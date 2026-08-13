@@ -1,5 +1,0 @@
-node_modules/
-dist/
-server/*.test.js
-package-lock.json
-README.md

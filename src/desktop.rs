@@ -1192,7 +1192,7 @@ fn upsert_detected_agents() -> Result<String> {
     let detected = adapters.len();
     let previews = adapters
         .into_iter()
-        .map(|adapter| adapter.preview_install(false))
+        .map(|adapter| adapter.preview_install())
         .collect::<Result<Vec<_>>>()?;
     let changed = previews
         .iter()
@@ -1216,7 +1216,7 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
             display_name: adapter.display_name,
             config_path: adapter.config_path.display().to_string(),
             installed: adapter
-                .preview_install(false)
+                .preview_install()
                 .map(|preview| !preview.has_changes())
                 .map_err(|error| format!("{error:#}").into()),
         })
@@ -1603,8 +1603,7 @@ enum ReleaseDisplayState {
 }
 
 struct PreparedUpdate {
-    update: crate::release_check::InstallableUpdate,
-    bytes: Vec<u8>,
+    prepared: ekubo_wallet_core::update_trust::PreparedUpdate,
     authorization: ekubo_wallet_core::update_trust::UpdateAuthorization,
 }
 
@@ -6969,14 +6968,13 @@ impl WalletWindow {
         self.release_state = ReleaseDisplayState::Downloading;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let downloaded_update = update.clone();
-            let bytes = tokio::task::spawn_blocking(move || downloaded_update.download())
+            let prepared = tokio::task::spawn_blocking(move || downloaded_update.download())
                 .await
                 .context("update download task failed")??;
-            let review = update.review(&bytes);
+            let review = prepared.review();
             let authorization = owner.authorize_update_install(&review).await?;
             Ok::<_, anyhow::Error>(PreparedUpdate {
-                update,
-                bytes,
+                prepared,
                 authorization,
             })
         });
@@ -13386,15 +13384,17 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         .ok()
                         .and_then(|mut update| update.take());
                     if let Some(prepared) = prepared {
-                        let _ = tokio
+                        let result = tokio
                             .spawn_blocking(move || {
                                 crate::release_check::install_and_relaunch(
-                                    &prepared.update,
-                                    prepared.bytes,
+                                    prepared.prepared,
                                     prepared.authorization,
                                 )
                             })
                             .await;
+                        if let Ok(Err(error)) = result {
+                            tracing::error!(%error, "authorized update installation failed");
+                        }
                     }
                 }
             })

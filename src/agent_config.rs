@@ -24,6 +24,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// skill and security-model resources unreachable by name. An underscore
 /// key survives the rewrite unchanged, so both spellings agree.
 pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
+/// The credential-free hosted companion installed beside the wallet server.
 pub const COMPANION_SERVER_NAME: &str = "ekubo";
 pub const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
 
@@ -116,7 +117,7 @@ impl Drop for ConfigBatchInstall {
 
 #[derive(Clone, Copy)]
 enum ConfigValidation {
-    Installed { kind: AgentKind, companion: bool },
+    Installed { kind: AgentKind },
 }
 
 impl ConfigPreview {
@@ -219,7 +220,7 @@ impl AgentAdapter {
             }
     }
 
-    pub fn preview_install(&self, install_companion: bool) -> Result<ConfigPreview> {
+    pub fn preview_install(&self) -> Result<ConfigPreview> {
         let before = match fs::read_to_string(&self.config_path) {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -227,24 +228,12 @@ impl AgentAdapter {
         };
         let url = MCP_RESOURCE;
         let after = match self.kind {
-            AgentKind::Codex => merge_codex(&before, url, install_companion)?,
-            AgentKind::ClaudeCode | AgentKind::Cursor => merge_json(
-                &before,
-                "mcpServers",
-                JsonShape::Url,
-                url,
-                install_companion,
-            )?,
-            AgentKind::GeminiCli => merge_json(
-                &before,
-                "mcpServers",
-                JsonShape::HttpUrl,
-                url,
-                install_companion,
-            )?,
-            AgentKind::Opencode => {
-                merge_json(&before, "mcp", JsonShape::Remote, url, install_companion)?
+            AgentKind::Codex => merge_codex(&before, url)?,
+            AgentKind::ClaudeCode | AgentKind::Cursor => {
+                merge_json(&before, "mcpServers", JsonShape::Url, url)?
             }
+            AgentKind::GeminiCli => merge_json(&before, "mcpServers", JsonShape::HttpUrl, url)?,
+            AgentKind::Opencode => merge_json(&before, "mcp", JsonShape::Remote, url)?,
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         };
         let diff = managed_config_diff(self.kind, &before, &after)?;
@@ -253,10 +242,7 @@ impl AgentAdapter {
             before,
             after,
             diff,
-            validation: ConfigValidation::Installed {
-                kind: self.kind,
-                companion: install_companion,
-            },
+            validation: ConfigValidation::Installed { kind: self.kind },
         })
     }
 }
@@ -267,7 +253,7 @@ fn binary_on_path(name: &str) -> bool {
     })
 }
 
-fn merge_codex(before: &str, url: &str, companion: bool) -> Result<String> {
+fn merge_codex(before: &str, url: &str) -> Result<String> {
     let mut document = if before.trim().is_empty() {
         DocumentMut::new()
     } else {
@@ -281,38 +267,17 @@ fn merge_codex(before: &str, url: &str, companion: bool) -> Result<String> {
         .or_insert_with(|| Item::Table(Table::new()))
         .as_table_mut()
         .context("Codex mcp_servers configuration must be a table")?;
-    let local = servers
-        .entry(LOCAL_SERVER_NAME)
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .context("Codex MCP server configuration must be a table")?;
-    // Nothing but the loopback URL and OAuth mode may survive in this entry.
-    // A stdio field would contradict the transport we just wrote, and a
-    // header or token field is a static credential this wallet never accepts
-    // — whether it arrived by hand, by another tool, or by an attacker.
-    for conflicting_key in [
-        "command",
-        "args",
-        "env",
-        "env_vars",
-        "cwd",
-        "experimental_environment",
-        "bearer_token_env_var",
-        "http_headers",
-        "env_http_headers",
-    ] {
-        local.remove(conflicting_key);
-    }
+    // Replace both wallet-managed entries with their exact credential-free
+    // shapes instead of trying to enumerate fields which must not survive;
+    // future harness credential fields are thereby removed without granting
+    // the wallet authority over any sibling or global key.
+    let mut local = Table::new();
     local["url"] = value(url);
     local["auth"] = value("oauth");
-    if companion {
-        let remote = servers
-            .entry(COMPANION_SERVER_NAME)
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .context("Codex companion MCP configuration must be a table")?;
-        remote["url"] = value(COMPANION_SERVER_URL);
-    }
+    servers.insert(LOCAL_SERVER_NAME, Item::Table(local));
+    let mut companion = Table::new();
+    companion["url"] = value(COMPANION_SERVER_URL);
+    servers.insert(COMPANION_SERVER_NAME, Item::Table(companion));
     Ok(document.to_string())
 }
 
@@ -323,13 +288,7 @@ enum JsonShape {
     Remote,
 }
 
-fn merge_json(
-    before: &str,
-    root: &str,
-    shape: JsonShape,
-    url: &str,
-    companion: bool,
-) -> Result<String> {
+fn merge_json(before: &str, root: &str, shape: JsonShape, url: &str) -> Result<String> {
     let mut document: Value = if before.trim().is_empty() {
         json!({})
     } else {
@@ -343,21 +302,20 @@ fn merge_json(
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .context("agent MCP configuration must be an object")?;
-    let local = match shape {
+    servers.insert(LOCAL_SERVER_NAME.into(), json_server(shape, url));
+    servers.insert(
+        COMPANION_SERVER_NAME.into(),
+        json_server(shape, COMPANION_SERVER_URL),
+    );
+    Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
+}
+
+fn json_server(shape: JsonShape, url: &str) -> Value {
+    match shape {
         JsonShape::Url => json!({"type": "http", "url": url}),
         JsonShape::HttpUrl => json!({"httpUrl": url}),
         JsonShape::Remote => json!({"type": "remote", "url": url}),
-    };
-    servers.insert(LOCAL_SERVER_NAME.into(), local);
-    if companion {
-        let remote = match shape {
-            JsonShape::Url => json!({"type": "http", "url": COMPANION_SERVER_URL}),
-            JsonShape::HttpUrl => json!({"httpUrl": COMPANION_SERVER_URL}),
-            JsonShape::Remote => json!({"type": "remote", "url": COMPANION_SERVER_URL}),
-        };
-        servers.insert(COMPANION_SERVER_NAME.into(), remote);
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
 }
 
 fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<String> {
@@ -529,17 +487,17 @@ fn validate_document(path: &Path, contents: &str) -> Result<()> {
 }
 
 fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result<()> {
-    let ConfigValidation::Installed { kind, companion } = validation;
+    let ConfigValidation::Installed { kind } = validation;
     match kind {
-        AgentKind::Codex => validate_codex_shape(contents, companion),
+        AgentKind::Codex => validate_codex_shape(contents),
         AgentKind::ClaudeCode | AgentKind::GeminiCli | AgentKind::Cursor | AgentKind::Opencode => {
-            validate_json_shape(contents, kind, companion)
+            validate_json_shape(contents, kind)
         }
         AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
     }
 }
 
-fn validate_codex_shape(contents: &str, companion: bool) -> Result<()> {
+fn validate_codex_shape(contents: &str) -> Result<()> {
     let document = contents
         .parse::<DocumentMut>()
         .context("Codex config is not valid TOML")?;
@@ -565,17 +523,25 @@ fn validate_codex_shape(contents: &str, companion: bool) -> Result<()> {
             && local.get("bearer_token_env_var").is_none(),
         "Codex MCP server configuration contains a credential source"
     );
-    if companion {
-        ensure!(
-            document["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str()
-                == Some(COMPANION_SERVER_URL),
-            "companion MCP server URL is missing"
-        );
-    }
+    ensure!(
+        local.as_table().is_some_and(|table| table.len() == 2),
+        "Codex MCP server contains unmanaged fields"
+    );
+    let companion = servers
+        .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
+        .context("companion MCP server is missing")?;
+    ensure!(
+        companion.get("url").and_then(Item::as_str) == Some(COMPANION_SERVER_URL),
+        "companion MCP server URL is incorrect"
+    );
+    ensure!(
+        companion.as_table().is_some_and(|table| table.len() == 1),
+        "companion MCP server contains unmanaged fields"
+    );
     Ok(())
 }
 
-fn validate_json_shape(contents: &str, kind: AgentKind, companion: bool) -> Result<()> {
+fn validate_json_shape(contents: &str, kind: AgentKind) -> Result<()> {
     let document: Value =
         serde_json::from_str(contents).context("agent config is not valid JSON")?;
     let root = if kind == AgentKind::Opencode {
@@ -606,16 +572,28 @@ fn validate_json_shape(contents: &str, kind: AgentKind, companion: bool) -> Resu
             && local.get("bearerToken").is_none(),
         "local MCP server configuration contains credentials"
     );
-    if companion {
-        ensure!(
-            document[root][COMPANION_SERVER_NAME][url_key].as_str() == Some(COMPANION_SERVER_URL),
-            "companion MCP server URL is missing"
-        );
-    }
+    let shape = match kind {
+        AgentKind::ClaudeCode | AgentKind::Cursor => JsonShape::Url,
+        AgentKind::GeminiCli => JsonShape::HttpUrl,
+        AgentKind::Opencode => JsonShape::Remote,
+        AgentKind::Codex | AgentKind::Other => unreachable!("validated above"),
+    };
+    ensure!(
+        local == &json_server(shape, url),
+        "local MCP server contains unmanaged fields"
+    );
+    let companion = servers
+        .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
+        .context("companion MCP server is missing")?;
+    ensure!(
+        companion == &json_server(shape, COMPANION_SERVER_URL),
+        "companion MCP server has an incorrect or credential-bearing shape"
+    );
     Ok(())
 }
 
 fn validate_loopback_url(url: &str) -> Result<()> {
+    ensure!(url == MCP_RESOURCE, "local MCP server URL is not fixed");
     let parsed = url::Url::parse(url).context("local MCP server URL is invalid")?;
     ensure!(
         parsed.scheme() == "http"

@@ -1,10 +1,9 @@
 //! Whether a newer signed desktop release exists.
 //!
 //! This module answers "am I behind?" for the Updates screen and the read-only
-//! `wallet_check_for_updates` MCP tool. The desktop can additionally consume
-//! the stable release's cargo-packager manifest and verify its native artifact
-//! with the public key compiled into the application. The release tag is
-//! validated before it enters a URL. Every
+//! `wallet_check_for_updates` MCP tool. The security kernel owns authenticated
+//! update discovery, download, authorization, and installation. The release tag
+//! used for the informational check is validated before it enters a URL. Every
 //! failure here — offline, rate limited, malformed JSON, an unwritable cache —
 //! resolves to "no update known" rather than an error, because nothing that
 //! depends on this answer should fail when the answer is merely unavailable.
@@ -13,195 +12,40 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use std::path::Path;
 use std::time::Duration;
 
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json";
-const UPDATE_MANIFEST_SIGNATURE_URL: &str =
-    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json.sig";
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// An update whose artifact URL and signature came from cargo-packager's
-/// stable-release manifest. `download` verifies the artifact with the public
-/// key compiled into this exact application binary before returning bytes.
-#[derive(Clone, Debug)]
-pub struct InstallableUpdate {
-    update: cargo_packager_updater::Update,
-    artifact_sha256: String,
-}
-
-impl InstallableUpdate {
-    #[must_use]
-    pub fn version(&self) -> &str {
-        &self.update.version
-    }
-
-    pub fn download(&self) -> anyhow::Result<Vec<u8>> {
-        let bytes = self.update.download()?;
-        let digest = hex::encode(Sha256::digest(&bytes));
-        anyhow::ensure!(
-            digest == self.artifact_sha256,
-            "the verified artifact does not match the digest bound by signed metadata"
-        );
-        Ok(bytes)
-    }
-
-    #[must_use]
-    pub fn review(&self, bytes: &[u8]) -> ekubo_wallet_core::update_trust::UpdateReview {
-        ekubo_wallet_core::update_trust::UpdateReview::from_verified_update(
-            &self.update,
-            bytes,
-            "Ekubo, Inc.",
-        )
-    }
-}
-
-fn verify_manifest_signature(
-    manifest: &[u8],
-    encoded_signature: &str,
-    public_key: &str,
-) -> anyhow::Result<()> {
-    let public_key = minisign_verify::PublicKey::decode(public_key)
-        .or_else(|_| minisign_verify::PublicKey::from_base64(public_key.trim()))
-        .context("the compiled updater public key is invalid")?;
-    let signature = minisign_verify::Signature::decode(encoded_signature)
-        .context("the update manifest signature is invalid")?;
-    public_key
-        .verify(manifest, &signature, false)
-        .context("the update manifest signature did not verify")
-}
-
-fn signed_manifest() -> anyhow::Result<Vec<u8>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(UPDATE_TIMEOUT)
-        .build()?;
-    let manifest = client
-        .get(UPDATE_MANIFEST_URL)
-        .send()?
-        .error_for_status()?
-        .bytes()?
-        .to_vec();
-    anyhow::ensure!(manifest.len() <= 1 << 20, "update manifest is too large");
-    let signature = client
-        .get(UPDATE_MANIFEST_SIGNATURE_URL)
-        .send()?
-        .error_for_status()?
-        .text()?;
-    verify_manifest_signature(&manifest, &signature, crate::UPDATER_PUBLIC_KEY)?;
-    Ok(manifest)
-}
-
-fn update_matches_signed_manifest(
-    update: &cargo_packager_updater::Update,
-    manifest: &[u8],
-) -> anyhow::Result<String> {
-    let signed: cargo_packager_updater::RemoteRelease =
-        serde_json::from_slice(manifest).context("signed update manifest is malformed")?;
-    let value: serde_json::Value = serde_json::from_slice(manifest)?;
-    let (platform, digest) = match &signed.data {
-        cargo_packager_updater::RemoteReleaseData::Dynamic(platform) => {
-            let digest = value
-                .get("sha256")
-                .and_then(serde_json::Value::as_str)
-                .context("signed update metadata has no artifact digest")?;
-            (platform, digest)
-        }
-        cargo_packager_updater::RemoteReleaseData::Static { platforms } => {
-            let target = format!("{}-{}", update.target, std::env::consts::ARCH);
-            let platform = platforms
-                .get(&target)
-                .context("the updater target is absent from the signed manifest")?;
-            let digest = value
-                .get("platforms")
-                .and_then(|platforms| platforms.get(&target))
-                .and_then(|platform| platform.get("sha256"))
-                .and_then(serde_json::Value::as_str)
-                .context("signed update target has no artifact digest")?;
-            (platform, digest)
-        }
-    };
-    anyhow::ensure!(
-        signed.version.to_string() == update.version,
-        "update version is not bound by the signed manifest"
-    );
-    anyhow::ensure!(
-        platform.url == update.download_url,
-        "update URL is not bound by the signed manifest"
-    );
-    anyhow::ensure!(
-        platform.signature == update.signature,
-        "artifact signature is not bound by the signed manifest"
-    );
-    anyhow::ensure!(
-        platform.format.to_string() == update.format.to_string(),
-        "update format is not bound by the signed manifest"
-    );
-    anyhow::ensure!(
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "signed artifact digest is not lowercase SHA-256"
-    );
-    Ok(digest.to_owned())
-}
+pub use ekubo_wallet_core::update_trust::InstallableUpdate;
 
 pub fn check_installable() -> anyhow::Result<Option<InstallableUpdate>> {
-    anyhow::ensure!(
-        !crate::UPDATER_PUBLIC_KEY.is_empty(),
-        "this development build has no updater verification key"
-    );
-    #[cfg(target_os = "linux")]
-    anyhow::ensure!(
-        std::env::var_os("APPIMAGE").is_some(),
-        "automatic updates are available for the AppImage distribution"
-    );
-    let current = semver::Version::parse(crate::VERSION)
-        .context("the application version is not valid semantic versioning")?;
-    let endpoint = UPDATE_MANIFEST_URL
-        .parse()
-        .context("the compiled update manifest URL is invalid")?;
-    let config = cargo_packager_updater::Config {
-        endpoints: vec![endpoint],
-        pubkey: crate::UPDATER_PUBLIC_KEY.to_owned(),
-        windows: None,
-    };
-    let manifest = signed_manifest()?;
-    let update = cargo_packager_updater::UpdaterBuilder::new(current, config)
-        .timeout(UPDATE_TIMEOUT)
-        .build()
-        .context("could not initialize the signed updater")?
-        .check()
-        .context("could not read the signed release manifest")?;
-    update
-        .map(|update| {
-            let artifact_sha256 = update_matches_signed_manifest(&update, &manifest)?;
-            Ok(InstallableUpdate {
-                update,
-                artifact_sha256,
-            })
-        })
-        .transpose()
+    ekubo_wallet_core::update_trust::check_installable()
 }
 
-/// Installs bytes already verified by [`InstallableUpdate::download`] and
-/// starts the replacement application where the platform installer does not
-/// do that itself.
+/// Gives an opaque, authenticated package back to core for re-verification and
+/// installation, then starts the replacement application on platforms whose
+/// installer does not do that itself.
 pub fn install_and_relaunch(
-    update: &InstallableUpdate,
-    bytes: Vec<u8>,
+    prepared: ekubo_wallet_core::update_trust::PreparedUpdate,
     authorization: ekubo_wallet_core::update_trust::UpdateAuthorization,
 ) -> anyhow::Result<()> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let executable = update.update.extract_path.clone();
-    ekubo_wallet_core::update_trust::install_update(
-        &update.update,
-        bytes,
-        "Ekubo, Inc.",
+    let relaunch_path = match ekubo_wallet_core::update_trust::install_update(
+        prepared,
         authorization,
-    )?;
+    ) {
+        Ok(path) => path,
+        Err(install_error) => {
+            relaunch_current_application().with_context(|| {
+                format!(
+                    "update installation failed ({install_error:#}) and the current application could not be restarted"
+                )
+            })?;
+            return Err(install_error);
+        }
+    };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let executable = relaunch_path.context("the updater did not return a relaunch path")?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = relaunch_path;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(executable)
@@ -211,6 +55,42 @@ pub fn install_and_relaunch(
     std::process::Command::new(executable)
         .spawn()
         .context("could not relaunch updated application")?;
+    Ok(())
+}
+
+/// A failed post-quit update must not strand the owner with no wallet process.
+/// This path is used only after core refused or rolled back an installation.
+fn relaunch_current_application() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe().context("could not locate the current wallet")?;
+        let bundle = executable
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .context("could not locate the current application bundle")?;
+        std::process::Command::new("open")
+            .arg(bundle)
+            .spawn()
+            .context("could not restart the current application")?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let executable = std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .map_or_else(std::env::current_exe, Ok)?;
+        std::process::Command::new(executable)
+            .spawn()
+            .context("could not restart the current application")?;
+    }
+    #[cfg(target_os = "windows")]
+    std::process::Command::new(
+        std::env::current_exe().context("could not locate the current wallet")?,
+    )
+    .spawn()
+    .context("could not restart the current application")?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    anyhow::bail!("automatic updates are unsupported on this platform");
     Ok(())
 }
 

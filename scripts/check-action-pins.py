@@ -9,7 +9,10 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)")
 
 failures = []
-for workflow in [pathlib.Path(".github/workflows/release.yml")]:
+for workflow in [
+    pathlib.Path(".github/workflows/release.yml"),
+    pathlib.Path(".github/workflows/release-policy.yml"),
+]:
     for number, line in enumerate(workflow.read_text().splitlines(), 1):
         match = USES.match(line)
         if not match or match.group(1).startswith("./"):

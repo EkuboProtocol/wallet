@@ -27,5 +27,5 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
 /// cargo-packager Minisign public key embedded by release CI. Development
 /// builds intentionally leave this empty and cannot install updates.
-pub const UPDATER_PUBLIC_KEY: &str = env!("EKUBO_COMPILED_UPDATER_PUBLIC_KEY");
+pub const UPDATER_PUBLIC_KEY: &str = ekubo_wallet_core::update_trust::UPDATER_PUBLIC_KEY;
 pub use desktop::run_desktop;

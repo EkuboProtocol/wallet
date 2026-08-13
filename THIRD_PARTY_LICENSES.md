@@ -201,6 +201,7 @@ file follows in the appendix. Regenerate this document with
 - simd_cesu8 1.2.0 — Sean C. Roach <me@seancroach.dev> — https://github.com/seancroach/simd_cesu8
 - simplecss 0.2.2 — https://github.com/linebender/simplecss
 - smol 2.0.2 — Stjepan Glavina <stjepang@gmail.com> — https://github.com/smol-rs/smol
+- solana-nohash-hasher 0.2.1 — Solana Labs Maintainers <maintainers@solanalabs.com> — https://github.com/solana-labs/nohash-hasher
 - spki 0.7.3 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/spki
 - sval 2.21.1 — Ashley Mannix <hey@kodraus.com> — https://github.com/sval-rs/sval
 - sval_buffer 2.21.1 — Ashley Mannix <hey@kodraus.com> — https://github.com/sval-rs/sval
@@ -287,6 +288,10 @@ file follows in the appendix. Regenerate this document with
 - num_enum 0.7.6 — Daniel Wagner-Hall <dawagner@gmail.com>, Daniel Henry-Mantilla <daniel.henry.mantilla@gmail.com>, Vincent Esche <regexident@gmail.com> — https://github.com/illicitonion/num_enum
 - num_enum_derive 0.7.6 — Daniel Wagner-Hall <dawagner@gmail.com>, Daniel Henry-Mantilla <daniel.henry.mantilla@gmail.com>, Vincent Esche <regexident@gmail.com> — https://github.com/illicitonion/num_enum
 
+## BSL-1.0
+
+- xxhash-rust 0.8.18 — Douman <douman@gmx.se> — https://github.com/DoumanAsh/xxhash-rust
+
 ## CC0-1.0
 
 - bitcoin-consensus-encoding 1.1.0 — Andrew Poelstra <apoelstra@wpsoftware.net>, Nick Johnson <nick@yonson.dev>, Tobin C. Harding <me@tobin.cc> — https://github.com/rust-bitcoin/rust-bitcoin/
@@ -366,14 +371,18 @@ file follows in the appendix. Regenerate this document with
 - convert_case 0.11.0 — rutrum <dave@rutrum.net> — https://github.com/rutrum/convert-case
 - core_maths 0.1.1 — Robert Bastian <me@robertbastian.dev — https://github.com/robertbastian/core_maths
 - crunchy 0.2.4 — Eira Fransham <jackefransham@gmail.com> — https://github.com/eira-fransham/crunchy
+- darling 0.21.3 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling 0.23.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling 0.24.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
+- darling_core 0.21.3 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling_core 0.23.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling_core 0.24.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
+- darling_macro 0.21.3 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling_macro 0.23.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling_macro 0.24.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - dashmap 6.2.1 — Acrimon <joel.wejdenstal@gmail.com> — https://github.com/xacrimon/dashmap
 - data-encoding 2.11.1 — https://github.com/ia0/data-encoding
+- dataview 1.0.2 — Casper <CasualX@users.noreply.github.com> — https://github.com/CasualX/dataview
 - derive_more 2.1.1 — Jelte Fennema <github-tech@jeltef.nl> — https://github.com/JelteF/derive_more
 - derive_more-impl 2.1.1 — Jelte Fennema <github-tech@jeltef.nl> — https://github.com/JelteF/derive_more
 - dispatch 0.2.0 — Steven Sheldon — http://github.com/SSheldon/rust-dispatch
@@ -442,6 +451,7 @@ file follows in the appendix. Regenerate this document with
 - minisign-verify 0.2.5 — Frank Denis <github@pureftpd.org> — https://github.com/jedisct1/rust-minisign-verify
 - mio 1.2.2 — Carl Lerche <me@carllerche.com>, Thomas de Zeeuw <thomasdezeeuw@gmail.com>, Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/mio
 - new_debug_unreachable 1.0.6 — Matt Brubeck <mbrubeck@limpet.net>, Jonathan Reem <jonathan.reem@gmail.com> — https://github.com/mbrubeck/rust-debug-unreachable
+- no-std-compat 0.4.1 — jD91mZM2 <me@krake.one> — https://gitlab.com/jD91mZM2/no-std-compat
 - nom 7.1.3 — contact@geoffroycouprie.com — https://github.com/Geal/nom
 - nom 8.0.0 — contact@geoffroycouprie.com — https://github.com/rust-bakery/nom
 - noop_proc_macro 0.3.0 — Luca Barbato <lu_zero@gentoo.org> — https://github.com/lu-zero/noop_proc_macro
@@ -467,6 +477,8 @@ file follows in the appendix. Regenerate this document with
 - ordered-float 5.3.0 — Jonathan Reem <jonathan.reem@gmail.com>, Matt Brubeck <mbrubeck@limpet.net> — https://github.com/reem/rust-ordered-float
 - pango 0.18.3 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk-rs-core
 - pango-sys 0.18.0 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk-rs-core
+- pelite 0.10.0 — Casper <CasualX@users.noreply.github.com> — https://github.com/CasualX/pelite
+- pelite-macros 0.1.1 — Casper <CasualX@users.noreply.github.com> — https://github.com/CasualX/pelite
 - phf 0.11.3 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf 0.13.1 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf 0.14.0 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
@@ -581,6 +593,7 @@ file follows in the appendix. Regenerate this document with
 - zed-scap 0.0.8-zed — Siddharth <siddharth99c@gmail.com>, Pranav <pranav2000joglekar@gmail.com> — https://github.com/helmerapp/scap
 - zed-xim 0.4.0-zed — Riey <creeper844@gmail.com> — https://github.com/Riey/xim-rs
 - zmij 1.0.23 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/zmij
+- zstd 0.13.3 — Alexandre Bury <alexandre.bury@gmail.com> — https://github.com/gyscos/zstd-rs
 - zvariant 5.13.1 — Zeeshan Ali Khan <zeeshanak@gnome.org> — https://github.com/z-galaxy/zbus/
 - zvariant_derive 5.13.1 — Zeeshan Ali Khan <zeeshanak@gnome.org> — https://github.com/z-galaxy/zbus/
 - zvariant_utils 3.5.0 — Zeeshan Ali Khan <zeeshanak@gnome.org>, turbocooler <turbocooler@cocaine.ninja> — https://github.com/z-galaxy/zbus/
@@ -680,6 +693,7 @@ file follows in the appendix. Regenerate this document with
 - async-recursion 1.1.1 — Robert Usher <266585+dcchut@users.noreply.github.com> — https://github.com/dcchut/async-recursion
 - async-trait 0.1.91 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/async-trait
 - auto_impl 1.3.0 — Ashley Mannix <ashleymannix@live.com.au>, Lukas Kalbertodt <lukas.kalbertodt@gmail.com> — https://github.com/auto-impl-rs/auto_impl/
+- backhand 0.25.1 — wcampbell <wcampbell1995@gmail.com> — https://github.com/wcampbell0x2a/backhand
 - backtrace 0.3.76 — The Rust Project Developers — https://github.com/rust-lang/backtrace-rs
 - base64 0.22.1 — Marshall Pierce <marshall@mpierce.org> — https://github.com/marshallpierce/rust-base64
 - base64 0.23.0 — Marshall Pierce <marshall@mpierce.org> — https://github.com/marshallpierce/rust-base64
@@ -741,6 +755,8 @@ file follows in the appendix. Regenerate this document with
 - ctr 0.9.2 — RustCrypto Developers — https://github.com/RustCrypto/block-modes
 - curve25519-dalek-derive 0.1.1 — https://github.com/dalek-cryptography/curve25519-dalek
 - data-url 0.3.2 — Simon Sapin <simon.sapin@exyr.org> — https://github.com/servo/rust-url
+- deku 0.20.3 — sharks <sharks@sharks> — https://github.com/sharksforarms/deku
+- deku_derive 0.20.3 — sharks <sharks@sharks> — https://github.com/sharksforarms/deku
 - deranged 0.5.8 — Jacob Pratt <jacob@jhpratt.dev> — https://github.com/jhpratt/deranged
 - derivative 2.2.0 — mcarton <cartonmartin+git@gmail.com> — https://github.com/mcarton/rust-derivative
 - digest 0.10.7 — RustCrypto Developers — https://github.com/RustCrypto/traits
@@ -860,6 +876,8 @@ file follows in the appendix. Regenerate this document with
 - lazy_static 1.5.0 — Marvin Löbel <loebel.marvin@gmail.com> — https://github.com/rust-lang-nursery/lazy-static.rs
 - leaky-cow 0.1.1 — Michael Howell <michael@notriddle.com> — https://github.com/notriddle/rust-leaky-cow
 - libc 0.2.189 — https://github.com/rust-lang/libc
+- liblzma 0.4.8 — Alex Crichton <alex@alexcrichton.com>, Portable-Network-Archive Developers — https://github.com/portable-network-archive/liblzma-rs
+- liblzma-sys 0.4.8 — Alex Crichton <alex@alexcrichton.com>, Portable-Network-Archive Developers — https://github.com/portable-network-archive/liblzma-rs
 - litrs 1.0.0 — Lukas Kalbertodt <lukas.kalbertodt@gmail.com> — https://github.com/LukasKalbertodt/litrs
 - lock_api 0.4.14 — Amanieu d'Antras <amanieu@gmail.com> — https://github.com/Amanieu/parking_lot
 - log 0.4.33 — The Rust Project Developers — https://github.com/rust-lang/log
@@ -1189,6 +1207,8 @@ file follows in the appendix. Regenerate this document with
 - zbus-secret-service-keyring-store 1.0.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/zbus-secret-service-keyring-store.git
 - zed-font-kit 0.14.1-zed — Patrick Walton <pcwalton@mimiga.net> — https://github.com/servo/font-kit
 - zed-reqwest 0.12.15-zed — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/reqwest
+- zstd-safe 7.2.4 — Alexandre Bury <alexandre.bury@gmail.com> — https://github.com/gyscos/zstd-rs
+- zstd-sys 2.0.16+zstd.1.5.7 — Alexandre Bury <alexandre.bury@gmail.com> — https://github.com/gyscos/zstd-rs
 
 ## MIT OR Apache-2.0 OR BSD-1-Clause
 
@@ -1267,6 +1287,7 @@ file follows in the appendix. Regenerate this document with
 - konst 0.2.20 — rodrimati1992 <rodrimatt1985@gmail.com> — https://github.com/rodrimati1992/konst/
 - konst_macro_rules 0.2.19 — rodrimati1992 <rodrimatt1985@gmail.com> — https://github.com/rodrimati1992/konst/
 - slotmap 1.1.1 — Orson Peters <orsonpeters@gmail.com> — https://github.com/orlp/slotmap
+- zlib-rs 0.6.7 — https://github.com/trifectatechfoundation/zlib-rs
 
 ## Zlib OR Apache-2.0 OR MIT
 
@@ -1341,6 +1362,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-transport 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-transport-http 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-tx-macros 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- backhand 0.25.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - bitcoin-consensus-encoding 1.1.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-internals 0.6.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-io 0.1.101: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
@@ -1412,6 +1434,7 @@ file follows in the appendix. Regenerate this document with
 - parity-scale-codec-derive 3.7.5: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - pathfinder_geometry 0.5.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - pathfinder_simd 0.5.6: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- pelite-macros 0.1.1: MIT — MIT License: https://opensource.org/license/mit
 - primitive-types 0.12.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - profiling 1.0.18: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - profiling-procmacros 1.0.18: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1478,7 +1501,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: adler2 2.0.1, allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.91, atk 0.18.2, atk-sys 0.18.2, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, cairo-rs 0.18.5, cairo-sys-rs 0.18.2, concurrent-queue 2.5.0, const-hex 1.19.1, ctor 0.2.9, ctor 1.0.13, curve25519-dalek-derive 0.1.1, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, enumn 0.1.14, erased-serde 0.4.10, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, flume 0.12.0, futures-lite 2.6.1, futures-utils-wasm 0.1.0, gdk 0.18.2, gdk-pixbuf 0.18.5, gdk-pixbuf-sys 0.18.0, gdk-sys 0.18.2, gio 0.18.4, gio-sys 0.18.1, glib 0.18.5, glib-macros 0.18.5, glib-sys 0.18.1, glow 0.17.0, gobject-sys 0.18.0, group 0.13.0, gtk 0.18.2, gtk-sys 0.18.2, gtk3-macros 0.18.2, hermit-abi 0.5.2, home 0.5.12, inventory 0.3.24, itoa 1.0.18, khronos-egl 6.0.0, link-section 0.19.3, linktime-proc-macro 0.2.3, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, macro-string 0.2.0, nybbles 0.4.8, once_cell 1.21.4, ordered-stream 0.2.0, pango 0.18.3, pango-sys 0.18.0, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, portable-atomic-util 0.2.7, prettyplease 0.2.37, proc-macro-crate 1.3.1, proc-macro-crate 2.0.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, raw-window-metal 1.1.0, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 1.1.0, rustc-hash 2.1.3, rustix 0.38.44, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 0.0.29, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_path_to_error 0.1.20, serde_repr 0.1.21, simd_cesu8 1.2.0, smol 2.0.2, smol_str 0.3.6, syn 1.0.109, syn 2.0.119, syn 3.0.3, system-deps 6.2.2, thiserror 1.0.69, thiserror 2.0.19, thiserror-impl 1.0.69, thiserror-impl 2.0.19, tinyvec 1.12.0, typeid 1.0.3, unicode-ident 1.0.24, utf-8 0.7.6, waker-fn 1.2.0, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wasm-streams 0.4.2, wasm_thread 0.3.3, winnow 0.5.40, winnow 0.7.15, winnow 1.0.4, wit-bindgen 0.57.1, x11 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zbus_polkit 5.0.0, zed-font-kit 0.14.1-zed, zmij 1.0.23, zvariant_utils 3.5.0
+## License text for: adler2 2.0.1, allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.91, atk 0.18.2, atk-sys 0.18.2, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, cairo-rs 0.18.5, cairo-sys-rs 0.18.2, concurrent-queue 2.5.0, const-hex 1.19.1, ctor 0.2.9, ctor 1.0.13, curve25519-dalek-derive 0.1.1, deku 0.20.3, deku_derive 0.20.3, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, enumn 0.1.14, erased-serde 0.4.10, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, flume 0.12.0, futures-lite 2.6.1, futures-utils-wasm 0.1.0, gdk 0.18.2, gdk-pixbuf 0.18.5, gdk-pixbuf-sys 0.18.0, gdk-sys 0.18.2, gio 0.18.4, gio-sys 0.18.1, glib 0.18.5, glib-macros 0.18.5, glib-sys 0.18.1, glow 0.17.0, gobject-sys 0.18.0, group 0.13.0, gtk 0.18.2, gtk-sys 0.18.2, gtk3-macros 0.18.2, hermit-abi 0.5.2, home 0.5.12, inventory 0.3.24, itoa 1.0.18, khronos-egl 6.0.0, link-section 0.19.3, linktime-proc-macro 0.2.3, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, macro-string 0.2.0, nybbles 0.4.8, once_cell 1.21.4, ordered-stream 0.2.0, pango 0.18.3, pango-sys 0.18.0, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, portable-atomic-util 0.2.7, prettyplease 0.2.37, proc-macro-crate 1.3.1, proc-macro-crate 2.0.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, raw-window-metal 1.1.0, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 1.1.0, rustc-hash 2.1.3, rustix 0.38.44, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 0.0.29, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_path_to_error 0.1.20, serde_repr 0.1.21, simd_cesu8 1.2.0, smol 2.0.2, smol_str 0.3.6, syn 1.0.109, syn 2.0.119, syn 3.0.3, system-deps 6.2.2, thiserror 1.0.69, thiserror 2.0.19, thiserror-impl 1.0.69, thiserror-impl 2.0.19, tinyvec 1.12.0, typeid 1.0.3, unicode-ident 1.0.24, utf-8 0.7.6, waker-fn 1.2.0, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wasm-streams 0.4.2, wasm_thread 0.3.3, winnow 0.5.40, winnow 0.7.15, winnow 1.0.4, wit-bindgen 0.57.1, x11 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zbus_polkit 5.0.0, zed-font-kit 0.14.1-zed, zmij 1.0.23, zvariant_utils 3.5.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -5824,7 +5847,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: darling 0.23.0, darling 0.24.0, darling_core 0.23.0, darling_core 0.24.0, darling_macro 0.23.0, darling_macro 0.24.0
+## License text for: darling 0.21.3, darling 0.23.0, darling 0.24.0, darling_core 0.21.3, darling_core 0.23.0, darling_core 0.24.0, darling_macro 0.21.3, darling_macro 0.23.0, darling_macro 0.24.0
 
 ```text
 MIT License
@@ -5931,6 +5954,18 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: dataview 1.0.2
+
+```text
+Copyright (c) 2020 Casper <CasualX@users.noreply.github.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: der 0.7.10, pkcs8 0.10.2
@@ -9926,6 +9961,36 @@ NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE US
 THIS SOFTWARE.
 ```
 
+## License text for: liblzma 0.4.8, liblzma-sys 0.4.8
+
+```text
+Copyright (c) 2016-2023 Alex Crichton and Portable-Network-Archive Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ## License text for: libm 0.2.16
 
 ```text
@@ -10922,6 +10987,32 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+## License text for: no-std-compat 0.4.1
+
+```text
+MIT License
+
+Copyright (c) 2019 jD91mZM2
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## License text for: no_std_io2 0.9.4
 
 ```text
@@ -10946,7 +11037,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: nohash-hasher 0.2.0
+## License text for: nohash-hasher 0.2.0, solana-nohash-hasher 0.2.1
 
 ```text
 Copyright 2018 Parity Technologies (UK) Ltd.
@@ -11425,6 +11516,18 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: pelite 0.10.0
+
+```text
+Copyright (c) 2016-2018 Casper <CasualX@users.noreply.github.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: phf 0.11.3, phf 0.13.1, phf 0.14.0, phf_codegen 0.11.3, phf_generator 0.11.3, phf_generator 0.13.1, phf_macros 0.13.1, phf_shared 0.11.3, phf_shared 0.13.1, phf_shared 0.14.0
@@ -12975,7 +13078,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: ryu 1.0.23
+## License text for: ryu 1.0.23, xxhash-rust 0.8.18
 
 ```text
 Boost Software License - Version 1.0 - August 17th, 2003
@@ -16315,6 +16418,49 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: zlib-rs 0.6.7
+
+```text
+(C) 2024 Trifecta Tech Foundation
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
+```
+
+## License text for: zstd 0.13.3
+
+```text
+The MIT License (MIT)
+Copyright (c) 2016 Alexandre Bury
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: zstd-safe 7.2.4, zstd-sys 2.0.16+zstd.1.5.7
+
+```text
+MIT or Apache-2.0
 ```
 
 ## License text for: zune-core 0.5.3, zune-jpeg 0.5.15

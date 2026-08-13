@@ -12,6 +12,8 @@
 use std::{env, fmt::Write as _, fs, path::Path};
 
 fn main() {
+    embed_updater_public_key();
+
     println!("cargo:rerun-if-changed=clearsign");
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let root = Path::new(&manifest).join("clearsign");
@@ -60,6 +62,24 @@ fn main() {
     generated.push_str("];\n");
     let out = Path::new(&out_dir).join("clearsign_embedded.rs");
     fs::write(out, generated).expect("write generated clearsign table");
+}
+
+fn embed_updater_public_key() {
+    println!("cargo:rerun-if-env-changed=EKUBO_UPDATER_PUBLIC_KEY");
+    let key = env::var("EKUBO_UPDATER_PUBLIC_KEY").unwrap_or_default();
+    assert!(
+        !(env::var("PROFILE").is_ok_and(|profile| profile == "release") && key.trim().is_empty()),
+        "release builds require EKUBO_UPDATER_PUBLIC_KEY"
+    );
+    if !key.is_empty()
+        && (!key.len().is_multiple_of(4)
+            || key
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))))
+    {
+        panic!("EKUBO_UPDATER_PUBLIC_KEY must be canonical single-line base64");
+    }
+    println!("cargo:rustc-env=EKUBO_COMPILED_UPDATER_PUBLIC_KEY={key}");
 }
 
 fn collect(root: &Path, directory: &Path, files: &mut Vec<String>) {

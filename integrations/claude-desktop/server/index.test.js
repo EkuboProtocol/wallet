@@ -33,18 +33,28 @@ test("stdio messages are forwarded without changing their identity", async () =>
 // or none of them mean anything. The lockfile is included because npm does not
 // mind a stale root version, which leaves this the only thing that would ever
 // notice one.
-test("bundle version matches the native wallet", () => {
+test("plugin versions match the native wallet", () => {
   const read = name => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url)));
-  const manifest = read("manifest.json");
+  const pluginManifest = read(".claude-plugin/plugin.json");
   const npmPackage = read("package.json");
   const lockfile = read("package-lock.json");
   const cargo = readFileSync(new URL("../../../Cargo.toml", import.meta.url), "utf8");
   const walletVersion = cargo.match(/^version = "([^"]+)"$/m)?.[1];
   const fix = "run contrib/sync-claude-desktop-version.py";
-  assert.equal(manifest.version, walletVersion, `manifest.json: ${fix}`);
+  assert.equal(pluginManifest.version, walletVersion, `.claude-plugin/plugin.json: ${fix}`);
   assert.equal(npmPackage.version, walletVersion, `package.json: ${fix}`);
   assert.equal(lockfile.version, walletVersion, `package-lock.json: ${fix}`);
   assert.equal(lockfile.packages[""].version, walletVersion, `package-lock.json: ${fix}`);
+});
+
+test("the Claude plugin always installs the credential-free companion", () => {
+  const pluginConfig = JSON.parse(
+    readFileSync(new URL("../.mcp.json", import.meta.url), "utf8")
+  );
+  assert.deepEqual(pluginConfig.mcpServers.ekubo, {
+    type: "http",
+    url: "https://mcp.ekubo.org/mcp"
+  });
 });
 
 test("runtime bridge contains no filesystem credential store", () => {

@@ -16,6 +16,13 @@ pub enum OwnerAuthorizationScope {
     TokenMetadata,
 }
 
+/// The exact client-management mutation named in an owner-presence prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentManagementOperation {
+    Revoke,
+    Remove,
+}
+
 /// Single-use proof that the owner authenticated the exact dapp review and
 /// account which the session boundary is about to settle.
 pub struct DappAuthorization {
@@ -84,6 +91,17 @@ impl OwnerAuthorization {
             granted_at: Instant::now(),
         }
     }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn expired_for_test(scope: OwnerAuthorizationScope) -> Self {
+        Self {
+            scope,
+            granted_at: Instant::now()
+                .checked_sub(OWNER_AUTHORIZATION_LIFETIME + Duration::from_secs(1))
+                .expect("the monotonic clock has enough test history"),
+        }
+    }
 }
 
 /// Authenticate the owner for one narrow class of security-sensitive changes.
@@ -124,6 +142,26 @@ pub async fn authorize_oauth_client(
     })
 }
 
+/// Authenticate an owner for one named revoke/remove operation. The caller
+/// wraps this proof with the exact encrypted registration it read before the
+/// prompt and consumes that wrapper during the post-authentication transaction.
+#[cfg(not(any(test, feature = "test-hooks")))]
+pub(crate) async fn authorize_agent_management(
+    client_name: &str,
+    operation: AgentManagementOperation,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::ManageAgent {
+            client_name: client_name.to_owned(),
+            operation,
+        })
+        .await?;
+    Ok(OwnerAuthorization {
+        scope: OwnerAuthorizationScope::AgentAccess,
+        granted_at: Instant::now(),
+    })
+}
+
 #[cfg(any(test, feature = "test-hooks"))]
 pub async fn authorize_oauth_client(
     _client_name: &str,
@@ -133,6 +171,16 @@ pub async fn authorize_oauth_client(
         OwnerAuthorizationScope::AgentAccess,
     ))
     .await)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) async fn authorize_agent_management(
+    _client_name: &str,
+    _operation: AgentManagementOperation,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    Ok(OwnerAuthorization::for_test(
+        OwnerAuthorizationScope::AgentAccess,
+    ))
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -158,6 +206,10 @@ pub enum PresenceRequest {
     AuthorizeAgent {
         client_name: String,
         redirect_host: String,
+    },
+    ManageAgent {
+        client_name: String,
+        operation: AgentManagementOperation,
     },
     SignTransaction {
         wallet: String,
@@ -213,6 +265,17 @@ impl PresenceRequest {
                     subject(redirect_host)
                 )
             }
+            Self::ManageAgent {
+                client_name,
+                operation,
+            } => match operation {
+                AgentManagementOperation::Revoke => {
+                    format!("revoke wallet access for {}", subject(client_name))
+                }
+                AgentManagementOperation::Remove => {
+                    format!("remove wallet registration for {}", subject(client_name))
+                }
+            },
             Self::SignTransaction { wallet } => {
                 format!("sign a transaction from wallet {}", subject(wallet))
             }

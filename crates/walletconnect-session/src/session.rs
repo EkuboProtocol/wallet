@@ -299,7 +299,7 @@ const fn lapsed(expiry: i64, now: i64) -> bool {
     now >= expiry
 }
 
-fn controller_refusal(rpc_method: &str) -> Option<(i64, &'static str)> {
+fn controller_refusal(rpc_method: &str, _settled: &Settled) -> Option<(i64, &'static str)> {
     (rpc_method == method::SESSION_EXTEND)
         .then_some((error_code::UNAUTHORIZED_EXTEND, EXTEND_REFUSAL))
 }
@@ -641,7 +641,11 @@ impl<'a> Session<'a> {
             // there is no way to ask them mid-flight without a second review
             // surface, so it is refused rather than accepted quietly.
             method::SESSION_EXTEND => {
-                let (code, refusal) = controller_refusal(&rpc_method)
+                let settled = self
+                    .settled
+                    .as_ref()
+                    .expect("a session-topic request has settled state");
+                let (code, refusal) = controller_refusal(&rpc_method, settled)
                     .expect("session extension is always controller-refused");
                 self.respond_on_session(
                     OutgoingResponse::error(message.id, code, refusal),

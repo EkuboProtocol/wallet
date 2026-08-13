@@ -17,23 +17,23 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # The extension is published on this release, so it has to name this
+      # The plugin is published on this release, so it has to name this
       # release. The tag is held to the same version because it, and not
       # Cargo.toml, is what `latest.json` reports to installed wallets.
-      - name: Require the bundle and the tag to name this wallet version
+      - name: Require the plugin and the tag to name this wallet version
         run: contrib/sync-claude-desktop-version.py --check --expect "${GITHUB_REF_NAME#v}"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: integrations/claude-desktop/package-lock.json
-      - name: Build Claude Desktop extension
+      - name: Build Claude Desktop plugin
         working-directory: integrations/claude-desktop
-        run: npm ci && npm test && npm run validate && npm run pack
+        run: npm ci && npm test && npm run validate:plugin && npm run pack:plugin
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: packages-claude-desktop
-          path: integrations/claude-desktop/dist/ekubo-wallet.mcpb
+          name: release-packages-claude-desktop
+          path: integrations/claude-desktop/dist/ekubo-wallet-plugin.zip
           if-no-files-found: error
 
   package:
@@ -46,13 +46,13 @@ jobs:
         include:
           - os: macos-15
             formats: app,dmg
-            artifact: macos
+            upload_name: release-packages-macos
           - os: windows-2025
             formats: nsis
-            artifact: windows
+            upload_name: unsigned-packages-windows
           - os: ubuntu-24.04
             formats: appimage,deb
-            artifact: linux
+            upload_name: release-packages-linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -61,11 +61,18 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libfuse2
       - name: Require protected update signing key
+        if: runner.os != 'Windows'
         shell: bash
         env:
           EKUBO_UPDATER_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
           EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
         run: test -n "$EKUBO_UPDATER_PRIVATE_KEY" && test -n "$EKUBO_UPDATER_PUBLIC_KEY"
+      - name: Require embedded updater public key on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
+        run: test -n "$EKUBO_UPDATER_PUBLIC_KEY"
       - name: Install cargo-packager
         uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
@@ -142,8 +149,6 @@ jobs:
         shell: pwsh
         env:
           EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
         run: cargo packager --release --formats "${{ matrix.formats }}"
       - name: Verify Windows application identity
         if: runner.os == 'Windows'
@@ -156,6 +161,10 @@ jobs:
           }
           if ($version.ProductName -ne "Ekubo Wallet") {
             throw "Unexpected ProductName: '$($version.ProductName)'"
+          }
+          $expectedVersion = $env:GITHUB_REF_NAME.Substring(1)
+          if ($version.ProductVersion -ne $expectedVersion) {
+            throw "Unexpected ProductVersion: '$($version.ProductVersion)', expected '$expectedVersion'"
           }
 
           $stream = [System.IO.File]::OpenRead($path)
@@ -183,6 +192,7 @@ jobs:
 
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
           codesign --verify --strict --verbose=2 "${dmgs[0]}"
           codesign -dv --verbose=4 "${dmgs[0]}" 2>&1 | grep -F 'Authority=Developer ID Application:'
       - name: Submit distributed DMG for notarization without waiting
@@ -218,60 +228,6 @@ jobs:
             printf '    xcrun notarytool info %s --key <AuthKey.p8> --key-id <key-id> --issuer <issuer-id>\n\n' "$submission_id"
             printf 'After acceptance, Gatekeeper can retrieve online tickets for the DMG and its nested app. This release is not stapled, so its first launch requires network access.\n'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Detect Windows signing configuration
-        if: runner.os == 'Windows'
-        id: windows-signing
-        shell: bash
-        env:
-          ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-        run: |
-          if [ -n "$ENDPOINT" ] && [ -n "$ACCOUNT" ] && [ -n "$PROFILE" ]; then
-            echo 'enabled=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'enabled=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::Publishing the Windows installer unsigned until its certificate profile is available.'
-          fi
-      - name: Sign Windows installer
-        if: runner.os == 'Windows' && steps.windows-signing.outputs.enabled == 'true'
-        uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
-        with:
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-          files-folder: target/release
-          files-folder-filter: exe
-      - name: Sign the final Authenticode-mutated Windows installer for the updater
-        if: runner.os == 'Windows' && steps.windows-signing.outputs.enabled == 'true'
-        shell: bash
-        env:
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          installers=(target/release/*setup.exe)
-          test "${#installers[@]}" -eq 1
-          rm -f "${installers[0]}.sig"
-          cargo packager signer sign "${installers[0]}"
-          test -s "${installers[0]}.sig"
-      - name: Verify both signatures on the final Windows installer
-        if: runner.os == 'Windows' && steps.windows-signing.outputs.enabled == 'true'
-        shell: pwsh
-        env:
-          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $installers = @(Get-ChildItem target/release/*setup.exe)
-          if ($installers.Count -ne 1) { throw "expected exactly one Windows installer" }
-          $authenticode = Get-AuthenticodeSignature $installers[0].FullName
-          if ($authenticode.Status -ne "Valid") { throw "final installer has invalid Authenticode: $($authenticode.Status)" }
-          cargo install minisign --locked --version 0.7.9
-          if ($LASTEXITCODE -ne 0) { throw "could not install Minisign verifier" }
-          $publicKey = @($env:EKUBO_UPDATER_PUBLIC_KEY -split "`r?`n" | Where-Object { $_.Trim() })[-1]
-          minisign -Vm $installers[0].FullName -x "$($installers[0].FullName).sig" -P $publicKey
-          if ($LASTEXITCODE -ne 0) { throw "final installer has an invalid updater signature" }
       - name: Remove temporary Apple signing material
         if: always() && runner.os == 'macOS'
         shell: bash
@@ -280,7 +236,7 @@ jobs:
           rm -f "$RUNNER_TEMP/developer-id-application.p12" "$RUNNER_TEMP/AuthKey.p8"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: packages-${{ matrix.artifact }}
+          name: ${{ matrix.upload_name }}
           path: |
             target/release/*.AppImage
             target/release/*.AppImage.sig
@@ -294,18 +250,118 @@ jobs:
             target/release/*.exe.sig
           if-no-files-found: error
 
+  finalize-windows:
+    needs: package
+    runs-on: windows-2025
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-packages-windows
+          path: dist
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Install cargo-packager
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Install Minisign verifier
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        with:
+          tool: minisign@0.7.9
+      - name: Capture the pre-Authenticode installer digest
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem dist/*setup.exe)
+          if ($installers.Count -ne 1) { throw "expected exactly one Windows installer" }
+          (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash | Set-Content "$env:RUNNER_TEMP/pre-authenticode.sha256"
+      - name: Detect Windows signing configuration
+        id: windows-signing
+        shell: pwsh
+        env:
+          ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          TENANT: ${{ secrets.AZURE_TENANT_ID }}
+          CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if ($env:ENDPOINT -and $env:ACCOUNT -and $env:PROFILE -and $env:TENANT -and $env:CLIENT) {
+            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Output "::notice::Publishing the Windows installer without Authenticode until the Trusted Signing account and profile are configured."
+          }
+      - name: Apply Authenticode to the Windows installer
+        if: steps.windows-signing.outputs.enabled == 'true'
+        uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          cache-dependencies: false
+      - name: Sign the final Windows installer for the updater
+        shell: pwsh
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $installers = @(Get-ChildItem dist/*setup.exe)
+          if ($installers.Count -ne 1) { throw "expected exactly one Windows installer" }
+          Remove-Item -Force -ErrorAction SilentlyContinue "$($installers[0].FullName).sig"
+          cargo packager signer sign $installers[0].FullName
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$($installers[0].FullName).sig")) {
+            throw "could not sign the final Windows installer for the updater"
+          }
+      - name: Verify the exact final Windows installer
+        shell: pwsh
+        env:
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem dist/*setup.exe)
+          if ($installers.Count -ne 1) { throw "expected exactly one Windows installer" }
+          $expectedVersion = $env:GITHUB_REF_NAME.Substring(1)
+          if ($installers[0].VersionInfo.ProductVersion -ne $expectedVersion) {
+            throw "final installer ProductVersion does not match release tag"
+          }
+          if ('${{ steps.windows-signing.outputs.enabled }}' -eq 'true') {
+            $before = (Get-Content "$env:RUNNER_TEMP/pre-authenticode.sha256").Trim()
+            $after = (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash
+            if ($before -eq $after) { throw "Authenticode did not change the installer bytes" }
+            $authenticode = Get-AuthenticodeSignature $installers[0].FullName
+            if ($authenticode.Status -ne "Valid") { throw "final installer has invalid Authenticode: $($authenticode.Status)" }
+          }
+          $publicKeyPath = "$env:RUNNER_TEMP/updater.pub"
+          $signaturePath = "$env:RUNNER_TEMP/installer.sig"
+          [IO.File]::WriteAllBytes($publicKeyPath, [Convert]::FromBase64String($env:EKUBO_UPDATER_PUBLIC_KEY.Trim()))
+          $encodedSignature = (Get-Content -Raw "$($installers[0].FullName).sig").Trim()
+          [IO.File]::WriteAllBytes($signaturePath, [Convert]::FromBase64String($encodedSignature))
+          minisign -Vm $installers[0].FullName -x $signaturePath -p $publicKeyPath
+          if ($LASTEXITCODE -ne 0) { throw "final installer has an invalid updater signature" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-packages-windows
+          path: |
+            dist/*.exe
+            dist/*.exe.sig
+          if-no-files-found: error
+
   publish:
-    needs: [package, claude-desktop]
+    needs: [package, finalize-windows, claude-desktop]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: packages-*
+          pattern: release-packages-*
           path: dist
           merge-multiple: true
       - name: Create update metadata
@@ -353,6 +409,10 @@ jobs:
         uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
           tool: cargo-packager@0.11.8
+      - name: Install Minisign verifier
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        with:
+          tool: minisign@0.7.9
       - name: Sign update metadata and verify every final updater artifact
         shell: bash
         env:
@@ -363,19 +423,39 @@ jobs:
           set -euo pipefail
           cargo packager signer sign dist/latest.json
           test -s dist/latest.json.sig
-          sudo apt-get update
-          sudo apt-get install -y minisign
-          public_key="$(printf '%s\n' "$EKUBO_UPDATER_PUBLIC_KEY" | tail -n 1)"
+          public_key="$RUNNER_TEMP/updater.pub"
+          printf '%s' "$EKUBO_UPDATER_PUBLIC_KEY" | base64 --decode > "$public_key"
           for artifact in dist/*.AppImage dist/*.app.tar.gz dist/*setup.exe dist/latest.json; do
             test -s "$artifact"
             test -s "$artifact.sig"
-            minisign -Vm "$artifact" -x "$artifact.sig" -P "$public_key"
+            decoded_signature="$RUNNER_TEMP/$(basename "$artifact").sig"
+            base64 --decode < "$artifact.sig" > "$decoded_signature"
+            minisign -Vm "$artifact" -x "$decoded_signature" -p "$public_key"
           done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets-for-attestation
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 1
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: dist/**
+
+  attest:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets-for-attestation
+          path: dist
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/**

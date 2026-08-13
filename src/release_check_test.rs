@@ -8,82 +8,11 @@ use super::*;
 const REPOSITORY: &str = "EkuboProtocol/wallet";
 
 #[test]
-fn installable_updates_use_only_the_stable_release_manifest() {
+fn core_and_desktop_package_versions_cannot_drift() {
     assert_eq!(
-        UPDATE_MANIFEST_URL,
-        "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json"
+        ekubo_wallet_core::update_trust::PACKAGE_VERSION_MARKER,
+        format!("\0EKUBO-WALLET-PACKAGE-VERSION:{}\0", crate::VERSION)
     );
-    assert!(!UPDATE_MANIFEST_URL.contains("prerelease"));
-}
-
-#[test]
-fn updater_private_material_is_never_compiled_into_the_module() {
-    let source = include_str!("release_check.rs");
-    assert!(source.contains("UPDATER_PUBLIC_KEY"));
-    assert!(!source.contains("UPDATER_PRIVATE_KEY"));
-}
-
-fn update_fixture(version: &str, url: &str) -> InstallableUpdate {
-    InstallableUpdate {
-        update: cargo_packager_updater::Update {
-            config: cargo_packager_updater::Config::default(),
-            body: None,
-            current_version: "1.0.0".into(),
-            version: version.into(),
-            date: None,
-            target: "linux".into(),
-            extract_path: "wallet.AppImage".into(),
-            download_url: url.parse().unwrap(),
-            signature: "artifact-signature".into(),
-            timeout: None,
-            headers: cargo_packager_updater::http::HeaderMap::default(),
-            format: cargo_packager_updater::UpdateFormat::AppImage,
-        },
-        artifact_sha256: "aa".repeat(32),
-    }
-}
-
-fn manifest_fixture(version: &str, url: &str) -> Vec<u8> {
-    let target = format!("linux-{}", std::env::consts::ARCH);
-    serde_json::to_vec(&serde_json::json!({
-        "version": version,
-        "platforms": {
-            (target): {
-                "url": url,
-                "signature": "artifact-signature",
-                "sha256": "aa".repeat(32),
-                "format": "appimage"
-            }
-        }
-    }))
-    .unwrap()
-}
-
-#[test]
-fn signed_metadata_cannot_claim_a_new_version_while_selecting_an_old_artifact() {
-    let new_url = "https://example.test/wallet-2.0.0.AppImage";
-    let old = update_fixture("2.0.0", "https://example.test/wallet-1.0.0.AppImage");
-    assert!(
-        update_matches_signed_manifest(&old.update, &manifest_fixture("2.0.0", new_url)).is_err()
-    );
-
-    let valid = update_fixture("2.0.0", new_url);
-    update_matches_signed_manifest(&valid.update, &manifest_fixture("2.0.0", new_url)).unwrap();
-
-    assert!(
-        update_matches_signed_manifest(&valid.update, &manifest_fixture("2.0.1", new_url)).is_err()
-    );
-}
-
-#[test]
-fn changing_any_signed_manifest_byte_invalidates_its_envelope() {
-    let public_key = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
-    let signature = "untrusted comment: signature from minisign secret key\n\
-RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n\
-trusted comment: timestamp:1633700835\tfile:test\tprehashed\n\
-wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==";
-    verify_manifest_signature(b"test", signature, public_key).unwrap();
-    assert!(verify_manifest_signature(b"Test", signature, public_key).is_err());
 }
 
 fn at(text: &str) -> DateTime<Utc> {

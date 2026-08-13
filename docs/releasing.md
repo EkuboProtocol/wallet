@@ -22,11 +22,13 @@ configuration is available; the workflow currently permits an otherwise
 update-signed Windows installer when it is not.
 
 The release workflow also tests, validates, and publishes the cross-platform
-`ekubo-wallet.mcpb` Claude Desktop extension. The extension has no runtime
-dependency installation and contains no credential material.
+`ekubo-wallet-plugin.zip` Claude Desktop plugin. The plugin has no runtime
+dependency installation and contains no credential material. The obsolete
+MCPB format is not published because current Claude Desktop versions do not
+import it.
 
 Its manifest, npm package, and lockfile repeat the wallet's version. The
-bundle's own test suite holds all of them to the root `Cargo.toml`, and
+plugin's own test suite holds all of them to the root `Cargo.toml`, and
 `contrib/sync-claude-desktop-version.py` is what rewrites them: bump the
 version in `Cargo.toml`, run the script, and commit what it changed. Tagging
 additionally requires the tag and manifest to name the same version.
@@ -35,7 +37,10 @@ Native update artifacts are signed by a dedicated Minisign key held only in the
 protected release environment. CI compiles the public key into the app,
 publishes a signed `latest.json` binding version, target, format, canonical
 artifact URL, SHA-256 digest, and detached artifact signature, verifies the
-final platform-signed artifacts, and attaches Sigstore provenance.
+final platform-signed artifacts, and attaches Sigstore provenance. The updater
+also reads the package version back from the bundled application binary (or the
+NSIS ProductVersion) and requires it to equal the authenticated manifest
+version before installation.
 
 Updates require explicit confirmation after the stable version is shown.
 Download completes and verifies before shutdown. The packaged macOS app,

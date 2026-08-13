@@ -466,15 +466,21 @@ fn the_deadline_is_the_same_deadline_for_every_method() {
 #[test]
 fn a_peer_is_not_authorized_to_extend_the_controller_owned_deadline() {
     let approved_deadline = far_future();
+    let settled = Settled {
+        topic: "topic".into(),
+        key: SymKey::from_hex(&"11".repeat(32)).unwrap(),
+        scope: scope(),
+        metadata: AppMetadata::default(),
+        expiry: approved_deadline,
+    };
     for _ in 0..2 {
-        let (code, message) = controller_refusal(method::SESSION_EXTEND)
+        let (code, message) = controller_refusal(method::SESSION_EXTEND, &settled)
             .expect("the peer's extension request was accepted");
         assert_eq!(code, 3004);
         assert!(message.contains("controls the session lifetime"));
-        let deadline_after_refusal = approved_deadline;
-        assert_eq!(deadline_after_refusal, approved_deadline);
+        assert_eq!(settled.expiry, approved_deadline);
     }
-    assert!(controller_refusal(method::SESSION_PING).is_none());
+    assert!(controller_refusal(method::SESSION_PING, &settled).is_none());
 }
 
 #[test]

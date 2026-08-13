@@ -7,6 +7,17 @@ fn agent_authorization() -> OwnerAuthorization {
     OwnerAuthorization::for_test(OwnerAuthorizationScope::AgentAccess)
 }
 
+fn client_management_authorization(
+    store: &DesktopStore,
+    client_id: Uuid,
+    operation: AgentManagementOperation,
+) -> OAuthClientManagementAuthorization {
+    let review = store
+        .client_management_review(client_id, operation)
+        .unwrap();
+    futures::executor::block_on(authorize_oauth_client_management(review)).unwrap()
+}
+
 fn store(key: u8) -> DesktopStore {
     let directory = tempfile::tempdir().unwrap();
     DesktopStore::open(
@@ -32,6 +43,7 @@ fn authorize_and_exchange(store: &mut DesktopStore, client: &McpClient) -> OAuth
             MCP_SCOPE,
             MCP_RESOURCE,
             OAuthSessionPreset::OneDayOneWeek,
+            client,
             &agent_authorization(),
         )
         .unwrap();
@@ -232,6 +244,7 @@ fn owner_selected_oauth_access_and_refresh_lifetimes_are_bound_to_the_code() {
             MCP_SCOPE,
             MCP_RESOURCE,
             OAuthSessionPreset::OneWeekOneMonth,
+            &client,
             &agent_authorization(),
         )
         .unwrap();
@@ -331,6 +344,7 @@ fn authorization_codes_are_one_time_and_pkce_bound() {
             MCP_SCOPE,
             MCP_RESOURCE,
             OAuthSessionPreset::OneDayOneWeek,
+            &client,
             &agent_authorization(),
         )
         .unwrap();
@@ -356,6 +370,47 @@ fn authorization_codes_are_one_time_and_pkce_bound() {
             .exchange_authorization_code(&encoded, client.id, REDIRECT, VERIFIER, MCP_RESOURCE,)
             .is_err()
     );
+}
+
+#[test]
+fn authorization_code_issuance_rejects_client_state_changed_during_owner_presence() {
+    let mut store = store(63);
+    let client = register(&mut store);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
+    store
+        .connection
+        .execute(
+            "UPDATE mcp_clients SET display_name = 'Changed' WHERE client_id = ?1",
+            [Blob(*client.id.as_bytes())],
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .issue_authorization_code_with_session(
+                client.id,
+                REDIRECT,
+                &challenge,
+                MCP_SCOPE,
+                MCP_RESOURCE,
+                OAuthSessionPreset::OneDayOneWeek,
+                &client,
+                &agent_authorization(),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_authorization_codes",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+        0
+    );
+    assert!(store.clients().unwrap().is_empty());
 }
 
 #[test]
@@ -419,9 +474,9 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
     let mut store = store(34);
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
-    store
-        .revoke_client(&client, &agent_authorization())
-        .unwrap();
+    let authorization =
+        client_management_authorization(&store, client.id, AgentManagementOperation::Revoke);
+    store.apply_client_management(authorization).unwrap();
     assert!(
         store
             .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
@@ -467,9 +522,9 @@ fn authorized_removal_deletes_every_oauth_credential() {
     let mut store = store(39);
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
-    store
-        .remove_client(&client, &agent_authorization())
-        .unwrap();
+    let authorization =
+        client_management_authorization(&store, client.id, AgentManagementOperation::Remove);
+    store.apply_client_management(authorization).unwrap();
     assert!(store.clients().unwrap().is_empty());
     assert!(
         store
@@ -494,11 +549,37 @@ fn authorized_removal_deletes_every_oauth_credential() {
 }
 
 #[test]
-fn client_management_rejects_wrong_scope_and_stale_registration_identity() {
+fn client_management_rejects_wrong_scope_expiration_and_stale_registration_identity() {
     let mut store = store(61);
     let client = register(&mut store);
-    let wrong = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
-    assert!(store.remove_client(&client, &wrong).is_err());
+    authorize_and_exchange(&mut store, &client);
+    let review = store
+        .client_management_review(client.id, AgentManagementOperation::Remove)
+        .unwrap();
+    let wrong = OAuthClientManagementAuthorization {
+        owner: OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings),
+        expected: review.expected,
+        grant_identity: review.grant_identity,
+        operation: review.operation,
+    };
+    assert!(store.apply_client_management(wrong).is_err());
+
+    let review = store
+        .client_management_review(client.id, AgentManagementOperation::Remove)
+        .unwrap();
+    let expired = OAuthClientManagementAuthorization {
+        owner: OwnerAuthorization::expired_for_test(OwnerAuthorizationScope::AgentAccess),
+        expected: review.expected,
+        grant_identity: review.grant_identity,
+        operation: review.operation,
+    };
+    assert!(store.apply_client_management(expired).is_err());
+
+    let review = store
+        .client_management_review(client.id, AgentManagementOperation::Remove)
+        .unwrap();
+    let authorization =
+        futures::executor::block_on(authorize_oauth_client_management(review)).unwrap();
 
     store
         .connection
@@ -510,12 +591,58 @@ fn client_management_rejects_wrong_scope_and_stale_registration_identity() {
             ],
         )
         .unwrap();
+    assert!(store.apply_client_management(authorization).is_err());
     assert!(
         store
-            .remove_client(&client, &agent_authorization())
+            .client_management_review(client.id, AgentManagementOperation::Remove)
+            .is_ok()
+    );
+}
+
+#[test]
+fn an_already_revoked_client_cannot_be_revoked_again() {
+    let mut store = store(62);
+    let client = register(&mut store);
+    authorize_and_exchange(&mut store, &client);
+    let authorization =
+        client_management_authorization(&store, client.id, AgentManagementOperation::Revoke);
+    store.apply_client_management(authorization).unwrap();
+
+    assert!(
+        store
+            .client_management_review(client.id, AgentManagementOperation::Revoke)
             .is_err()
     );
-    assert!(store.client_for_management(client.id).is_ok());
+    assert!(
+        store
+            .client_management_review(client.id, AgentManagementOperation::Remove)
+            .is_err()
+    );
+    let source = include_str!("desktop_store.rs");
+    assert!(!source.contains("pub fn revoke_client("));
+    assert!(!source.contains("pub fn remove_client("));
+}
+
+#[test]
+fn client_management_rejects_credentials_rotated_during_owner_presence() {
+    let mut store = store(64);
+    let client = register(&mut store);
+    let pair = authorize_and_exchange(&mut store, &client);
+    let review = store
+        .client_management_review(client.id, AgentManagementOperation::Revoke)
+        .unwrap();
+    let authorization =
+        futures::executor::block_on(authorize_oauth_client_management(review)).unwrap();
+
+    store
+        .refresh_access_token(
+            &pair.refresh_token.expose_base64url(),
+            client.id,
+            MCP_RESOURCE,
+        )
+        .unwrap();
+    assert!(store.apply_client_management(authorization).is_err());
+    assert_eq!(store.clients().unwrap()[0].id, client.id);
 }
 
 #[test]
@@ -538,6 +665,7 @@ fn protected_desktop_settings_reject_the_wrong_authorization_scope() {
                 MCP_SCOPE,
                 MCP_RESOURCE,
                 OAuthSessionPreset::OneDayOneWeek,
+                &client,
                 &wrong_scope,
             )
             .is_err()

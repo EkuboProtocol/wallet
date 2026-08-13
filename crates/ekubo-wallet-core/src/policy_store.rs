@@ -21,6 +21,12 @@ use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+#[cfg(any(test, feature = "test-hooks"))]
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
 use std::{path::Path, str::FromStr};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -38,6 +44,43 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// everything else in there is incidental, and none of it is.
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
 const KEYRING_USER: &str = "default";
+
+#[cfg(any(test, feature = "test-hooks"))]
+static TEST_DATABASE_KEYS: LazyLock<Mutex<HashMap<PathBuf, [u8; 32]>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Route production-style store opens for one test directory to an explicit
+/// key, without touching the machine-wide credential store.
+///
+/// A release build cannot contain this function: `test-hooks` is refused when
+/// debug assertions are disabled. Keeping the override keyed by data directory
+/// also lets otherwise unrelated tests continue to exercise the real
+/// production routing in the same process.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn register_test_database_key(data_dir: &Path, key: [u8; 32]) -> Result<()> {
+    let mut keys = TEST_DATABASE_KEYS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test database-key registry was poisoned"))?;
+    if let Some(existing) = keys.get(data_dir) {
+        ensure!(
+            existing == &key,
+            "test data directory already has a different database key"
+        );
+    } else {
+        keys.insert(data_dir.to_path_buf(), key);
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn registered_test_database_key(data_dir: &Path) -> Result<Option<DatabaseKey>> {
+    Ok(TEST_DATABASE_KEYS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test database-key registry was poisoned"))?
+        .get(data_dir)
+        .copied()
+        .map(DatabaseKey::new))
+}
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -1929,6 +1972,11 @@ fn verify_integrity(connection: &Connection) -> Result<()> {
 }
 
 fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result<DatabaseKey> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(key) = registered_test_database_key(data_dir)? {
+        return Ok(key);
+    }
+
     // An ephemeral session keeps its key beside its database and never reaches
     // the credential store. Absent from a release build, where neither this
     // call nor the module behind it exists.

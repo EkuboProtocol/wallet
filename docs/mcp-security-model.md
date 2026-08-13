@@ -8,8 +8,10 @@ an `Access-Control-*` header, and a request whose `Host` is not exactly
 health route exists. OAuth discovery and registration routes are the only
 mandated unauthenticated protocol surface.
 
-Agent configuration carries only `http://127.0.0.1:61744/mcp`; installing or
-repairing it creates no credential and requests no owner authentication. OAuth
+Agent configuration carries two exact credential-free entries: the wallet at
+`http://127.0.0.1:61744/mcp` and the always-installed companion at
+`https://mcp.ekubo.org/mcp`. Installing or repairing them creates no credential
+and requests no owner authentication. OAuth
 uses Dynamic Client Registration for public client metadata, Authorization Code
 with S256 PKCE, exact redirect-URI matching, the canonical MCP resource
 indicator, and rotating refresh tokens with an owner-selected absolute

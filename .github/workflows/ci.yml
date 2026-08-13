@@ -82,7 +82,7 @@ env:
 
 jobs:
   claude-desktop:
-    name: Claude Desktop MCPB
+    name: Claude Desktop plugin
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -104,8 +104,8 @@ jobs:
       - name: Test credential-free bridge
         run: npm test
 
-      - name: Validate and pack MCP Bundle
-        run: npm run validate && npm run pack
+      - name: Validate and pack Claude plugin
+        run: npm run validate:plugin && npm run pack:plugin
 
   test:
     name: Test (${{ matrix.runner }})

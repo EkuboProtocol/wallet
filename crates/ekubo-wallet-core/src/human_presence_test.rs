@@ -56,6 +56,26 @@ fn oauth_prompt_names_and_sanitizes_the_client_and_callback_host() {
 }
 
 #[test]
+fn agent_management_prompts_bind_the_exact_destructive_operation() {
+    assert_eq!(
+        PresenceRequest::ManageAgent {
+            client_name: "Codex".into(),
+            operation: AgentManagementOperation::Revoke,
+        }
+        .reason(),
+        "revoke wallet access for Codex"
+    );
+    assert_eq!(
+        PresenceRequest::ManageAgent {
+            client_name: "Codex".into(),
+            operation: AgentManagementOperation::Remove,
+        }
+        .reason(),
+        "remove wallet registration for Codex"
+    );
+}
+
+#[test]
 fn an_empty_name_still_names_something() {
     assert_eq!(
         PresenceRequest::SignMessage {

@@ -29,10 +29,11 @@ directories = "6.0.0"
 fs2 = "0.4.3"
 hex = "0.4.3"
 keyring = "4.1.6"
+minisign-verify = "0.2.5"
 num-bigint = "0.5.1"
 percent-encoding = "2.3.2"
 rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -48,6 +49,7 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]
 futures = "0.3.31"
+minisign = "0.7.9"
 proptest = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
@@ -55,14 +57,18 @@ libc = "0.2.189"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
+flate2 = "1.1.9"
 objc2 = "0.6.3"
 objc2-foundation = { version = "0.3.1", features = ["NSError", "NSString"] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "LAPublicDefines", "block2"] }
+tar = "0.4.46"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+pelite = { version = "0.10.0", default-features = false, features = ["std"] }
 windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials_UI"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+backhand = { version = "0.25.1", default-features = false, features = ["gzip", "xz", "zstd"] }
 zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
 zbus_polkit = "5.0.0"
 

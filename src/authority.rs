@@ -17,12 +17,12 @@ use ekubo_wallet_core::{
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{
         AgentKind, AppearancePreference, DesktopStore, McpClient, OAuthAuthorizationCode,
-        OAuthSessionPreset, OAuthTokenPair,
+        OAuthSessionPreset, OAuthTokenPair, authorize_oauth_client_management,
     },
     execution::BroadcastResult,
     human_presence::{
-        DappAuthorization, OwnerAuthorizationScope, PlatformHumanPresence, authorize_dapp_access,
-        authorize_oauth_client, authorize_owner,
+        AgentManagementOperation, DappAuthorization, OwnerAuthorizationScope,
+        PlatformHumanPresence, authorize_dapp_access, authorize_oauth_client, authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -664,20 +664,9 @@ impl OAuthApi {
             scope,
             resource,
             session_preset,
+            &client,
             &authorization,
         )?;
-        if let Err(launch_error) = crate::launch_at_login::enable(&authorization) {
-            let rollback = self.desktop()?.revoke_client(&client, &authorization);
-            self.events
-                .publish(DomainEventKind::AgentConnectionChanged { client_id });
-            if let Err(rollback) = rollback {
-                return Err(launch_error).context(format!(
-                    "launch-at-login setup failed and the new agent grant could not be revoked: {rollback:#}"
-                ));
-            }
-            return Err(launch_error)
-                .context("new agent grant was revoked because launch-at-login setup failed");
-        }
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
         Ok(code)
@@ -764,8 +753,11 @@ impl OwnerApi {
     /// release binary contains it.
     #[cfg(test)]
     pub(crate) fn for_test(data_dir: &std::path::Path) -> Result<Self> {
-        use ekubo_wallet_core::policy_store::{DATABASE_FILE, DatabaseKey};
+        use ekubo_wallet_core::policy_store::{
+            DATABASE_FILE, DatabaseKey, register_test_database_key,
+        };
 
+        register_test_database_key(data_dir, [0x43; 32])?;
         let key = DatabaseKey::new([0x43; 32]);
         let desktop = DesktopStore::open(&data_dir.join(DATABASE_FILE), &key)?;
         Ok(Self {
@@ -872,42 +864,26 @@ impl OwnerApi {
     }
 
     pub async fn revoke_client(&self, client_id: Uuid) -> Result<()> {
-        let expected = self.desktop()?.client_for_management(client_id)?;
-        let authorization = authorize_owner(OwnerAuthorizationScope::AgentAccess).await?;
+        let review = self
+            .desktop()?
+            .client_management_review(client_id, AgentManagementOperation::Revoke)?;
+        let authorization = authorize_oauth_client_management(review).await?;
         let mut desktop = self.desktop()?;
-        desktop.revoke_client(&expected, &authorization)?;
-        let any_active = desktop
-            .clients()?
-            .iter()
-            .any(|client| client.authorized_at.is_some() && client.revoked_at.is_none());
-        drop(desktop);
+        desktop.apply_client_management(authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        if !any_active {
-            crate::launch_at_login::disable().context(
-                "agent access was revoked, but launch-at-login persistence could not be removed",
-            )?;
-        }
         Ok(())
     }
 
     pub async fn remove_client(&self, client_id: Uuid) -> Result<()> {
-        let expected = self.desktop()?.client_for_management(client_id)?;
-        let authorization = authorize_owner(OwnerAuthorizationScope::AgentAccess).await?;
+        let review = self
+            .desktop()?
+            .client_management_review(client_id, AgentManagementOperation::Remove)?;
+        let authorization = authorize_oauth_client_management(review).await?;
         let mut desktop = self.desktop()?;
-        desktop.remove_client(&expected, &authorization)?;
-        let any_active = desktop
-            .clients()?
-            .iter()
-            .any(|client| client.authorized_at.is_some() && client.revoked_at.is_none());
-        drop(desktop);
+        desktop.apply_client_management(authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        if !any_active {
-            crate::launch_at_login::disable().context(
-                "agent registration was removed, but launch-at-login persistence could not be removed",
-            )?;
-        }
         Ok(())
     }
 

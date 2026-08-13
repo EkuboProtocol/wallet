@@ -20,7 +20,7 @@ Authorizations are separated by purpose: agent access, dapp access, update trust
 
 The MCP server listens only on the fixed loopback endpoint and requires an OAuth access token for the exact MCP resource. Dynamic registration grants no access. OAuth authorization, code issuance, refresh, revocation, and client removal terminate in core; authorization and revocation require OS human presence and re-read the registered client and redirect URI after authentication. Credentials are issued only by the token endpoint.
 
-The HTTP server holds `OAuthApi`, a protocol-only capability, plus `AgentApi`. It never receives `OwnerApi`, a raw database handle, owner authorization, custody, export, policy mutation, or client-revocation methods. Wallet-managed agent configuration contains only the exact `ekubo_wallet` loopback URL and OAuth mode; it never stores tokens or changes a harness-wide credential-store policy.
+The HTTP server holds `OAuthApi`, a protocol-only capability, plus `AgentApi`. It never receives `OwnerApi`, a raw database handle, owner authorization, custody, export, policy mutation, or client-revocation methods. Wallet-managed agent configuration contains two exact credential-free entries: the `ekubo_wallet` loopback URL with OAuth mode and the always-installed `ekubo` companion at `https://mcp.ekubo.org/mcp`. It never stores tokens or changes a harness-wide credential-store policy.
 
 ## WalletConnect and dapps
 
@@ -34,7 +34,7 @@ RPC endpoints, chain responses, simulations, fee data, receipts, and broadcasts 
 
 ## Updates and release supply chain
 
-Update metadata and artifact hosting are untrusted. `latest.json` is Minisign-signed, and the application verifies that signature before accepting its version, target, format, URL, or artifact signature. The separately signed artifact is verified on download. The exact verified bytes and authenticated metadata are re-read in core immediately before installation, and an ordinary quit has no installer capability.
+Update metadata and artifact hosting are untrusted. `latest.json` is Minisign-signed, and the application verifies that signature before accepting its version, target, format, URL, or artifact signature. The separately signed artifact is verified on download. Core independently reads the version marker from the bundled application binary (or the NSIS ProductVersion), requires it to match the authenticated version and to be newer than the running package, then repeats every check immediately before installation. An ordinary quit has no installer capability.
 
 Release workflow actions are pinned to full commit SHAs and checked by a dedicated pull-request workflow. Jobs start with no permissions and receive only their minimum permissions. Platform signing precedes final updater signing: Windows Authenticode mutates the installer first, then the final EXE is re-signed for the updater. The publish job verifies every final package signature, signs `latest.json`, verifies its signature, publishes the same bytes, and attests the release assets. Apple and Windows platform signing services remain external trust dependencies; compromise of a release private key can authorize malicious releases and requires key revocation and a trusted recovery release.
 

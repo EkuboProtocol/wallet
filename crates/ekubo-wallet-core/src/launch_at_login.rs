@@ -2,9 +2,13 @@
 //!
 //! Enabling persistence expands the wallet's execution and listener surface,
 //! so it requires the same sealed authorization that granted agent access.
-//! Disabling it only removes authority and is deliberately authorization-free.
+//! Disabling it is bound to the exact authenticated revoke/remove operation so
+//! launch behavior remains a core-enforced owner setting in both directions.
 
-use crate::human_presence::{OwnerAuthorization, OwnerAuthorizationScope};
+use crate::{
+    desktop_store::OAuthClientManagementAuthorization,
+    human_presence::{AgentManagementOperation, OwnerAuthorization, OwnerAuthorizationScope},
+};
 use anyhow::{Context, Result, ensure};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use directories::BaseDirs;
@@ -20,8 +24,15 @@ const HIDDEN_STARTUP_ARGUMENT: &str = "--hidden-startup";
 
 /// Install the exact wallet login registration after core verifies the agent
 /// access grant that justifies it.
-pub fn enable(authorization: &OwnerAuthorization) -> Result<()> {
+pub(crate) fn enable(authorization: &OwnerAuthorization) -> Result<()> {
     authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+    if cfg!(any(test, feature = "test-hooks")) {
+        return Ok(());
+    }
+    enable_current_executable()
+}
+
+fn enable_current_executable() -> Result<()> {
     let executable = std::env::current_exe().context("could not locate the wallet executable")?;
     ensure!(
         executable.is_absolute(),
@@ -30,10 +41,41 @@ pub fn enable(authorization: &OwnerAuthorization) -> Result<()> {
     enable_executable(&executable)
 }
 
-/// Remove the exact wallet login registration. This is idempotent and never
-/// asks for owner authorization because it can only reduce attack surface.
-pub fn disable() -> Result<()> {
+/// Remove the exact wallet login registration as part of the same authenticated
+/// revoke/remove operation that eliminated the final active agent grant.
+pub(crate) fn disable_for_client_management(
+    authorization: &OAuthClientManagementAuthorization,
+    operation: AgentManagementOperation,
+) -> Result<()> {
+    authorization.require_operation(operation)?;
+    if cfg!(any(test, feature = "test-hooks")) {
+        return Ok(());
+    }
     disable_registration()
+}
+
+/// Roll back launch persistence using the still-fresh grant proof when code
+/// issuance fails before any OAuth credential leaves the process.
+pub(crate) fn rollback_enable(authorization: &OwnerAuthorization) -> Result<()> {
+    authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+    if cfg!(any(test, feature = "test-hooks")) {
+        return Ok(());
+    }
+    disable_registration()
+}
+
+/// Restore launch persistence when the database mutation following a successful
+/// removal could not commit. The same sealed operation proof authorizes only
+/// this rollback to the pre-mutation state.
+pub(crate) fn rollback_disable(
+    authorization: &OAuthClientManagementAuthorization,
+    operation: AgentManagementOperation,
+) -> Result<()> {
+    authorization.require_operation(operation)?;
+    if cfg!(any(test, feature = "test-hooks")) {
+        return Ok(());
+    }
+    enable_current_executable()
 }
 
 #[cfg(target_os = "macos")]

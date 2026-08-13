@@ -27,6 +27,7 @@ fn clients() -> (Arc<Mutex<DesktopStore>>, String) {
             MCP_SCOPE,
             MCP_RESOURCE,
             OAuthSessionPreset::OneDayOneWeek,
+            &client,
             &OwnerAuthorization::for_test(OwnerAuthorizationScope::AgentAccess),
         )
         .unwrap();
