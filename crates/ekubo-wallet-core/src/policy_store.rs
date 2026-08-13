@@ -32,7 +32,7 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// queues and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.db.v2";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
 const KEYRING_USER: &str = "default";
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.
@@ -322,9 +322,6 @@ impl PolicyStore {
             "policy database schema {version} is not the schema this build understands \
              ({SCHEMA_VERSION})"
         );
-        if seed_defaults == SeedDefaults::Yes {
-            crate::default_tokens::rename_legacy_source(&connection)?;
-        }
         verify_integrity(&connection)?;
         // Narrowed through a handle that refuses to follow a link, not through
         // the name. This runs after the connection is open, which is exactly

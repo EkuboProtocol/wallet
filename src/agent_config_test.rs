@@ -30,10 +30,13 @@ fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns()
     );
 }
 
+/// Whatever else the entry held, the upsert leaves only the loopback URL and
+/// OAuth mode: a stdio field would contradict the transport, and a header or
+/// token field is a static credential this wallet never accepts.
 #[test]
-fn codex_upsert_replaces_legacy_stdio_transport() {
+fn codex_upsert_clears_stdio_and_credential_fields() {
     let output = merge_codex(
-        "[mcp_servers.ekubo_wallet]\ncommand = \"wallet\"\nargs = [\"serve\"]\n\n",
+        "[mcp_servers.ekubo_wallet]\ncommand = \"wallet\"\nargs = [\"serve\"]\nbearer_token_env_var = \"TOKEN\"\nhttp_headers = { Authorization = \"Bearer stale\" }\n\n",
         "http://127.0.0.1:50000/mcp",
         false,
     )
@@ -42,6 +45,7 @@ fn codex_upsert_replaces_legacy_stdio_transport() {
     let local = &parsed["mcp_servers"][LOCAL_SERVER_NAME];
     assert!(local.get("command").is_none());
     assert!(local.get("args").is_none());
+    assert!(local.get("bearer_token_env_var").is_none());
     assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:50000/mcp"));
     assert_eq!(local["auth"].as_str(), Some("oauth"));
     assert!(local.get("http_headers").is_none());
@@ -49,94 +53,6 @@ fn codex_upsert_replaces_legacy_stdio_transport() {
         parsed["mcp_oauth_credentials_store"].as_str(),
         Some("keyring")
     );
-}
-
-/// An install predating the underscore key must end up with one entry, not
-/// two pointing at the same wallet.
-#[test]
-fn codex_upsert_migrates_the_hyphenated_entry_to_a_single_underscore_entry() {
-    let output = merge_codex(
-        "[mcp_servers.ekubo-wallet]\nurl = \"http://127.0.0.1:50000/mcp\"\nauth = \"oauth\"\n",
-        "http://127.0.0.1:50000/mcp",
-        false,
-    )
-    .unwrap();
-    let parsed = output.parse::<DocumentMut>().unwrap();
-    assert!(
-        parsed["mcp_servers"]
-            .get(LEGACY_LOCAL_SERVER_NAME)
-            .is_none()
-    );
-    assert_eq!(
-        parsed["mcp_servers"][LOCAL_SERVER_NAME]["url"].as_str(),
-        Some("http://127.0.0.1:50000/mcp")
-    );
-    validate_codex_shape(&output, true, false).unwrap();
-}
-
-#[test]
-fn every_json_shape_migrates_the_hyphenated_entry() {
-    for (root, shape, kind) in [
-        ("mcpServers", JsonShape::Url, AgentKind::ClaudeCode),
-        ("mcpServers", JsonShape::HttpUrl, AgentKind::GeminiCli),
-        ("mcp", JsonShape::Remote, AgentKind::Opencode),
-    ] {
-        let before = format!(
-            r#"{{"{root}":{{"ekubo-wallet":{{"url":"http://127.0.0.1:1/mcp"}},"unrelated":{{"url":"https://example.com"}}}}}}"#
-        );
-        let output = merge_json(&before, root, shape, "http://127.0.0.1:50000/mcp", false).unwrap();
-        let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert!(parsed[root].get(LEGACY_LOCAL_SERVER_NAME).is_none());
-        assert!(parsed[root].get(LOCAL_SERVER_NAME).is_some());
-        assert_eq!(parsed[root]["unrelated"]["url"], "https://example.com");
-        validate_json_shape(&output, kind, true, false).unwrap();
-    }
-}
-
-/// Uninstalling has to clear both spellings, or an old entry survives and the
-/// harness keeps offering a wallet that is no longer registered.
-#[test]
-fn removal_deletes_both_spellings_of_the_wallet_entry() {
-    let codex = remove_codex(
-        "[mcp_servers.ekubo-wallet]\nurl = \"http://127.0.0.1:1/mcp\"\n[mcp_servers.ekubo_wallet]\nurl = \"http://127.0.0.1:2/mcp\"\n",
-        false,
-    )
-    .unwrap();
-    // Emptying the table leaves it implicit, so it may vanish on reparse
-    // entirely; either way neither spelling may survive.
-    let parsed = codex.parse::<DocumentMut>().unwrap();
-    let servers = parsed.get("mcp_servers").and_then(Item::as_table);
-    assert!(
-        servers
-            .and_then(|servers| servers.get(LEGACY_LOCAL_SERVER_NAME))
-            .is_none()
-    );
-    assert!(
-        servers
-            .and_then(|servers| servers.get(LOCAL_SERVER_NAME))
-            .is_none()
-    );
-
-    let json = remove_json(
-        r#"{"mcpServers":{"ekubo-wallet":{"url":"http://127.0.0.1:1/mcp"},"ekubo_wallet":{"url":"http://127.0.0.1:2/mcp"}}}"#,
-        "mcpServers",
-        false,
-    )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&json).unwrap();
-    assert!(parsed["mcpServers"].get(LEGACY_LOCAL_SERVER_NAME).is_none());
-    assert!(parsed["mcpServers"].get(LOCAL_SERVER_NAME).is_none());
-}
-
-/// Validation runs after the write, so it is the backstop that catches a
-/// surviving legacy entry however it got there.
-#[test]
-fn validation_rejects_a_surviving_hyphenated_entry() {
-    let codex = "mcp_oauth_credentials_store = \"keyring\"\n[mcp_servers.ekubo-wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nauth = \"oauth\"\n[mcp_servers.ekubo_wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nauth = \"oauth\"\n";
-    assert!(validate_codex_shape(codex, true, false).is_err());
-
-    let json = r#"{"mcpServers":{"ekubo-wallet":{"url":"http://127.0.0.1:1/mcp"},"ekubo_wallet":{"url":"http://127.0.0.1:1/mcp"}}}"#;
-    assert!(validate_json_shape(json, AgentKind::ClaudeCode, true, false).is_err());
 }
 
 #[test]

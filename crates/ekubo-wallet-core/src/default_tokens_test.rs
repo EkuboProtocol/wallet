@@ -103,37 +103,6 @@ fn seeded_rows_use_the_default_tokens_source() {
 }
 
 #[test]
-fn production_open_renames_the_legacy_seed_source() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("policies.db");
-    let key = DatabaseKey::new([39; 32]);
-    let database = PolicyStore::open_with(&path, &key, SeedDefaults::Yes).unwrap();
-    let first = embedded().unwrap().tokens.into_iter().next().unwrap();
-    database
-        .connection
-        .execute(
-            "UPDATE tokens SET source = ?1 WHERE chain_id = ?2 AND address = ?3",
-            rusqlite::params![
-                LEGACY_SOURCE,
-                i64::try_from(first.chain_id).unwrap(),
-                crate::sql::Blob(first.address)
-            ],
-        )
-        .unwrap();
-    drop(database);
-
-    let reopened = TokenStore::new(PolicyStore::open_with(&path, &key, SeedDefaults::Yes).unwrap());
-    assert_eq!(
-        reopened
-            .get(first.chain_id, first.address)
-            .unwrap()
-            .unwrap()
-            .source,
-        SOURCE
-    );
-}
-
-#[test]
 fn reopening_a_database_does_not_reseed_it() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");

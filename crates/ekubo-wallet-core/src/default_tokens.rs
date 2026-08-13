@@ -57,7 +57,6 @@ const EMBEDDED: &str = include_str!("../default-tokens.json");
 /// filename or fetch URL; the exact upstream provenance stays in the vendored
 /// snapshot metadata.
 pub const SOURCE: &str = "Default tokens";
-const LEGACY_SOURCE: &str = "Ekubo default tokens";
 
 /// Parse the embedded list.
 ///
@@ -89,18 +88,6 @@ pub(crate) fn seed(connection: &Connection) -> Result<usize> {
     };
     connection.execute_batch("COMMIT")?;
     Ok(seeded)
-}
-
-/// Rename only the source label used by pre-launch builds. This preserves the
-/// owner's token rows exactly while ensuring an already-seeded test database
-/// displays the same source label as a fresh installation.
-pub(crate) fn rename_legacy_source(connection: &Connection) -> Result<usize> {
-    connection
-        .execute(
-            "UPDATE tokens SET source = ?1 WHERE source = ?2",
-            params![SOURCE, LEGACY_SOURCE],
-        )
-        .context("failed to rename the legacy default-token source")
 }
 
 fn insert_all(
