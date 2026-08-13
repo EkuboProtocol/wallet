@@ -9,7 +9,6 @@ const OPEN_ID: &str = "ekubo.open";
 const REVIEWS_ID: &str = "ekubo.reviews";
 const CONNECT_ID: &str = "ekubo.connect";
 const AGENTS_ID: &str = "ekubo.agents";
-const UPDATES_ID: &str = "ekubo.updates";
 const SETTINGS_ID: &str = "ekubo.settings";
 const QUIT_ID: &str = "ekubo.quit";
 
@@ -17,7 +16,6 @@ const QUIT_ID: &str = "ekubo.quit";
 pub enum TrayCommand {
     OpenWallet,
     OpenRoute(Route),
-    CheckForUpdates,
     Quit,
 }
 
@@ -56,6 +54,11 @@ impl PlatformTray {
     /// Nothing here ends in an ellipsis either. The convention reserves one for
     /// a command that stops to ask for more input, and every one of these just
     /// brings a window forward.
+    ///
+    /// `Check for updates` is gone for the same reason the status line stopped
+    /// being a command: it opened Settings, which is where `Settings` goes, and
+    /// arriving there already runs the check. Two items landing on one screen
+    /// read as though they differ.
     pub fn new(dark_mode: bool) -> Result<Self> {
         let menu = Menu::new();
         let open = MenuItem::with_id(OPEN_ID, "Open Ekubo Wallet", true, None);
@@ -63,7 +66,6 @@ impl PlatformTray {
         let agents = MenuItem::with_id(AGENTS_ID, "Starting the agent gateway", false, None);
         let connect = MenuItem::with_id(CONNECT_ID, "Connect a dapp", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Settings", true, None);
-        let updates = MenuItem::with_id(UPDATES_ID, "Check for updates", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit Ekubo Wallet", true, None);
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
@@ -75,7 +77,6 @@ impl PlatformTray {
             &connect,
             &settings,
             &separator_two,
-            &updates,
             &quit,
         ])
         .context("failed to construct the tray menu")?;
@@ -259,7 +260,6 @@ fn command_for_id(id: &str) -> Option<TrayCommand> {
         REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Activity)),
         CONNECT_ID => Some(TrayCommand::OpenRoute(Route::WalletConnect)),
         SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
-        UPDATES_ID => Some(TrayCommand::CheckForUpdates),
         QUIT_ID => Some(TrayCommand::Quit),
         // `AGENTS_ID` lands here with everything unrecognized: the
         // agent-status line reports, it does not act.

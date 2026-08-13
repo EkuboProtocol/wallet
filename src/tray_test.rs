@@ -76,34 +76,38 @@ fn native_menu_ids_map_to_the_expected_commands() {
         command_for_id(SETTINGS_ID),
         Some(TrayCommand::OpenRoute(Route::Settings))
     );
-    assert_eq!(
-        command_for_id(UPDATES_ID),
-        Some(TrayCommand::CheckForUpdates)
-    );
     assert_eq!(command_for_id(QUIT_ID), Some(TrayCommand::Quit));
     assert_eq!(command_for_id("unknown"), None);
 }
 
 #[test]
-fn no_two_menu_items_issue_the_same_command() {
+fn no_two_menu_items_do_the_same_thing() {
     // The agent-status line used to open Settings, which is what the
-    // `Settings` item is for. A menu with two ways to do one thing reads as
-    // though they differ.
-    let commands = [
-        OPEN_ID,
-        REVIEWS_ID,
-        CONNECT_ID,
-        SETTINGS_ID,
-        UPDATES_ID,
-        QUIT_ID,
-    ]
-    .map(command_for_id)
-    .to_vec();
+    // `Settings` item is for, and `Check for updates` landed there too. A menu
+    // with two ways to reach one screen reads as though they differ.
+    let items = [OPEN_ID, REVIEWS_ID, CONNECT_ID, SETTINGS_ID, QUIT_ID];
+    let commands = items.map(command_for_id).to_vec();
     for (index, command) in commands.iter().enumerate() {
-        assert!(command.is_some(), "menu item {index} does nothing");
+        assert!(command.is_some(), "menu item {} does nothing", items[index]);
         assert!(
             !commands[index + 1..].contains(command),
             "two menu items issue {command:?}"
+        );
+    }
+    // Issuing distinct commands is not enough: what a reader compares is where
+    // each one leaves them.
+    let destinations = commands
+        .iter()
+        .flatten()
+        .filter_map(|command| match command {
+            TrayCommand::OpenRoute(route) => Some(*route),
+            TrayCommand::OpenWallet | TrayCommand::Quit => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, route) in destinations.iter().enumerate() {
+        assert!(
+            !destinations[index + 1..].contains(route),
+            "two menu items open {route:?}"
         );
     }
     // The status line reports and nothing else.

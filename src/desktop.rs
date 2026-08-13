@@ -7182,6 +7182,12 @@ impl WalletWindow {
     }
 
     fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
+        // Nothing a banner points at can be acted on before the legal
+        // documents are answered, and moving the app behind that modal only
+        // hides where the reader was.
+        if self.legal_gate {
+            return;
+        }
         self.command_palette = false;
         self.set_route(Route::Activity);
         match route {
@@ -13151,18 +13157,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
                         TrayCommand::OpenRoute(route) => {
+                            // `navigate_route`, not `set_route`: the rail's own
+                            // buttons are disabled while the legal gate is up,
+                            // and the tray must not be the one way to move the
+                            // app out from under a decision it cannot dismiss.
                             tray_view.update(cx, |view, cx| {
-                                view.set_route(route);
-                                cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
-                        TrayCommand::CheckForUpdates => {
-                            tray_view.update(cx, |view, cx| {
-                                view.set_route(Route::Settings);
-                                view.check_latest_release(cx);
-                                cx.notify();
+                                view.navigate_route(route, cx);
                             });
                             let _ =
                                 cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
