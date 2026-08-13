@@ -8207,6 +8207,12 @@ impl WalletWindow {
                     .child(img(logo).w(px(36.0)).h(px(36.0))),
             );
         for route in Route::ALL {
+            // The badge is the one thing on this rail that changes on its own,
+            // and it was drawn for the eye alone: the button's tooltip and its
+            // screen-reader name both said "Inbox" whether or not anything was
+            // waiting in it.
+            let waiting = (route == Route::Activity && pending_reviews > 0)
+                .then(|| format!("{} waiting", pluralize(pending_reviews, "request")));
             let button = app_button(SharedString::from(format!(
                 "sidebar-route-{}",
                 route.label()
@@ -8217,12 +8223,21 @@ impl WalletWindow {
             .selected(route == self.route)
             .toggled(route == self.route)
             .disabled(self.legal_gate || self.network_editor_open)
-            .tooltip(format!("{}  {}", route.label(), route.shortcut()))
+            .tooltip(match &waiting {
+                Some(waiting) => format!("{} — {waiting}  {}", route.label(), route.shortcut()),
+                None => format!("{}  {}", route.label(), route.shortcut()),
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
             }))
             .child(Icon::new(route.icon()).size(px(30.0)));
-            let button = accessible_button(button, route.label());
+            let button = accessible_button(
+                button,
+                match &waiting {
+                    Some(waiting) => format!("{}, {waiting}", route.label()),
+                    None => route.label().to_owned(),
+                },
+            );
             if route == Route::Activity {
                 let count = if pending_reviews > 99 {
                     "99+".to_owned()
