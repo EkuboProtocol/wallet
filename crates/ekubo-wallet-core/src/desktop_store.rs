@@ -32,6 +32,10 @@ pub const MCP_SCOPE: &str = "wallet:use";
 
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
 const MAX_OAUTH_CLIENTS: i64 = 128;
+/// How long a registered but never-authorized client survives before it
+/// becomes eligible for pruning. It only bounds the registration table; a
+/// client is never dropped while there is room for it.
+const UNAUTHORIZED_CLIENT_RETENTION: Duration = Duration::days(30);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -328,14 +332,26 @@ impl DesktopStore {
         if let Some(value) = &registration {
             ensure!(value.len() <= 262_144, "managed registration is too large");
         }
-        self.connection.execute(
-            "DELETE FROM mcp_clients
-             WHERE authorized_at IS NULL AND created_at < ?1",
-            [Millis(Utc::now() - Duration::days(1))],
-        )?;
-        let count: i64 =
+        // Abandoned registrations are pruned only under count pressure, and
+        // only once they are long stale. Agent harnesses cache the `client_id`
+        // that dynamic registration returned and reuse it for every later
+        // login without re-registering, so deleting a row on a timer the
+        // client cannot observe locks that agent out permanently: its
+        // `/authorize` calls fail against a `client_id` this wallet no longer
+        // knows, and nothing in the protocol tells it to register again.
+        let mut count: i64 =
             self.connection
                 .query_row("SELECT count(*) FROM mcp_clients", [], |row| row.get(0))?;
+        if count >= MAX_OAUTH_CLIENTS {
+            self.connection.execute(
+                "DELETE FROM mcp_clients
+                 WHERE authorized_at IS NULL AND created_at < ?1",
+                [Millis(Utc::now() - UNAUTHORIZED_CLIENT_RETENTION)],
+            )?;
+            count = self
+                .connection
+                .query_row("SELECT count(*) FROM mcp_clients", [], |row| row.get(0))?;
+        }
         ensure!(
             count < MAX_OAUTH_CLIENTS,
             "OAuth client registration limit reached"
