@@ -8755,6 +8755,16 @@ impl WalletWindow {
         }
 
         div()
+            // A settings row puts its name at the left edge and its control at
+            // the right, which is the desktop idiom and reads well until the
+            // window is wide: at a thousand pixels the `View` beside a legal
+            // document sat a hand's width from the document it opened, and the
+            // pairing had to be inferred from vertical alignment alone. Every
+            // settings pane worth copying caps its measure for this reason —
+            // the control stays beside its subject however wide the window is.
+            // Only this route is capped; the token list and the policy
+            // document want every pixel they can get.
+            .max_w(px(720.0))
             .flex()
             .flex_col()
             .gap_4()
