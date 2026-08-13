@@ -127,6 +127,21 @@ fn export_lease_conceals_and_conditionally_clears_its_clipboard_value() {
     );
 }
 
+#[test]
+fn export_lease_counts_down_to_zero_and_stays_there() {
+    let lease = ExportLease::new_for_duration(
+        zeroize::Zeroizing::new("secret".to_owned()),
+        Duration::from_millis(200),
+    );
+    let remaining = lease.remaining();
+    assert!(remaining > Duration::ZERO && remaining <= Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(250));
+    // A concealed lease reports no time left rather than a duration the
+    // countdown would render as a key that is still on screen.
+    assert!(lease.concealed());
+    assert_eq!(lease.remaining(), Duration::ZERO);
+}
+
 #[tokio::test]
 async fn notification_previews_are_always_detailed() {
     let directory = tempfile::tempdir().unwrap();

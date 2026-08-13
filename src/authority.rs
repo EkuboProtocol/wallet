@@ -1930,6 +1930,17 @@ impl ExportLease {
             || self.value.lock().map_or(true, |value| value.is_empty())
     }
 
+    /// How much longer the key stays visible. A reveal that vanishes without
+    /// warning reads as a bug; a countdown makes the deadline the user's to
+    /// plan around.
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        if self.concealed() {
+            return Duration::ZERO;
+        }
+        self.expires_at.saturating_duration_since(Instant::now())
+    }
+
     #[must_use]
     pub fn visible_value(&self) -> Option<zeroize::Zeroizing<String>> {
         if self.concealed() {

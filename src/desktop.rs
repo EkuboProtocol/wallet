@@ -5212,10 +5212,21 @@ impl WalletWindow {
                 }
                 cx.notify();
             });
-            cx.background_executor()
-                .timer(PRIVATE_KEY_REVEAL_DURATION)
-                .await;
-            let _ = view.update(cx, |_, cx| cx.notify());
+            // Re-render every second so the countdown moves and the panel
+            // flips itself to "hidden" the moment the lease expires.
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let revealed = view.update(cx, |view, cx| {
+                    cx.notify();
+                    view.account_export
+                        .as_ref()
+                        .and_then(|export| export.lease.as_ref())
+                        .is_some_and(|lease| !lease.concealed())
+                });
+                if !matches!(revealed, Ok(true)) {
+                    break;
+                }
+            }
         })
         .detach();
         cx.notify();
@@ -5928,6 +5939,13 @@ impl WalletWindow {
         // security review there is nothing to decide before leaving it.
         if self.selected_record.is_some() {
             self.selected_record = None;
+            cx.notify();
+        }
+        // Escape also closes the export panel. Leaving it open was the one
+        // modal in the app that trapped focus with no keyboard way out, and
+        // dropping the lease conceals the key sooner rather than later.
+        if self.account_export.is_some() {
+            self.account_export = None;
             cx.notify();
         }
     }
@@ -9578,7 +9596,26 @@ impl WalletWindow {
                                             .font_family(MONO_FONT_FAMILY)
                                             .text_sm()
                                             .text_color(cx.theme().muted_foreground),
-                                    ),
+                                    )
+                                    // A key that has left the machine cannot
+                                    // be un-exported, and until now the wallet
+                                    // recorded that fact without ever showing
+                                    // it.
+                                    .when_some(item.exported_at, |identity, exported_at| {
+                                        identity.child(
+                                            selectable_text(
+                                                format!("account-exported-{}", item.id),
+                                                &format!(
+                                                    "Key exported {}",
+                                                    relative_time_label(exported_at, chrono::Utc::now())
+                                                ),
+                                            )
+                                            .max_w_full()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(cx.theme().warning),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -9599,7 +9636,7 @@ impl WalletWindow {
                                         app_button(SharedString::from(format!(
                                             "export-account-{export_id}"
                                         )))
-                                        .label("Export")
+                                        .label("Export key")
                                         .on_click(
                                             cx.listener(move |view, _, _, cx| {
                                                 view.begin_account_export(export_id.clone(), cx);
@@ -13229,6 +13266,11 @@ impl WalletWindow {
             return div().into_any_element();
         };
         let visible = export.lease.as_ref().and_then(ExportLease::visible_value);
+        let remaining = export
+            .lease
+            .as_ref()
+            .map_or(Duration::ZERO, ExportLease::remaining);
+        let expired = export.lease.is_some() && visible.is_none();
         div()
             .absolute()
             .inset_4()
@@ -13248,20 +13290,51 @@ impl WalletWindow {
                     .child(selectable_label("Export private key")),
             )
             .child(selectable_label(format!("Account: {}", export.wallet_id)))
-            .child(selectable_label("Anyone with this key has full control of the account. Never paste it into a website, chat, issue, log, or agent prompt."))
-            .when_some(visible.as_ref(), |panel, value| {
+            .child(selectable_label("Anyone with this key can move every asset the account holds, on every network, forever. Never paste it into a website, chat, issue, log, or agent prompt."))
+            // Before the OS prompt, say what the prompt is for and what
+            // follows it. That the reveal runs on a clock is something to know
+            // before you are looking at a key you have to read in time.
+            .when(export.lease.is_none(), |panel| {
                 panel.child(
                     div()
-                        .p_3()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .font_family(MONO_FONT_FAMILY)
-                        .child(value.to_string()),
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_label(format!(
+                            "Your device will ask you to confirm. The key is then shown for {} seconds and hidden again; you can reveal it as often as you need.",
+                            PRIVATE_KEY_REVEAL_DURATION.as_secs()
+                        ))),
                 )
             })
-            .when(export.lease.is_some() && visible.is_none(), |panel| {
+            .when_some(visible.as_ref(), |panel, value| {
+                panel
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .font_family(MONO_FONT_FAMILY)
+                            .child(value.to_string()),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(format!(
+                                "Hidden again in {} seconds.",
+                                remaining.as_secs().max(1)
+                            )))
+                            .child(selectable_label(
+                                "Copying it also clears the clipboard 30 seconds later.",
+                            )),
+                    )
+            })
+            .when(expired, |panel| {
                 panel.child(selectable_label(
-                    "The 30-second reveal expired and the key is concealed.",
+                    "The key is hidden again. Reveal it once more if you still need it.",
                 ))
             })
             .when_some(export.error.clone(), |panel, error| {
@@ -13278,7 +13351,7 @@ impl WalletWindow {
                     .justify_between()
                     .child(
                         app_button("close-account-export")
-                            .label("Close")
+                            .label(if visible.is_some() { "Done" } else { "Close" })
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.account_export = None;
                                 cx.notify();
@@ -13288,13 +13361,16 @@ impl WalletWindow {
                         div()
                             .flex()
                             .gap_2()
-                            .when(export.lease.is_none(), |buttons| {
+                            // An expired reveal used to leave the panel with
+                            // nothing but Close, so seeing the key again meant
+                            // guessing that reopening the panel worked.
+                            .when(export.lease.is_none() || expired, |buttons| {
                                 buttons.child(
                                     app_button("authenticate-account-export")
-                                        .label(if export.authenticating {
-                                            "Authenticating…"
-                                        } else {
-                                            "Authenticate & reveal"
+                                        .label(match (export.authenticating, expired) {
+                                            (true, _) => "Waiting for confirmation…",
+                                            (false, true) => "Reveal again",
+                                            (false, false) => "Confirm & reveal",
                                         })
                                         .danger()
                                         .disabled(export.authenticating)
