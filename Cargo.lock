@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.7"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3267,7 +3267,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-core"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.7"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",

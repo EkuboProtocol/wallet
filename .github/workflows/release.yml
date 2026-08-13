@@ -97,6 +97,7 @@ jobs:
           printf 'EKUBO_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
       - name: Build native packages
+        if: runner.os != 'Windows'
         shell: bash
         env:
           EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
@@ -106,12 +107,20 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_API_KEY: ${{ secrets.APPLE_NOTARY_KEY_ID }}
         run: cargo packager --release --formats "${{ matrix.formats }}"
+      - name: Build native packages (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: cargo packager --release --formats "${{ matrix.formats }}"
       - name: Verify signed and notarized macOS packages
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          app="target/release/bundle/macos/Ekubo Wallet.app"
+          app="target/release/Ekubo Wallet.app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:'
           xcrun stapler validate "$app"
@@ -149,7 +158,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.artifact }}
-          path: target/release/bundle/**
+          path: |
+            target/release/*.AppImage
+            target/release/*.AppImage.sig
+            target/release/*.app.tar.gz
+            target/release/*.app.tar.gz.sig
+            target/release/*.deb
+            target/release/*.deb.sig
+            target/release/*.dmg
+            target/release/*.dmg.sig
+            target/release/*.exe
+            target/release/*.exe.sig
           if-no-files-found: error
 
   publish:
@@ -162,15 +181,46 @@ jobs:
           pattern: packages-*
           path: dist
           merge-multiple: true
-      - name: Install cargo-packager signer
-        run: cargo install cargo-packager --locked --version 0.11.8
-      - name: Sign update metadata
-        env:
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: cargo packager signer sign dist/latest.json
+      - name: Create update metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          macos_bundle="$(find dist -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          windows_bundle="$(find dist -maxdepth 1 -name '*.exe' -print -quit)"
+          linux_bundle="$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)"
+          for bundle in "$macos_bundle" "$windows_bundle" "$linux_bundle"; do
+            test -n "$bundle"
+            test -s "$bundle.sig"
+          done
+
+          asset_url() {
+            local filename encoded
+            filename="$(basename "$1")"
+            encoded="$(printf '%s' "$filename" | jq -sRr @uri)"
+            printf 'https://github.com/%s/releases/download/%s/%s' \
+              "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$encoded"
+          }
+
+          jq -n \
+            --arg version "${GITHUB_REF_NAME#v}" \
+            --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg macos_url "$(asset_url "$macos_bundle")" \
+            --arg macos_signature "$(cat "$macos_bundle.sig")" \
+            --arg windows_url "$(asset_url "$windows_bundle")" \
+            --arg windows_signature "$(cat "$windows_bundle.sig")" \
+            --arg linux_url "$(asset_url "$linux_bundle")" \
+            --arg linux_signature "$(cat "$linux_bundle.sig")" \
+            '{
+              version: $version,
+              pub_date: $pub_date,
+              platforms: {
+                "macos-aarch64": {url: $macos_url, signature: $macos_signature, format: "app"},
+                "windows-x86_64": {url: $windows_url, signature: $windows_signature, format: "nsis"},
+                "linux-x86_64": {url: $linux_url, signature: $linux_signature, format: "appimage"}
+              }
+            }' > dist/latest.json
       - name: Require signed update metadata
-        run: test -f dist/latest.json && test -f dist/latest.json.sig && find dist -name '*.sig' -print -quit | grep .
+        run: test -s dist/latest.json && test "$(find dist -name '*.sig' | wc -l)" -ge 3
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: ${{ contains(github.ref_name, '-') }}
