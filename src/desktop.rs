@@ -12112,6 +12112,34 @@ impl WalletWindow {
                 })),
         );
         content = match self.cached_networks() {
+            // Nothing to list, and the reason matters: with testnet mode off,
+            // a wallet whose networks are all test networks drew an empty page
+            // under an Add button and no account of where they had gone. Every
+            // other page in this wallet says what its own empty means.
+            Ok(networks) if networks_for_display(networks, self.testnet_mode).is_empty() => content
+                .child(
+                    div()
+                        .p_5()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_semibold()
+                                .child(selectable_label("No network is configured")),
+                        )
+                        .child(div().text_color(cx.theme().muted_foreground).child(
+                            selectable_label(if networks.is_empty() {
+                                "This wallet will not sign for any chain until you add one above."
+                            } else {
+                                "Every configured network is a test network. Turn on testnet mode in Settings to see them, or add a network above."
+                            }),
+                        )),
+                ),
             Ok(networks) => content.children(
                 networks_for_display(networks, self.testnet_mode)
                     .into_iter()
