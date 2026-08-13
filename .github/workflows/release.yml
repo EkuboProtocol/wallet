@@ -66,7 +66,9 @@ jobs:
           EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
         run: test -n "$EKUBO_UPDATER_PRIVATE_KEY" && test -n "$EKUBO_UPDATER_PUBLIC_KEY"
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked --version 0.11.8
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        with:
+          tool: cargo-packager@0.11.8
       - name: Configure mandatory Apple signing and notarization
         if: runner.os == 'macOS'
         shell: bash
