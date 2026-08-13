@@ -22,8 +22,26 @@
 //! overridden with `EKUBO_WALLET_LIVE_RPC_<chain-id>`, which is how a chain
 //! whose default public endpoint rate-limits `eth_simulateV1` is tested.
 //!
+//! This matrix runs locally, on demand, and nowhere else. It depends on shared
+//! public endpoints, which throttle and go down on their own schedule, so as a
+//! CI job it failed for reasons that had nothing to do with the code and taught
+//! us to ignore it. Run it by hand when the chain-facing surface changes.
+//!
+//! One chain at a time: the shared endpoints throttle a parallel run, and a
+//! throttled retry loop is slower than running serially.
+//!
 //! ```sh
-//! EKUBO_WALLET_LIVE_RPC_TESTS=1 cargo test --test live_networks -- --nocapture
+//! EKUBO_WALLET_LIVE_RPC_TESTS=1 cargo test --locked --all-features \
+//!     --test live_networks -- --nocapture --test-threads=1
+//! ```
+//!
+//! Some live cases live in the library instead, behind `#[ignore]`. Restrict
+//! Cargo to the library harness; a name filter alone also links every unrelated
+//! integration-test binary before filtering it.
+//!
+//! ```sh
+//! EKUBO_WALLET_LIVE_RPC_TESTS=1 cargo test --locked --all-features \
+//!     --lib live_ -- --ignored --nocapture
 //! ```
 
 use alloy::{

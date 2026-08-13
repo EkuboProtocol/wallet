@@ -1,4 +1,4 @@
-name: Release desktop applications
+name: Release
 
 on:
   push:
