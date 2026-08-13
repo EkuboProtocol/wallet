@@ -1428,6 +1428,11 @@ pub struct WalletWindow {
     active_review: Option<ActiveReview>,
     queued_reviews: SerialQueue<QueuedReview>,
     review_flow: ReviewFlowState,
+    /// The most recent notification the owner clicked while a decision or
+    /// editor owned the window. Navigation is intent, not a work queue: a
+    /// later click supersedes an earlier one and must be the screen that opens
+    /// when the blocker leaves.
+    notification_navigation: NotificationNavigation,
     agent_reinstall: AgentReinstallState,
     /// Set for a second after an install the reader asked for, so the button
     /// can answer with a check mark instead of a spinner nobody can read.
@@ -1830,6 +1835,26 @@ impl<T> SerialQueue<T> {
 
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
+    }
+}
+
+#[derive(Default)]
+struct NotificationNavigation {
+    pending: Option<NotificationRoute>,
+}
+
+impl NotificationNavigation {
+    fn receive(&mut self, route: NotificationRoute) {
+        // Navigation is intent, not a work queue: the newest explicit click
+        // supersedes an older one that has not been shown yet.
+        self.pending = Some(route);
+    }
+
+    fn take(&mut self, blocked: bool) -> Option<NotificationRoute> {
+        if blocked {
+            return None;
+        }
+        self.pending.take()
     }
 }
 
@@ -3805,6 +3830,7 @@ impl WalletWindow {
             active_review: None,
             queued_reviews: SerialQueue::default(),
             review_flow: ReviewFlowState::Ready,
+            notification_navigation: NotificationNavigation::default(),
             agent_reinstall: AgentReinstallState::Idle,
             agent_install_confirmed: false,
             detected_agents: AgentDetectionState::Loading,
@@ -4474,6 +4500,7 @@ impl WalletWindow {
                     let _ = on_close_view.update(cx, |view, cx| {
                         view.token_editor_open = false;
                         view.token_editor_errors = TokenEditorErrors::default();
+                        view.activate_next_waiting_surface(cx);
                         cx.notify();
                     });
                 })
@@ -4947,8 +4974,18 @@ impl WalletWindow {
         }
     }
 
-    fn finish_review_flow(&mut self) {
+    fn finish_review_flow(&mut self, cx: &mut Context<Self>) {
         self.review_flow = ReviewFlowState::Ready;
+        self.activate_next_waiting_surface(cx);
+    }
+
+    /// Resume the owner's latest explicit notification navigation before an
+    /// unsolicited queued prompt. If there is no click waiting, continue the
+    /// ordinary serial review flow.
+    fn activate_next_waiting_surface(&mut self, cx: &mut Context<Self>) {
+        if self.activate_pending_notification(cx) {
+            return;
+        }
         self.activate_next_queued_review();
         if self.active_review.is_some() {
             let route = self.active_review_route();
@@ -5642,6 +5679,9 @@ impl WalletWindow {
         match self.owner.accept_legal(document, &review.digest) {
             Ok(()) => {
                 self.open_next_required_legal(cx);
+                if !self.legal_gate {
+                    self.activate_next_waiting_surface(cx);
+                }
                 // Acceptance is written straight to the legal store, which
                 // raises no domain event, so nothing else was ever going to
                 // refresh the snapshot. Settings reads its acceptance dates
@@ -5667,6 +5707,7 @@ impl WalletWindow {
         // security review there is nothing to decide before leaving it.
         if self.selected_record.is_some() {
             self.selected_record = None;
+            self.activate_next_waiting_surface(cx);
             cx.notify();
         }
         // Escape also closes the export panel. Leaving it open was the one
@@ -5674,6 +5715,7 @@ impl WalletWindow {
         // dropping the lease conceals the key sooner rather than later.
         if self.account_export.is_some() {
             self.account_export = None;
+            self.activate_next_waiting_surface(cx);
             cx.notify();
         }
     }
@@ -5931,6 +5973,7 @@ impl WalletWindow {
         self.network_editor_open = false;
         self.network_editor_original = None;
         self.network_editor_errors = NetworkEditorErrors::default();
+        self.activate_next_waiting_surface(cx);
         cx.notify();
     }
 
@@ -6190,6 +6233,7 @@ impl WalletWindow {
                         view.network_editor_errors = NetworkEditorErrors::default();
                         window.close_dialog(cx);
                         view.reload_desktop_snapshot(cx);
+                        view.activate_next_waiting_surface(cx);
                     }
                     Err(error) => {
                         view.network_editor_errors.form =
@@ -7100,7 +7144,7 @@ impl WalletWindow {
                     }) {
                         view.active_review = None;
                     }
-                    view.finish_review_flow();
+                    view.finish_review_flow(cx);
                     match result {
                         Ok(_) => view.clear_route_error(Route::Activity),
                         Err(error) if error.to_string().contains("closed without a decision") => {
@@ -7248,7 +7292,7 @@ impl WalletWindow {
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
-                        view.finish_review_flow();
+                        view.finish_review_flow(cx);
                         match result {
                             Ok(_) => view.clear_route_error(Route::Activity),
                             Err(error) => view.set_route_error(
@@ -7278,7 +7322,7 @@ impl WalletWindow {
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
-                        view.finish_review_flow();
+                        view.finish_review_flow(cx);
                         match result {
                             Ok(_) => view.clear_route_error(Route::Activity),
                             Err(error) => view.set_route_error(
@@ -7304,7 +7348,7 @@ impl WalletWindow {
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
-                        view.finish_review_flow();
+                        view.finish_review_flow(cx);
                         match result {
                             Ok(_) => {
                                 view.account_action_errors.remove(&wallet_id);
@@ -7373,11 +7417,7 @@ impl WalletWindow {
         if wait_for_flow {
             self.review_flow = ReviewFlowState::Busy;
         }
-        self.activate_next_queued_review();
-        if self.active_review.is_some() {
-            let route = self.active_review_route();
-            self.set_route(route);
-        }
+        self.activate_next_waiting_surface(cx);
         cx.notify();
     }
 
@@ -7425,30 +7465,56 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
-        // Nothing a banner points at can be acted on before the legal
-        // documents are answered, and moving the app behind that modal only
-        // hides where the reader was.
-        if self.legal_gate {
-            return;
-        }
+    fn notification_navigation_blocked(&self) -> bool {
+        self.legal_gate
+            || self.active_review.is_some()
+            || self.review_flow.is_in_progress()
+            || self.account_export.is_some()
+            || self.token_editor_open
+            || self.network_editor_open
+    }
+
+    fn take_pending_notification_route(&mut self) -> Option<NotificationRoute> {
+        let blocked = self.notification_navigation_blocked();
+        self.notification_navigation.take(blocked)
+    }
+
+    /// Open the latest notification click once no decision or editor owns the
+    /// window. Returns whether an intent was consumed.
+    fn activate_pending_notification(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(route) = self.take_pending_notification_route() else {
+            return false;
+        };
+        // A read-only legal document is dismissible. Required legal review is
+        // covered by `legal_gate` above and keeps the intent pending.
+        self.legal_review = None;
         self.command_palette = false;
         self.set_route(Route::Activity);
         match route {
             NotificationRoute::Review(request_id) => {
-                // No record selection here. A waiting request is answered in
-                // the review surface, and pre-selecting it would raise the
-                // read-only detail modal over the inbox the moment whichever
-                // review is already open finishes.
-                if self.active_review.is_none() && !self.review_flow.is_in_progress() {
-                    self.begin_transaction_review(request_id, cx);
-                }
+                self.selected_record = None;
+                self.begin_transaction_review(request_id, cx);
             }
             NotificationRoute::Activity(request_id) => {
                 self.selected_record = Some(request_id);
-                self.load_transaction_inspection(request_id, cx);
+                if self.activity_inspections.contains_key(&request_id) {
+                    cx.notify();
+                } else {
+                    self.load_transaction_inspection(request_id, cx);
+                }
             }
         }
+        cx.notify();
+        true
+    }
+
+    fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
+        // Navigation follows the most recent thing the owner explicitly
+        // clicked. If another security surface owns the window, retain that
+        // intent and resume it when the blocker finishes instead of silently
+        // dropping it.
+        self.notification_navigation.receive(route);
+        self.activate_pending_notification(cx);
         cx.notify();
     }
 
@@ -7526,10 +7592,7 @@ impl WalletWindow {
                     }
                 }
                 if enabled {
-                    self.activate_next_queued_review();
-                    if self.active_review.is_some() {
-                        self.set_route(self.active_review_route());
-                    }
+                    self.activate_next_waiting_surface(cx);
                 }
                 self.clear_route_error(Route::Settings);
             }
@@ -7705,6 +7768,16 @@ impl WalletWindow {
 
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_3();
+        if self.review_flow == ReviewFlowState::Loading {
+            content = content.child(
+                h_flex()
+                    .id("transaction-review-loading")
+                    .gap_2()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new().small())
+                    .child(selectable_label("Opening the exact transaction review…")),
+            );
+        }
         let networks = self.network_display_names();
         let now = chrono::Utc::now();
         match self.cached_reviews() {
@@ -8458,6 +8531,7 @@ impl WalletWindow {
                                 .primary()
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.selected_record = None;
+                                    view.activate_next_waiting_surface(cx);
                                     cx.notify();
                                 })),
                             ),
@@ -12420,6 +12494,7 @@ impl WalletWindow {
                             .label(if visible.is_some() { "Done" } else { "Close" })
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.account_export = None;
+                                view.activate_next_waiting_surface(cx);
                                 cx.notify();
                             })),
                     )
