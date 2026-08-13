@@ -1,4 +1,5 @@
 /target
+/integrations/claude-desktop/dist
 /.idea
 /.vscode
 /.claude/worktrees

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "ekubo-wallet",
+  "display_name": "Ekubo Wallet",
+  "version": "1.0.0-rc.7",
+  "description": "Connect Claude Desktop to the locally running Ekubo Wallet.",
+  "long_description": "A credential-free local bridge from Claude Desktop's stdio transport to Ekubo Wallet's OAuth-protected loopback MCP server. Ekubo Wallet must be installed and running. OAuth credentials remain in memory and are discarded when the extension stops.",
+  "author": {
+    "name": "Ekubo Protocol",
+    "url": "https://github.com/EkuboProtocol/wallet"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EkuboProtocol/wallet"
+  },
+  "homepage": "https://github.com/EkuboProtocol/wallet",
+  "documentation": "https://github.com/EkuboProtocol/wallet/blob/main/docs/installation.md",
+  "support": "https://github.com/EkuboProtocol/wallet/issues",
+  "license": "FSL-1.1-MIT",
+  "keywords": ["wallet", "ethereum", "evm", "local", "oauth"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {}
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

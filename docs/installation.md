@@ -26,6 +26,19 @@ Settings also retains per-agent repair, OAuth access revocation, and removal.
 The remote Ekubo MCP entry is installed by default and remains independently
 removable.
 
+Claude Desktop is distinct from Claude Code and does not read `~/.claude.json`
+for local HTTP servers. Install the `ekubo-wallet.mcpb` asset published with
+the wallet release from **Settings → Extensions → Advanced settings → Install
+Extension**. The extension is a dependency-free JavaScript adapter launched by
+Claude Desktop's bundled Node.js runtime. It exposes stdio to Claude and
+forwards messages only to the fixed `http://127.0.0.1:61744/mcp` endpoint.
+
+The Claude Desktop adapter performs OAuth dynamic client registration and PKCE
+against the running wallet. It retains access and refresh credentials only in
+process memory: it never writes them to the extension, an agent configuration
+file, or disk. Restarting Claude Desktop can therefore require owner
+authorization again. The wallet must be running before Claude uses its tools.
+
 The local server advertises `wallet://skills/use-ekubo-wallet/SKILL.md` and
 includes its trigger guidance in the MCP handshake: agents are told to discover
 Ekubo Wallet for onchain EVM work and when “wallet” may mean a crypto wallet.
@@ -62,3 +75,17 @@ The packaged app gets its Dock icon from the `icons` entry under
 `package.metadata.packager` in `Cargo.toml`. The editable source is
 `assets/app-icon.svg`; `assets/app-icon-512.png` is its checked raster export
 for packagers that do not accept SVG application icons.
+
+## Building the Claude Desktop extension
+
+The same cross-platform MCP Bundle is published for macOS, Windows, and Linux:
+
+```sh
+cd integrations/claude-desktop
+npm ci
+npm test
+npm run validate
+npm run pack
+```
+
+The output is `integrations/claude-desktop/dist/ekubo-wallet.mcpb`.

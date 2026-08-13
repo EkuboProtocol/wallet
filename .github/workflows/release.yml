@@ -14,6 +14,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  claude-desktop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # The extension is published on this release, so it has to name this
+      # release. The tag is held to the same version because it, and not
+      # Cargo.toml, is what `latest.json` reports to installed wallets.
+      - name: Require the bundle and the tag to name this wallet version
+        run: contrib/sync-claude-desktop-version.py --check --expect "${GITHUB_REF_NAME#v}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/claude-desktop/package-lock.json
+      - name: Build Claude Desktop extension
+        working-directory: integrations/claude-desktop
+        run: npm ci && npm test && npm run validate && npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-claude-desktop
+          path: integrations/claude-desktop/dist/ekubo-wallet.mcpb
+          if-no-files-found: error
+
   package:
     environment: release
     strategy:
@@ -172,7 +195,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: package
+    needs: [package, claude-desktop]
     runs-on: ubuntu-24.04
     environment: release
     steps:
