@@ -80,6 +80,21 @@ fn owner_authorization_is_scope_bound() {
 }
 
 #[test]
+fn dapp_authorization_is_exact_and_single_use() {
+    let authorization = futures::executor::block_on(authorize_dapp_access("review-a", "primary"))
+        .expect("test owner authorization");
+    authorization.verify("review-a", "primary").unwrap();
+
+    let stale = futures::executor::block_on(authorize_dapp_access("review-a", "primary"))
+        .expect("test owner authorization");
+    assert!(stale.verify("review-b", "primary").is_err());
+
+    let changed_account = futures::executor::block_on(authorize_dapp_access("review-a", "primary"))
+        .expect("test owner authorization");
+    assert!(changed_account.verify("review-a", "secondary").is_err());
+}
+
+#[test]
 fn protected_setting_prompts_name_the_security_boundary() {
     assert_eq!(
         PresenceRequest::ChangeProtectedSettings {
@@ -87,6 +102,13 @@ fn protected_setting_prompts_name_the_security_boundary() {
         }
         .reason(),
         "change which local agents can access the wallet"
+    );
+    assert_eq!(
+        PresenceRequest::ChangeProtectedSettings {
+            scope: OwnerAuthorizationScope::DappAccess,
+        }
+        .reason(),
+        "approve the dapp connection shown in Ekubo Wallet"
     );
     assert_eq!(
         PresenceRequest::ChangeProtectedSettings {

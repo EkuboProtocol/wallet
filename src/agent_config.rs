@@ -275,9 +275,6 @@ fn merge_codex(before: &str, url: &str, companion: bool) -> Result<String> {
             .parse::<DocumentMut>()
             .context("Codex config is not valid TOML")?
     };
-    // This wallet's OAuth credentials authorize signing requests. Never let
-    // Codex's `auto` mode fall back to its file credential store.
-    document["mcp_oauth_credentials_store"] = value("keyring");
     let servers = document
         .as_table_mut()
         .entry("mcp_servers")
@@ -369,12 +366,6 @@ fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<Str
         AgentKind::Codex => {
             let before = parse_codex_document(before)?;
             let after = parse_codex_document(after)?;
-            push_managed_change(
-                &mut changes,
-                "mcp_oauth_credentials_store",
-                codex_value(&before, None, "mcp_oauth_credentials_store"),
-                codex_value(&after, None, "mcp_oauth_credentials_store"),
-            );
             for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
                 push_managed_change(
                     &mut changes,
@@ -552,13 +543,6 @@ fn validate_codex_shape(contents: &str, companion: bool) -> Result<()> {
     let document = contents
         .parse::<DocumentMut>()
         .context("Codex config is not valid TOML")?;
-    ensure!(
-        document
-            .get("mcp_oauth_credentials_store")
-            .and_then(Item::as_str)
-            == Some("keyring"),
-        "Codex must store wallet OAuth credentials in the OS keyring"
-    );
     let servers = document.get("mcp_servers").and_then(Item::as_table);
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
     let local = local.context("local MCP server is missing")?;

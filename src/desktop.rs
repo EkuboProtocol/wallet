@@ -1605,6 +1605,7 @@ enum ReleaseDisplayState {
 struct PreparedUpdate {
     update: crate::release_check::InstallableUpdate,
     bytes: Vec<u8>,
+    authorization: ekubo_wallet_core::update_trust::UpdateAuthorization,
 }
 
 enum PortfolioState {
@@ -6935,13 +6936,13 @@ impl WalletWindow {
         else {
             return;
         };
-        let version = update.version.clone();
+        let version = update.version().to_owned();
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
             alert
                 .title(format!("Install Ekubo Wallet {version}?"))
-                .description("The update will be downloaded and verified before the wallet closes. WalletConnect sessions will disconnect and the local MCP server will stop before installation.")
+                .description(format!("Version {version}, published by Ekubo, Inc., will be downloaded and verified before the wallet closes. WalletConnect sessions will disconnect and the local MCP server will stop before installation."))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Download & install")
@@ -6964,13 +6965,20 @@ impl WalletWindow {
             return;
         };
         let update = update.as_ref().clone();
+        let owner = self.owner.clone();
         self.release_state = ReleaseDisplayState::Downloading;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let downloaded_update = update.clone();
             let bytes = tokio::task::spawn_blocking(move || downloaded_update.download())
                 .await
                 .context("update download task failed")??;
-            Ok::<_, anyhow::Error>(PreparedUpdate { update, bytes })
+            let review = update.review(&bytes);
+            let authorization = owner.authorize_update_install(&review).await?;
+            Ok::<_, anyhow::Error>(PreparedUpdate {
+                update,
+                bytes,
+                authorization,
+            })
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -7000,16 +7008,29 @@ impl WalletWindow {
 
     fn revoke_agent(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
         self.clear_route_error(Route::Settings);
-        match self.owner.revoke_client(client_id) {
-            Ok(()) => {
-                self.hidden_agent_sessions.insert(client_id);
-                self.reload_desktop_snapshot(cx);
-            }
-            Err(error) => self.set_route_error(
-                Route::Settings,
-                format!("Could not revoke agent: {error:#}"),
-            ),
-        }
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.revoke_client(client_id).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.hidden_agent_sessions.insert(client_id);
+                        view.reload_desktop_snapshot(cx);
+                    }
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not revoke agent: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -7368,23 +7389,59 @@ impl WalletWindow {
             (
                 GuiReviewCommand::Approve,
                 Some(ActiveReviewCompletion::WalletConnect {
+                    choices,
                     selected_account,
                     response,
-                    ..
                 }),
             ) => {
+                wait_for_flow = true;
                 self.active_review = None;
-                if response
-                    .send(ProposalCommand::Approve(selected_account))
-                    .is_err()
-                {
+                let Some(choice) = choices.get(selected_account) else {
+                    let _ = response.send(ProposalCommand::Reject);
                     self.set_route_error(
                         Route::WalletConnect,
-                        "The connection proposal is no longer active.",
+                        "The selected account is no longer available.",
                     );
-                } else {
-                    self.clear_route_error(Route::WalletConnect);
-                }
+                    return;
+                };
+                let document = choice.document.clone();
+                let account = choice.account.clone();
+                let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    owner.authorize_dapp_connection(&document, &account).await
+                });
+                cx.spawn(async move |view, cx| {
+                    let result = task.await;
+                    let _ = view.update(cx, |view, cx| {
+                        view.finish_review_flow(cx);
+                        match result {
+                            Ok(authorization) => {
+                                if response
+                                    .send(ProposalCommand::Approve {
+                                        index: selected_account,
+                                        authorization,
+                                    })
+                                    .is_err()
+                                {
+                                    view.set_route_error(
+                                        Route::WalletConnect,
+                                        "The connection proposal is no longer active.",
+                                    );
+                                } else {
+                                    view.clear_route_error(Route::WalletConnect);
+                                }
+                            }
+                            Err(error) => {
+                                let _ = response.send(ProposalCommand::Reject);
+                                view.set_route_error(
+                                    Route::WalletConnect,
+                                    format!("Dapp connection was not authorized: {error:#}"),
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             (
                 GuiReviewCommand::Reject,
@@ -10288,6 +10345,19 @@ impl WalletWindow {
                                     ),
                                 )),
                         )
+                        .when_some(session.expires_at, |column, expires_at| {
+                            let deadline = chrono::DateTime::from_timestamp(expires_at, 0)
+                                .map_or_else(|| expires_at.to_string(), |value| value.to_rfc3339());
+                            column.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_text(
+                                        format!("walletconnect-session-expiry-{session_id}"),
+                                        &format!("Expires {deadline}; reconnect to renew"),
+                                    )),
+                            )
+                        })
                         .when_some(session.last_error, |column, error| {
                             column.child(
                                 div()
@@ -11671,7 +11741,7 @@ impl WalletWindow {
                     panel.child(
                         app_button("install-signed-update")
                             .self_start()
-                            .label(format!("Install {}", update.version))
+                            .label(format!("Install {}", update.version()))
                             .primary()
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.confirm_update_installation(window, cx);
@@ -13220,7 +13290,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let authority = ApplicationAuthority::open(config)?;
     let owner = authority.owner_api();
     let agent = authority.agent_api();
-    let clients = authority.desktop_store();
+    let oauth = authority.oauth_api();
     let events = authority.events();
     let server_slot = Arc::new(Mutex::new(None::<McpHttpServer>));
     let pending_update = Arc::new(Mutex::new(None::<PreparedUpdate>));
@@ -13321,6 +13391,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 crate::release_check::install_and_relaunch(
                                     &prepared.update,
                                     prepared.bytes,
+                                    prepared.authorization,
                                 )
                             })
                             .await;
@@ -13627,7 +13698,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let status_tray = tray.clone();
             let server_events = events.clone();
             let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                McpHttpServer::start(owner, agent, clients, server_events).await
+                McpHttpServer::start(oauth, agent, server_events).await
             });
             cx.spawn(async move |cx| match server_task.await {
                 Ok(server) => {

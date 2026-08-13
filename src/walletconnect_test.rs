@@ -60,9 +60,11 @@ fn live_status_updates_preserve_the_dapp_name() {
         SessionStatus::Connected,
         Some("Example".into()),
         1,
+        Some(1_900_000_000),
     );
-    manager.update(summary.id, SessionStatus::Connected, None, 0);
+    manager.update(summary.id, SessionStatus::Connected, None, 0, None);
     let current = manager.sessions().pop().unwrap();
     assert_eq!(current.dapp_name.as_deref(), Some("Example"));
     assert_eq!(current.active_requests, 0);
+    assert_eq!(current.expires_at, Some(1_900_000_000));
 }

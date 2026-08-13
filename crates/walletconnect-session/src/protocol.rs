@@ -19,8 +19,8 @@ use serde_json::Value;
 /// JSON-RPC version string, which the protocol requires verbatim.
 pub const JSONRPC_VERSION: &str = "2.0";
 
-/// How long a settled session lasts before the dapp must extend it: seven
-/// days, as the protocol specifies.
+/// How long a settled session lasts. This wallet is the session controller,
+/// so the peer cannot move this deadline after the owner approves it.
 pub const SESSION_TTL_SECONDS: i64 = 604_800;
 
 /// Relay publish tags and their time-to-live in seconds.
@@ -55,6 +55,8 @@ pub mod ttl {
 /// A dapp shows these to its user, so picking the right one is the difference
 /// between "your wallet rejected this" and "your wallet is broken".
 pub mod error_code {
+    /// The peer is not allowed to extend a controller-owned session.
+    pub const UNAUTHORIZED_EXTEND: i64 = 3004;
     /// The person said no.
     pub const USER_REJECTED: i64 = 5000;
     /// The proposal asked for a chain this wallet has no configuration for.

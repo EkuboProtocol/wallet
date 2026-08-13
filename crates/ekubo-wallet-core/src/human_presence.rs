@@ -8,10 +8,47 @@ const OWNER_AUTHORIZATION_LIFETIME: Duration = Duration::from_mins(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerAuthorizationScope {
     AgentAccess,
+    DappAccess,
+    UpdateTrust,
     PolicySettings,
     NetworkSettings,
     NotificationPrivacy,
     TokenMetadata,
+}
+
+/// Single-use proof that the owner authenticated the exact dapp review and
+/// account which the session boundary is about to settle.
+pub struct DappAuthorization {
+    owner: OwnerAuthorization,
+    review_identity: String,
+    account_id: String,
+}
+
+impl DappAuthorization {
+    /// Consume the proof and bind settlement to a freshly generated review.
+    pub fn verify(self, review_identity: &str, account_id: &str) -> Result<(), HumanPresenceError> {
+        self.owner.require(OwnerAuthorizationScope::DappAccess)?;
+        if self.review_identity != review_identity || self.account_id != account_id {
+            return Err(HumanPresenceError::Denied(
+                "the dapp proposal or selected account changed after owner authentication".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Authenticate the owner for one exact dapp review. The returned proof is
+/// deliberately single-use and can settle only matching, freshly re-read state.
+pub async fn authorize_dapp_access(
+    review_identity: &str,
+    account_id: &str,
+) -> Result<DappAuthorization, HumanPresenceError> {
+    let owner = authorize_owner(OwnerAuthorizationScope::DappAccess).await?;
+    Ok(DappAuthorization {
+        owner,
+        review_identity: review_identity.to_owned(),
+        account_id: account_id.to_owned(),
+    })
 }
 
 /// Short-lived, scope-bound proof minted only after platform authentication.
@@ -203,6 +240,12 @@ impl PresenceRequest {
             Self::ChangeProtectedSettings { scope } => match scope {
                 OwnerAuthorizationScope::AgentAccess => {
                     "change which local agents can access the wallet".into()
+                }
+                OwnerAuthorizationScope::DappAccess => {
+                    "approve the dapp connection shown in Ekubo Wallet".into()
+                }
+                OwnerAuthorizationScope::UpdateTrust => {
+                    "install the authenticated application update shown in Ekubo Wallet".into()
                 }
                 OwnerAuthorizationScope::PolicySettings => {
                     "widen automatic signing policy permissions".into()

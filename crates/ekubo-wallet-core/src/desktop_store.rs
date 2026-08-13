@@ -156,6 +156,8 @@ pub struct McpClient {
     pub id: Uuid,
     pub display_name: String,
     pub agent_kind: AgentKind,
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
     pub registration: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub authorized_at: Option<DateTime<Utc>>,
@@ -347,6 +349,7 @@ impl DesktopStore {
             id: Uuid::new_v4(),
             display_name: name.to_owned(),
             agent_kind,
+            redirect_uris: redirect_uris.to_vec(),
             registration: registration
                 .as_deref()
                 .map(serde_json::from_str)
@@ -423,6 +426,7 @@ impl DesktopStore {
             id: client_id,
             display_name,
             agent_kind: AgentKind::parse(&kind)?,
+            redirect_uris: redirects,
             registration: registration
                 .as_deref()
                 .map(serde_json::from_str)
@@ -507,34 +511,110 @@ impl DesktopStore {
         })
     }
 
-    /// Immediately revoke an OAuth session. Revocation only removes authority,
-    /// so the owner surface deliberately does not require human presence.
-    pub fn revoke_client(&mut self, client_id: Uuid) -> Result<()> {
+    fn security_identity_matches(current: &McpClient, expected: &McpClient) -> bool {
+        current.id == expected.id
+            && current.display_name == expected.display_name
+            && current.agent_kind == expected.agent_kind
+            && current.redirect_uris == expected.redirect_uris
+            && current.registration == expected.registration
+    }
+
+    /// Read the exact registered identity which an owner authorization must bind.
+    pub fn client_for_management(&self, client_id: Uuid) -> Result<McpClient> {
+        let (
+            display_name,
+            kind,
+            redirects,
+            registration,
+            created_at,
+            authorized_at,
+            last_used_at,
+            revoked_at,
+        ) = self
+            .connection
+            .query_row(
+                "SELECT display_name, agent_kind, redirect_uris_json, registration_json,
+                    created_at, authorized_at, last_used_at, revoked_at
+             FROM mcp_clients WHERE client_id = ?1",
+                [Blob(*client_id.as_bytes())],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Millis>(4)?.0,
+                        row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
+                        row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
+                        row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
+                    ))
+                },
+            )
+            .optional()?
+            .context("unknown MCP client")?;
+        Ok(McpClient {
+            id: client_id,
+            display_name,
+            agent_kind: AgentKind::parse(&kind)?,
+            redirect_uris: serde_json::from_str(&redirects)?,
+            registration: registration
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+            created_at,
+            authorized_at,
+            last_used_at,
+            session_expires_at: None,
+            revoked_at,
+        })
+    }
+
+    /// Revoke only the exact client identity authenticated by the owner.
+    pub fn revoke_client(
+        &mut self,
+        expected: &McpClient,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+        let current = self.client_for_management(expected.id)?;
+        ensure!(
+            Self::security_identity_matches(&current, expected),
+            "OAuth client registration changed after owner authentication"
+        );
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE mcp_clients SET revoked_at = ?1
              WHERE client_id = ?2 AND authorized_at IS NOT NULL AND revoked_at IS NULL",
-            params![Millis(Utc::now()), Blob(*client_id.as_bytes())],
+            params![Millis(Utc::now()), Blob(*expected.id.as_bytes())],
         )?;
         ensure!(changed == 1, "unknown or already revoked MCP client");
         transaction.execute(
             "DELETE FROM oauth_access_tokens WHERE client_id = ?1",
-            [Blob(*client_id.as_bytes())],
+            [Blob(*expected.id.as_bytes())],
         )?;
         transaction.execute(
             "DELETE FROM oauth_refresh_tokens WHERE client_id = ?1",
-            [Blob(*client_id.as_bytes())],
+            [Blob(*expected.id.as_bytes())],
         )?;
         transaction.commit()?;
         Ok(())
     }
 
-    /// Delete a registration and every credential beneath it. Like revocation,
-    /// this can only reduce authority and deliberately needs no presence token.
-    pub fn remove_client(&mut self, client_id: Uuid) -> Result<()> {
+    /// Delete only the exact registration authenticated by the owner.
+    pub fn remove_client(
+        &mut self,
+        expected: &McpClient,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+        let current = self.client_for_management(expected.id)?;
+        ensure!(
+            Self::security_identity_matches(&current, expected),
+            "OAuth client registration changed after owner authentication"
+        );
         let changed = self.connection.execute(
             "DELETE FROM mcp_clients WHERE client_id = ?1",
-            params![Blob(*client_id.as_bytes())],
+            params![Blob(*expected.id.as_bytes())],
         )?;
         ensure!(changed == 1, "unknown MCP client");
         Ok(())
@@ -765,8 +845,8 @@ impl DesktopStore {
 
     pub fn clients(&self) -> Result<Vec<McpClient>> {
         let mut statement = self.connection.prepare(
-            "SELECT c.client_id, c.display_name, c.agent_kind, c.registration_json,
-                    c.created_at, c.authorized_at, c.last_used_at, c.revoked_at,
+            "SELECT c.client_id, c.display_name, c.agent_kind, c.redirect_uris_json,
+                    c.registration_json, c.created_at, c.authorized_at, c.last_used_at, c.revoked_at,
                     NULLIF(MAX(
                         COALESCE(
                             (SELECT MAX(t.expires_at)
@@ -790,12 +870,13 @@ impl DesktopStore {
                 Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(0)?.0),
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Millis>(4)?.0,
-                row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Millis>(5)?.0,
                 row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(8)?.map(|value| value.0),
+                row.get::<_, Option<Millis>>(9)?.map(|value| value.0),
             ))
         })?;
         rows.map(|row| {
@@ -803,6 +884,7 @@ impl DesktopStore {
                 id,
                 display_name,
                 kind,
+                redirects,
                 registration,
                 created_at,
                 authorized_at,
@@ -814,6 +896,7 @@ impl DesktopStore {
                 id,
                 display_name,
                 agent_kind: AgentKind::parse(&kind)?,
+                redirect_uris: serde_json::from_str(&redirects)?,
                 registration: registration
                     .as_deref()
                     .map(serde_json::from_str)

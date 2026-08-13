@@ -33,8 +33,9 @@ additionally requires the tag and manifest to name the same version.
 
 Native update artifacts are signed by a dedicated Minisign key held only in the
 protected release environment. CI compiles the public key into the app,
-publishes `latest.json` with the signed artifact locations and signatures,
-retains the detached signatures, and attaches Sigstore provenance.
+publishes a signed `latest.json` binding version, target, format, canonical
+artifact URL, SHA-256 digest, and detached artifact signature, verifies the
+final platform-signed artifacts, and attaches Sigstore provenance.
 
 Updates require explicit confirmation after the stable version is shown.
 Download completes and verifies before shutdown. The packaged macOS app,

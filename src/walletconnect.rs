@@ -3,7 +3,9 @@
 use crate::{authority::OwnerApi, events::EventBus};
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
-use ekubo_wallet_core::{approval::ReviewDocument, config::WalletMetadata};
+use ekubo_wallet_core::{
+    approval::ReviewDocument, config::WalletMetadata, human_presence::DappAuthorization,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -43,6 +45,8 @@ pub struct SessionSummary {
     pub active_requests: usize,
     pub dapp_name: Option<String>,
     pub last_error: Option<String>,
+    /// The controller-selected settlement deadline. Peers cannot extend it.
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Default)]
@@ -76,6 +80,7 @@ impl WalletConnectManager {
             active_requests: 0,
             dapp_name: None,
             last_error: None,
+            expires_at: None,
         };
         self.sessions.insert(
             id,
@@ -124,6 +129,7 @@ impl WalletConnectManager {
         status: SessionStatus,
         dapp_name: Option<String>,
         active_requests: usize,
+        expires_at: Option<i64>,
     ) {
         if let Some(session) = self.sessions.get_mut(&id) {
             session.summary.status = status;
@@ -131,6 +137,9 @@ impl WalletConnectManager {
                 session.summary.dapp_name = dapp_name;
             }
             session.summary.active_requests = active_requests;
+            if expires_at.is_some() {
+                session.summary.expires_at = expires_at;
+            }
         }
     }
 
@@ -158,9 +167,11 @@ pub struct ProposalPrompt {
     pub response: oneshot::Sender<ProposalCommand>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProposalCommand {
-    Approve(usize),
+    Approve {
+        index: usize,
+        authorization: DappAuthorization,
+    },
     Reject,
     Close,
 }

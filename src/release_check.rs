@@ -13,17 +13,140 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::path::Path;
 use std::time::Duration;
 
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json";
+const UPDATE_MANIFEST_SIGNATURE_URL: &str =
+    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json.sig";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An update whose artifact URL and signature came from cargo-packager's
 /// stable-release manifest. `download` verifies the artifact with the public
 /// key compiled into this exact application binary before returning bytes.
-pub type InstallableUpdate = cargo_packager_updater::Update;
+#[derive(Clone, Debug)]
+pub struct InstallableUpdate {
+    update: cargo_packager_updater::Update,
+    artifact_sha256: String,
+}
+
+impl InstallableUpdate {
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.update.version
+    }
+
+    pub fn download(&self) -> anyhow::Result<Vec<u8>> {
+        let bytes = self.update.download()?;
+        let digest = hex::encode(Sha256::digest(&bytes));
+        anyhow::ensure!(
+            digest == self.artifact_sha256,
+            "the verified artifact does not match the digest bound by signed metadata"
+        );
+        Ok(bytes)
+    }
+
+    #[must_use]
+    pub fn review(&self, bytes: &[u8]) -> ekubo_wallet_core::update_trust::UpdateReview {
+        ekubo_wallet_core::update_trust::UpdateReview::from_verified_update(
+            &self.update,
+            bytes,
+            "Ekubo, Inc.",
+        )
+    }
+}
+
+fn verify_manifest_signature(
+    manifest: &[u8],
+    encoded_signature: &str,
+    public_key: &str,
+) -> anyhow::Result<()> {
+    let public_key = minisign_verify::PublicKey::decode(public_key)
+        .or_else(|_| minisign_verify::PublicKey::from_base64(public_key.trim()))
+        .context("the compiled updater public key is invalid")?;
+    let signature = minisign_verify::Signature::decode(encoded_signature)
+        .context("the update manifest signature is invalid")?;
+    public_key
+        .verify(manifest, &signature, false)
+        .context("the update manifest signature did not verify")
+}
+
+fn signed_manifest() -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(UPDATE_TIMEOUT)
+        .build()?;
+    let manifest = client
+        .get(UPDATE_MANIFEST_URL)
+        .send()?
+        .error_for_status()?
+        .bytes()?
+        .to_vec();
+    anyhow::ensure!(manifest.len() <= 1 << 20, "update manifest is too large");
+    let signature = client
+        .get(UPDATE_MANIFEST_SIGNATURE_URL)
+        .send()?
+        .error_for_status()?
+        .text()?;
+    verify_manifest_signature(&manifest, &signature, crate::UPDATER_PUBLIC_KEY)?;
+    Ok(manifest)
+}
+
+fn update_matches_signed_manifest(
+    update: &cargo_packager_updater::Update,
+    manifest: &[u8],
+) -> anyhow::Result<String> {
+    let signed: cargo_packager_updater::RemoteRelease =
+        serde_json::from_slice(manifest).context("signed update manifest is malformed")?;
+    let value: serde_json::Value = serde_json::from_slice(manifest)?;
+    let (platform, digest) = match &signed.data {
+        cargo_packager_updater::RemoteReleaseData::Dynamic(platform) => {
+            let digest = value
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .context("signed update metadata has no artifact digest")?;
+            (platform, digest)
+        }
+        cargo_packager_updater::RemoteReleaseData::Static { platforms } => {
+            let target = format!("{}-{}", update.target, std::env::consts::ARCH);
+            let platform = platforms
+                .get(&target)
+                .context("the updater target is absent from the signed manifest")?;
+            let digest = value
+                .get("platforms")
+                .and_then(|platforms| platforms.get(&target))
+                .and_then(|platform| platform.get("sha256"))
+                .and_then(serde_json::Value::as_str)
+                .context("signed update target has no artifact digest")?;
+            (platform, digest)
+        }
+    };
+    anyhow::ensure!(
+        signed.version.to_string() == update.version,
+        "update version is not bound by the signed manifest"
+    );
+    anyhow::ensure!(
+        platform.url == update.download_url,
+        "update URL is not bound by the signed manifest"
+    );
+    anyhow::ensure!(
+        platform.signature == update.signature,
+        "artifact signature is not bound by the signed manifest"
+    );
+    anyhow::ensure!(
+        platform.format.to_string() == update.format.to_string(),
+        "update format is not bound by the signed manifest"
+    );
+    anyhow::ensure!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "signed artifact digest is not lowercase SHA-256"
+    );
+    Ok(digest.to_owned())
+}
 
 pub fn check_installable() -> anyhow::Result<Option<InstallableUpdate>> {
     anyhow::ensure!(
@@ -45,21 +168,40 @@ pub fn check_installable() -> anyhow::Result<Option<InstallableUpdate>> {
         pubkey: crate::UPDATER_PUBLIC_KEY.to_owned(),
         windows: None,
     };
-    cargo_packager_updater::UpdaterBuilder::new(current, config)
+    let manifest = signed_manifest()?;
+    let update = cargo_packager_updater::UpdaterBuilder::new(current, config)
         .timeout(UPDATE_TIMEOUT)
         .build()
         .context("could not initialize the signed updater")?
         .check()
-        .context("could not read the signed release manifest")
+        .context("could not read the signed release manifest")?;
+    update
+        .map(|update| {
+            let artifact_sha256 = update_matches_signed_manifest(&update, &manifest)?;
+            Ok(InstallableUpdate {
+                update,
+                artifact_sha256,
+            })
+        })
+        .transpose()
 }
 
 /// Installs bytes already verified by [`InstallableUpdate::download`] and
 /// starts the replacement application where the platform installer does not
 /// do that itself.
-pub fn install_and_relaunch(update: &InstallableUpdate, bytes: Vec<u8>) -> anyhow::Result<()> {
+pub fn install_and_relaunch(
+    update: &InstallableUpdate,
+    bytes: Vec<u8>,
+    authorization: ekubo_wallet_core::update_trust::UpdateAuthorization,
+) -> anyhow::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let executable = update.extract_path.clone();
-    update.install(bytes).context("could not install update")?;
+    let executable = update.update.extract_path.clone();
+    ekubo_wallet_core::update_trust::install_update(
+        &update.update,
+        bytes,
+        "Ekubo, Inc.",
+        authorization,
+    )?;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(executable)

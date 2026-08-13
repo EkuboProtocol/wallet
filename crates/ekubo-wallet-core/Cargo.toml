@@ -17,6 +17,7 @@ publish = false
 test-hooks = []
 
 [dependencies]
+cargo-packager-updater = "0.2.3"
 alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
 anyhow = "1.0.100"

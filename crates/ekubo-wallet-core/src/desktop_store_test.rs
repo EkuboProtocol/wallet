@@ -419,7 +419,9 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
     let mut store = store(34);
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
-    store.revoke_client(client.id).unwrap();
+    store
+        .revoke_client(&client, &agent_authorization())
+        .unwrap();
     assert!(
         store
             .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
@@ -461,11 +463,13 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
 }
 
 #[test]
-fn removal_is_authorization_free_and_deletes_every_oauth_credential() {
+fn authorized_removal_deletes_every_oauth_credential() {
     let mut store = store(39);
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
-    store.remove_client(client.id).unwrap();
+    store
+        .remove_client(&client, &agent_authorization())
+        .unwrap();
     assert!(store.clients().unwrap().is_empty());
     assert!(
         store
@@ -487,6 +491,31 @@ fn removal_is_authorization_free_and_deletes_every_oauth_credential() {
             .oauth_client_for_authorization(client.id, REDIRECT)
             .is_err()
     );
+}
+
+#[test]
+fn client_management_rejects_wrong_scope_and_stale_registration_identity() {
+    let mut store = store(61);
+    let client = register(&mut store);
+    let wrong = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    assert!(store.remove_client(&client, &wrong).is_err());
+
+    store
+        .connection
+        .execute(
+            "UPDATE mcp_clients SET redirect_uris_json = ?1 WHERE client_id = ?2",
+            rusqlite::params![
+                "[\"http://127.0.0.1:43120/callback\"]",
+                crate::sql::Blob(*client.id.as_bytes())
+            ],
+        )
+        .unwrap();
+    assert!(
+        store
+            .remove_client(&client, &agent_authorization())
+            .is_err()
+    );
+    assert!(store.client_for_management(client.id).is_ok());
 }
 
 #[test]

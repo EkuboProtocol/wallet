@@ -1,5 +1,9 @@
 # Security boundary
 
+The [system-wide threat model](threat-model.md) defines the actors, trust
+assumptions, persistence and rollback behavior, and accepted residual risks
+that surround this code boundary.
+
 Private keys and signing remain inside the core authority. MCP never receives
 `OwnerApi`; its Rust type has no methods for account export, approval, policy
 installation, legal acceptance, or agent registration.

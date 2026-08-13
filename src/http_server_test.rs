@@ -2,7 +2,7 @@ use super::*;
 use axum::http::HeaderValue;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ekubo_wallet_core::{
-    desktop_store::{MCP_RESOURCE, MCP_SCOPE},
+    desktop_store::{DesktopStore, MCP_RESOURCE, MCP_SCOPE},
     human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
     policy_store::DatabaseKey,
 };
@@ -122,9 +122,16 @@ fn top_level_authorization_navigation_is_the_only_browser_shaped_request_allowed
 #[test]
 fn mcp_requires_an_oauth_access_token_for_the_exact_resource() {
     let (clients, token) = clients();
+    let authenticate = |encoded: &str| {
+        clients
+            .lock()
+            .ok()
+            .and_then(|mut store| store.authenticate_access_token(encoded, MCP_RESOURCE).ok())
+            .flatten()
+    };
     let mut headers = HeaderMap::new();
     assert_eq!(
-        authenticate_headers(&headers, &clients)
+        authenticate_headers(&headers, authenticate)
             .unwrap_err()
             .status(),
         StatusCode::UNAUTHORIZED
@@ -133,7 +140,25 @@ fn mcp_requires_an_oauth_access_token_for_the_exact_resource() {
         "authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
     );
-    assert!(authenticate_headers(&headers, &clients).is_ok());
+    assert!(
+        authenticate_headers(&headers, |encoded| {
+            clients
+                .lock()
+                .ok()
+                .and_then(|mut store| store.authenticate_access_token(encoded, MCP_RESOURCE).ok())
+                .flatten()
+        })
+        .is_ok()
+    );
+}
+
+#[test]
+fn http_transport_has_no_owner_or_raw_store_capability() {
+    let source = include_str!("http_server.rs");
+    assert!(!source.contains("OwnerApi"));
+    assert!(!source.contains("DesktopStore"));
+    assert!(!source.contains("state.owner"));
+    assert!(!source.contains("state.clients"));
 }
 
 #[test]

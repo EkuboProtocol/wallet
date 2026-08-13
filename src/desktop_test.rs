@@ -78,6 +78,7 @@ fn revoked_and_optimistically_hidden_agent_sessions_are_not_rendered() {
         id,
         display_name: "Agent".into(),
         agent_kind: AgentKind::Codex,
+        redirect_uris: vec!["http://127.0.0.1/callback".into()],
         registration: None,
         created_at: chrono::Utc::now(),
         authorized_at: Some(chrono::Utc::now()),

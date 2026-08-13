@@ -45,6 +45,38 @@ fn mcp_has_no_owner_capability_or_local_file_transport() {
 }
 
 #[test]
+fn http_transport_has_only_narrow_oauth_and_agent_capabilities() {
+    let source = fs::read_to_string(root().join("src/http_server.rs")).unwrap();
+    for forbidden in ["OwnerApi", "DesktopStore", "state.owner", "state.clients"] {
+        assert!(
+            !source.contains(forbidden),
+            "HTTP transport contains privileged capability {forbidden}"
+        );
+    }
+    assert!(source.contains("OAuthApi"));
+    assert!(source.contains("AgentApi"));
+}
+
+#[test]
+fn repository_links_a_current_system_wide_threat_model() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(readme.contains("docs/threat-model.md"));
+    let security = fs::read_to_string(root().join("docs/security-boundary.md")).unwrap();
+    assert!(security.contains("threat-model.md"));
+    let threat_model = fs::read_to_string(root().join("docs/threat-model.md")).unwrap();
+    for boundary in [
+        "Owner authorization",
+        "MCP and OAuth",
+        "WalletConnect and dapps",
+        "RPC, transactions, and policy",
+        "Updates and release supply chain",
+        "Residual risks and response",
+    ] {
+        assert!(threat_model.contains(boundary), "missing {boundary}");
+    }
+}
+
+#[test]
 fn gpui_revisions_and_desktop_database_identity_are_pinned() {
     let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
     assert!(manifest.contains("cc053a4a6fa2fd0e8793201ed9099466af1be0b1"));
