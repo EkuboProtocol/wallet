@@ -655,6 +655,32 @@ fn untitled_settings_section(content: GroupBox) -> gpui::Div {
     div().w_full().child(content)
 }
 
+/// The portfolio and the policy editor dead-end on the same missing account,
+/// and each used to say so in a panel of its own shape — one a bordered card
+/// with a bold heading, the other a `GroupBox`. Two looks for one condition
+/// read as two different problems, so both pages ask for the account here.
+fn account_required_panel(
+    panel_id: &'static str,
+    button_id: &'static str,
+    message: &'static str,
+    cx: &mut Context<WalletWindow>,
+) -> GroupBox {
+    GroupBox::new()
+        .id(panel_id)
+        .outline()
+        .title("Create your first account")
+        .child(selectable_label(message))
+        .child(
+            app_button(button_id)
+                .label("Go to Accounts")
+                .primary()
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.set_route(Route::Accounts);
+                    cx.notify();
+                })),
+        )
+}
+
 /// One row of the About panel: a name, an optional status line beneath it, and
 /// a single action on the right. Each row used to assemble its own container,
 /// so the buttons did not share a column and the status hung off the name
@@ -10543,24 +10569,12 @@ impl WalletWindow {
             }
         }
         if accounts.is_empty() {
-            return content.child(
-                GroupBox::new()
-                    .id("policy-empty")
-                    .outline()
-                    .title("Signing policies")
-                    .child(selectable_label(
-                        "Create an account before configuring signing permissions.",
-                    ))
-                    .child(
-                        app_button("policy-go-to-accounts")
-                            .label("Go to Accounts")
-                            .primary()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_route(Route::Accounts);
-                                cx.notify();
-                            })),
-                    ),
-            );
+            return content.child(account_required_panel(
+                "policy-empty",
+                "policy-go-to-accounts",
+                "A wallet account is required before there are signing permissions to configure.",
+                cx,
+            ));
         }
 
         // The account selector lives in the fixed page header, so the body is
@@ -12176,34 +12190,12 @@ impl WalletWindow {
             .cached_accounts()
             .is_ok_and(<[WalletMetadata]>::is_empty)
         {
-            return content.child(
-                div()
-                    .p_5()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .font_semibold()
-                            .child(selectable_label("Create your first account")),
-                    )
-                    .child(selectable_label(
-                        "A wallet account is required before there are balances to show.",
-                    ))
-                    .child(
-                        app_button("portfolio-create-account")
-                            .label("Go to Accounts")
-                            .primary()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_route(Route::Accounts);
-                                cx.notify();
-                            })),
-                    ),
-            );
+            return content.child(account_required_panel(
+                "portfolio-empty",
+                "portfolio-create-account",
+                "A wallet account is required before there are balances to show.",
+                cx,
+            ));
         }
         match &self.portfolio {
             // Placeholder rows shaped like balance rows, so the page shows
@@ -13674,6 +13666,16 @@ impl WalletWindow {
     fn route_header_actions(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
         match self.route {
             Route::Overview => {
+                // With no account there is nothing to refresh, and the page
+                // below is asking for one instead of showing balances. This
+                // reads the same fact `render_portfolio` does, so the header
+                // and the empty panel cannot disagree.
+                if self
+                    .cached_accounts()
+                    .is_ok_and(<[WalletMetadata]>::is_empty)
+                {
+                    return None;
+                }
                 let loading = matches!(self.portfolio, PortfolioState::Loading);
                 let no_networks = self
                     .cached_networks()
