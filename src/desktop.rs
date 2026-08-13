@@ -1384,6 +1384,9 @@ pub struct WalletWindow {
     account_entry_mode: AccountEntryMode,
     account_operation: Option<AccountOperation>,
     account_status: Option<SharedString>,
+    /// Names the newest note, so a timer set for an older one cannot take a
+    /// newer one off the screen with it.
+    account_status_seq: u64,
     account_id_error: Option<SharedString>,
     private_key_error: Option<SharedString>,
     account_action_errors: BTreeMap<String, SharedString>,
@@ -1855,8 +1858,13 @@ struct ActivityFeedback {
     seq: u64,
 }
 
-/// How long a note about something that worked stays on its row.
-const ACTIVITY_FEEDBACK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(8);
+/// How long a note about something that worked stays on the screen.
+///
+/// Both places one appears: an inbox row's note about the last thing the owner
+/// asked it to do, and the line under the account form saying an account was
+/// created. Each is a receipt for a press whose result is already visible
+/// beside it, so each says so briefly and then gets out of the way.
+const SUCCESS_NOTE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl ActivityFeedback {
     fn note(message: impl Into<SharedString>) -> Self {
@@ -3749,6 +3757,7 @@ impl WalletWindow {
             account_entry_mode: AccountEntryMode::Create,
             account_operation: None,
             account_status: None,
+            account_status_seq: 0,
             account_id_error: None,
             private_key_error: None,
             account_action_errors: BTreeMap::new(),
@@ -4856,6 +4865,28 @@ impl WalletWindow {
         cx.notify();
     }
 
+    /// A note that an account was created or imported, which then leaves.
+    ///
+    /// It used to stay for the life of the process: "Account primary was
+    /// created." sat under the form while the reader went to Settings, set up
+    /// an agent, came back, and read it again — about something the list
+    /// directly below had been showing the whole time.
+    fn set_account_status(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.account_status_seq = self.account_status_seq.wrapping_add(1);
+        let seq = self.account_status_seq;
+        self.account_status = Some(message.into());
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(SUCCESS_NOTE_LIFETIME).await;
+            let _ = view.update(cx, |view, cx| {
+                if view.account_status_seq == seq {
+                    view.account_status = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn set_account_entry_mode(&mut self, mode: AccountEntryMode, cx: &mut Context<Self>) {
         if self.account_operation.is_some() || self.account_entry_mode == mode {
             return;
@@ -4902,8 +4933,7 @@ impl WalletWindow {
                             input.update(cx, |input, cx| input.set_value("", window, cx));
                         }
                         view.account_action_errors.remove(&account.id);
-                        view.account_status =
-                            Some(format!("Account {} was created.", account.id).into());
+                        view.set_account_status(format!("Account {} was created.", account.id), cx);
                         view.reload_desktop_snapshot(cx);
                         view.invalidate_portfolio();
                     }
@@ -4968,8 +4998,10 @@ impl WalletWindow {
                             input.update(cx, |input, cx| input.set_value("", window, cx));
                         }
                         view.account_action_errors.remove(&account.id);
-                        view.account_status =
-                            Some(format!("Account {} was imported.", account.id).into());
+                        view.set_account_status(
+                            format!("Account {} was imported.", account.id),
+                            cx,
+                        );
                         view.reload_desktop_snapshot(cx);
                         view.invalidate_portfolio();
                     }
@@ -6371,9 +6403,7 @@ impl WalletWindow {
         self.activity_feedback.insert(request_id, feedback);
         if expiring {
             cx.spawn(async move |view, cx| {
-                cx.background_executor()
-                    .timer(ACTIVITY_FEEDBACK_LIFETIME)
-                    .await;
+                cx.background_executor().timer(SUCCESS_NOTE_LIFETIME).await;
                 let _ = view.update(cx, |view, cx| {
                     // Only this note. A later press on the same row put its own
                     // note there, and that one has its own timer.
