@@ -186,7 +186,7 @@ jobs:
         run: |
           set -euo pipefail
           macos_bundle="$(find dist -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
-          windows_bundle="$(find dist -maxdepth 1 -name '*.exe' -print -quit)"
+          windows_bundle="$(find dist -maxdepth 1 -name '*setup.exe' -print -quit)"
           linux_bundle="$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)"
           for bundle in "$macos_bundle" "$windows_bundle" "$linux_bundle"; do
             test -n "$bundle"
