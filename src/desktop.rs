@@ -410,38 +410,30 @@ fn account_switcher(
         )
 }
 
-fn markdown_escape_plain_text(value: &str) -> SharedString {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if matches!(
-            character,
-            '\\' | '`'
-                | '*'
-                | '_'
-                | '{'
-                | '}'
-                | '['
-                | ']'
-                | '<'
-                | '>'
-                | '('
-                | ')'
-                | '#'
-                | '+'
-                | '-'
-                | '.'
-                | '!'
-                | '|'
-        ) {
-            escaped.push('\\');
+/// Literal text for a renderer that reads markup. HTML is the format that can
+/// express "this is text": five characters have meaning and escaping them is
+/// positionless and complete.
+///
+/// Markdown cannot. Backslash escapes are ignored inside the constructs that
+/// swallow punctuation — an autolinked URL keeps every backslash the escaper
+/// put in it, which is how `http://127.0.0.1:61744/mcp` reached the screen as
+/// `http://127\.0\.0\.1:61744/mcp`. Escaping harder cannot fix that, because
+/// the escapes are the thing being displayed.
+fn html_escaped_plain_text(value: &str) -> SharedString {
+    let mut html = String::with_capacity(value.len());
+    for (index, line) in value.split('\n').enumerate() {
+        if index > 0 {
+            // A newline the caller wrote is a line the reader should see.
+            // Markdown joined those lines into a paragraph.
+            html.push_str("<br>");
         }
-        escaped.push(character);
+        push_html_escaped(&mut html, line);
     }
-    escaped.into()
+    html.into()
 }
 
 fn selectable_text(id: impl Into<ElementId>, value: &str) -> TextView {
-    TextView::markdown(id, markdown_escape_plain_text(value)).selectable(true)
+    TextView::html(id, html_escaped_plain_text(value)).selectable(true)
 }
 
 fn push_html_escaped(output: &mut String, value: &str) {
@@ -510,7 +502,7 @@ fn selectable_legal_text(
 #[track_caller]
 fn selectable_label(value: impl Into<SharedString>) -> TextView {
     let value = value.into();
-    gpui_component::text::markdown(markdown_escape_plain_text(&value)).selectable(true)
+    gpui_component::text::html(html_escaped_plain_text(&value)).selectable(true)
 }
 
 fn selectable_error_alert(id: impl Into<SharedString>, message: impl Into<SharedString>) -> Alert {

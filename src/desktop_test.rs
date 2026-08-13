@@ -904,10 +904,27 @@ fn shared_controls_use_contextual_desktop_dimensions() {
 }
 
 #[test]
-fn selectable_plain_text_escapes_markdown_without_changing_visible_content() {
+fn selectable_plain_text_escapes_markup_without_changing_visible_content() {
+    // Only the five characters that mean something to a markup parser are
+    // touched. Everything else — the dots and slashes in a URL, the dashes in
+    // a name, the parentheses around a token symbol — reaches the screen as
+    // the caller wrote it.
     assert_eq!(
-        markdown_escape_plain_text("Account_#1 [0xabc].").as_ref(),
-        r"Account\_\#1 \[0xabc\]\."
+        html_escaped_plain_text("http://127.0.0.1:61744/mcp").as_ref(),
+        "http://127.0.0.1:61744/mcp"
+    );
+    assert_eq!(
+        html_escaped_plain_text("Account_#1 [0xabc]. 1.25 USDC (native) — a-b").as_ref(),
+        "Account_#1 [0xabc]. 1.25 USDC (native) — a-b"
+    );
+    assert_eq!(
+        html_escaped_plain_text("<script>alert('x' & \"y\")</script>").as_ref(),
+        "&lt;script&gt;alert(&#39;x&#39; &amp; &quot;y&quot;)&lt;/script&gt;"
+    );
+    // A newline is a line break rather than a paragraph join.
+    assert_eq!(
+        html_escaped_plain_text("first\nsecond").as_ref(),
+        "first<br>second"
     );
 }
 
