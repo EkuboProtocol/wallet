@@ -1420,3 +1420,11 @@ fn a_source_cannot_draw_outside_its_line() {
         "via EkuboProtocol"
     );
 }
+
+#[test]
+fn a_digest_is_only_described_as_signed_when_something_signed_it() {
+    assert_eq!(digest_label(true), "Digest that was signed");
+    // A rejected request sits under an explanation reading "no signature was
+    // ever produced". The row beneath it used to say the digest was signed.
+    assert_eq!(digest_label(false), "Digest this would have signed");
+}

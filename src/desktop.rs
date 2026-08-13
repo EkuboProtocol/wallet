@@ -535,6 +535,20 @@ fn selectable_code_text(id: impl Into<ElementId>, value: &str) -> TextView {
     TextView::markdown(id, markdown_fenced_code(value)).selectable(true)
 }
 
+/// What the digest row is called, which depends on whether anything signed it.
+///
+/// It read "Digest that was signed" in every state, including directly under
+/// an explanation saying "You turned this down, so no signature was ever
+/// produced." One of the two was lying, and the label is the one a reader
+/// skims.
+const fn digest_label(signed: bool) -> &'static str {
+    if signed {
+        "Digest that was signed"
+    } else {
+        "Digest this would have signed"
+    }
+}
+
 fn copyable_value(id: impl Into<SharedString>, label: &'static str, value: String) -> gpui::Div {
     let id = id.into();
     let text_id = SharedString::from(format!("{id}-text"));
@@ -7995,7 +8009,7 @@ impl WalletWindow {
                 }
                 detail = detail.child(copyable_value(
                     format!("activity-message-digest-{request_id}"),
-                    "Digest that was signed",
+                    digest_label(item.status == MessageStatus::Signed),
                     item.digest.clone(),
                 ));
                 match document {
@@ -8005,7 +8019,11 @@ impl WalletWindow {
                                 self.render_exact_payload(
                                     request_id,
                                     &format!("message-payload-{index}"),
-                                    "the exact message that was signed",
+                                    if item.status == MessageStatus::Signed {
+                                        "the exact message that was signed"
+                                    } else {
+                                        "the exact message this would have signed"
+                                    },
                                     payload,
                                     cx,
                                 )
@@ -8083,7 +8101,7 @@ impl WalletWindow {
                 }
                 detail = detail.child(copyable_value(
                     format!("activity-typed-data-digest-{request_id}"),
-                    "Digest that was signed",
+                    digest_label(item.status == TypedDataStatus::Signed),
                     item.digest.clone(),
                 ));
                 match document {
@@ -8093,7 +8111,11 @@ impl WalletWindow {
                                 self.render_exact_payload(
                                     request_id,
                                     &format!("typed-data-payload-{index}"),
-                                    "the exact typed data that was signed",
+                                    if item.status == TypedDataStatus::Signed {
+                                        "the exact typed data that was signed"
+                                    } else {
+                                        "the exact typed data this would have signed"
+                                    },
                                     payload,
                                     cx,
                                 )
