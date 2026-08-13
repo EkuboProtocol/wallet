@@ -2,8 +2,65 @@ name: Tests
 
 on:
   pull_request:
+    # These paths are not consumed or validated by any job below. Embedded
+    # MCP/legal Markdown is intentionally absent: changing it rebuilds and
+    # tests the application.
+    paths-ignore:
+      - ".agents/**"
+      - ".gitattributes"
+      - ".github/apple/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/release.yml"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "README.md"
+      - "audits/**"
+      - "contrib/polkit/**"
+      - "contrib/rehearse-macos-signing.sh"
+      - "contrib/rpc-probe/**"
+      - "contrib/sync-claude-desktop-version.py"
+      - "contrib/vendor-default-tokens.py"
+      - "crates/ekubo-wallet-core/clearsign/README.md"
+      - "docs/approval-ux.md"
+      - "docs/architecture.md"
+      - "docs/releasing.md"
+      - "docs/security-boundary.md"
+      - "docs/storage.md"
+      - "examples/abi-decoding.json"
+      - "examples/policy.json"
+      - "integrations/claude-desktop/README.md"
+      - "schemas/**"
+      - "scripts/**"
   push:
     branches: [main]
+    paths-ignore:
+      - ".agents/**"
+      - ".gitattributes"
+      - ".github/apple/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/release.yml"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "README.md"
+      - "audits/**"
+      - "contrib/polkit/**"
+      - "contrib/rehearse-macos-signing.sh"
+      - "contrib/rpc-probe/**"
+      - "contrib/sync-claude-desktop-version.py"
+      - "contrib/vendor-default-tokens.py"
+      - "crates/ekubo-wallet-core/clearsign/README.md"
+      - "docs/approval-ux.md"
+      - "docs/architecture.md"
+      - "docs/releasing.md"
+      - "docs/security-boundary.md"
+      - "docs/storage.md"
+      - "examples/abi-decoding.json"
+      - "examples/policy.json"
+      - "integrations/claude-desktop/README.md"
+      - "schemas/**"
+      - "scripts/**"
   workflow_dispatch:
 
 permissions:

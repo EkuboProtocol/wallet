@@ -2,7 +2,7 @@
 
 Vendored [ERC-7730](https://eips.ethereum.org/EIPS/eip-7730) calldata
 descriptors, copied verbatim from the CC0-licensed
-[clear-signing-erc7730-registry](https://github.com/LedgerHQ/clear-signing-erc7730-registry)
+[clear-signing-erc7730-registry](https://github.com/ethereum/clear-signing-erc7730-registry)
 at review time. The wallet embeds these files at compile time and never
 fetches descriptors from the network: updating the snapshot is a reviewed
 git commit, exactly like a code change, because descriptors shape what a

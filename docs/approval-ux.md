@@ -2,8 +2,9 @@
 
 A review is a structured `ReviewDocument`: trusted facts, sections, exact
 payloads, warnings, digest, request ID, and document identity. The initial
-selection is Reject. Approve remains unavailable until the user reaches the end
-of every section and exact-payload view.
+selection is Reject. The review renders every section and exact payload in one
+scrollable document, and Approve remains unavailable until the user reaches its
+end.
 
 Closing a review records no decision. Refreshing always selects Reject again; a
 changed document identity also returns scroll to the beginning and clears the

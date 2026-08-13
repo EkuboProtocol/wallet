@@ -15,7 +15,7 @@
     "url": "https://github.com/EkuboProtocol/wallet"
   },
   "homepage": "https://github.com/EkuboProtocol/wallet",
-  "documentation": "https://github.com/EkuboProtocol/wallet/blob/main/docs/installation.md",
+  "documentation": "https://docs.ekubo.org/",
   "support": "https://github.com/EkuboProtocol/wallet/issues",
   "license": "FSL-1.1-MIT",
   "keywords": ["wallet", "ethereum", "evm", "local", "oauth"],

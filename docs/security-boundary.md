@@ -12,7 +12,8 @@ and policy state after OS authentication.
 
 Exact calldata, message bytes, complete typed data, digest, warnings, Unicode
 controls, bidi controls, and confusable characters remain available in the
-review. Generic notification previews are the default and contain no actions.
+review. Transaction notifications name the account and network but never show
+the request identifier or contain approval actions.
 
 Public HTTPS and bounded `data:application/json` artifacts are supported.
 Local-file artifacts are not.

@@ -1,11 +1,14 @@
-# wallet-mcp-server
+# Ekubo Wallet repository
 
 ## Every commit runs the gate first
 
 ```sh
-cargo fmt          # mandatory, never skip
-cargo clippy --workspace --all-targets
-cargo test --workspace
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+RUST_MIN_STACK=67108864 cargo test --locked --workspace --all-features
+python3 contrib/generate-third-party-licenses.py --check
+(cd integrations/claude-desktop && npm ci && npm test && npm run validate && npm run pack)
+cargo audit
 ```
 
 `--workspace` is load-bearing: this manifest is a package *and* the
@@ -14,10 +17,10 @@ package and silently skips every test in `ekubo-wallet-core` — the
 security kernel. Tests there once referenced functions that had already
 been deleted and the gate still reported success.
 
-Nothing reviews this downstream, so an unformatted or unbuilt commit is a
-defect that reaches `main` directly. Regenerate `THIRD_PARTY_LICENSES.md` with
-`contrib/generate-third-party-licenses.py` whenever dependencies change; a test
-fails if it is stale.
+The `main` workflow repeats these checks across its platform matrix. The Python
+scripts require Python 3.11 or newer. Regenerate `THIRD_PARTY_LICENSES.md` with
+`contrib/generate-third-party-licenses.py` whenever dependencies change; the
+gate fails if it is stale.
 
 ## Every test lives in a `_test.rs` file
 
@@ -80,51 +83,18 @@ outward-facing and consume CI, and the maintainer controls when they happen.
 Recommend a release when one seems warranted and let them decide. The full
 procedure is in [docs/releasing.md](docs/releasing.md).
 
-## Interactive terminal UX uses ratatui
-
-`ratatui` (crossterm backend, sharing the existing crossterm dependency) is the
-only terminal UI library here; `inquire` is gone. `src/tx_browser.rs` is the
-pattern: alternate screen, per-frame layout so resizing cannot break it, and a
-toned `Span`/`Line` document model reusing `tui::Tone`.
-
-The rule that matters now is not which library but **one command, one screen
-mode**. `src/fullscreen.rs` draws on the alternate screen; `tui.rs`'s
-`confirm`, `pick`, and `text` open an inline viewport at the cursor and print
-the line they answered into the scrollback. Both are ratatui, and mixing them
-inside one command is the defect: the terminal flips modes at every step and
-the finished prompts pile up behind the full-screen view. That is what left
-half-typed address-book forms on the screen after the browser exited.
-
-So: a command that shows any full-screen surface stays full-screen to its last
-question. Build from `fullscreen`'s pieces — `pick_table`, `edit_form`,
-`confirm_review`, `TextField`, `decision_pane`, `SearchableTable` — and let
-only the finished result reach the scrollback, once, after the screen is
-released. A command that never opens a screen may use the inline prompts
-throughout; `account create`'s starting-policy question and the inline approval
-fallback are the two that legitimately do.
-
-The one unavoidable handover is platform owner authentication: a polkit text
-agent prompts on the same terminal, so release the screen around it and
-re-enter afterwards, as `address_book_browser` does.
-
 ## Judge refactors on maintainability, not audit cost
-
-A full `v12` audit costs roughly $525 (measured 2026-08-06, after the test
-split: 44 files, 1,112,246 bytes, $526.34; it was $619.12 with test modules
-inline). Excluding the four TUI browser modules — `tx_browser`,
-`address_book_browser`, `fullscreen`, `pager` — saves only tens of dollars.
 
 Shrinking the audit corpus is therefore never a reason to consolidate or
 delete code; argue those changes on reviewability alone. The `_test.rs` rule
 above is not an exception to that: it moves code rather than removing it, and
 the reviewability argument for it stands on its own.
 
-Pricing is measured UTF-8 bytes plus per-file overhead, and it is not linear —
-26% fewer bytes bought 15% off — so a large part of the price is fixed and
-trimming is worth less than byte counts suggest. `v12_estimate_cost` is free
-and takes a `zipUid`, so measure a hypothetical layout instead of guessing.
+Pricing is measured from the submitted corpus and can change. Use the audit
+tool's estimate for the exact current submission rather than preserving a
+historical dollar or byte count here.
 
 When audit spend does matter, scope with `paths` and prefer a diff review per
-change over repeated full audits. Keep `tui.rs` and `render.rs` in scope
-regardless: the approve/reject picker and terminal-escape sanitization are
-security-relevant display code.
+change over repeated full audits. Keep the core authorization code and native
+review rendering in scope: approval gating and hostile-text presentation are
+security-relevant display behavior.
