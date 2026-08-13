@@ -136,7 +136,7 @@ const VIEWPORT: gpui::Size<gpui::Pixels> = gpui::Size {
 /// fields is not enough on its own — the task has to be allowed to finish, or
 /// its clone of the handle outlives the app.
 fn release(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
-    cx.update_entity(view, |wallet, cx| wallet.release_window_state(cx));
+    cx.update_entity(view, WalletWindow::release_window_state);
     for _ in 0..200 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(5));
