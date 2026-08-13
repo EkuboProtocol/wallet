@@ -176,6 +176,26 @@ impl SignatureQueue {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Delete every decided row, optionally for one wallet.
+    ///
+    /// A row in this queue is decided or it is awaiting a decision, so
+    /// "finished" is simply everything else. The awaiting ones are what the
+    /// review screen is showing somebody right now, and deleting one would
+    /// retract a question a caller is still waiting on the answer to.
+    pub fn clear_decided(&self, connection: &Connection, wallet_id: Option<&str>) -> Result<usize> {
+        if let Some(wallet_id) = wallet_id {
+            crate::config::validate_wallet_id(wallet_id)?;
+        }
+        Ok(connection.execute(
+            &format!(
+                "DELETE FROM {} WHERE status <> 'awaiting_approval' \
+                 AND (?1 IS NULL OR wallet_id = ?1)",
+                self.table
+            ),
+            [wallet_id],
+        )?)
+    }
+
     /// IDs of recent requests in every lifecycle state, newest first.
     pub fn list_ids(
         &self,

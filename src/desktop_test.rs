@@ -1490,3 +1490,69 @@ fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
         ["https://rpc-one.example/", "https://rpc-two.example/"]
     );
 }
+
+#[test]
+fn a_row_names_whoever_asked_for_it() {
+    let agent = SharedString::from("Claude Code");
+
+    // The authenticated agent is the most specific answer there is, so it
+    // outranks the provenance of the plan it handed over.
+    assert_eq!(
+        activity_source_label(Some("mcp.ekubo.org"), Some(&agent)),
+        "via Claude Code"
+    );
+    assert_eq!(
+        activity_source_label(Some("WalletConnect: Ekubo Protocol"), None),
+        "via Ekubo Protocol over WalletConnect"
+    );
+    assert_eq!(
+        activity_source_label(Some("app.ekubo.org"), None),
+        "from a plan served by app.ekubo.org"
+    );
+    assert_eq!(
+        activity_source_label(Some("inline data URI"), None),
+        "from a plan given inline"
+    );
+    assert_eq!(
+        activity_source_label(Some("a file on this machine"), None),
+        "from a plan file on this machine"
+    );
+
+    // Nothing carried a source, which is what a transfer the owner typed into
+    // this wallet looks like.
+    assert_eq!(activity_source_label(None, None), "built by this wallet");
+}
+
+#[test]
+fn a_signature_row_prefers_the_claim_its_review_showed() {
+    let agent = SharedString::from("Codex");
+    assert_eq!(
+        signature_source_label(Some("app.uniswap.org"), Some(&agent)),
+        "via app.uniswap.org"
+    );
+    // An MCP client names no requester, so the agent it authenticated as
+    // answers instead of the row reading "unnamed".
+    assert_eq!(signature_source_label(None, Some(&agent)), "via Codex");
+    assert_eq!(
+        signature_source_label(Some("   "), Some(&agent)),
+        "via Codex"
+    );
+    assert_eq!(
+        signature_source_label(None, None),
+        "from an unnamed requester"
+    );
+}
+
+#[test]
+fn a_source_cannot_draw_outside_its_line() {
+    // Both names are somebody else's text. The stores refuse control and
+    // bidirectional characters on the way in; the row refuses them again, and
+    // caps how much of itself a name can occupy.
+    let long = "x".repeat(200);
+    let label = activity_source_label(Some(&format!("WalletConnect: {long}")), None);
+    assert_eq!(label, format!("via {} over WalletConnect", "x".repeat(64)));
+    assert_eq!(
+        signature_source_label(Some("Ekubo\u{202e}Protocol\n"), None),
+        "via EkuboProtocol"
+    );
+}

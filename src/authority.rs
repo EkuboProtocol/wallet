@@ -1162,6 +1162,35 @@ impl OwnerApi {
         Ok(records)
     }
 
+    /// The agent that asked for each record, by request ID.
+    ///
+    /// Read for the owner's activity list and nowhere else. It is deliberately
+    /// not folded into `PendingTransaction`: that type is an agent-facing
+    /// schema, and who else is talking to this wallet is not something one
+    /// agent gets to read off another's request.
+    pub fn activity_sources(&self) -> Result<std::collections::BTreeMap<Uuid, String>> {
+        self.desktop()?.request_attributions()
+    }
+
+    /// Forget every finished record in the activity list, for every wallet.
+    ///
+    /// Owner-only, and pointedly absent from `AgentApi`: this list is the
+    /// account a person keeps of what their agents did, so an agent able to
+    /// clear it could erase the evidence of its own behaviour.
+    ///
+    /// What survives is everything not yet finished — awaiting a decision,
+    /// signed, in flight, cancelling — because those are live state rather
+    /// than history, and one of them holds the only copy of an envelope the
+    /// chain may still mine. Nothing on chain changes and no policy loosens;
+    /// this forgets the local record and nothing else.
+    pub fn clear_activity_history(&self) -> Result<usize> {
+        let data_dir = self.config.data_dir();
+        let mut removed = PendingStore::production(data_dir)?.clear_terminal_history(None)?;
+        removed += MessageStore::production(data_dir)?.clear_history(None)?;
+        removed += TypedDataStore::production(data_dir)?.clear_history(None)?;
+        Ok(removed)
+    }
+
     pub fn transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
         PendingStore::production(self.config.data_dir())?.get(request_id)
     }

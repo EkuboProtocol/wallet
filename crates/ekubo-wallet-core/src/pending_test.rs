@@ -1143,6 +1143,77 @@ fn a_cancelled_row_from_wallet_removal_never_had_an_envelope() {
 }
 
 #[test]
+fn clearing_history_leaves_every_row_that_can_still_reach_the_chain() {
+    // The owner-initiated twin of the retention bound below: it deletes the
+    // same rows, so it has to spare the same ones. A signed envelope exists
+    // nowhere but this database, and an awaiting row is a question somebody is
+    // still waiting on the answer to.
+    let (_directory, mut store) = store();
+    let settled = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    let hash = hash_of(ORIGINAL_BYTES);
+    let hash = hash.as_str();
+    store
+        .store_signed(
+            settled.request_id,
+            &settled.digest,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ORIGINAL_BYTES,
+            hash,
+        )
+        .unwrap();
+    let claimed = store.claim_for_submission(settled.request_id).unwrap();
+    store
+        .mark_broadcast(settled.request_id, hash, claimed.generation)
+        .unwrap();
+    store.finalize(settled.request_id, true, 123, None).unwrap();
+
+    let awaiting = store
+        .create("primary", "ethereum", &plan_with_value("7"), None, 1)
+        .unwrap();
+    let in_flight = store
+        .create("primary", "ethereum", &plan_with_value("8"), None, 1)
+        .unwrap();
+    store
+        .store_signed(
+            in_flight.request_id,
+            &in_flight.digest,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            CANCEL_BYTES_ONE,
+            hash_of(CANCEL_BYTES_ONE).as_str(),
+        )
+        .unwrap();
+
+    // Another wallet's history is not this one's to clear.
+    assert_eq!(store.clear_terminal_history(Some("secondary")).unwrap(), 0);
+    assert_eq!(store.list(None, 10).unwrap().len(), 3);
+
+    assert_eq!(store.clear_terminal_history(None).unwrap(), 1);
+    assert!(
+        store.get(settled.request_id).is_err(),
+        "a finished record is what clearing forgets"
+    );
+    assert_eq!(
+        store.get(awaiting.request_id).unwrap().status,
+        PendingStatus::AwaitingApproval,
+        "a question nobody has answered is not history"
+    );
+    let kept = store.get(in_flight.request_id).unwrap();
+    assert_eq!(kept.status, PendingStatus::Signed);
+    assert_eq!(
+        kept.serialized_transaction.as_deref(),
+        Some(CANCEL_BYTES_ONE),
+        "the only copy of an envelope the chain may still mine survives"
+    );
+    assert!(
+        store
+            .clear_terminal_history(Some("not a wallet id"))
+            .is_err()
+    );
+}
+
+#[test]
 fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
     // Nothing bounded what queued and in-flight rows *become*. Every automatic
     // signature writes a durable row before it broadcasts, so repeated valid

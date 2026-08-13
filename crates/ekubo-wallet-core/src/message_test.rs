@@ -407,6 +407,53 @@ fn recent_activity_lists_every_status_with_limits_and_wallet_filters() {
 }
 
 #[test]
+fn clearing_history_keeps_requests_still_awaiting_a_decision() {
+    let (_directory, mut store) = store();
+    let signed = store
+        .create("primary", None, b"first", MessageEncoding::Text, None)
+        .unwrap();
+    let rejected = store
+        .create("primary", None, b"second", MessageEncoding::Text, None)
+        .unwrap();
+    let awaiting = store
+        .create("primary", None, b"third", MessageEncoding::Text, None)
+        .unwrap();
+    let other = store
+        .create("secondary", None, b"other", MessageEncoding::Text, None)
+        .unwrap();
+    store
+        .store_signature(
+            signed.request_id,
+            "primary",
+            message_digest(b"first"),
+            &format!("0x{}", "11".repeat(65)),
+        )
+        .unwrap();
+    store.reject(rejected.request_id).unwrap();
+
+    // One wallet at a time deletes only that wallet's decided rows.
+    assert_eq!(store.clear_history(Some("secondary")).unwrap(), 0);
+    assert_eq!(store.list(None, 10).unwrap().len(), 4);
+
+    assert_eq!(store.clear_history(None).unwrap(), 2);
+    let remaining = store
+        .list(None, 10)
+        .unwrap()
+        .into_iter()
+        .map(|request| request.request_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        remaining,
+        [awaiting.request_id, other.request_id]
+            .into_iter()
+            .collect()
+    );
+    assert!(store.get(signed.request_id).is_err());
+    assert!(store.get(rejected.request_id).is_err());
+    assert!(store.clear_history(Some("not a wallet id")).is_err());
+}
+
+#[test]
 fn chainless_requests_deduplicate_and_stay_distinct_from_chained_ones() {
     let (_directory, mut store) = store();
     let message = b"gm".to_vec();

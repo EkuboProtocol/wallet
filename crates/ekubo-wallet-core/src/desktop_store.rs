@@ -845,6 +845,39 @@ impl DesktopStore {
         .collect()
     }
 
+    /// Which agent asked for each request, by request ID.
+    ///
+    /// Attribution is recorded when a client's call creates the row, and no
+    /// agent-facing API reads it back: one client learning which other client
+    /// asked for something is not part of what an agent is told. The owner is
+    /// the one reader entitled to the answer, and their activity list is where
+    /// the question gets asked.
+    ///
+    /// Revoked and never-authorized clients are named too, unlike
+    /// [`Self::clients`]. This answers "who asked, at the time", and a record
+    /// whose asker has since been revoked is exactly the one an owner most
+    /// wants attributed.
+    pub fn request_attributions(&self) -> Result<std::collections::BTreeMap<Uuid, String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT r.request_id, c.display_name
+             FROM (
+                 SELECT request_id, requesting_client_id FROM pending_transactions
+                 UNION ALL
+                 SELECT request_id, requesting_client_id FROM pending_messages
+                 UNION ALL
+                 SELECT request_id, requesting_client_id FROM pending_typed_data
+             ) r
+             JOIN mcp_clients c ON c.client_id = r.requesting_client_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(0)?.0),
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn attribute_transaction(&mut self, request_id: Uuid, client_id: Uuid) -> Result<()> {
         self.attribute_uuid("pending_transactions", request_id, client_id)
     }

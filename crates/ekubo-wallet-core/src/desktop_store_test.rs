@@ -533,3 +533,72 @@ fn testnet_mode_defaults_off_and_persists_in_the_encrypted_store() {
     store.set_testnet_mode(false).unwrap();
     assert!(!store.testnet_mode().unwrap());
 }
+
+#[test]
+fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
+    // "Who asked for this record" is a different question from "which agents
+    // are connected": the client that asked may never have finished
+    // authorizing, or may have been revoked since. Both are absent from
+    // `clients`, and the history list must still be able to name them.
+    let mut store = store(38);
+    let client = register(&mut store);
+    assert!(
+        store.clients().unwrap().is_empty(),
+        "an unauthorized client is not a connection"
+    );
+
+    let attributed = Uuid::new_v4();
+    let anonymous = Uuid::new_v4();
+    // Distinct plan digests: two awaiting rows for one wallet and chain may
+    // not name the same plan.
+    for (digest, request_id) in [(6_u8, attributed), (7, anonymous)] {
+        store
+            .connection
+            .execute(
+                "INSERT INTO pending_transactions(
+                     request_id, wallet_id, network_name, chain_id, plan_json,
+                     plan_digest, policy_revision, status, created_at, updated_at
+                 ) VALUES (?1, 'primary', 'ethereum', 1, '{}', ?2, 1, 'awaiting_approval', ?3, ?3)",
+                params![
+                    Blob(*request_id.as_bytes()),
+                    Blob([digest; 32]),
+                    Millis(Utc::now()),
+                ],
+            )
+            .unwrap();
+    }
+    let signature_request = Uuid::new_v4();
+    store
+        .connection
+        .execute(
+            "INSERT INTO pending_typed_data(
+                 request_id, wallet_id, chain_id, typed_data_json, digest, status,
+                 created_at, updated_at
+             ) VALUES (?1, 'primary', 1, '{}', ?2, 'awaiting_approval', ?3, ?3)",
+            params![
+                Blob(*signature_request.as_bytes()),
+                Blob([8_u8; 32]),
+                Millis(Utc::now()),
+            ],
+        )
+        .unwrap();
+
+    store.attribute_transaction(attributed, client.id).unwrap();
+    store
+        .attribute_typed_data(signature_request, client.id)
+        .unwrap();
+
+    let attributions = store.request_attributions().unwrap();
+    assert_eq!(
+        attributions.get(&attributed).map(String::as_str),
+        Some("Codex")
+    );
+    assert_eq!(
+        attributions.get(&signature_request).map(String::as_str),
+        Some("Codex")
+    );
+    assert!(
+        !attributions.contains_key(&anonymous),
+        "a record nobody was attributed to names nobody"
+    );
+}

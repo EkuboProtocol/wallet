@@ -36,6 +36,15 @@ const MAX_AWAITING_APPROVALS_PER_WALLET: i64 = 64;
 /// keeping it is small next to the cost of losing a record someone needed.
 const MAX_TERMINAL_HISTORY_PER_WALLET: i64 = 1_000;
 
+/// The statuses a lifecycle row can never leave, spelled once for SQL.
+///
+/// Two things delete history — the retention bound below and the owner asking
+/// for it — and they have to mean the same thing by "finished". Written as the
+/// literal list an `IN` clause takes rather than as values to bind, because
+/// `SQLite` has no array parameter and the alternative is quoting these into
+/// SQL at runtime.
+const TERMINAL_STATUS_LIST: &str = "'rejected', 'confirmed', 'reverted', 'cancelled', 'replaced'";
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingStatus {
@@ -170,14 +179,16 @@ fn prune_terminal_history(
     wallet_id: &str,
 ) -> Result<usize> {
     let removed = transaction.execute(
-        "DELETE FROM pending_transactions
-         WHERE request_id IN (
-             SELECT request_id FROM pending_transactions
-             WHERE wallet_id = ?1
-               AND status IN ('rejected', 'confirmed', 'reverted', 'cancelled', 'replaced')
-             ORDER BY created_at DESC, request_id DESC
-             LIMIT -1 OFFSET ?2
-         )",
+        &format!(
+            "DELETE FROM pending_transactions
+             WHERE request_id IN (
+                 SELECT request_id FROM pending_transactions
+                 WHERE wallet_id = ?1
+                   AND status IN ({TERMINAL_STATUS_LIST})
+                 ORDER BY created_at DESC, request_id DESC
+                 LIMIT -1 OFFSET ?2
+             )"
+        ),
         params![wallet_id, MAX_TERMINAL_HISTORY_PER_WALLET],
     )?;
     Ok(removed)
@@ -455,6 +466,32 @@ impl PendingStore {
             "only a signed but never-submitted transaction can be discarded locally"
         );
         self.get(request_id)
+    }
+
+    /// Forget every finished transaction, optionally for one wallet.
+    ///
+    /// The same rows [`prune_terminal_history`] reclaims on its own schedule,
+    /// deleted because the owner asked rather than because a bound was
+    /// reached. Nothing awaiting a decision, signed, in flight, or cancelling
+    /// is touched: those are live lifecycle state, and one of them holds the
+    /// only copy of an envelope the chain may still mine.
+    ///
+    /// Nothing on chain changes and no policy loosens — these rows are
+    /// history, not spending counters or reservations, and the partial unique
+    /// indexes that enforce one in-flight envelope and one pending plan per
+    /// wallet and chain cover only the statuses this leaves alone.
+    pub fn clear_terminal_history(&mut self, wallet_id: Option<&str>) -> Result<usize> {
+        if let Some(wallet_id) = wallet_id {
+            validate_wallet_id(wallet_id)?;
+        }
+        Ok(self.database.connection.execute(
+            &format!(
+                "DELETE FROM pending_transactions
+                 WHERE status IN ({TERMINAL_STATUS_LIST})
+                   AND (?1 IS NULL OR wallet_id = ?1)"
+            ),
+            [wallet_id],
+        )?)
     }
 
     pub fn get(&self, request_id: Uuid) -> Result<PendingTransaction> {

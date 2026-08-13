@@ -1231,6 +1231,11 @@ pub struct WalletWindow {
     selected_record: Option<uuid::Uuid>,
     activity_busy: BTreeSet<uuid::Uuid>,
     activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
+    /// Names the newest note on each row, so a timer set for an older one
+    /// cannot take a newer one off the screen with it.
+    activity_feedback_seq: u64,
+    history_clearing: bool,
+    history_clear_error: Option<SharedString>,
     activity_inspections: BTreeMap<uuid::Uuid, ActivityInspectionState>,
     /// Records whose exact machine payload the owner has asked to see. The
     /// bytes stay collapsed by default so the human account of what happened
@@ -1332,6 +1337,11 @@ pub struct WalletWindow {
 struct DesktopSnapshot {
     reviews: std::result::Result<OwnerReviewQueues, SharedString>,
     activity: std::result::Result<Arc<[OwnerActivityRecord]>, SharedString>,
+    /// Which agent asked for each record, where one did. Empty rather than an
+    /// error when the lookup fails: a row still names its source from the plan
+    /// it carries, and a history list is not worth failing to draw over the
+    /// attribution it could not read.
+    activity_sources: BTreeMap<uuid::Uuid, SharedString>,
     clients: std::result::Result<Vec<McpClient>, SharedString>,
     accounts: std::result::Result<Vec<WalletMetadata>, SharedString>,
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
@@ -1346,6 +1356,21 @@ impl DesktopSnapshot {
         let reviews = cache_result(owner.reviews(None));
         let activity =
             cache_result(owner.activity(None, 200)).map(Arc::<[OwnerActivityRecord]>::from);
+        let activity_sources = owner
+            .activity_sources()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(request_id, name)| {
+                // The name an agent chose for itself. Registration already
+                // holds it to a terminal-safe line, and this holds it again at
+                // the surface that draws it, where the bound on its width is
+                // also a bound on how much of the row it can take over.
+                (
+                    request_id,
+                    SharedString::from(ekubo_wallet_core::sanitize::stripped_capped(&name, 64)),
+                )
+            })
+            .collect();
         let clients = cache_result(owner.clients());
         let accounts = cache_result(owner.accounts());
         let legal_status = cache_result(owner.legal_status());
@@ -1380,6 +1405,7 @@ impl DesktopSnapshot {
         Self {
             reviews,
             activity,
+            activity_sources,
             clients,
             accounts,
             policies,
@@ -1729,10 +1755,45 @@ struct NetworkEditorDraft {
     documentation_url: String,
 }
 
+/// A note one row is showing about the last thing the owner asked it to do.
+///
+/// Two kinds, and they have different lifespans. A note that something went
+/// wrong stays until the next attempt on that row, because it is the only
+/// account of a failure the row's own status cannot show. A note that
+/// something went as asked is a receipt for a press, and the row already
+/// carries the result — so it says so briefly and then gets out of the way.
+/// It used to stay for the life of the process: "Checked with the network.
+/// The transaction was included in a block and its calls succeeded." sat under
+/// a row already labelled Confirmed until the app was restarted.
 #[derive(Clone)]
 struct ActivityFeedback {
     message: SharedString,
     error: bool,
+    /// Which note this is, in the order the view set them. Stamped by
+    /// [`WalletWindow::set_activity_feedback`], the only thing that puts one
+    /// of these on a row, so the value at construction is never read.
+    seq: u64,
+}
+
+/// How long a note about something that worked stays on its row.
+const ACTIVITY_FEEDBACK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(8);
+
+impl ActivityFeedback {
+    fn note(message: impl Into<SharedString>) -> Self {
+        Self {
+            message: message.into(),
+            error: false,
+            seq: 0,
+        }
+    }
+
+    fn failure(message: impl Into<SharedString>) -> Self {
+        Self {
+            message: message.into(),
+            error: true,
+            seq: 0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1886,6 +1947,57 @@ fn chain_label(chain_id: Option<u64>, networks: &BTreeMap<u64, SharedString>) ->
     }
 }
 
+/// Text somebody else authored, cut to what one line of a row can carry.
+///
+/// Both the stores it comes from already refuse control and bidirectional
+/// characters on the way in. This is the same claim made again at the surface
+/// that draws it, where the cap on width is also a cap on how much of the row
+/// a name can take for itself.
+fn sanitized_source(value: &str) -> String {
+    ekubo_wallet_core::sanitize::stripped_capped(value, 64)
+}
+
+/// Who asked for a transaction, in the words its row uses.
+///
+/// Three answers, most specific first: the agent this wallet authenticated,
+/// the provenance the plan itself carried, and — for a plan this wallet built
+/// out of something the owner typed — the wallet. The list used to give none
+/// of them, so a transfer somebody made by hand and one an agent asked for
+/// read identically.
+fn activity_source_label(plan_source: Option<&str>, agent: Option<&SharedString>) -> String {
+    if let Some(agent) = agent {
+        return format!("via {agent}");
+    }
+    let Some(source) = plan_source else {
+        return "built by this wallet".to_owned();
+    };
+    if let Some(dapp) = source.strip_prefix(ekubo_wallet_core::pending::DAPP_PLAN_SOURCE_PREFIX) {
+        return format!("via {} over WalletConnect", sanitized_source(dapp));
+    }
+    match source {
+        "inline data URI" => "from a plan given inline".to_owned(),
+        "a file on this machine" => "from a plan file on this machine".to_owned(),
+        host => format!("from a plan served by {}", sanitized_source(host)),
+    }
+}
+
+/// The same question for the two signature queues, which record the asker's
+/// own claim about itself. That claim is what the review screen showed, so the
+/// row keeps it; the authenticated agent answers only for the rows where
+/// nobody claimed anything, which is every request an MCP client made.
+fn signature_source_label(requester: Option<&str>, agent: Option<&SharedString>) -> String {
+    match requester
+        .map(str::trim)
+        .filter(|requester| !requester.is_empty())
+    {
+        Some(requester) => format!("via {}", sanitized_source(requester)),
+        None => agent.map_or_else(
+            || "from an unnamed requester".to_owned(),
+            |agent| format!("via {agent}"),
+        ),
+    }
+}
+
 /// Title, subtitle, state word, and state colour for one inbox row.
 ///
 /// Every field is a sentence a person could have written. The request UUID is
@@ -1901,6 +2013,7 @@ struct ActivityRowSummary {
 fn activity_row_summary(
     record: &OwnerActivityRecord,
     networks: &BTreeMap<u64, SharedString>,
+    agent: Option<&SharedString>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ActivityRowSummary {
     match record {
@@ -1910,8 +2023,9 @@ fn activity_row_summary(
                 chain_label(item.chain_id.parse().ok(), networks)
             ),
             subtitle: format!(
-                "{} · {}",
+                "{} · {} · {}",
                 item.wallet_id,
+                activity_source_label(item.plan_source.as_deref(), agent),
                 relative_time_label(item.created_at, now)
             ),
             status: item.status.label(),
@@ -1922,7 +2036,7 @@ fn activity_row_summary(
             subtitle: format!(
                 "{} · {} · {}",
                 item.wallet_id,
-                item.requester.as_deref().unwrap_or("unnamed requester"),
+                signature_source_label(item.requester.as_deref(), agent),
                 relative_time_label(item.created_at, now)
             ),
             status: item.status.label(),
@@ -1936,7 +2050,7 @@ fn activity_row_summary(
             subtitle: format!(
                 "{} · {} · {}",
                 item.wallet_id,
-                item.requester.as_deref().unwrap_or("unnamed requester"),
+                signature_source_label(item.requester.as_deref(), agent),
                 relative_time_label(item.created_at, now)
             ),
             status: item.status.label(),
@@ -1951,12 +2065,13 @@ fn render_activity_row(
     busy: bool,
     feedback: Option<ActivityFeedback>,
     networks: &BTreeMap<u64, SharedString>,
+    agent: Option<&SharedString>,
     now: chrono::DateTime<chrono::Utc>,
     editor: WeakEntity<WalletWindow>,
     cx: &mut App,
 ) -> gpui::Div {
     let request_id = record.request_id();
-    let summary = activity_row_summary(record, networks, now);
+    let summary = activity_row_summary(record, networks, agent, now);
     // Always "Details": the detail opens over the list, so the row's own
     // button is never the thing that closes it.
     let detail_label = "Details";
@@ -3922,6 +4037,9 @@ impl WalletWindow {
             selected_record: None,
             activity_busy: BTreeSet::new(),
             activity_feedback: BTreeMap::new(),
+            activity_feedback_seq: 0,
+            history_clearing: false,
+            history_clear_error: None,
             activity_inspections: BTreeMap::new(),
             activity_payloads_expanded: BTreeSet::new(),
             active_review: None,
@@ -6876,17 +6994,52 @@ impl WalletWindow {
 
     fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         let feedback = match self.owner.discard_unsent_transaction(request_id) {
-            Ok(_) => ActivityFeedback {
-                message: "Discarded signed bytes that were never submitted.".into(),
-                error: false,
-            },
-            Err(error) => ActivityFeedback {
-                message: format!("Could not discard transaction: {error:#}").into(),
-                error: true,
-            },
+            Ok(_) => ActivityFeedback::note("Discarded signed bytes that were never submitted."),
+            Err(error) => {
+                ActivityFeedback::failure(format!("Could not discard transaction: {error:#}"))
+            }
         };
-        self.activity_feedback.insert(request_id, feedback);
+        self.set_activity_feedback(request_id, feedback, cx);
         self.selected_record = Some(request_id);
+        cx.notify();
+    }
+
+    /// Put a note on a row, and take it back off when it has been read.
+    ///
+    /// Only the notes that report success expire. A failure is the row's whole
+    /// account of what went wrong, and every action that could produce another
+    /// one clears it on the way in, so it stays until the owner tries again.
+    fn set_activity_feedback(
+        &mut self,
+        request_id: uuid::Uuid,
+        mut feedback: ActivityFeedback,
+        cx: &mut Context<Self>,
+    ) {
+        self.activity_feedback_seq += 1;
+        let seq = self.activity_feedback_seq;
+        feedback.seq = seq;
+        let expiring = !feedback.error;
+        self.activity_feedback.insert(request_id, feedback);
+        if expiring {
+            cx.spawn(async move |view, cx| {
+                cx.background_executor()
+                    .timer(ACTIVITY_FEEDBACK_LIFETIME)
+                    .await;
+                let _ = view.update(cx, |view, cx| {
+                    // Only this note. A later press on the same row put its own
+                    // note there, and that one has its own timer.
+                    if view
+                        .activity_feedback
+                        .get(&request_id)
+                        .is_some_and(|current| current.seq == seq)
+                    {
+                        view.activity_feedback.remove(&request_id);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -6982,23 +7135,16 @@ impl WalletWindow {
             let _ = view.update(cx, |view, cx| {
                 view.activity_busy.remove(&request_id);
                 let updated = result.as_ref().ok().cloned();
-                view.activity_feedback.insert(
-                    request_id,
-                    match result {
-                        Ok(record) => ActivityFeedback {
-                            message: format!(
-                                "Checked with the network. {}",
-                                record.status.explanation()
-                            )
-                            .into(),
-                            error: false,
-                        },
-                        Err(error) => ActivityFeedback {
-                            message: format!("The network could not be reached: {error:#}").into(),
-                            error: true,
-                        },
-                    },
-                );
+                let feedback = match result {
+                    Ok(record) => ActivityFeedback::note(format!(
+                        "Checked with the network. {}",
+                        record.status.explanation()
+                    )),
+                    Err(error) => ActivityFeedback::failure(format!(
+                        "The network could not be reached: {error:#}"
+                    )),
+                };
+                view.set_activity_feedback(request_id, feedback, cx);
                 view.synchronize_transaction_activity(request_id, updated, cx);
                 cx.notify();
             });
@@ -7028,28 +7174,19 @@ impl WalletWindow {
                         .as_ref()
                         .and_then(|broadcast| broadcast.broadcast_error.as_deref())
                     {
-                        Some(error) => ActivityFeedback {
-                            message: format!(
-                                "No endpoint accepted the exact signed bytes: {error}"
-                            )
-                            .into(),
-                            error: true,
-                        },
-                        None => ActivityFeedback {
-                            message: format!(
-                                "Nothing new was sent. {}",
-                                action.record.status.explanation()
-                            )
-                            .into(),
-                            error: false,
-                        },
+                        Some(error) => ActivityFeedback::failure(format!(
+                            "No endpoint accepted the exact signed bytes: {error}"
+                        )),
+                        None => ActivityFeedback::note(format!(
+                            "Nothing new was sent. {}",
+                            action.record.status.explanation()
+                        )),
                     },
-                    Err(error) => ActivityFeedback {
-                        message: format!("Could not send exact signed bytes: {error:#}").into(),
-                        error: true,
-                    },
+                    Err(error) => ActivityFeedback::failure(format!(
+                        "Could not send exact signed bytes: {error:#}"
+                    )),
                 };
-                view.activity_feedback.insert(request_id, feedback);
+                view.set_activity_feedback(request_id, feedback, cx);
                 view.synchronize_transaction_activity(request_id, updated, cx);
                 cx.notify();
             });
@@ -7112,27 +7249,94 @@ impl WalletWindow {
                         .as_ref()
                         .and_then(|broadcast| broadcast.broadcast_error.as_deref())
                     {
-                        Some(error) => ActivityFeedback {
-                            message: format!("Cancellation broadcast was not accepted: {error}")
-                                .into(),
-                            error: true,
-                        },
-                        None => ActivityFeedback {
-                            message: format!(
-                                "No cancellation was needed. {}",
-                                action.record.status.explanation()
-                            )
-                            .into(),
-                            error: false,
-                        },
+                        Some(error) => ActivityFeedback::failure(format!(
+                            "Cancellation broadcast was not accepted: {error}"
+                        )),
+                        None => ActivityFeedback::note(format!(
+                            "No cancellation was needed. {}",
+                            action.record.status.explanation()
+                        )),
                     },
-                    Err(error) => ActivityFeedback {
-                        message: format!("Could not cancel transaction: {error:#}").into(),
-                        error: true,
-                    },
+                    Err(error) => ActivityFeedback::failure(format!(
+                        "Could not cancel transaction: {error:#}"
+                    )),
                 };
-                view.activity_feedback.insert(request_id, feedback);
+                view.set_activity_feedback(request_id, feedback, cx);
                 view.synchronize_transaction_activity(request_id, updated, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ask before forgetting the list, in the words of what is actually lost.
+    ///
+    /// Deleting local history is not a chain action and undoes nothing that
+    /// was sent — but it is the only record this wallet keeps of what its
+    /// agents asked it to do, and there is no copy anywhere else.
+    fn confirm_activity_history_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history_clearing {
+            return;
+        }
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            alert
+                .title("Clear decided history?")
+                .description(
+                    "Every record this wallet has finished with is deleted from this machine: sent, confirmed, reverted, rejected, and cancelled — for every account, including networks this window is not showing. Anything still waiting on you, or still able to reach the chain, stays. Nothing on chain changes, and deleted records cannot be brought back.",
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Clear history")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Keep history")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| {
+                        view.clear_activity_history(cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn clear_activity_history(&mut self, cx: &mut Context<Self>) {
+        if self.history_clearing {
+            return;
+        }
+        self.history_clearing = true;
+        self.history_clear_error = None;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.clear_activity_history())
+                .await
+                .context("history clearing task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.history_clearing = false;
+                match result {
+                    Ok(_) => {
+                        // The emptied list is the entire report, so there is no
+                        // note to leave about it. What has to go is the view
+                        // state keyed by records that no longer exist: notes on
+                        // rows nobody can see, receipts fetched for them, and a
+                        // selection whose detail would open onto nothing.
+                        view.activity_feedback.clear();
+                        view.activity_inspections.clear();
+                        view.activity_payloads_expanded.clear();
+                        view.selected_record = None;
+                    }
+                    Err(error) => {
+                        view.history_clear_error =
+                            Some(format!("History could not be cleared: {error:#}").into());
+                    }
+                }
+                view.reload_desktop_snapshot(cx);
                 cx.notify();
             });
         })
@@ -8860,7 +9064,7 @@ impl WalletWindow {
                     )
                     .child(div().text_color(cx.theme().muted_foreground).child(
                         selectable_label(
-                            "Once this wallet signs or sends something, it stays here permanently — open any row to see what it did.",
+                            "Once this wallet signs or sends something, it stays here until you clear it — open any row to see what it did.",
                         ),
                     )),
             );
@@ -8868,6 +9072,10 @@ impl WalletWindow {
         let selected_record = self.selected_record;
         let busy = Arc::new(self.activity_busy.clone());
         let feedback = Arc::new(self.activity_feedback.clone());
+        let no_sources = BTreeMap::new();
+        let sources = self
+            .snapshot()
+            .map_or(&no_sources, |snapshot| &snapshot.activity_sources);
         let networks = self.network_display_names();
         let now = chrono::Utc::now();
         let editor = cx.entity().downgrade();
@@ -8888,12 +9096,62 @@ impl WalletWindow {
                 busy.contains(&request_id),
                 feedback.get(&request_id).cloned(),
                 &networks,
+                sources.get(&request_id),
                 now,
                 editor.clone(),
                 cx,
             ));
         }
-        panel.child(rows)
+        panel
+            .child(self.render_activity_history_header(items.len(), cx))
+            .child(rows)
+    }
+
+    /// How much history there is, and the one control that ends it.
+    ///
+    /// The count is the argument for the button being here at all: this list
+    /// only grows, every row is a card the window lays out on every frame, and
+    /// the person watching it get slower is the only one who can say which of
+    /// it still matters.
+    fn render_activity_history_header(&self, shown: usize, cx: &mut Context<Self>) -> gpui::Div {
+        let mut header = div().w_full().flex().flex_col().gap_2();
+        if let Some(error) = &self.history_clear_error {
+            header = header.child(selectable_error_alert(
+                "activity-history-clear-error",
+                error.clone(),
+            ));
+        }
+        header.child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        // "Shown", not "kept". This list is capped at the most
+                        // recent records and filtered to the networks the owner
+                        // is showing, so the number under it is not the number
+                        // the button below deletes.
+                        .child(selectable_label(if shown == 1 {
+                            "1 record shown".to_owned()
+                        } else {
+                            format!("{shown} records shown")
+                        })),
+                )
+                .child(
+                    app_button("clear-activity-history")
+                        .danger()
+                        .label("Clear history")
+                        .disabled(self.history_clearing)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.confirm_activity_history_clear(window, cx);
+                        })),
+                ),
+        )
     }
 
     fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {

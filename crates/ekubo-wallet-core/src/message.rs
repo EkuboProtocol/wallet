@@ -646,6 +646,12 @@ impl MessageStore {
             .collect()
     }
 
+    /// Forget every decided message, optionally for one wallet. Requests still
+    /// awaiting a decision stay.
+    pub fn clear_history(&mut self, wallet_id: Option<&str>) -> Result<usize> {
+        QUEUE.clear_decided(&self.database.connection, wallet_id)
+    }
+
     pub fn list(&self, wallet_id: Option<&str>, limit: u16) -> Result<Vec<PendingMessage>> {
         QUEUE
             .list_ids(&self.database.connection, wallet_id, limit)?

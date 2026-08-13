@@ -267,6 +267,68 @@ fn recent_activity_lists_every_status_with_limits_and_wallet_filters() {
 }
 
 #[test]
+fn clearing_history_keeps_requests_still_awaiting_a_decision() {
+    let (_directory, mut store) = store();
+    let mut signed_payload = permit_payload();
+    signed_payload["message"]["nonce"] = json!("1");
+    let mut rejected_payload = permit_payload();
+    rejected_payload["message"]["nonce"] = json!("2");
+    let mut awaiting_payload = permit_payload();
+    awaiting_payload["message"]["nonce"] = json!("3");
+    let (_, chain_id, signed_digest) = parse_typed_data(&signed_payload).unwrap();
+    let (_, _, rejected_digest) = parse_typed_data(&rejected_payload).unwrap();
+    let (_, _, awaiting_digest) = parse_typed_data(&awaiting_payload).unwrap();
+    let signed = store
+        .create("primary", chain_id, &signed_payload, signed_digest, None)
+        .unwrap();
+    let rejected = store
+        .create(
+            "primary",
+            chain_id,
+            &rejected_payload,
+            rejected_digest,
+            None,
+        )
+        .unwrap();
+    let awaiting = store
+        .create(
+            "primary",
+            chain_id,
+            &awaiting_payload,
+            awaiting_digest,
+            None,
+        )
+        .unwrap();
+    store
+        .store_signature(
+            signed.request_id,
+            "primary",
+            signed_digest,
+            &format!("0x{}", "11".repeat(65)),
+        )
+        .unwrap();
+    store.reject(rejected.request_id).unwrap();
+
+    // Another wallet's clearing leaves this one's rows exactly where they are.
+    assert_eq!(store.clear_history(Some("secondary")).unwrap(), 0);
+    assert_eq!(store.list(None, 10).unwrap().len(), 3);
+
+    assert_eq!(store.clear_history(None).unwrap(), 2);
+    assert_eq!(
+        store
+            .list(None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|request| request.request_id)
+            .collect::<Vec<_>>(),
+        vec![awaiting.request_id]
+    );
+    assert!(store.get(signed.request_id).is_err());
+    assert!(store.get(rejected.request_id).is_err());
+    assert!(store.clear_history(Some("not a wallet id")).is_err());
+}
+
+#[test]
 fn recognizes_erc2612_permits_only_for_the_signing_wallet() {
     let payload = permit_payload();
     let (typed, _, _) = parse_typed_data(&payload).unwrap();
