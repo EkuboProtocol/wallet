@@ -13952,7 +13952,7 @@ impl WalletWindow {
     }
 
     fn render_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let palette = div()
             .absolute()
             .top(px(54.0))
             .left(px(58.0))
@@ -13964,7 +13964,28 @@ impl WalletWindow {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
-            .child(div().font_semibold().mb_2().child("Go to…"))
+            // A press anywhere off the panel dismisses it, which is what every
+            // other launcher does and what the scrim below makes possible to
+            // aim at. Escape already worked; a mouse had no way out.
+            .on_mouse_down_out(cx.listener(|view, _, _, cx| {
+                view.command_palette = false;
+                cx.notify();
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .mb_2()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().font_semibold().child("Go to…"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Esc to close"),
+                    ),
+            )
             .when_some(self.command_palette_list.as_ref(), |palette, list| {
                 palette.child(
                     List::new(list)
@@ -13974,7 +13995,12 @@ impl WalletWindow {
                         .border_color(cx.theme().border)
                         .rounded(cx.theme().radius),
                 )
-            })
+            });
+        // The palette used to float over a live page: the wheel scrolled
+        // whatever was behind it, and a press landed on whichever control was
+        // underneath. Every other surface that takes over this window
+        // occludes; this one is no different for as long as it is open.
+        div().absolute().inset_0().occlude().child(palette)
     }
 }
 
