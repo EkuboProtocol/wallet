@@ -106,3 +106,10 @@ fn only_transaction_events_raise_a_banner() {
         None
     );
 }
+
+#[test]
+fn only_the_platform_default_action_opens_a_notification_route() {
+    assert!(notification_action_opens("default"));
+    assert!(!notification_action_opens("Open"));
+    assert!(!notification_action_opens("__closed"));
+}

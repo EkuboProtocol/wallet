@@ -133,16 +133,24 @@ impl NotificationService for PlatformNotificationService {
                 .appname("Ekubo Wallet")
                 .summary(&notification.title)
                 .body(&notification.body)
+                // XDG servers only promise an activation signal for actions
+                // the notification advertised. macOS and Windows also map a
+                // body click to this conventional default action.
+                .action("default", "Open")
                 .show();
             if let Ok(handle) = handle {
                 handle.wait_for_action(move |action| {
-                    if action == "default" {
+                    if notification_action_opens(action) {
                         let _ = clicked.send(notification.route);
                     }
                 });
             }
         });
     }
+}
+
+fn notification_action_opens(action: &str) -> bool {
+    action == "default"
 }
 
 #[cfg(test)]
