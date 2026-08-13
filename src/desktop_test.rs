@@ -1428,3 +1428,21 @@ fn a_digest_is_only_described_as_signed_when_something_signed_it() {
     // ever produced". The row beneath it used to say the digest was signed.
     assert_eq!(digest_label(false), "Digest this would have signed");
 }
+
+#[test]
+fn removing_an_account_puts_the_danger_on_the_button_that_destroys_the_key() {
+    // Approving is normally the permissive choice, so reject carries the red.
+    // Account removal inverts that: approving destroys a key that cannot be
+    // recovered, and the red used to sit on the button that keeps it.
+    let removal = review_decision_labels(Some(&ActiveReviewCompletion::AccountRemoval {
+        wallet_id: "primary".into(),
+    }));
+    assert!(removal.approve_is_destructive);
+    assert_eq!(removal.approve, "Authenticate & remove");
+    assert_eq!(removal.reject, "Keep this account");
+
+    let transaction = review_decision_labels(None);
+    assert!(!transaction.approve_is_destructive);
+    assert_eq!(transaction.approve, "Authenticate & approve");
+    assert_eq!(transaction.reject, "Reject request");
+}

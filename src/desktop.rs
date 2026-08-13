@@ -1694,6 +1694,35 @@ enum ActiveReviewCompletion {
     },
 }
 
+/// What a review calls its two decisions, and which one costs something.
+struct ReviewDecisionLabels {
+    reject: &'static str,
+    approve: &'static str,
+    approve_is_destructive: bool,
+}
+
+const fn review_decision_labels(
+    completion: Option<&ActiveReviewCompletion>,
+) -> ReviewDecisionLabels {
+    match completion {
+        Some(ActiveReviewCompletion::WalletConnect { .. }) => ReviewDecisionLabels {
+            reject: "Decline connection",
+            approve: "Authenticate & connect",
+            approve_is_destructive: false,
+        },
+        Some(ActiveReviewCompletion::AccountRemoval { .. }) => ReviewDecisionLabels {
+            reject: "Keep this account",
+            approve: "Authenticate & remove",
+            approve_is_destructive: true,
+        },
+        _ => ReviewDecisionLabels {
+            reject: "Reject request",
+            approve: "Authenticate & approve",
+            approve_is_destructive: false,
+        },
+    }
+}
+
 enum QueuedReview {
     Transaction(Box<GuiReviewPrompt>),
     WalletConnect(ProposalPrompt),
@@ -11570,10 +11599,15 @@ impl WalletWindow {
             active.completion,
             Some(ActiveReviewCompletion::Transaction(_))
         );
-        let walletconnect_connection = matches!(
-            active.completion,
-            Some(ActiveReviewCompletion::WalletConnect { .. })
-        );
+        // What the two decisions are called, and which of them is the
+        // dangerous one.
+        //
+        // Reject was red and approve was purple in every review, which is
+        // right when approving is what lets something happen. Removing an
+        // account inverts it: approving destroys a key, and the red sat on the
+        // button that keeps it. A reader who reads only the colour was being
+        // pointed at the safe choice as though it were the costly one.
+        let decisions = review_decision_labels(active.completion.as_ref());
         let mut review_body = div()
             .w_full()
             .max_w(px(920.0))
@@ -11823,15 +11857,28 @@ impl WalletWindow {
                     .gap_2()
                     .justify_between()
                     .items_center()
-                    .child(
-                        app_button(("review-refresh", generation))
-                            .label("Re-simulate")
-                            .loading(active.awaiting_refresh)
-                            .disabled(active.awaiting_refresh || !can_refresh)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.send_review_command(generation, GuiReviewCommand::Refresh, cx);
-                            })),
-                    )
+                    // Only a transaction has a simulation to re-run. The other
+                    // four kinds of review — a message, typed data, a
+                    // connection, an account removal — rendered this button
+                    // permanently greyed, which reads as a thing that is
+                    // temporarily unavailable rather than one that was never
+                    // going to apply. An empty slot keeps the decision buttons
+                    // where they are.
+                    .child(div().when(can_refresh, |slot| {
+                        slot.child(
+                            app_button(("review-refresh", generation))
+                                .label("Re-simulate")
+                                .loading(active.awaiting_refresh)
+                                .disabled(active.awaiting_refresh)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.send_review_command(
+                                        generation,
+                                        GuiReviewCommand::Refresh,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }))
                     .child(
                         div()
                             .flex()
@@ -11848,24 +11895,20 @@ impl WalletWindow {
                             })
                             .child(
                                 app_button(("review-select-reject", generation))
-                                    .label(if walletconnect_connection {
-                                        "Decline connection"
-                                    } else {
-                                        "Reject request"
-                                    })
-                                    .danger()
+                                    .label(decisions.reject)
+                                    .when(!decisions.approve_is_destructive, ButtonVariants::danger)
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.decide_review(generation, ReviewDecision::Reject, cx);
                                     })),
                             )
                             .child(
                                 app_button(("review-select-approve", generation))
-                                    .label(if walletconnect_connection {
-                                        "Authenticate & connect"
-                                    } else {
-                                        "Authenticate & approve"
-                                    })
-                                    .primary()
+                                    .label(decisions.approve)
+                                    .when_else(
+                                        decisions.approve_is_destructive,
+                                        ButtonVariants::danger,
+                                        ButtonVariants::primary,
+                                    )
                                     .disabled(!approve_enabled)
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.decide_review(generation, ReviewDecision::Approve, cx);
