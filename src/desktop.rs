@@ -5406,6 +5406,12 @@ impl WalletWindow {
         match self.owner.accept_legal(document, &review.digest) {
             Ok(()) => {
                 self.open_next_required_legal(cx);
+                // Acceptance is written straight to the legal store, which
+                // raises no domain event, so nothing else was ever going to
+                // refresh the snapshot. Settings reads its acceptance dates
+                // from that snapshot and went on saying "Review required"
+                // about a document the reader had just accepted.
+                self.reload_desktop_snapshot(cx);
             }
             Err(error) => {
                 if let Some(review) = self.legal_review.as_mut() {
