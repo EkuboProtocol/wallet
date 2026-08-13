@@ -8646,7 +8646,9 @@ impl WalletWindow {
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            // Same rhythm as the settings pane: the gap between "Waiting on
+            // you" and "Already decided" is a section break, not a row break.
+            .gap_6()
             .child(
                 GroupBox::new()
                     .id("activity-needs-review")
@@ -8964,7 +8966,12 @@ impl WalletWindow {
             .max_w(px(720.0))
             .flex()
             .flex_col()
-            .gap_4()
+            // A settings pane's groups need more air than the rows inside
+            // them, or the whole page reads as one dense block — the same
+            // thing the account form fixed for itself. The reference desktop
+            // settings spacing is 20-28px between groups against 16px within
+            // one; these were both 16.
+            .gap_6()
             .child(settings_section(
                 "Appearance",
                 GroupBox::new()
