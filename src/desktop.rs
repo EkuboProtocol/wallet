@@ -28,7 +28,7 @@ use ekubo_wallet_core::approval::{
     ApprovalFact, ApprovalSection, ApprovalSectionKind, ReviewDecision, ReviewDocument,
 };
 use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
-use ekubo_wallet_core::core::policy::{Effect, Rule, WalletPolicy, diff_policies};
+use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, MCP_RESOURCE, McpClient};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
@@ -1421,20 +1421,6 @@ pub struct WalletWindow {
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
-    policy_rule_editor_open: bool,
-    policy_rule_original_index: Option<usize>,
-    policy_rule_effect: GuidedRuleEffect,
-    policy_rule_target_mode: GuidedLiteralMode,
-    policy_rule_chain_mode: GuidedLiteralMode,
-    policy_rule_value_mode: GuidedLiteralMode,
-    policy_rule_calldata_mode: GuidedCalldataMode,
-    policy_rule_label_input: Option<Entity<InputState>>,
-    policy_rule_targets_input: Option<Entity<InputState>>,
-    policy_rule_chain_ids_input: Option<Entity<InputState>>,
-    policy_rule_values_input: Option<Entity<InputState>>,
-    policy_rule_abi_input: Option<Entity<InputState>>,
-    policy_rule_args_input: Option<Entity<InputState>>,
-    policy_rule_errors: GuidedPolicyRuleErrors,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
@@ -1666,60 +1652,6 @@ struct PolicyEditor {
     current_policy: Option<WalletPolicy>,
     proposal: Option<PolicyProposal>,
     validation: Option<std::result::Result<PolicyDraftReview, SharedString>>,
-    mode: PolicyEditorMode,
-    guided_policy: std::result::Result<WalletPolicy, SharedString>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PolicyEditorMode {
-    Guided,
-    Advanced,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedRuleEffect {
-    Allow,
-    Deny,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedLiteralMode {
-    Any,
-    Exact,
-    Predicate,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedCalldataMode {
-    Any,
-    Empty,
-    Selector,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct GuidedPolicyRuleErrors {
-    label: Option<String>,
-    targets: Option<String>,
-    chain_ids: Option<String>,
-    values: Option<String>,
-    abi: Option<String>,
-    args: Option<String>,
-    form: Option<String>,
-}
-
-#[derive(Clone)]
-struct GuidedPolicyRuleDraft {
-    effect: GuidedRuleEffect,
-    label: String,
-    target_mode: GuidedLiteralMode,
-    targets: String,
-    chain_mode: GuidedLiteralMode,
-    chain_ids: String,
-    value_mode: GuidedLiteralMode,
-    values: String,
-    calldata_mode: GuidedCalldataMode,
-    abi: String,
-    args: String,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -3693,318 +3625,14 @@ fn review_policy_draft(
     })
 }
 
-fn allow_anything_policy_document() -> Result<(String, WalletPolicy)> {
-    let policy = WalletPolicy::allow_anything();
-    let document = serde_json::to_string_pretty(&policy)?;
-    Ok((document, policy))
+fn allow_anything_policy_document() -> Result<String> {
+    Ok(serde_json::to_string_pretty(
+        &WalletPolicy::allow_anything(),
+    )?)
 }
 
-fn disable_signing_policy_document() -> Result<(String, WalletPolicy)> {
-    let policy = WalletPolicy::deny_all();
-    let document = serde_json::to_string_pretty(&policy)?;
-    Ok((document, policy))
-}
-
-fn guided_literal_predicate(
-    mode: GuidedLiteralMode,
-    input: &str,
-    address: bool,
-    expected: &str,
-) -> std::result::Result<Option<serde_json::Value>, String> {
-    if mode == GuidedLiteralMode::Any {
-        return Ok(None);
-    }
-    if mode == GuidedLiteralMode::Predicate {
-        return serde_json::from_str(input.trim())
-            .map(Some)
-            .map_err(|error| format!("Enter one predicate JSON object: {error}"));
-    }
-    let values = input
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>();
-    if values.is_empty() {
-        return Err(format!(
-            "Enter one or more {expected}, separated by commas."
-        ));
-    }
-    let valid = if address {
-        values.iter().all(|value| {
-            *value == "$self"
-                || (value.len() == 42
-                    && value.starts_with("0x")
-                    && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit()))
-        })
-    } else {
-        values
-            .iter()
-            .all(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
-    };
-    if !valid {
-        return Err(format!("Use {expected}, separated by commas."));
-    }
-    let values = values.into_iter().map(str::to_owned).collect::<Vec<_>>();
-    Ok(Some(if values.len() == 1 {
-        serde_json::json!({ "eq": values[0] })
-    } else {
-        serde_json::json!({ "in": values })
-    }))
-}
-
-fn update_guided_policy_rule(
-    document: &str,
-    original_index: Option<usize>,
-    draft: &GuidedPolicyRuleDraft,
-) -> std::result::Result<(String, WalletPolicy), Box<GuidedPolicyRuleErrors>> {
-    let mut errors = GuidedPolicyRuleErrors::default();
-    let label = draft.label.trim();
-    if !label.is_empty()
-        && (label.chars().count() > 160
-            || ekubo_wallet_core::sanitize::stripped_capped(label, 160) != label)
-    {
-        errors.label = Some(
-            "Use at most 160 visible characters with no control or bidirectional characters."
-                .into(),
-        );
-    }
-    let target = guided_literal_predicate(
-        draft.target_mode,
-        &draft.targets,
-        true,
-        "complete 0x-prefixed addresses or $self",
-    )
-    .map_err(|error| errors.targets = Some(error))
-    .ok()
-    .flatten();
-    let chain_id = guided_literal_predicate(
-        draft.chain_mode,
-        &draft.chain_ids,
-        false,
-        "non-negative decimal chain IDs",
-    )
-    .map_err(|error| errors.chain_ids = Some(error))
-    .ok()
-    .flatten();
-    let native_value = guided_literal_predicate(
-        draft.value_mode,
-        &draft.values,
-        false,
-        "non-negative decimal wei values",
-    )
-    .map_err(|error| errors.values = Some(error))
-    .ok()
-    .flatten();
-    let calldata = match draft.calldata_mode {
-        GuidedCalldataMode::Any => None,
-        GuidedCalldataMode::Empty => Some(serde_json::json!({ "eq": "0x" })),
-        GuidedCalldataMode::Selector => {
-            let abi = draft.abi.trim();
-            if abi.is_empty() {
-                errors.abi = Some("Enter the complete canonical function signature.".into());
-            }
-            let args = match serde_json::from_str::<serde_json::Value>(draft.args.trim()) {
-                Ok(serde_json::Value::Object(args)) => Some(args),
-                Ok(_) => {
-                    errors.args = Some("Argument constraints must be a JSON object.".into());
-                    None
-                }
-                Err(error) => {
-                    errors.args = Some(format!("Argument constraints are not valid JSON: {error}"));
-                    None
-                }
-            };
-            args.filter(|_| !abi.is_empty()).map(|args| {
-                if args.is_empty() {
-                    serde_json::json!({ "selector": { "abi": abi } })
-                } else {
-                    serde_json::json!({ "selector": { "abi": abi, "args": args } })
-                }
-            })
-        }
-    };
-    if errors != GuidedPolicyRuleErrors::default() {
-        return Err(Box::new(errors));
-    }
-
-    let mut rule = serde_json::Map::new();
-    rule.insert(
-        "effect".into(),
-        serde_json::Value::String(
-            match draft.effect {
-                GuidedRuleEffect::Allow => "allow",
-                GuidedRuleEffect::Deny => "deny",
-            }
-            .into(),
-        ),
-    );
-    if !label.is_empty() {
-        rule.insert("label".into(), serde_json::Value::String(label.into()));
-    }
-    for (slot, predicate) in [
-        ("chain_id", chain_id),
-        ("to", target),
-        ("native_value", native_value),
-        ("calldata", calldata),
-    ] {
-        if let Some(predicate) = predicate {
-            rule.insert(slot.into(), predicate);
-        }
-    }
-
-    let mut value: serde_json::Value = match serde_json::from_str(document) {
-        Ok(value) => value,
-        Err(error) => {
-            errors.form = Some(format!(
-                "The advanced document is not valid JSON. Fix it before using the guided editor: {error}"
-            ));
-            return Err(Box::new(errors));
-        }
-    };
-    let rules = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("rules"))
-        .and_then(serde_json::Value::as_array_mut);
-    let Some(rules) = rules else {
-        errors.form = Some("The policy document has no ordered `rules` list.".into());
-        return Err(Box::new(errors));
-    };
-    let rule = serde_json::Value::Object(rule);
-    if let Some(index) = original_index {
-        let Some(existing) = rules.get_mut(index) else {
-            errors.form = Some("The selected rule changed while it was being edited.".into());
-            return Err(Box::new(errors));
-        };
-        *existing = rule;
-    } else {
-        rules.push(rule);
-    }
-    match WalletPolicy::parse(value) {
-        Ok(policy) => match serde_json::to_string_pretty(&policy) {
-            Ok(document) => Ok((document, policy)),
-            Err(error) => {
-                errors.form = Some(format!("Could not serialize the policy: {error:#}"));
-                Err(Box::new(errors))
-            }
-        },
-        Err(error) => {
-            if draft.calldata_mode == GuidedCalldataMode::Selector {
-                errors.abi = Some(format!(
-                    "The selector or its predicates are invalid: {error:#}"
-                ));
-            } else {
-                errors.form = Some(format!("The resulting rule is invalid: {error:#}"));
-            }
-            Err(Box::new(errors))
-        }
-    }
-}
-
-fn remove_guided_policy_rule(document: &str, index: usize) -> Result<(String, WalletPolicy)> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(document).context("policy document is not valid JSON")?;
-    let rules = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("rules"))
-        .and_then(serde_json::Value::as_array_mut)
-        .context("the policy document has no ordered rule list")?;
-    ensure!(index < rules.len(), "the selected rule no longer exists");
-    rules.remove(index);
-    let policy = WalletPolicy::parse(value)?;
-    let document = serde_json::to_string_pretty(&policy)?;
-    Ok((document, policy))
-}
-
-fn guided_predicate_values(
-    predicate: Option<&ekubo_wallet_core::core::predicate::Predicate>,
-) -> Result<(GuidedLiteralMode, String)> {
-    let Some(predicate) = predicate else {
-        return Ok((GuidedLiteralMode::Any, String::new()));
-    };
-    let value = serde_json::to_value(predicate)?;
-    match value {
-        serde_json::Value::String(value) if value == "any_value" => {
-            Ok((GuidedLiteralMode::Any, String::new()))
-        }
-        serde_json::Value::Object(object) if object.len() == 1 => {
-            if let Some(serde_json::Value::String(value)) = object.get("eq") {
-                Ok((GuidedLiteralMode::Exact, value.clone()))
-            } else if let Some(serde_json::Value::Array(values)) = object.get("in") {
-                let values = values
-                    .iter()
-                    .map(serde_json::Value::as_str)
-                    .collect::<Option<Vec<_>>>()
-                    .context("the literal set contains a non-string value")?;
-                Ok((GuidedLiteralMode::Exact, values.join(", ")))
-            } else {
-                Ok((
-                    GuidedLiteralMode::Predicate,
-                    serde_json::to_string_pretty(&serde_json::Value::Object(object))?,
-                ))
-            }
-        }
-        other => Ok((
-            GuidedLiteralMode::Predicate,
-            serde_json::to_string_pretty(&other)?,
-        )),
-    }
-}
-
-fn guided_rule_draft(rule: &Rule) -> Result<GuidedPolicyRuleDraft> {
-    let (target_mode, targets) = guided_predicate_values(rule.to.as_ref())?;
-    let (chain_mode, chain_ids) = guided_predicate_values(rule.chain_id.as_ref())?;
-    let (value_mode, values) = guided_predicate_values(rule.native_value.as_ref())?;
-    let (calldata_mode, abi, args) = match rule.calldata.as_ref() {
-        None => (GuidedCalldataMode::Any, String::new(), "{}".into()),
-        Some(predicate) => {
-            let value = serde_json::to_value(predicate)?;
-            match value {
-                serde_json::Value::String(value) if value == "any_value" => {
-                    (GuidedCalldataMode::Any, String::new(), "{}".into())
-                }
-                serde_json::Value::Object(object)
-                    if object.len() == 1
-                        && object.get("eq") == Some(&serde_json::Value::String("0x".into())) =>
-                {
-                    (GuidedCalldataMode::Empty, String::new(), "{}".into())
-                }
-                serde_json::Value::Object(object) if object.len() == 1 => {
-                    let selector = object
-                        .get("selector")
-                        .and_then(serde_json::Value::as_object)
-                        .context("this calldata predicate requires Advanced JSON")?;
-                    let abi = selector
-                        .get("abi")
-                        .and_then(serde_json::Value::as_str)
-                        .context("this selector has no ABI signature")?
-                        .to_owned();
-                    let args = selector
-                        .get("args")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    let args = serde_json::to_string_pretty(&args)?;
-                    (GuidedCalldataMode::Selector, abi, args)
-                }
-                _ => anyhow::bail!("this calldata predicate requires Advanced JSON"),
-            }
-        }
-    };
-    Ok(GuidedPolicyRuleDraft {
-        effect: match rule.effect {
-            Effect::Allow => GuidedRuleEffect::Allow,
-            Effect::Deny => GuidedRuleEffect::Deny,
-        },
-        label: rule.label.clone().unwrap_or_default(),
-        target_mode,
-        targets,
-        chain_mode,
-        chain_ids,
-        value_mode,
-        values,
-        calldata_mode,
-        abi,
-        args,
-    })
+fn disable_signing_policy_document() -> Result<String> {
+    Ok(serde_json::to_string_pretty(&WalletPolicy::deny_all())?)
 }
 
 impl WalletWindow {
@@ -4126,20 +3754,6 @@ impl WalletWindow {
             network_proposal_error: None,
             policy_json_input: None,
             policy_editor: None,
-            policy_rule_editor_open: false,
-            policy_rule_original_index: None,
-            policy_rule_effect: GuidedRuleEffect::Allow,
-            policy_rule_target_mode: GuidedLiteralMode::Any,
-            policy_rule_chain_mode: GuidedLiteralMode::Any,
-            policy_rule_value_mode: GuidedLiteralMode::Any,
-            policy_rule_calldata_mode: GuidedCalldataMode::Any,
-            policy_rule_label_input: None,
-            policy_rule_targets_input: None,
-            policy_rule_chain_ids_input: None,
-            policy_rule_values_input: None,
-            policy_rule_abi_input: None,
-            policy_rule_args_input: None,
-            policy_rule_errors: GuidedPolicyRuleErrors::default(),
             policy_installing: false,
             policy_action_error: None,
             token_proposal_busy: false,
@@ -4399,42 +4013,6 @@ impl WalletWindow {
                     .code_editor("json")
                     .rows(20)
                     .placeholder("Select an account to inspect and edit its policy")
-            }));
-        }
-        if self.policy_rule_label_input.is_none() {
-            self.policy_rule_label_input =
-                Some(cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("What this permission is for")
-                }));
-        }
-        if self.policy_rule_targets_input.is_none() {
-            self.policy_rule_targets_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("0x-prefixed target addresses, separated by commas")
-            }));
-        }
-        if self.policy_rule_chain_ids_input.is_none() {
-            self.policy_rule_chain_ids_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Decimal chain IDs, separated by commas")
-            }));
-        }
-        if self.policy_rule_values_input.is_none() {
-            self.policy_rule_values_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Exact wei values, separated by commas")
-            }));
-        }
-        if self.policy_rule_abi_input.is_none() {
-            self.policy_rule_abi_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("transfer(address to, uint256 amount)")
-            }));
-        }
-        if self.policy_rule_args_input.is_none() {
-            self.policy_rule_args_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor("json")
-                    .rows(6)
-                    .default_value("{}")
-                    .placeholder("Typed argument predicate object")
             }));
         }
     }
@@ -5453,15 +5031,10 @@ impl WalletWindow {
                         self.policy_editor = Some(PolicyEditor {
                             wallet_id: wallet_id.to_owned(),
                             source_revision,
-                            guided_policy: Ok(current_policy
-                                .clone()
-                                .unwrap_or_else(WalletPolicy::require_approval_for_everything)),
                             current_policy,
                             proposal: None,
                             validation: None,
-                            mode: PolicyEditorMode::Advanced,
                         });
-                        self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
                         self.policy_editor_anchor.scroll_to(window, cx);
                     }
@@ -5510,11 +5083,8 @@ impl WalletWindow {
                             source_revision: Some(proposal.source_revision),
                             current_policy,
                             proposal: Some(proposal),
-                            guided_policy: Ok(review.policy.clone()),
                             validation: Some(Ok(review)),
-                            mode: PolicyEditorMode::Advanced,
                         });
-                        self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
                     }
                     Err(error) => {
@@ -5552,236 +5122,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn set_policy_editor_mode(&mut self, mode: PolicyEditorMode, cx: &mut Context<Self>) {
-        let Some(editor) = self.policy_editor.as_mut() else {
-            return;
-        };
-        if mode == PolicyEditorMode::Guided
-            && let Some(input) = self.policy_json_input.as_ref()
-        {
-            editor.guided_policy = serde_json::from_str(input.read(cx).value().as_ref())
-                .context("policy document is not valid JSON")
-                .and_then(WalletPolicy::parse)
-                .map_err(|error| format!("Guided editor unavailable: {error:#}").into());
-        }
-        editor.mode = mode;
-        cx.notify();
-    }
-
-    fn reset_guided_policy_rule_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [
-            self.policy_rule_label_input.as_ref(),
-            self.policy_rule_targets_input.as_ref(),
-            self.policy_rule_chain_ids_input.as_ref(),
-            self.policy_rule_values_input.as_ref(),
-            self.policy_rule_abi_input.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        if let Some(input) = self.policy_rule_args_input.as_ref() {
-            input.update(cx, |input, cx| input.set_value("{}", window, cx));
-        }
-        self.policy_rule_editor_open = false;
-        self.policy_rule_original_index = None;
-        self.policy_rule_effect = GuidedRuleEffect::Allow;
-        self.policy_rule_target_mode = GuidedLiteralMode::Any;
-        self.policy_rule_chain_mode = GuidedLiteralMode::Any;
-        self.policy_rule_value_mode = GuidedLiteralMode::Any;
-        self.policy_rule_calldata_mode = GuidedCalldataMode::Any;
-        self.policy_rule_errors = GuidedPolicyRuleErrors::default();
-        cx.notify();
-    }
-
-    fn begin_guided_policy_rule(
-        &mut self,
-        index: Option<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.reset_guided_policy_rule_form(window, cx);
-        if let Some(index) = index {
-            let Some(Ok(policy)) = self
-                .policy_editor
-                .as_ref()
-                .map(|editor| &editor.guided_policy)
-            else {
-                return;
-            };
-            let Some(rule) = policy.rules.get(index) else {
-                self.policy_rule_errors.form = Some("The selected rule no longer exists.".into());
-                cx.notify();
-                return;
-            };
-            let draft = match guided_rule_draft(rule) {
-                Ok(draft) => draft,
-                Err(error) => {
-                    self.policy_rule_errors.form = Some(format!(
-                        "This rule uses predicates that need the Advanced JSON editor: {error:#}"
-                    ));
-                    cx.notify();
-                    return;
-                }
-            };
-            let values = [
-                (self.policy_rule_label_input.as_ref(), draft.label),
-                (self.policy_rule_targets_input.as_ref(), draft.targets),
-                (self.policy_rule_chain_ids_input.as_ref(), draft.chain_ids),
-                (self.policy_rule_values_input.as_ref(), draft.values),
-                (self.policy_rule_abi_input.as_ref(), draft.abi),
-                (self.policy_rule_args_input.as_ref(), draft.args),
-            ];
-            for (input, value) in values {
-                if let Some(input) = input {
-                    input.update(cx, |input, cx| input.set_value(value, window, cx));
-                }
-            }
-            self.policy_rule_effect = draft.effect;
-            self.policy_rule_target_mode = draft.target_mode;
-            self.policy_rule_chain_mode = draft.chain_mode;
-            self.policy_rule_value_mode = draft.value_mode;
-            self.policy_rule_calldata_mode = draft.calldata_mode;
-            self.policy_rule_original_index = Some(index);
-        }
-        self.policy_rule_editor_open = true;
-        if let Some(input) = self.policy_rule_label_input.as_ref() {
-            input.update(cx, |input, cx| input.focus(window, cx));
-        }
-        self.policy_editor_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    fn save_guided_policy_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inputs = (
-            self.policy_rule_label_input.as_ref(),
-            self.policy_rule_targets_input.as_ref(),
-            self.policy_rule_chain_ids_input.as_ref(),
-            self.policy_rule_values_input.as_ref(),
-            self.policy_rule_abi_input.as_ref(),
-            self.policy_rule_args_input.as_ref(),
-            self.policy_json_input.as_ref(),
-        );
-        let (
-            Some(label),
-            Some(targets),
-            Some(chain_ids),
-            Some(values),
-            Some(abi),
-            Some(args),
-            Some(document_input),
-        ) = inputs
-        else {
-            return;
-        };
-        if !self.policy_rule_editor_open {
-            return;
-        }
-        let draft = GuidedPolicyRuleDraft {
-            effect: self.policy_rule_effect,
-            label: label.read(cx).value().to_string(),
-            target_mode: self.policy_rule_target_mode,
-            targets: targets.read(cx).value().to_string(),
-            chain_mode: self.policy_rule_chain_mode,
-            chain_ids: chain_ids.read(cx).value().to_string(),
-            value_mode: self.policy_rule_value_mode,
-            values: values.read(cx).value().to_string(),
-            calldata_mode: self.policy_rule_calldata_mode,
-            abi: abi.read(cx).value().to_string(),
-            args: args.read(cx).value().to_string(),
-        };
-        match update_guided_policy_rule(
-            document_input.read(cx).value().as_ref(),
-            self.policy_rule_original_index,
-            &draft,
-        ) {
-            Ok((document, policy)) => {
-                document_input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
-            }
-            Err(errors) => self.policy_rule_errors = *errors,
-        }
-        cx.notify();
-    }
-
-    fn remove_guided_policy_rule(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.policy_json_input.as_ref() else {
-            return;
-        };
-        match remove_guided_policy_rule(input.read(cx).value().as_ref(), index) {
-            Ok((document, policy)) => {
-                input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.reset_guided_policy_rule_form(window, cx);
-                self.policy_action_error = None;
-            }
-            Err(error) => {
-                self.policy_action_error =
-                    Some(format!("Could not remove rule from draft: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
-    fn move_guided_policy_rule(
-        &mut self,
-        from: usize,
-        to: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.policy_json_input.as_ref() else {
-            return;
-        };
-        let result = (|| -> Result<(String, WalletPolicy)> {
-            let mut value: serde_json::Value =
-                serde_json::from_str(input.read(cx).value().as_ref())
-                    .context("policy document is not valid JSON")?;
-            let rules = value
-                .as_object_mut()
-                .and_then(|root| root.get_mut("rules"))
-                .and_then(serde_json::Value::as_array_mut)
-                .context("the policy document has no ordered rule list")?;
-            ensure!(
-                from < rules.len() && to < rules.len(),
-                "the selected rule no longer exists"
-            );
-            rules.swap(from, to);
-            let policy = WalletPolicy::parse(value)?;
-            Ok((serde_json::to_string_pretty(&policy)?, policy))
-        })();
-        match result {
-            Ok((document, policy)) => {
-                input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
-            }
-            Err(error) => {
-                self.policy_action_error =
-                    Some(format!("Could not reorder rule: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
     fn apply_allow_anything_policy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
@@ -5789,12 +5129,10 @@ impl WalletWindow {
             return;
         };
         match allow_anything_policy_document() {
-            Ok((document, policy)) => {
+            Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                editor.guided_policy = Ok(policy);
                 self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -5811,12 +5149,10 @@ impl WalletWindow {
             return;
         };
         match disable_signing_policy_document() {
-            Ok((document, policy)) => {
+            Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                editor.guided_policy = Ok(policy);
                 self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -5836,9 +5172,7 @@ impl WalletWindow {
             Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                editor.guided_policy = Ok(WalletPolicy::require_approval_for_everything());
                 self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -5866,7 +5200,6 @@ impl WalletWindow {
                 input.update(cx, |input, cx| {
                     input.set_value(review.document.clone(), window, cx);
                 });
-                editor.guided_policy = Ok(review.policy.clone());
                 self.policy_action_error = None;
                 Ok(review)
             }
@@ -9931,379 +9264,6 @@ impl WalletWindow {
         div().flex().flex_col().gap_4().child(form).child(accounts)
     }
 
-    fn render_guided_policy_rule_form(&self, cx: &mut Context<Self>) -> gpui::Div {
-        if !self.policy_rule_editor_open {
-            return div();
-        }
-        let mut form = div()
-            .p_4()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().font_semibold().child(selectable_label(format!(
-                "{} ordered rule",
-                if self.policy_rule_original_index.is_some() {
-                    "Edit"
-                } else {
-                    "Add"
-                }
-            ))))
-            .child(selectable_label("Effect"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("policy-rule-allow")
-                            .label("Allow automatically")
-                            .toggled(self.policy_rule_effect == GuidedRuleEffect::Allow)
-                            .when(
-                                self.policy_rule_effect == GuidedRuleEffect::Allow,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_effect = GuidedRuleEffect::Allow;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-deny")
-                            .label("Deny without review")
-                            .danger()
-                            .toggled(self.policy_rule_effect == GuidedRuleEffect::Deny)
-                            .when(
-                                self.policy_rule_effect == GuidedRuleEffect::Deny,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_effect = GuidedRuleEffect::Deny;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if let Some(input) = self.policy_rule_label_input.as_ref() {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(selectable_label("Description (optional)"))
-                    .child(app_input(input, cx).aria_label("Rule description"))
-                    .when_some(self.policy_rule_errors.label.clone(), |field, error| {
-                        field.child(field_error("policy-rule-description-error", error, cx))
-                    }),
-            );
-        }
-        form = form
-            .child(selectable_label("Called contract or recipient"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("policy-rule-target-any")
-                            .label("Any target")
-                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Any)
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.targets = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-target-exact")
-                            .label("Named targets")
-                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Exact)
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-target-predicate")
-                            .label("Predicate")
-                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Predicate)
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if self.policy_rule_target_mode != GuidedLiteralMode::Any
-            && let Some(input) = self.policy_rule_targets_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        app_input(input, cx).aria_label("Called contract or recipient constraint"),
-                    )
-                    .when_some(self.policy_rule_errors.targets.clone(), |field, error| {
-                        field.child(field_error("policy-rule-targets-error", error, cx))
-                    }),
-            );
-        }
-        form = form.child(selectable_label("Network chain ID")).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("policy-rule-chain-any")
-                        .label("Any network")
-                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Any)
-                        .when(
-                            self.policy_rule_chain_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_chain_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.chain_ids = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-chain-exact")
-                        .label("Specific chain IDs")
-                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Exact)
-                        .when(
-                            self.policy_rule_chain_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_chain_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-chain-predicate")
-                        .label("Predicate")
-                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Predicate)
-                        .when(
-                            self.policy_rule_chain_mode == GuidedLiteralMode::Predicate,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_chain_mode = GuidedLiteralMode::Predicate;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_chain_mode != GuidedLiteralMode::Any
-            && let Some(input) = self.policy_rule_chain_ids_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(app_input(input, cx).aria_label("Network chain ID constraint"))
-                    .when_some(self.policy_rule_errors.chain_ids.clone(), |field, error| {
-                        field.child(field_error("policy-rule-chain-ids-error", error, cx))
-                    }),
-            );
-        }
-        form = form
-            .child(selectable_label("Native value on the call"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("policy-rule-value-any")
-                            .label("Any value")
-                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Any)
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.values = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-value-exact")
-                            .label("Exact wei values")
-                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Exact)
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-value-predicate")
-                            .label("Range or predicate")
-                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Predicate)
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if self.policy_rule_value_mode != GuidedLiteralMode::Any
-            && let Some(input) = self.policy_rule_values_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(app_input(input, cx).aria_label("Native value constraint"))
-                    .when_some(self.policy_rule_errors.values.clone(), |field, error| {
-                        field.child(field_error("policy-rule-values-error", error, cx))
-                    }),
-            );
-        }
-        form = form.child(selectable_label("Calldata")).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("policy-rule-calldata-any")
-                        .label("Any calldata")
-                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Any)
-                        .when(
-                            self.policy_rule_calldata_mode == GuidedCalldataMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_calldata_mode = GuidedCalldataMode::Any;
-                            view.policy_rule_errors.abi = None;
-                            view.policy_rule_errors.args = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-calldata-empty")
-                        .label("Empty calldata")
-                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Empty)
-                        .when(
-                            self.policy_rule_calldata_mode == GuidedCalldataMode::Empty,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_calldata_mode = GuidedCalldataMode::Empty;
-                            view.policy_rule_errors.abi = None;
-                            view.policy_rule_errors.args = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-calldata-selector")
-                        .label("ABI function")
-                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Selector)
-                        .when(
-                            self.policy_rule_calldata_mode == GuidedCalldataMode::Selector,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_calldata_mode = GuidedCalldataMode::Selector;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_calldata_mode == GuidedCalldataMode::Selector {
-            if let Some(input) = self.policy_rule_abi_input.as_ref() {
-                form = form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(selectable_label("Canonical function signature"))
-                        .child(app_input(input, cx).aria_label("Canonical function signature"))
-                        .when_some(self.policy_rule_errors.abi.clone(), |field, error| {
-                            field.child(field_error("policy-rule-abi-error", error, cx))
-                        }),
-                );
-            }
-            if let Some(input) = self.policy_rule_args_input.as_ref() {
-                form = form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(selectable_label("Typed argument predicates (JSON object)"))
-                        .child(
-                            app_input(input, cx)
-                                .aria_label("Typed argument predicates")
-                                .w_full(),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(selectable_label("Use eq/in predicates, or compose any, all, not, each, selector, and length predicates. The signature type-checks every constraint.")),
-                        )
-                        .when_some(self.policy_rule_errors.args.clone(), |field, error| {
-                            field.child(field_error("policy-rule-arguments-error", error, cx))
-                        }),
-                );
-            }
-        }
-        form.when_some(self.policy_rule_errors.form.clone(), |form, error| {
-            form.child(field_error("policy-rule-form-error", error, cx))
-        })
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(
-                    app_button("save-guided-policy-rule")
-                        .label(if self.policy_rule_original_index.is_some() {
-                            "Save rule draft"
-                        } else {
-                            "Add rule draft"
-                        })
-                        .primary()
-                        .disabled(self.policy_installing)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.save_guided_policy_rule(window, cx);
-                        })),
-                )
-                .child(
-                    app_button("cancel-guided-policy-rule")
-                        .label("Cancel")
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.reset_guided_policy_rule_form(window, cx);
-                        })),
-                ),
-        )
-    }
-
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div()
             .h_full()
@@ -10559,182 +9519,42 @@ impl WalletWindow {
                     )
                 },
             );
-        match editor.mode {
-            PolicyEditorMode::Advanced => {
-                editor_panel = editor_panel
-                    .child(
-                        div()
-                        .id("policy-json-editor-input")
-                        .flex_1()
-                        .min_h(px(320.0))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .child(selectable_label("Policy JSON")),
-                        )
-                        .child(
-                            app_input(input, cx)
-                                .aria_label("Policy JSON")
-                                .font_family(MONO_FONT_FAMILY)
-                                .w_full()
-                                .h_full(),
-                        ),
-                    )
-                    .when(allow_anything_draft, |panel| {
-                        panel.child(
-                            div()
-                                .id("policy-unrestricted-warning")
-                                .role(Role::Alert)
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().danger)
-                                .text_color(cx.theme().danger)
-                                .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
-                        )
-                    });
-            }
-            PolicyEditorMode::Guided => match &editor.guided_policy {
-                Err(error) => {
-                    editor_panel = editor_panel.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(selectable_label(error.clone())),
-                    );
-                }
-                Ok(policy) => {
-                    let mut rule_cards = div().flex().flex_col().gap_2();
-                    for (rule_index, rule) in policy.rules.iter().enumerate() {
-                        let mut controls = h_flex().gap_2();
-                        if rule_index > 0 {
-                            controls =
-                                controls.child(
-                                    app_button(SharedString::from(format!(
-                                        "move-policy-rule-up-{rule_index}"
-                                    )))
-                                    .label("Move up")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.move_guided_policy_rule(
-                                            rule_index,
-                                            rule_index - 1,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                                );
-                        }
-                        if rule_index + 1 < policy.rules.len() {
-                            controls =
-                                controls.child(
-                                    app_button(SharedString::from(format!(
-                                        "move-policy-rule-down-{rule_index}"
-                                    )))
-                                    .label("Move down")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.move_guided_policy_rule(
-                                            rule_index,
-                                            rule_index + 1,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                                );
-                        }
-                        rule_cards = rule_cards.child(
-                            div()
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().font_semibold().child(selectable_text(
-                                    ("policy-rule-title", rule_index),
-                                    &format!(
-                                        "{}. {}",
-                                        rule_index + 1,
-                                        match rule.effect {
-                                            Effect::Allow => "Allow",
-                                            Effect::Deny => "Deny",
-                                        }
-                                    ),
-                                )))
-                                .child(div().min_w_0().text_sm().child(selectable_text(
-                                    ("policy-rule-description", rule_index),
-                                    &rule.describe(),
-                                )))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(selectable_text(
-                                            ("policy-rule-match-description", rule_index),
-                                            "The first matching rule decides this call.",
-                                        )),
-                                )
-                                .child(
-                                    controls
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "edit-policy-rule-{rule_index}"
-                                            )))
-                                            .label("Edit")
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.begin_guided_policy_rule(
-                                                    Some(rule_index),
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                        )
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "remove-policy-rule-{rule_index}"
-                                            )))
-                                            .label("Remove")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.remove_guided_policy_rule(
-                                                    rule_index, window, cx,
-                                                );
-                                            })),
-                                        ),
-                                ),
-                        );
-                    }
-                    if policy.rules.is_empty() {
-                        rule_cards =
-                            rule_cards.child(div().text_color(cx.theme().muted_foreground).child(
-                                selectable_label(
-                                    "No rules. Every transaction request will need your approval.",
-                                ),
-                            ));
-                    }
-                    editor_panel = editor_panel
-                        .child(self.render_guided_policy_rule_form(cx))
-                        .child(
-                            GroupBox::new()
-                                .id("guided-policy-rules")
-                                .outline()
-                                .title("Ordered rules")
-                                .child(rule_cards)
-                                .child(app_button("add-policy-rule").label("Add rule").on_click(
-                                    cx.listener(|view, _, window, cx| {
-                                        view.begin_guided_policy_rule(None, window, cx);
-                                    }),
-                                )),
-                        );
-                }
-            },
-        }
         editor_panel = editor_panel
+            .child(
+                div()
+                .id("policy-json-editor-input")
+                .flex_1()
+                .min_h(px(320.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .child(selectable_label("Policy JSON")),
+                )
+                .child(
+                    app_input(input, cx)
+                        .aria_label("Policy JSON")
+                        .font_family(MONO_FONT_FAMILY)
+                        .w_full()
+                        .h_full(),
+                ),
+            )
+            .when(allow_anything_draft, |panel| {
+                panel.child(
+                    div()
+                        .id("policy-unrestricted-warning")
+                        .role(Role::Alert)
+                        .p_3()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().danger)
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
+                )
+            })
             .child(
                 GroupBox::new()
                     .id("policy-presets")
@@ -13974,12 +12794,6 @@ fn show_wallet_window(
         view.network_editor_original = None;
         view.policy_json_input = None;
         view.policy_editor = None;
-        view.policy_rule_label_input = None;
-        view.policy_rule_targets_input = None;
-        view.policy_rule_chain_ids_input = None;
-        view.policy_rule_values_input = None;
-        view.policy_rule_abi_input = None;
-        view.policy_rule_args_input = None;
         view.policy_installing = false;
         view.token_proposal_busy = false;
         view.network_proposal_busy = false;

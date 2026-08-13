@@ -1,5 +1,6 @@
 use super::*;
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
+use ekubo_wallet_core::core::policy::Effect;
 
 #[test]
 fn command_palette_matches_route_labels_as_ordered_subsequences() {
@@ -358,124 +359,12 @@ fn portfolio_rows_are_commingled_by_chain_then_token_address() {
     );
 }
 
-fn guided_rule_draft_with_selector() -> GuidedPolicyRuleDraft {
-    GuidedPolicyRuleDraft {
-        effect: GuidedRuleEffect::Allow,
-        label: "Send a bounded amount to named recipients".into(),
-        target_mode: GuidedLiteralMode::Exact,
-        targets: concat!(
-            "0x1111111111111111111111111111111111111111, ",
-            "0x2222222222222222222222222222222222222222"
-        )
-        .into(),
-        chain_mode: GuidedLiteralMode::Exact,
-        chain_ids: "1".into(),
-        value_mode: GuidedLiteralMode::Exact,
-        values: "0".into(),
-        calldata_mode: GuidedCalldataMode::Selector,
-        abi: "transfer(address to, uint256 amount)".into(),
-        args: r#"{
-            "to": { "in": ["0x3333333333333333333333333333333333333333"] },
-            "amount": { "all": [{ "not": { "eq": "0" } }] }
-        }"#
-        .into(),
-    }
-}
-
-#[test]
-fn guided_policy_rule_crud_round_trips_through_canonical_validation() {
-    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
-    let draft = guided_rule_draft_with_selector();
-    let (document, policy) = update_guided_policy_rule(&document, None, &draft).unwrap();
-
-    assert_eq!(policy.rules.len(), 1);
-    assert_eq!(
-        policy.rules[0].label.as_deref(),
-        Some("Send a bounded amount to named recipients")
-    );
-    assert!(policy.rules[0].describe().contains("transfer"));
-
-    let mut replacement = draft;
-    replacement.effect = GuidedRuleEffect::Deny;
-    replacement.label = "Never make this transfer".into();
-    replacement.calldata_mode = GuidedCalldataMode::Empty;
-    let (document, policy) = update_guided_policy_rule(&document, Some(0), &replacement).unwrap();
-    assert_eq!(policy.rules.len(), 1);
-    assert!(
-        policy.rules[0]
-            .describe()
-            .starts_with("deny [Never make this transfer]")
-    );
-
-    let (document, policy) = remove_guided_policy_rule(&document, 0).unwrap();
-    assert!(policy.rules.is_empty());
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&document).unwrap()["rules"],
-        serde_json::json!([])
-    );
-}
-
-#[test]
-fn guided_policy_rule_preserves_recursive_predicates_when_reopened() {
-    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
-    let draft = GuidedPolicyRuleDraft {
-        effect: GuidedRuleEffect::Allow,
-        label: "Bounded mainnet transfer".into(),
-        target_mode: GuidedLiteralMode::Predicate,
-        targets: r#"{ "not": { "eq": "0x0000000000000000000000000000000000000000" } }"#.into(),
-        chain_mode: GuidedLiteralMode::Predicate,
-        chain_ids: r#"{ "any": [{ "eq": "1" }, { "eq": "8453" }] }"#.into(),
-        value_mode: GuidedLiteralMode::Predicate,
-        values: r#"{ "all": [{ "gte": "1" }, { "lte": "1000000000000000000" }] }"#.into(),
-        calldata_mode: GuidedCalldataMode::Any,
-        abi: String::new(),
-        args: "{}".into(),
-    };
-    let (_, policy) = update_guided_policy_rule(&document, None, &draft).unwrap();
-    let reopened = guided_rule_draft(&policy.rules[0]).unwrap();
-
-    assert_eq!(reopened.target_mode, GuidedLiteralMode::Predicate);
-    assert_eq!(reopened.chain_mode, GuidedLiteralMode::Predicate);
-    assert_eq!(reopened.value_mode, GuidedLiteralMode::Predicate);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&reopened.values).unwrap(),
-        serde_json::json!({ "all": [{ "gte": "1" }, { "lte": "1000000000000000000" }] })
-    );
-}
-
-#[test]
-fn guided_policy_rule_reports_errors_next_to_each_invalid_field() {
-    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
-    let draft = GuidedPolicyRuleDraft {
-        effect: GuidedRuleEffect::Allow,
-        label: "\u{202e}misleading".into(),
-        target_mode: GuidedLiteralMode::Exact,
-        targets: "not an address".into(),
-        chain_mode: GuidedLiteralMode::Exact,
-        chain_ids: "0x1234".into(),
-        value_mode: GuidedLiteralMode::Exact,
-        values: "one ether".into(),
-        calldata_mode: GuidedCalldataMode::Selector,
-        abi: String::new(),
-        args: "[]".into(),
-    };
-
-    let errors = update_guided_policy_rule(&document, None, &draft).unwrap_err();
-    assert!(errors.label.is_some());
-    assert!(errors.targets.is_some());
-    assert!(errors.chain_ids.is_some());
-    assert!(errors.values.is_some());
-    assert!(errors.abi.is_some());
-    assert!(errors.args.is_some());
-    assert!(errors.form.is_none());
-}
-
 #[test]
 fn allow_anything_preset_is_canonical_and_unambiguously_unrestricted() {
-    let (document, policy) = allow_anything_policy_document().unwrap();
-    let reparsed = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
+    let document = allow_anything_policy_document().unwrap();
+    let policy = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
 
-    assert_eq!(policy, reparsed);
+    assert_eq!(policy, WalletPolicy::allow_anything());
     assert_eq!(policy.rules.len(), 1);
     assert_eq!(policy.rules[0].effect, Effect::Allow);
     assert!(policy.rules[0].chain_id.is_none());
@@ -486,10 +375,10 @@ fn allow_anything_preset_is_canonical_and_unambiguously_unrestricted() {
 
 #[test]
 fn disable_signing_preset_is_one_unconditional_deny() {
-    let (document, policy) = disable_signing_policy_document().unwrap();
-    let reparsed = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
+    let document = disable_signing_policy_document().unwrap();
+    let policy = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
 
-    assert_eq!(policy, reparsed);
+    assert_eq!(policy, WalletPolicy::deny_all());
     assert_eq!(policy.rules.len(), 1);
     assert_eq!(policy.rules[0].effect, Effect::Deny);
     assert!(policy.rules[0].chain_id.is_none());
