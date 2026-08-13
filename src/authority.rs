@@ -916,10 +916,14 @@ impl OwnerApi {
         self.config.network_by_chain_id(&chain_id.to_string())
     }
 
-    /// Read every account on all enabled configured networks with bounded
+    /// Read accounts on all enabled configured networks with bounded
     /// concurrency. Each network is block-pinned by the same core path exposed
     /// to agents, and one read's failure does not hide the others.
-    pub async fn portfolio(&self) -> Result<OwnerPortfolioSnapshot> {
+    ///
+    /// `wallet_id` restricts the read to a single account. The desktop viewer
+    /// shows one account at a time, and reading the accounts nobody is looking
+    /// at multiplies the RPC calls a refresh costs by the account count.
+    pub async fn portfolio(&self, wallet_id: Option<&str>) -> Result<OwnerPortfolioSnapshot> {
         use futures::{StreamExt as _, stream};
 
         let mut snapshot = self.config.load()?;
@@ -931,6 +935,10 @@ impl OwnerApi {
             !snapshot.networks.is_empty(),
             "there are no enabled configured networks"
         );
+        if let Some(wallet_id) = wallet_id {
+            snapshot.wallets.retain(|wallet| wallet.id == wallet_id);
+            ensure!(!snapshot.wallets.is_empty(), "unknown account {wallet_id}");
+        }
         let token_store = TokenStore::production(self.config.data_dir())?;
         let mut known_by_chain = std::collections::BTreeMap::new();
         for network in &snapshot.networks {

@@ -55,6 +55,7 @@ use gpui_component::{
     input::{Input, InputContentType, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
+    skeleton::Skeleton,
     spinner::Spinner,
     switch::Switch,
     tab::{Tab, TabBar},
@@ -295,6 +296,68 @@ fn copy_button(
         accessibility_label: accessibility_label.into(),
         large: false,
     }
+}
+
+/// Which account tab the policies page shows as selected. The editor owns the
+/// selection, so an account whose editor has not opened yet — or that has been
+/// deleted out from under the editor — falls back to the first tab.
+fn policy_selected_account_index(
+    account_labels: &[String],
+    editor_wallet_id: Option<&str>,
+) -> usize {
+    editor_wallet_id
+        .and_then(|wallet_id| account_labels.iter().position(|label| label == wallet_id))
+        .unwrap_or_default()
+}
+
+/// Balance rows that have not arrived yet, drawn in the card and at the row
+/// pitch the real ones use. A spinner says only that the app is busy; these
+/// say a list of tokens is what is coming, and where it will be.
+fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
+    // Uneven widths, because equal-length bars read as a rendered table rather
+    // than as a placeholder for one.
+    const ROWS: [(gpui::Pixels, gpui::Pixels, gpui::Pixels); 3] = [
+        (px(184.0), px(96.0), px(248.0)),
+        (px(136.0), px(72.0), px(212.0)),
+        (px(208.0), px(112.0), px(264.0)),
+    ];
+    let mut card = div()
+        .w_full()
+        .min_w_0()
+        .p_4()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
+        .flex()
+        .flex_col();
+    for (index, (identity, balance, metadata)) in ROWS.into_iter().enumerate() {
+        card = card.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .py_2()
+                .when(index + 1 < ROWS.len(), |row| {
+                    row.border_b_1().border_color(cx.theme().border)
+                })
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(Skeleton::new().h_5().w(identity).max_w_full())
+                        .child(Skeleton::new().h_5().w(balance).flex_none()),
+                )
+                .child(Skeleton::new().secondary().h_3().w(metadata).max_w_full()),
+        );
+    }
+    card
 }
 
 fn account_switcher(
@@ -5905,15 +5968,43 @@ impl WalletWindow {
         self.reinstall_detected_agents(cx);
     }
 
+    /// The accounts list is background-cached and never depends on the
+    /// portfolio read, so the selector keeps working — and keeps its label —
+    /// while balances load, fail, or have never been fetched.
+    fn portfolio_accounts(&self) -> &[WalletMetadata] {
+        self.cached_accounts().unwrap_or_default()
+    }
+
+    fn selected_portfolio_account(&self) -> Option<&WalletMetadata> {
+        let accounts = self.portfolio_accounts();
+        accounts.get(clamped_portfolio_account_index(
+            accounts.len(),
+            self.portfolio_account_index,
+        ))
+    }
+
     fn refresh_portfolio(&mut self, cx: &mut Context<Self>) {
         if self.legal_gate || matches!(self.portfolio, PortfolioState::Loading) {
             return;
         }
+        // Without a selected account there is nothing to read. Leaving the
+        // state `Idle` lets the render-time trigger try again once the
+        // background accounts snapshot arrives.
+        let Some(wallet_id) = self
+            .selected_portfolio_account()
+            .map(|account| account.id.clone())
+        else {
+            return;
+        };
         self.portfolio_generation = self.portfolio_generation.wrapping_add(1);
         let generation = self.portfolio_generation;
         self.portfolio = PortfolioState::Loading;
         let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.portfolio().await });
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.portfolio(Some(&wallet_id)).await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -5921,13 +6012,7 @@ impl WalletWindow {
                     return;
                 }
                 view.portfolio = match result {
-                    Ok(snapshot) => {
-                        view.portfolio_account_index = clamped_portfolio_account_index(
-                            snapshot.accounts.len(),
-                            view.portfolio_account_index,
-                        );
-                        PortfolioState::Ready(snapshot)
-                    }
+                    Ok(snapshot) => PortfolioState::Ready(snapshot),
                     Err(error) => PortfolioState::Failed(
                         format!("Could not load portfolio: {error:#}").into(),
                     ),
@@ -5944,11 +6029,15 @@ impl WalletWindow {
     }
 
     fn select_portfolio_account(&mut self, index: usize, cx: &mut Context<Self>) {
-        let PortfolioState::Ready(snapshot) = &self.portfolio else {
+        let index = clamped_portfolio_account_index(self.portfolio_accounts().len(), index);
+        if index == self.portfolio_account_index {
             return;
-        };
-        self.portfolio_account_index =
-            clamped_portfolio_account_index(snapshot.accounts.len(), index);
+        }
+        self.portfolio_account_index = index;
+        // Balances are read one account at a time, so the shown snapshot
+        // belongs to the account that was selected a moment ago.
+        self.invalidate_portfolio();
+        self.refresh_portfolio(cx);
         cx.notify();
     }
 
@@ -10091,39 +10180,8 @@ impl WalletWindow {
             );
         }
 
-        if accounts.len() > 1 {
-            let account_labels = accounts
-                .iter()
-                .map(|account| account.id.clone())
-                .collect::<Vec<_>>();
-            let selected_index = self
-                .policy_editor
-                .as_ref()
-                .and_then(|editor| {
-                    account_labels
-                        .iter()
-                        .position(|account| account == &editor.wallet_id)
-                })
-                .unwrap_or_default();
-            let switch_accounts = account_labels.clone();
-            content = content.child(
-                GroupBox::new()
-                    .id("policy-account-picker")
-                    .outline()
-                    .title("Account")
-                    .child(account_switcher(
-                        "policy-account-tabs",
-                        &account_labels,
-                        selected_index,
-                        cx.listener(move |view, index: &usize, window, cx| {
-                            if let Some(wallet_id) = switch_accounts.get(*index) {
-                                view.open_policy_editor(wallet_id, window, cx);
-                            }
-                        }),
-                    )),
-            );
-        }
-
+        // The account selector lives in the fixed page header, so the body is
+        // only the policy for whichever account it names.
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_ref(), self.policy_json_input.as_ref())
         else {
@@ -10168,10 +10226,9 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().font_semibold().child(selectable_text(
-                format!("policy-editor-title-{}", editor.wallet_id),
-                &format!("{} policy", editor.wallet_id),
-            )))
+            // No account name here: the header already names the account this
+            // document belongs to, and repeating it pushed the policy itself
+            // further down the page.
             .child(
                 div()
                     .text_sm()
@@ -11613,61 +11670,9 @@ impl WalletWindow {
             .iter()
             .filter(|network| !network.disabled && (self.testnet_mode || !network.testnet))
             .count();
-        let mut content = div().flex().flex_col().gap_4().child(
-            div()
-                .w_full()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .child(selectable_label("Balances across enabled networks")),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(selectable_label("Only non-zero balances are shown."))
-                                .child(
-                                    app_button("portfolio-manage-tokens")
-                                        .label("Missing a token? Add it in Tokens")
-                                        .link()
-                                        .h(px(28.0))
-                                        .px_1()
-                                        .text_sm()
-                                        .font_normal()
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.set_route(Route::Tokens);
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-                .child(
-                    app_button("refresh-portfolio")
-                        .label(if matches!(self.portfolio, PortfolioState::Loading) {
-                            "Refreshing…"
-                        } else {
-                            "Refresh"
-                        })
-                        .disabled(
-                            enabled_network_count == 0
-                                || matches!(self.portfolio, PortfolioState::Loading),
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.refresh_portfolio(cx);
-                        })),
-                ),
-        );
+        // The account selector and the refresh control live in the fixed page
+        // header, so this panel is only the balances themselves.
+        let mut content = div().flex().flex_col().gap_4();
         if enabled_network_count == 0 {
             return content.child(
                 div()
@@ -11681,25 +11686,14 @@ impl WalletWindow {
                     )),
             );
         }
-        match &self.portfolio {
-            PortfolioState::Idle | PortfolioState::Loading => content.child(
-                div()
-                    .p_5()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Spinner::new())
-                            .child(selectable_label("Loading account balances…")),
-                    ),
-            ),
-            PortfolioState::Failed(error) => content.child(
-                selectable_error_alert("portfolio-error", error.clone())
-                    .title("Portfolio unavailable"),
-            ),
-            PortfolioState::Ready(snapshot) if snapshot.accounts.is_empty() => content.child(
+        // Having no accounts is a fact of the background snapshot rather than
+        // of the balance read, so it answers before any loading placeholder:
+        // there is nothing to load until an account exists.
+        if self
+            .cached_accounts()
+            .is_ok_and(<[WalletMetadata]>::is_empty)
+        {
+            return content.child(
                 div()
                     .p_5()
                     .rounded(cx.theme().radius_lg)
@@ -11726,35 +11720,25 @@ impl WalletWindow {
                                 cx.notify();
                             })),
                     ),
+            );
+        }
+        match &self.portfolio {
+            // Placeholder rows shaped like balance rows, so the page shows
+            // where the token list is about to appear instead of a spinner
+            // that says only that something, somewhere, is happening.
+            PortfolioState::Idle | PortfolioState::Loading => {
+                content.child(portfolio_loading_placeholder(cx))
+            }
+            PortfolioState::Failed(error) => content.child(
+                selectable_error_alert("portfolio-error", error.clone())
+                    .title("Portfolio unavailable"),
             ),
+            // One account is read per refresh, so the snapshot holds exactly
+            // the selected account.
             PortfolioState::Ready(snapshot) => {
-                let selected_index = clamped_portfolio_account_index(
-                    snapshot.accounts.len(),
-                    self.portfolio_account_index,
-                );
-                if snapshot.accounts.len() > 1 {
-                    let account_labels = snapshot
-                        .accounts
-                        .iter()
-                        .map(|account| account.wallet.id.clone())
-                        .collect::<Vec<_>>();
-                    content = content.child(
-                        GroupBox::new()
-                            .id("portfolio-account-picker")
-                            .outline()
-                            .title("Account")
-                            .child(account_switcher(
-                                "portfolio-account-tabs",
-                                &account_labels,
-                                selected_index,
-                                cx.listener(|view, index: &usize, _, cx| {
-                                    view.select_portfolio_account(*index, cx);
-                                }),
-                            )),
-                    );
-                }
-
-                let account = &snapshot.accounts[selected_index];
+                let Some(account) = snapshot.accounts.first() else {
+                    return content.child(portfolio_loading_placeholder(cx));
+                };
                 let rows = portfolio_balance_rows(account);
                 let failures = account
                     .networks
@@ -11962,7 +11946,30 @@ impl WalletWindow {
                         .gap_3()
                         .child(balances),
                 );
-                content
+                // One line under the list, because the question it answers —
+                // "why is my token missing?" — only comes up once the list is
+                // on screen.
+                content.child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_label("Only non-zero balances are shown."))
+                        .child(
+                            app_button("portfolio-manage-tokens")
+                                .label("Add a token")
+                                .link()
+                                .h(px(22.0))
+                                .px_0()
+                                .text_sm()
+                                .font_normal()
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.set_route(Route::Tokens);
+                                    cx.notify();
+                                })),
+                        ),
+                )
             }
         }
     }
@@ -13187,6 +13194,92 @@ impl WalletWindow {
             .into_any_element()
     }
 
+    /// Page-level actions belong in the fixed header, not in the scrolling
+    /// body: a refresh control that scrolls away is a control you cannot find
+    /// while looking at what you wanted to refresh.
+    fn route_header_actions(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        match self.route {
+            Route::Overview => {
+                let loading = matches!(self.portfolio, PortfolioState::Loading);
+                let no_networks = self
+                    .cached_networks()
+                    .unwrap_or_default()
+                    .iter()
+                    .all(|network| network.disabled || (network.testnet && !self.testnet_mode));
+                Some(
+                    div().flex_none().child(
+                        app_button("refresh-portfolio")
+                            .label(if loading { "Refreshing…" } else { "Refresh" })
+                            .disabled(loading || no_networks)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.refresh_portfolio(cx);
+                            })),
+                    ),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// The account a page is showing is a property of the page, not a row in
+    /// its body: it stays visible while balances load and while the body
+    /// scrolls, and it is the same control on every page that has one.
+    fn route_account_selector(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if !matches!(self.route, Route::Overview | Route::Policies) {
+            return None;
+        }
+        let accounts = self.cached_accounts().ok()?;
+        let labels = accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect::<Vec<_>>();
+        match labels.as_slice() {
+            [] => return None,
+            // A lone account needs naming, not choosing.
+            [only] => {
+                return Some(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_text(
+                            SharedString::from(format!("route-account-{}", self.route.label())),
+                            &format!("Account · {only}"),
+                        )),
+                );
+            }
+            _ => {}
+        }
+        let switcher = if self.route == Route::Overview {
+            account_switcher(
+                "portfolio-account-tabs",
+                &labels,
+                clamped_portfolio_account_index(labels.len(), self.portfolio_account_index),
+                cx.listener(|view, index: &usize, _, cx| {
+                    view.select_portfolio_account(*index, cx);
+                }),
+            )
+        } else {
+            let selected = policy_selected_account_index(
+                &labels,
+                self.policy_editor
+                    .as_ref()
+                    .map(|editor| editor.wallet_id.as_str()),
+            );
+            let switch_accounts = labels.clone();
+            account_switcher(
+                "policy-account-tabs",
+                &labels,
+                selected,
+                cx.listener(move |view, index: &usize, window, cx| {
+                    if let Some(wallet_id) = switch_accounts.get(*index) {
+                        view.open_policy_editor(wallet_id, window, cx);
+                    }
+                }),
+            )
+        };
+        Some(div().w_full().child(switcher))
+    }
+
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let route_panel = if self.desktop_snapshot.is_none() {
             div()
@@ -13214,35 +13307,49 @@ impl WalletWindow {
                     .pb_3()
                     .bg(cx.theme().background)
                     .flex()
-                    .items_start()
-                    .gap_2()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
-                            .min_w_0()
-                            .flex_1()
+                            .w_full()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_start()
+                            .gap_2()
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_3xl()
-                                    .font_medium()
-                                    .child(self.route.label()),
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_3xl()
+                                            .font_medium()
+                                            .child(self.route.label()),
+                                    )
+                                    // A page title names the screen; this line
+                                    // says what the screen is for, so nobody
+                                    // has to open a tab to find out whether it
+                                    // is the one they want.
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .whitespace_normal()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(self.route.description()),
+                                    ),
                             )
-                            // A page title names the screen; this line says
-                            // what the screen is for, so nobody has to open a
-                            // tab to find out whether it is the one they want.
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .whitespace_normal()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(self.route.description()),
-                            ),
+                            .when_some(self.route_header_actions(cx), |header, actions| {
+                                header.child(actions)
+                            })
+                            .when(self.desktop_snapshot_loading, |header| {
+                                header.child(Spinner::new().small())
+                            }),
                     )
-                    .when(self.desktop_snapshot_loading, |header| {
-                        header.child(Spinner::new().small())
+                    .when_some(self.route_account_selector(cx), |header, selector| {
+                        header.child(selector)
                     }),
             )
             .child(
@@ -13533,6 +13640,10 @@ fn apply_interface_palette(cx: &mut App) {
         )
     };
     let accent = color(0x9d5af2);
+    // Skeleton placeholders sit both on the page background and on `surface`
+    // cards, and the component animates them down to half opacity, so the
+    // default (which matches `surface`) would vanish inside a card.
+    let skeleton = color(if dark { 0x3a3a3a } else { 0xdedde0 });
     let primary = color(interaction.primary);
     let primary_active = color(interaction.primary_active);
     let button_danger = color(interaction.danger);
@@ -13612,6 +13723,7 @@ fn apply_interface_palette(cx: &mut App) {
     colors.secondary_foreground = foreground;
     colors.secondary_hover = surface_hover;
     colors.selection = accent.opacity(0.35);
+    colors.skeleton = skeleton;
     colors.sidebar = surface;
     colors.sidebar_accent = color(interaction.button_active);
     colors.sidebar_accent_foreground = foreground;

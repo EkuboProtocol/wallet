@@ -768,6 +768,18 @@ fn portfolio_account_selection_is_clamped_after_accounts_change() {
     assert_eq!(clamped_portfolio_account_index(0, 7), 0);
 }
 
+#[test]
+fn policy_account_tab_follows_the_open_editor() {
+    let labels = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+    assert_eq!(policy_selected_account_index(&labels, Some("beta")), 1);
+    assert_eq!(policy_selected_account_index(&labels, Some("gamma")), 2);
+    // No editor open yet, and an editor left on a deleted account, both fall
+    // back to the first tab rather than to a tab that is not there.
+    assert_eq!(policy_selected_account_index(&labels, None), 0);
+    assert_eq!(policy_selected_account_index(&labels, Some("deleted")), 0);
+    assert_eq!(policy_selected_account_index(&[], Some("alpha")), 0);
+}
+
 fn relative_luminance(rgb: u32) -> f64 {
     let channel = |shift: u32| {
         let value = f64::from(u8::try_from((rgb >> shift) & 0xff_u32).unwrap()) / 255.0;
