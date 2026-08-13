@@ -13025,9 +13025,13 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind,
                                 crate::events::DomainEventKind::OAuthAuthorizationRequested { .. }
                             ) {
+                                // `navigate_route`, for the reason the tray
+                                // uses it: an agent that connects while the
+                                // legal documents are still open must not pull
+                                // the app to Settings behind a modal the reader
+                                // cannot dismiss.
                                 event_view.update(cx, |view, cx| {
-                                    view.set_route(Route::Settings);
-                                    cx.notify();
+                                    view.navigate_route(Route::Settings, cx);
                                 });
                                 let _ = cx.update(|cx| {
                                     show_wallet_window(cx, &event_view, &event_window)
