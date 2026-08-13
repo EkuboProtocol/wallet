@@ -10643,10 +10643,36 @@ impl WalletWindow {
                 );
             }
         }
+        let mut sessions = div().flex().flex_col().gap_3().child(
+            div()
+                .font_semibold()
+                .child(selectable_label("Active sessions")),
+        );
         if self.walletconnect_sessions.is_empty() {
-            return panel.child(selectable_label("No active WalletConnect sessions."));
+            return div().flex().flex_col().gap_4().child(panel).child(
+                sessions.child(
+                    div()
+                        .p_4()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().muted_foreground)
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .font_medium()
+                                .text_color(cx.theme().foreground)
+                                .child(selectable_label("No dapp is connected")),
+                        )
+                        .child(selectable_label(
+                            "Pair one above. A session lives only as long as this wallet runs — quitting drops every pairing.",
+                        )),
+                ),
+            );
         }
-        panel.children(self.walletconnect_sessions.iter().cloned().map(|session| {
+        sessions = sessions.children(self.walletconnect_sessions.iter().cloned().map(|session| {
             let session_id = session.id;
             div()
                 .w_full()
@@ -10717,7 +10743,8 @@ impl WalletWindow {
                             view.disconnect_walletconnect(session_id, cx);
                         })),
                 )
-        }))
+        }));
+        div().flex().flex_col().gap_4().child(panel).child(sessions)
     }
 
     fn render_network_editor_form(&self, view: &WeakEntity<Self>, cx: &App) -> gpui::Div {
