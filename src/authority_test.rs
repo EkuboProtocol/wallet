@@ -102,7 +102,10 @@ fn export_lease_conceals_and_conditionally_clears_its_clipboard_value() {
     );
     lease.copy_explicitly(clipboard.clone()).unwrap();
     assert_eq!(clipboard.read_text().unwrap().as_deref(), Some("secret"));
-    std::thread::sleep(Duration::from_millis(50));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while clipboard.read_text().unwrap().is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(lease.concealed());
     assert_eq!(clipboard.read_text().unwrap(), None);
 
@@ -113,7 +116,11 @@ fn export_lease_conceals_and_conditionally_clears_its_clipboard_value() {
     );
     lease.copy_explicitly(clipboard.clone()).unwrap();
     clipboard.write_text("new clipboard value").unwrap();
-    std::thread::sleep(Duration::from_millis(50));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !lease.concealed() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(lease.concealed());
     assert_eq!(
         clipboard.read_text().unwrap().as_deref(),
         Some("new clipboard value")
