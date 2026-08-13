@@ -4333,9 +4333,19 @@ impl WalletWindow {
             let Some(entity) = view.upgrade() else {
                 return dialog.title("Add token").child("Token form unavailable.");
             };
-            let (busy, errors) = {
+            let (busy, errors, chain_hint) = {
                 let window = entity.read(cx);
-                (window.token_editor_busy, window.token_editor_errors.clone())
+                // Which network the number in the field actually names. The
+                // form asked for a chain ID and said nothing back, so adding a
+                // token meant knowing that Base is 8453 and trusting you had
+                // typed it — and a wrong-but-configured chain saved happily
+                // under the wrong network.
+                let hint = window.token_editor_chain_hint(cx);
+                (
+                    window.token_editor_busy,
+                    window.token_editor_errors.clone(),
+                    hint,
+                )
             };
             let add_view = view.clone();
             let close_view = view.clone();
@@ -4382,6 +4392,14 @@ impl WalletWindow {
                                                 .aria_label("Chain ID")
                                                 .disabled(busy),
                                         )
+                                        .when_some(chain_hint, |field, hint| {
+                                            field.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(selectable_label(hint)),
+                                            )
+                                        })
                                         .when_some(errors.chain_id.clone(), |field, error| {
                                             field.child(field_error(
                                                 "token-editor-chain-id-error",
@@ -4521,6 +4539,37 @@ impl WalletWindow {
         });
         chain_id_focus.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
+    }
+
+    /// What the chain ID currently in the token form names, said back to the
+    /// reader while they type it.
+    ///
+    /// The wallet knows every configured network by name, and the form asked
+    /// for the number anyway and answered nothing — so adding a token meant
+    /// remembering that Base is 8453, and a plausible wrong number that
+    /// happened to be configured saved without complaint under the wrong
+    /// network. An empty field says nothing, because a hint about a field
+    /// nobody has filled in yet is noise.
+    fn token_editor_chain_hint(&self, cx: &App) -> Option<SharedString> {
+        let input = self.token_chain_id_input.as_ref()?;
+        let typed = input.read(cx).value();
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return None;
+        }
+        let Ok(chain_id) = typed.parse::<u64>() else {
+            return Some("Not a chain ID. Enter the network's decimal number.".into());
+        };
+        let visible = self
+            .cached_networks()
+            .ok()?
+            .iter()
+            .find(|network| network.chain_id == chain_id)
+            .filter(|network| self.testnet_mode || !network.testnet);
+        Some(match visible {
+            Some(network) => network.display_label().to_owned().into(),
+            None => "No network configured here. Add it under Networks first.".into(),
+        })
     }
 
     fn save_token_editor(&mut self, cx: &mut Context<Self>) {
