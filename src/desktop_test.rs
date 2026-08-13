@@ -1403,6 +1403,25 @@ fn status_colour_separates_success_from_waiting_from_failure() {
 }
 
 #[test]
+fn a_gateway_that_could_not_start_reads_as_a_failure_and_carries_its_reason() {
+    assert_eq!(McpGatewayStatus::Starting.tone(), StatusTone::Working);
+    assert_eq!(McpGatewayStatus::Starting.label(), "Starting");
+    assert_eq!(McpGatewayStatus::Starting.detail(), None);
+
+    assert_eq!(McpGatewayStatus::Online.tone(), StatusTone::Done);
+    assert_eq!(McpGatewayStatus::Online.label(), "Reachable");
+    // Nothing to explain: the endpoint beside the pill is the whole story.
+    assert_eq!(McpGatewayStatus::Online.detail(), None);
+
+    let offline = McpGatewayStatus::Offline("address already in use".into());
+    assert_eq!(offline.tone(), StatusTone::Failed);
+    assert_eq!(offline.label(), "Unreachable");
+    // The one fact a reader cannot guess from a status word: the port is
+    // fixed, so why it could not be served is the whole of the diagnosis.
+    assert_eq!(offline.detail().as_deref(), Some("address already in use"));
+}
+
+#[test]
 fn ages_read_as_elapsed_time_until_they_are_old_enough_to_need_a_date() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
         .unwrap()

@@ -966,6 +966,47 @@ impl StatusTone {
     }
 }
 
+/// Whether an agent can reach this wallet right now.
+///
+/// The tray menu has always said this — "Agents cannot connect right now" —
+/// but the window never did. The gateway binds one fixed loopback port, so
+/// another process already holding it leaves every agent unable to connect
+/// while Settings still shows the endpoint, the install button, and a list of
+/// configured agents, all of them describing a server that is not running.
+#[derive(Clone)]
+enum McpGatewayStatus {
+    Starting,
+    Online,
+    Offline(SharedString),
+}
+
+impl McpGatewayStatus {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Online => "Reachable",
+            Self::Offline(_) => "Unreachable",
+        }
+    }
+
+    const fn tone(&self) -> StatusTone {
+        match self {
+            Self::Starting => StatusTone::Working,
+            Self::Online => StatusTone::Done,
+            Self::Offline(_) => StatusTone::Failed,
+        }
+    }
+
+    /// The sentence under the pill. Only a failure has one: the reason the
+    /// port could not be served is the only thing here nobody can guess.
+    fn detail(&self) -> Option<SharedString> {
+        match self {
+            Self::Starting | Self::Online => None,
+            Self::Offline(error) => Some(error.clone()),
+        }
+    }
+}
+
 const fn transaction_status_tone(status: PendingStatus) -> StatusTone {
     match status {
         PendingStatus::Confirmed => StatusTone::Done,
@@ -1305,7 +1346,7 @@ pub struct WalletWindow {
     token_import_status: Option<SharedString>,
     token_proposal_error: Option<SharedString>,
     token_list_generation: u64,
-    mcp_status: SharedString,
+    mcp_status: McpGatewayStatus,
     selected_record: Option<uuid::Uuid>,
     activity_busy: BTreeSet<uuid::Uuid>,
     activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
@@ -4111,7 +4152,7 @@ impl WalletWindow {
             token_import_status: None,
             token_proposal_error: None,
             token_list_generation: 0,
-            mcp_status: "MCP starting…".into(),
+            mcp_status: McpGatewayStatus::Starting,
             selected_record: None,
             activity_busy: BTreeSet::new(),
             activity_feedback: BTreeMap::new(),
@@ -9657,6 +9698,39 @@ impl WalletWindow {
                 GroupBox::new()
                     .id("detected-agent-settings")
                     .outline()
+                    // Whether the endpoint below is actually being served. It
+                    // is the first thing every row under it depends on, so it
+                    // is the first thing the section says.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(selectable_label("Agent gateway")),
+                            )
+                            .child(status_pill(
+                                self.mcp_status.label(),
+                                self.mcp_status.tone(),
+                                cx,
+                            )),
+                    )
+                    .when_some(self.mcp_status.detail(), |group, error| {
+                        group.child(
+                            selectable_error_alert(
+                                "mcp-gateway-error",
+                                format!(
+                                    "No agent can reach this wallet until it is restarted: {error}"
+                                ),
+                            )
+                            .title("The agent gateway could not start"),
+                        )
+                    })
                     // The endpoint every one of these installs points at. It
                     // was a compile-time constant the interface never showed,
                     // so an agent configured by hand had nothing to copy.
@@ -14778,7 +14852,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             });
             cx.spawn(async move |cx| match server_task.await {
                 Ok(server) => {
-                    let address = server.address;
                     if let Ok(mut guard) = slot.lock() {
                         *guard = Some(server);
                     }
@@ -14786,12 +14859,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         tray.set_mcp_online(true);
                     }
                     wallet_view.update(cx, |view, cx| {
-                        view.mcp_status = format!("MCP online at {address}/mcp").into();
+                        view.mcp_status = McpGatewayStatus::Online;
                         cx.notify();
                     });
                 }
                 Err(error) => wallet_view.update(cx, |view, cx| {
-                    view.mcp_status = format!("MCP offline: {error:#}").into();
+                    view.mcp_status = McpGatewayStatus::Offline(format!("{error:#}").into());
                     cx.notify();
                 }),
             })
