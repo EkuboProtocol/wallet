@@ -8389,6 +8389,11 @@ impl WalletWindow {
                         )))
                         .label("Review")
                         .primary()
+                        // The same guard the transaction card above carries.
+                        // Without it these two answered a press with an error
+                        // telling the reader to finish the review that was
+                        // already on the screen in front of them.
+                        .disabled(self.review_flow.is_in_progress())
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.begin_typed_data_review(request_id, cx);
                         })),
@@ -8416,6 +8421,7 @@ impl WalletWindow {
                         app_button(SharedString::from(format!("review-message-{request_id}")))
                             .label("Review")
                             .primary()
+                            .disabled(self.review_flow.is_in_progress())
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.begin_message_review(request_id, cx);
                             })),
