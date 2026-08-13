@@ -11204,38 +11204,48 @@ impl WalletWindow {
                         .child(selectable_label(error)),
                 )
             });
+        // Two ways to get a token into this wallet, so they belong on one
+        // line. Stacked, they read as a menu of unrelated commands and push
+        // the list they act on further down the page.
         content = content.child(
-            app_button("open-token-editor")
-                .debug_selector(|| "add-token-button".to_owned())
-                .self_start()
-                .label("Add token")
-                .primary()
-                .disabled(self.token_editor_open)
-                .on_click(cx.listener(|view, _, window, cx| {
-                    view.open_new_token_editor(window, cx);
-                })),
+            h_flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    app_button("open-token-editor")
+                        .debug_selector(|| "add-token-button".to_owned())
+                        .label("Add token")
+                        .primary()
+                        .disabled(self.token_editor_open)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.open_new_token_editor(window, cx);
+                        })),
+                )
+                .when_some(self.token_list_url_input.as_ref(), |row, _| {
+                    row.child(
+                        app_button("toggle-owner-token-list-import")
+                            .label(if self.token_list_import_open {
+                                "Close token-list import"
+                            } else {
+                                "Import a published token list…"
+                            })
+                            .icon(if self.token_list_import_open {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .disabled(self.token_import_state == TokenImportState::Fetching)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.toggle_token_list_import(cx);
+                            })),
+                    )
+                }),
         );
-        if let Some(input) = self.token_list_url_input.as_ref() {
+        if let Some(input) = self.token_list_url_input.as_ref()
+            && self.token_list_import_open
+        {
             content = content.child(
-                app_button("toggle-owner-token-list-import")
-                    .self_start()
-                    .label(if self.token_list_import_open {
-                        "Close token-list import"
-                    } else {
-                        "Import a published token list…"
-                    })
-                    .icon(if self.token_list_import_open {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .disabled(self.token_import_state == TokenImportState::Fetching)
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.toggle_token_list_import(cx);
-                    })),
-            );
-            if self.token_list_import_open {
-                content = content.child(
                 GroupBox::new()
                     .id("owner-token-list-import")
                     .title("Import published token list")
@@ -11317,7 +11327,6 @@ impl WalletWindow {
                         )
                     }),
                 );
-            }
         }
         match self.cached_reviews().map(|reviews| {
             reviews

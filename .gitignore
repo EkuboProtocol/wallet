@@ -10,3 +10,4 @@
 # committed. The public key is supplied to release builds through CI.
 /ekubo-updater.key
 /ekubo-updater.key.pub
+target/screenshots/

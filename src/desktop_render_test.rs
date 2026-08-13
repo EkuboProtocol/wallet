@@ -368,3 +368,95 @@ fn the_legal_and_export_overlays_lay_out(cx: &mut gpui::TestAppContext) {
     draw(cx, window, &view);
     release(cx, &view);
 }
+
+/// Rasterise the wallet's screens to PNGs and leave them on disk.
+///
+/// GPUI can render a window offscreen through Metal, so the interface can be
+/// looked at on a machine with no panel attached — which is the situation this
+/// was written in, and the reason it exists. Ignored by default because it
+/// needs a GPU and writes files; run it deliberately:
+///
+/// ```sh
+/// cargo test --lib screenshots -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "writes PNGs and needs a GPU; run deliberately"]
+fn screenshots() {
+    let directory = std::path::PathBuf::from(
+        std::env::var("EKUBO_SHOT_DIR").unwrap_or_else(|_| "target/screenshots".to_owned()),
+    );
+    std::fs::create_dir_all(&directory).expect("shot directory");
+
+    let platform = gpui_platform::current_platform(true);
+    let mut cx = gpui::HeadlessAppContext::with_platform(
+        platform.text_system(),
+        Arc::new(crate::assets::WalletAssets::default()),
+        gpui_platform::current_headless_renderer,
+    );
+    cx.allow_parking();
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let owner = cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_tokio::init(cx);
+        load_application_fonts(cx).expect("fonts");
+        apply_interface_palette(cx);
+        OwnerApi::for_test(temp.path()).expect("owner")
+    });
+    let (review_presenter, _reviews) = GuiReviewPresenter::channel();
+    let (walletconnect_presenter, _proposals) = ProposalPresenter::channel();
+    let window = cx
+        .open_window(VIEWPORT, |_, cx| {
+            cx.new(|cx| {
+                WalletWindow::new(
+                    owner,
+                    review_presenter,
+                    Arc::new(Mutex::new(WalletConnectManager::default())),
+                    walletconnect_presenter,
+                    Rc::new(RefCell::new(None)),
+                    Arc::new(Mutex::new(None)),
+                    cx,
+                )
+            })
+        })
+        .expect("window");
+    cx.run_until_parked();
+
+    let view = cx.update(|cx| window.root(cx).expect("root"));
+    cx.update(|cx| {
+        view.update(cx, |wallet, _| {
+            wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+            wallet.desktop_snapshot_error = None;
+            wallet.legal_gate = false;
+            wallet.legal_review = None;
+        });
+    });
+
+    for route in Route::ALL {
+        cx.update(|cx| {
+            view.update(cx, |wallet, _| {
+                // Re-applied each frame: the first render opens the legal gate,
+                // and that overlay covers whichever page is behind it.
+                wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+                wallet.desktop_snapshot_error = None;
+                wallet.legal_gate = false;
+                wallet.legal_review = None;
+                wallet.set_route(route);
+            });
+        });
+        cx.run_until_parked();
+        // `render_to_image` rasterises the last drawn frame, so the window has
+        // to be marked dirty and given a chance to draw or every shot is of
+        // whatever was on screen before.
+        cx.update(|cx| {
+            let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
+        });
+        cx.run_until_parked();
+        let image = cx
+            .capture_screenshot(window.into())
+            .expect("offscreen render");
+        let path = directory.join(format!("{}.png", route.label().to_lowercase()));
+        image.save(&path).expect("write png");
+        println!("wrote {}", path.display());
+    }
+}
