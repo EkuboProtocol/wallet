@@ -1,0 +1,4 @@
+# These documents are compiled into the MCP server with `include_str!`.
+# Normalize their bytes across platforms so Windows packages advertise the
+# same Markdown resources as macOS and Linux packages.
+docs/skills/**/SKILL.md text eol=lf
