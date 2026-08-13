@@ -8947,6 +8947,11 @@ impl WalletWindow {
         }
 
         div()
+            // Named so a render test can measure this cap rather than take it
+            // on trust. `debug_selector` is a documented no-op in release
+            // builds. Without the cap the pane lays out to 1800px in a 1400px
+            // window; the test asserts the difference.
+            .debug_selector(|| "settings-pane".to_owned())
             // A settings row puts its name at the left edge and its control at
             // the right, which is the desktop idiom and reads well until the
             // window is wide: at a thousand pixels the `View` beside a legal
@@ -11168,6 +11173,7 @@ impl WalletWindow {
             });
         content = content.child(
             app_button("open-token-editor")
+                .debug_selector(|| "add-token-button".to_owned())
                 .self_start()
                 .label("Add token")
                 .primary()

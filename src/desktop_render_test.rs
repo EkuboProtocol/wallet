@@ -151,12 +151,32 @@ fn release(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
 /// matters: a test that only refreshed passed while rendering nothing, which
 /// is the failure mode these tests exist to rule out.
 fn draw(cx: &mut gpui::TestAppContext, window: gpui::AnyWindowHandle, view: &Entity<WalletWindow>) {
+    let _ = measure(cx, window, view, &[]);
+}
+
+/// Draw, and read back where the named elements actually ended up.
+///
+/// The two things reported from using this build were both geometry — a
+/// control sitting a hand's width from its label, and a button as wide as the
+/// page — so those are measured here rather than argued in a commit message.
+/// `debug_selector` is a no-op in release builds, so the anchors cost nothing.
+fn measure(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    selectors: &[&'static str],
+) -> Vec<Option<gpui::Bounds<gpui::Pixels>>> {
     let mut visual = gpui::VisualTestContext::from_window(window, cx);
     let view = view.clone();
     visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
         gpui::AnyView::from(view).into_any_element()
     });
+    let bounds = selectors
+        .iter()
+        .map(|selector| visual.debug_bounds(selector))
+        .collect();
     visual.run_until_parked();
+    bounds
 }
 
 #[gpui::test]
@@ -224,7 +244,34 @@ fn the_settings_pane_is_capped_to_a_readable_measure(cx: &mut gpui::TestAppConte
     // The cap is the whole of the fix for a control sitting a hand's width
     // from its label, so it is worth asserting rather than eyeballing.
     cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Settings));
-    draw(cx, window, &view);
+    let measured = measure(cx, window, &view, &["settings-pane"]);
+    let pane = measured[0].expect("the settings pane must have been laid out");
+    assert!(
+        pane.size.width <= px(720.0),
+        "the settings pane must stay within its measure, not stretch to the \
+         {VIEWPORT:?} window: it was {:?}",
+        pane.size.width
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn an_action_button_is_the_width_of_its_label(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    // A flex column stretches its children, so this button was as wide as the
+    // page — a primary bar with "Add token" floating in the middle of it.
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Tokens));
+    let measured = measure(cx, window, &view, &["add-token-button"]);
+    let button = measured[0].expect("the add-token button must have been laid out");
+    assert!(
+        button.size.width < px(240.0),
+        "an anchored button must take the width of its label, not of the page: \
+         it was {:?} in a {:?} window",
+        button.size.width,
+        VIEWPORT.width
+    );
     release(cx, &view);
 }
 
