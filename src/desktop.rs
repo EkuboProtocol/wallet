@@ -8121,8 +8121,9 @@ impl WalletWindow {
             .iter()
             .find(|record| record.request_id() == request_id)
         else {
-            // The record left the snapshot — approved out of the queue, or
-            // aged past the retained history. Nothing to show over the list.
+            // Unreachable in a settled frame: `render` drops a selection the
+            // snapshot cannot account for before it gets here. Kept so a
+            // record that leaves mid-frame draws nothing rather than panicking.
             return div().into_any_element();
         };
         let detail = self.render_activity_detail(record, cx);
@@ -12421,6 +12422,20 @@ impl Render for WalletWindow {
             cx.on_next_frame(window, move |view, _, cx| {
                 view.update_legal_scroll_state(&digest, cx);
             });
+        }
+        // A notification names a record by id, and the inbox keeps only the
+        // most recent few hundred. Clicking a banner for one that has aged out
+        // used to leave `selected_record` set: the detail overlay drew nothing,
+        // but the window still counted a modal as open and moved focus into a
+        // trap that was not on the screen. Drop the selection instead, so the
+        // click lands on the inbox it was always about.
+        if let Some(request_id) = self.selected_record
+            && let Ok(records) = self.cached_activity_records()
+            && !records
+                .iter()
+                .any(|record| record.request_id() == request_id)
+        {
+            self.selected_record = None;
         }
         let modal_open = self.active_review.is_some()
             || self.legal_review.is_some()
