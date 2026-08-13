@@ -27,6 +27,7 @@ ztracing = { path = "crates/ztracing-compat" }
 [[bin]]
 name = "ekubo-wallet"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }

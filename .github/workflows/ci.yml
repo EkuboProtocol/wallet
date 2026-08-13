@@ -40,8 +40,8 @@ jobs:
             test_jobs: 4
             test_debug: 2
           - runner: windows-2025
-            test_jobs: 2
-            test_debug: 2
+            test_jobs: 1
+            test_debug: 0
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -70,17 +70,11 @@ jobs:
           # behind, and that is the expensive half of this job.
           cache-on-failure: true
 
-      # This also covers what a separate `cargo check --all-targets` used to:
-      # `cargo test` builds the lib, the bins, and every test target, and
-      # unlike that step it does so for the whole workspace rather than the
-      # root package alone. Nothing here has a bench or a Rust example, so
-      # that flag reached nothing this does not. Checking first only bought a
-      # second copy of the graph in a profile the tests cannot link against —
-      # 11 of the Windows job's 48 minutes.
-      - name: Run tests
-        # Also set in .cargo/config.toml for local runs. Repeated here because
-        # the harness runs each test on a spawned thread, and Windows MSVC debug
-        # frames overflow that thread's smaller default stack.
+      # Link and run every integration test once on Linux. macOS and Windows
+      # still compile those platform-specific targets below, but do not spend
+      # most of their job relinking the same large GPUI test executables.
+      - name: Run complete test suite
+        if: runner.os == 'Linux'
         env:
           RUST_MIN_STACK: 67108864
           # Linux's hosted linker has repeatedly crashed with SIGBUS while
@@ -88,6 +82,19 @@ jobs:
           # not test behavior or optimization.
           CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
         run: cargo test --locked --workspace --all-features --jobs ${{ matrix.test_jobs }}
+
+      - name: Compile application and integration tests
+        if: runner.os != 'Linux'
+        env:
+          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
+        run: cargo check --locked --workspace --all-features --bins --tests
+
+      - name: Run workspace unit tests
+        if: runner.os != 'Linux'
+        env:
+          RUST_MIN_STACK: 67108864
+          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
+        run: cargo test --locked --workspace --all-features --lib --jobs ${{ matrix.test_jobs }}
 
   lint:
     name: Formatting and lints
