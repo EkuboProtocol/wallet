@@ -102,6 +102,7 @@ pub struct ForkParent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForkSession {
     pub fork_id: Uuid,
+    pub wallet_instance_id: Uuid,
     pub wallet_id: String,
     pub wallet_address: Address,
     pub chain_id: u64,
@@ -259,6 +260,7 @@ impl ForkStore {
     pub fn create(
         &mut self,
         wallet_id: &str,
+        wallet_instance_id: Uuid,
         wallet_address: Address,
         chain_id: u64,
         parent: ForkParent,
@@ -268,7 +270,7 @@ impl ForkStore {
         let held = self
             .sessions
             .values()
-            .filter(|session| session.wallet_id == wallet_id)
+            .filter(|session| session.wallet_instance_id == wallet_instance_id)
             .count();
         ensure!(
             held < MAX_FORKS_PER_WALLET,
@@ -280,6 +282,7 @@ impl ForkStore {
         );
         let session = ForkSession {
             fork_id: Uuid::new_v4(),
+            wallet_instance_id,
             wallet_id: wallet_id.to_owned(),
             wallet_address,
             chain_id,
@@ -301,12 +304,17 @@ impl ForkStore {
     /// `pin_parent_block`, so a caller at its fork limit paid two RPC calls per
     /// attempt to be told no — the one tool whose outbound work no bound
     /// covered.
-    pub fn ensure_capacity(&mut self, wallet_id: &str, now: DateTime<Utc>) -> Result<()> {
+    pub fn ensure_capacity(
+        &mut self,
+        wallet_id: &str,
+        wallet_instance_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         self.prune(now);
         let held = self
             .sessions
             .values()
-            .filter(|session| session.wallet_id == wallet_id)
+            .filter(|session| session.wallet_instance_id == wallet_instance_id)
             .count();
         ensure!(
             held < MAX_FORKS_PER_WALLET,

@@ -16,6 +16,7 @@
 //! prefixed message can never collide with an RLP transaction preimage.
 
 use crate::{
+    config::WalletMetadata,
     policy_store::PolicyStore,
     sanitize::is_bidirectional_control,
     signature_requests::{SignatureQueue, encode_signature, split_decision},
@@ -109,7 +110,10 @@ impl MessageEncoding {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct PendingMessage {
     pub request_id: Uuid,
+    pub wallet_instance_id: Uuid,
     pub wallet_id: String,
+    #[schemars(with = "String")]
+    pub wallet_address: Address,
     /// Context the requester declared. `personal_sign` binds no chain, so this
     /// is never a property of the signature itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,9 +544,53 @@ impl MessageStore {
     /// Queue one message for human review. An identical message already
     /// awaiting approval for the same wallet and declared chain is reused
     /// rather than stacked.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn create(
         &mut self,
         wallet_id: &str,
+        chain_id: Option<&str>,
+        message: &[u8],
+        encoding: MessageEncoding,
+        requester: Option<&str>,
+    ) -> Result<PendingMessage> {
+        self.create_bound(
+            Uuid::nil(),
+            wallet_id,
+            Address::ZERO,
+            chain_id,
+            message,
+            encoding,
+            requester,
+        )
+    }
+
+    pub fn create_for_wallet(
+        &mut self,
+        wallet: &WalletMetadata,
+        chain_id: Option<&str>,
+        message: &[u8],
+        encoding: MessageEncoding,
+        requester: Option<&str>,
+    ) -> Result<PendingMessage> {
+        self.database
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+            .context("wallet has no active policy")?;
+        self.create_bound(
+            wallet.instance_id,
+            &wallet.id,
+            wallet.address,
+            chain_id,
+            message,
+            encoding,
+            requester,
+        )
+    }
+
+    fn create_bound(
+        &mut self,
+        wallet_instance_id: Uuid,
+        wallet_id: &str,
+        wallet_address: Address,
         chain_id: Option<&str>,
         message: &[u8],
         encoding: MessageEncoding,
@@ -562,6 +610,7 @@ impl MessageStore {
         let requester = requester.unwrap_or_default();
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
+            wallet_instance_id,
             wallet_id,
             chain_id,
             digest,
@@ -569,12 +618,14 @@ impl MessageStore {
             |transaction, request_id, now| {
                 transaction.execute(
                     "INSERT INTO pending_messages(
-                        request_id, wallet_id, chain_id, message, message_encoding, digest,
+                        request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, message, message_encoding, digest,
                         requester, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'awaiting_approval', ?8, ?8)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'awaiting_approval', ?10, ?10)",
                     params![
                         request_id,
+                        wallet_instance_id.to_string(),
                         wallet_id,
+                        format!("{wallet_address:#x}"),
                         stored_chain_id,
                         message,
                         encoding.as_str(),
@@ -616,6 +667,7 @@ impl MessageStore {
     /// decision with an attacker-chosen signature in it and no signature ever
     /// made. The orchestrator is the only caller, and it is the only caller
     /// that has done those things.
+    #[cfg(test)]
     pub(crate) fn store_signature(
         &mut self,
         request_id: Uuid,
@@ -626,7 +678,26 @@ impl MessageStore {
         QUEUE.store_signature(
             &mut self.database.connection,
             request_id,
+            Uuid::nil(),
             signer_wallet_id,
+            expected_digest,
+            signature,
+        )?;
+        self.get(request_id)
+    }
+
+    pub(crate) fn store_signature_for_wallet(
+        &mut self,
+        request_id: Uuid,
+        signer_wallet: &WalletMetadata,
+        expected_digest: B256,
+        signature: &str,
+    ) -> Result<PendingMessage> {
+        QUEUE.store_signature(
+            &mut self.database.connection,
+            request_id,
+            signer_wallet.instance_id,
+            &signer_wallet.id,
             expected_digest,
             signature,
         )?;
@@ -665,29 +736,33 @@ impl MessageStore {
             .database
             .connection
             .query_row(
-                "SELECT wallet_id, chain_id, message, message_encoding, digest, status,
+                "SELECT wallet_instance_id, wallet_id, wallet_address, chain_id, message, message_encoding, digest, status,
                         created_at, updated_at, decided_at, signature, requester
                  FROM pending_messages WHERE request_id = ?1",
                 [request_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.blob::<B256>(4)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
                         row.get::<_, String>(5)?,
-                        row.time(6)?,
-                        row.time(7)?,
-                        row.time_opt(8)?,
-                        row.blob_opt::<[u8; 65]>(9)?,
-                        row.get::<_, String>(10)?,
+                        row.blob::<B256>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.time(8)?,
+                        row.time(9)?,
+                        row.time_opt(10)?,
+                        row.blob_opt::<[u8; 65]>(11)?,
+                        row.get::<_, String>(12)?,
                     ))
                 },
             )
             .with_context(|| format!("unknown message request {request_id}"))?;
         let (
+            wallet_instance_id,
             wallet_id,
+            wallet_address,
             chain_id,
             message,
             encoding,
@@ -699,7 +774,11 @@ impl MessageStore {
             signature,
             requester,
         ) = row;
+        let wallet_instance_id = Uuid::parse_str(&wallet_instance_id)
+            .context("stored message wallet instance is invalid")?;
         crate::config::validate_wallet_id(&wallet_id)?;
+        let wallet_address = Address::from_str(&wallet_address)
+            .context("stored message wallet identity is invalid")?;
         // Re-derive the digest from the stored bytes so a corrupted or edited
         // row can never present one message while binding a signature to
         // another.
@@ -712,7 +791,9 @@ impl MessageStore {
             split_decision(decided_at, status == MessageStatus::Rejected);
         Ok(PendingMessage {
             request_id,
+            wallet_instance_id,
             wallet_id,
+            wallet_address,
             chain_id: (chain_id != 0).then(|| chain_id.to_string()),
             message_hex: encode_message_hex(&message),
             encoding: MessageEncoding::parse(&encoding)?,

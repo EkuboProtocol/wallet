@@ -39,7 +39,7 @@ fn configuration_is_encrypted_with_the_wallet_database_key() {
 #[test]
 fn default_networks_have_unique_chain_ids_and_identifiers() {
     validate_config(&WalletConfig {
-        version: 2,
+        version: 3,
         wallets: vec![],
         networks: default_networks(),
     })
@@ -100,7 +100,7 @@ fn disabled_networks_are_not_resolvable_for_wallet_activity() {
 }
 
 #[test]
-fn network_mutations_require_network_scoped_owner_authorization() {
+fn disabling_a_network_is_free_but_reenabling_requires_network_authorization() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
     let before = store.load().unwrap();
@@ -111,17 +111,18 @@ fn network_mutations_require_network_scoped_owner_authorization() {
         .unwrap()
         .clone();
     let wrong_scope = OwnerAuthorization::for_test(OwnerAuthorizationScope::NotificationPrivacy);
+    let disabled = store.set_network_disabled(&ethereum, true, None).unwrap();
+    assert!(disabled.disabled);
     assert!(
         store
-            .set_network_disabled(&ethereum, true, &wrong_scope)
+            .set_network_disabled(&disabled, false, Some(&wrong_scope))
             .is_err()
     );
-    assert_eq!(store.load().unwrap(), before);
 
     let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
     assert!(
-        store
-            .set_network_disabled(&ethereum, true, &authorized)
+        !store
+            .set_network_disabled(&disabled, false, Some(&authorized))
             .unwrap()
             .disabled
     );
@@ -147,7 +148,7 @@ fn network_toggle_refuses_a_stale_reviewed_row() {
 
     assert!(
         store
-            .set_network_disabled(&reviewed, true, &authorization)
+            .set_network_disabled(&reviewed, true, None)
             .unwrap_err()
             .to_string()
             .contains("changed while the enable setting was being authenticated")

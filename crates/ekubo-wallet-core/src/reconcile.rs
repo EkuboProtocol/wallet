@@ -105,6 +105,14 @@ pub async fn reconcile_record(
     mut record: PendingTransaction,
     recover_stale_submission: bool,
 ) -> Result<PendingTransaction> {
+    if matches!(
+        record.status,
+        PendingStatus::Confirmed | PendingStatus::Reverted | PendingStatus::Cancelled
+    ) && record.finalized_at.is_none()
+        && record.settlement_transaction_hash.is_some()
+    {
+        return revalidate_provisional_receipt(pending, network, record).await;
+    }
     if record.status == PendingStatus::Cancelling {
         return reconcile_cancelling(pending, network, record).await;
     }
@@ -147,11 +155,11 @@ pub async fn reconcile_record(
                     record.generation,
                 )?;
             }
-            pending.finalize(
+            pending.record_original_receipt(
                 record.request_id,
-                receipt.succeeded,
-                receipt.block_number,
-                Some(&receipt.mined_fee()),
+                &transaction_hash,
+                &receipt,
+                network.finality_confirmations,
             )
         }
         ChainObservation::Replaced => {
@@ -189,6 +197,45 @@ pub async fn reconcile_record(
     }
 }
 
+async fn revalidate_provisional_receipt(
+    pending: &Mutex<PendingStore>,
+    network: &NetworkConfig,
+    record: PendingTransaction,
+) -> Result<PendingTransaction> {
+    let settlement_hash = record
+        .settlement_transaction_hash
+        .as_deref()
+        .context("provisional receipt is missing its settlement transaction hash")?;
+    let Some(receipt) = transaction_receipt(network, settlement_hash).await? else {
+        return lock(pending)?.rollback_provisional_receipt(record.request_id, settlement_hash);
+    };
+    let original_hash = record
+        .broadcast_transaction_hash
+        .as_ref()
+        .or(record.signed_transaction_hash.as_ref());
+    if original_hash.is_some_and(|hash| hash == settlement_hash) {
+        return lock(pending)?.record_original_receipt(
+            record.request_id,
+            settlement_hash,
+            &receipt,
+            network.finality_confirmations,
+        );
+    }
+    ensure!(
+        record
+            .cancel_transaction_hashes
+            .iter()
+            .any(|hash| hash == settlement_hash),
+        "provisional receipt names an envelope this lifecycle did not record"
+    );
+    lock(pending)?.record_cancellation_receipt(
+        record.request_id,
+        settlement_hash,
+        &receipt,
+        network.finality_confirmations,
+    )
+}
+
 /// Give a replacement verdict a chance to be wrong.
 ///
 /// `Replaced` is inferred from a consumed nonce and a missing receipt, and a
@@ -213,21 +260,22 @@ async fn recheck_replaced(
     if let Some(hash) = original
         && let Some(receipt) = transaction_receipt(network, hash).await?
     {
-        return lock(pending)?.finalize(
+        return lock(pending)?.record_original_receipt(
             record.request_id,
-            receipt.succeeded,
-            receipt.block_number,
-            Some(&receipt.mined_fee()),
+            hash,
+            &receipt,
+            network.finality_confirmations,
         );
     }
     for hash in record.cancel_transaction_hashes.iter().rev() {
         if let Some(receipt) = transaction_receipt(network, hash).await? {
             // A reverted cancellation still consumed the nonce, so it settles
             // the record the same way a successful one does.
-            return lock(pending)?.mark_cancelled(
+            return lock(pending)?.record_cancellation_receipt(
                 record.request_id,
-                receipt.block_number,
-                Some(&receipt.mined_fee()),
+                hash,
+                &receipt,
+                network.finality_confirmations,
             );
         }
     }
@@ -281,11 +329,11 @@ async fn reconcile_cancelling(
         .cloned()
         .context("cancelling transaction is missing its hash")?;
     if let Some(receipt) = transaction_receipt(network, &original_hash).await? {
-        return lock(pending)?.finalize(
+        return lock(pending)?.record_original_receipt(
             record.request_id,
-            receipt.succeeded,
-            receipt.block_number,
-            Some(&receipt.mined_fee()),
+            &original_hash,
+            &receipt,
+            network.finality_confirmations,
         );
     }
     let envelope_nonce = signed_transaction_nonce(
@@ -302,21 +350,22 @@ async fn reconcile_cancelling(
     // winner, and every hash in the history is equally "cancelled by us".
     for cancel_hash in record.cancel_transaction_hashes.iter().rev() {
         if let Some(receipt) = transaction_receipt(network, cancel_hash).await? {
-            return lock(pending)?.mark_cancelled(
+            return lock(pending)?.record_cancellation_receipt(
                 record.request_id,
-                receipt.block_number,
-                Some(&receipt.mined_fee()),
+                cancel_hash,
+                &receipt,
+                network.finality_confirmations,
             );
         }
     }
     // Close the race window: the original may have mined between the nonce
     // read and here, exactly like the plain broadcast path.
     if let Some(receipt) = transaction_receipt(network, &original_hash).await? {
-        return lock(pending)?.finalize(
+        return lock(pending)?.record_original_receipt(
             record.request_id,
-            receipt.succeeded,
-            receipt.block_number,
-            Some(&receipt.mined_fee()),
+            &original_hash,
+            &receipt,
+            network.finality_confirmations,
         );
     }
     lock(pending)?.mark_replaced(record.request_id, record.generation)
@@ -396,28 +445,24 @@ pub async fn submit_claimed(
     if broadcast.broadcast_error.is_some() {
         return Ok((claimed, broadcast));
     }
-    let record = {
-        let mut pending = lock(pending)?;
-        let broadcast_record = pending.mark_broadcast(
-            claimed.request_id,
-            &broadcast.transaction_hash,
-            claimed.generation,
-        )?;
-        match broadcast.receipt_status {
-            BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => pending
-                .finalize(
-                    broadcast_record.request_id,
-                    broadcast.receipt_status == BroadcastReceiptStatus::Success,
-                    broadcast
-                        .block_number
-                        .as_deref()
-                        .context("confirmed transaction is missing a block number")?
-                        .parse()
-                        .context("confirmed transaction has an invalid block number")?,
-                    broadcast.mined_fee.as_ref(),
-                )?,
-            BroadcastReceiptStatus::Pending => broadcast_record,
+    let broadcast_record = lock(pending)?.mark_broadcast(
+        claimed.request_id,
+        &broadcast.transaction_hash,
+        claimed.generation,
+    )?;
+    let record = match broadcast.receipt_status {
+        BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => {
+            let receipt = transaction_receipt(network, &broadcast.transaction_hash)
+                .await?
+                .context("send reported a mined transaction but its receipt disappeared")?;
+            lock(pending)?.record_original_receipt(
+                broadcast_record.request_id,
+                &broadcast.transaction_hash,
+                &receipt,
+                network.finality_confirmations,
+            )?
         }
+        BroadcastReceiptStatus::Pending => broadcast_record,
     };
     Ok((record, broadcast))
 }
@@ -547,21 +592,21 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
         let resend = SignedExecution {
             digest: record.digest.clone(),
             serialized_transaction: bytes,
-            transaction_hash: hash,
+            transaction_hash: hash.clone(),
         };
         let broadcast = broadcast_signed_cancellation(&resend, wallet, network).await?;
         let record = match broadcast.receipt_status {
-            BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => lock(pending)?
-                .mark_cancelled(
+            BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => {
+                let receipt = transaction_receipt(network, &hash)
+                    .await?
+                    .context("send reported a mined cancellation but its receipt disappeared")?;
+                lock(pending)?.record_cancellation_receipt(
                     record.request_id,
-                    broadcast
-                        .block_number
-                        .as_deref()
-                        .context("mined cancellation is missing a block number")?
-                        .parse()
-                        .context("mined cancellation has an invalid block number")?,
-                    broadcast.mined_fee.as_ref(),
-                )?,
+                    &hash,
+                    &receipt,
+                    network.finality_confirmations,
+                )?
+            }
             BroadcastReceiptStatus::Pending if broadcast.broadcast_error.is_some() => {
                 reconcile_record(pending, network, record, false).await?
             }
@@ -593,17 +638,17 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     let broadcast = broadcast_signed_cancellation(&signed, wallet, network).await?;
     let record = match broadcast.receipt_status {
         // The receipt belongs to the cancellation hash: it mined immediately.
-        BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => lock(pending)?
-            .mark_cancelled(
+        BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => {
+            let receipt = transaction_receipt(network, &signed.transaction_hash)
+                .await?
+                .context("send reported a mined cancellation but its receipt disappeared")?;
+            lock(pending)?.record_cancellation_receipt(
                 stored.request_id,
-                broadcast
-                    .block_number
-                    .as_deref()
-                    .context("mined cancellation is missing a block number")?
-                    .parse()
-                    .context("mined cancellation has an invalid block number")?,
-                broadcast.mined_fee.as_ref(),
-            )?,
+                &signed.transaction_hash,
+                &receipt,
+                network.finality_confirmations,
+            )?
+        }
         // An outright rejection usually means the race is already over —
         // "nonce too low" for a just-mined original — so ask the chain what
         // the rejection actually meant instead of reporting limbo.
@@ -632,7 +677,15 @@ pub async fn reconcile_all(
                 | PendingStatus::Submitting
                 | PendingStatus::Cancelling
                 | PendingStatus::Replaced
-        ) {
+                | PendingStatus::Confirmed
+                | PendingStatus::Reverted
+                | PendingStatus::Cancelled
+        ) || (matches!(
+            record.status,
+            PendingStatus::Confirmed | PendingStatus::Reverted | PendingStatus::Cancelled
+        ) && (record.finalized_at.is_some()
+            || record.settlement_transaction_hash.is_none()))
+        {
             reconciled.push(record);
             continue;
         }

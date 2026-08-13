@@ -18,6 +18,7 @@ use crate::{
 use alloy::primitives::Address;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
+use uuid::Uuid;
 
 /// Reached only if the guard let the request through, and it says so. Owner
 /// authentication is the step a half-provisioned wallet must never get to ask
@@ -42,16 +43,16 @@ struct UnusableKeys;
 impl crate::sealed::SealedKeyStore for UnusableKeys {}
 
 impl KeyStore for UnusableKeys {
-    fn insert_new(&self, _wallet_id: &str, _key: &PrivateKeyMaterial) -> Result<()> {
+    fn insert_new(&self, _instance_id: Uuid, _key: &PrivateKeyMaterial) -> Result<()> {
         panic!("a policyless wallet reached the key store");
     }
-    fn load(&self, _wallet_id: &str) -> Result<PrivateKeyMaterial> {
+    fn load(&self, _instance_id: Uuid) -> Result<PrivateKeyMaterial> {
         panic!("a policyless wallet reached the key store");
     }
-    fn address_of(&self, _wallet_id: &str) -> Result<Option<Address>> {
+    fn address_of(&self, _instance_id: Uuid) -> Result<Option<Address>> {
         panic!("a policyless wallet reached the key store");
     }
-    fn delete_matching(&self, _wallet_id: &str, _expected: Address) -> Result<Deletion> {
+    fn delete_matching(&self, _instance_id: Uuid, _expected: Address) -> Result<Deletion> {
         panic!("a policyless wallet reached the key store");
     }
 }
@@ -85,6 +86,7 @@ fn half_provisioned(with_policy: bool) -> HalfProvisioned {
     // assertion below stops at or before owner authentication, which is ahead
     // of the point either signer compares this against encrypted configuration.
     let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
         id: "primary".into(),
         address: Address::repeat_byte(0x11),
         created_at: chrono::Utc::now(),
@@ -95,10 +97,21 @@ fn half_provisioned(with_policy: bool) -> HalfProvisioned {
     let mut policies = PolicyStore::open(&directory.path().join("policies.db"), &KEY).unwrap();
     if with_policy {
         policies
-            .put(
-                "primary",
-                &WalletPolicy::require_approval_for_everything(),
-                None,
+            .initialize_policy(&wallet, &WalletPolicy::require_approval_for_everything())
+            .unwrap();
+    } else {
+        policies
+            .connection
+            .execute(
+                "INSERT INTO wallet_instances(
+                 instance_id, wallet_id, wallet_address, created_at, retired_at
+             ) VALUES (?1, ?2, ?3, ?4, NULL)",
+                rusqlite::params![
+                    wallet.instance_id.to_string(),
+                    wallet.id,
+                    format!("{:#x}", wallet.address),
+                    crate::sql::Millis(wallet.created_at),
+                ],
             )
             .unwrap();
     }
@@ -117,7 +130,7 @@ fn a_wallet_with_no_policy_is_not_provisioned() {
     let missing = half_provisioned(false);
     let error = format!(
         "{:#}",
-        require_provisioned_wallet(&missing.policies, "primary").unwrap_err()
+        require_provisioned_wallet(&missing.policies, &missing.wallet).unwrap_err()
     );
     assert!(error.contains("has no policy"), "{error}");
     assert!(
@@ -126,7 +139,7 @@ fn a_wallet_with_no_policy_is_not_provisioned() {
     );
 
     let present = half_provisioned(true);
-    require_provisioned_wallet(&present.policies, "primary")
+    require_provisioned_wallet(&present.policies, &present.wallet)
         .expect("a provisioned wallet signs as it always did");
 }
 

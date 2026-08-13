@@ -223,7 +223,9 @@ impl WalletMcpServer {
     ) -> Result<Self> {
         for wallet in config.load()?.wallets {
             ensure!(
-                policies.get(&wallet.id)?.is_some(),
+                policies
+                    .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+                    .is_some(),
                 "wallet {} has no policy in the encrypted database",
                 wallet.id
             );
@@ -511,6 +513,10 @@ struct AddNetworkInput {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     rpc_strategy: Option<String>,
+    /// Confirmations required before a receipt releases the wallet's signing
+    /// slot. Omit for the conservative default of 12.
+    #[serde(default = "default_network_finality_confirmations")]
+    finality_confirmations: u16,
     /// The largest gas limit this network will ever be asked for, as a
     /// canonical decimal integer of at least 21000 — a cap below the
     /// intrinsic cost of a transaction would refuse every transaction here.
@@ -1021,6 +1027,12 @@ struct ExecutionStatusOutput {
     transaction_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     block_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_hash: Option<String>,
+    /// False while the receipt is still being revalidated and retains the
+    /// wallet/chain signing slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finalized: Option<bool>,
     /// What this transaction actually cost, read from its receipt: gas burned,
     /// the price the chain charged, and their product in wei. Present once the
     /// record settles.
@@ -1131,14 +1143,15 @@ impl WalletMcpServer {
         &self,
         Parameters(WalletInput { wallet_id }): Parameters<WalletInput>,
     ) -> Result<Json<PolicyOutput>, ErrorData> {
-        self.config
+        let wallet = self
+            .config
             .wallet(&wallet_id)
             .map_err(|error| tool_error(&error))?;
         let stored = self
             .policies
             .lock()
             .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
-            .get(&wallet_id)
+            .get_for_wallet(&wallet_id, wallet.instance_id, wallet.address)
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| {
                 ErrorData::invalid_params(format!("wallet {wallet_id} has no local policy"), None)
@@ -1222,7 +1235,7 @@ impl WalletMcpServer {
             .policies
             .lock()
             .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
-            .get(&input.wallet_id)
+            .get_for_wallet(&input.wallet_id, wallet.instance_id, wallet.address)
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| {
                 ErrorData::invalid_params(
@@ -1262,8 +1275,9 @@ impl WalletMcpServer {
             let mut simulations = self.simulations.lock().map_err(|_| {
                 ErrorData::internal_error("simulation registry lock was poisoned", None)
             })?;
-            let recorded = simulations.record(
+            let recorded = simulations.record_for_instance(
                 &wallet.id,
+                wallet.instance_id,
                 &input.chain_id,
                 execution_plan.clone(),
                 Some(plan_source.to_string()),
@@ -1347,7 +1361,7 @@ impl WalletMcpServer {
         self.forks
             .lock()
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
-            .ensure_capacity(&wallet_id, Utc::now())
+            .ensure_capacity(&wallet_id, wallet.instance_id, Utc::now())
             .map_err(|error| tool_error(&error))?;
         self.ensure_global_fork_capacity()?;
         let parent = pin_parent_block(&network)
@@ -1359,6 +1373,7 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
             .create(
                 &wallet_id,
+                wallet.instance_id,
                 wallet.address,
                 network.chain_id,
                 parent,
@@ -2090,6 +2105,7 @@ impl WalletMcpServer {
                 .transpose()
                 .map_err(|error: anyhow::Error| tool_error(&error))?
                 .unwrap_or_default(),
+            finality_confirmations: input.finality_confirmations,
             max_gas_limit: Some(input.max_gas_limit),
             // An agent does not choose the owner's fee ceiling.
             max_fee_per_gas: None,
@@ -2384,18 +2400,20 @@ impl WalletMcpServer {
             .lock()
             .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?;
         let current = policies
-            .get(&wallet.id)
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| {
                 ErrorData::invalid_params(format!("wallet {} has no local policy", wallet.id), None)
             })?;
         let replaced_previous_proposal = policies
-            .proposal(&wallet.id)
+            .proposal_for_instance(wallet.instance_id)
             .map_err(|error| tool_error(&error))?
             .is_some();
         let proposal = policies
-            .put_proposal(
+            .put_proposal_for_wallet(
                 &wallet.id,
+                wallet.instance_id,
+                wallet.address,
                 input.source_revision,
                 &proposed,
                 &input.rationale,
@@ -2460,7 +2478,7 @@ impl WalletMcpServer {
             .typed_data
             .lock()
             .map_err(|_| ErrorData::internal_error("typed-data database lock was poisoned", None))?
-            .create(&wallet.id, chain_id, &input.typed_data, digest, None)
+            .create_for_wallet(&wallet, chain_id, &input.typed_data, digest, None)
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_typed_data(record.request_id, client_id)
@@ -2554,13 +2572,7 @@ impl WalletMcpServer {
             .messages
             .lock()
             .map_err(|_| ErrorData::internal_error("message database lock was poisoned", None))?
-            .create(
-                &wallet.id,
-                input.chain_id.as_deref(),
-                &message,
-                encoding,
-                None,
-            )
+            .create_for_wallet(&wallet, input.chain_id.as_deref(), &message, encoding, None)
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_message(record.request_id, client_id)
@@ -2638,8 +2650,14 @@ impl WalletMcpServer {
             "fork was opened for a different chain",
         )?;
         if let Some(wallet_id) = wallet_id {
+            let wallet = self
+                .config
+                .wallet(wallet_id)
+                .map_err(|error| tool_error(&error))?;
             ensure_tool(
-                session.wallet_id == wallet_id,
+                session.wallet_instance_id == wallet.instance_id
+                    && session.wallet_id == wallet_id
+                    && session.wallet_address == wallet.address,
                 "fork was opened for a different wallet",
             )?;
         }
@@ -2668,12 +2686,15 @@ impl WalletMcpServer {
         }
     }
 
-    fn active_policy(&self, wallet_id: &str) -> Result<crate::policy_store::StoredPolicy> {
+    fn active_policy(
+        &self,
+        wallet: &crate::config::WalletMetadata,
+    ) -> Result<crate::policy_store::StoredPolicy> {
         self.policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
-            .get(wallet_id)?
-            .with_context(|| format!("wallet {wallet_id} has no local policy"))
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+            .with_context(|| format!("wallet {} has no local policy", wallet.id))
     }
 
     /// Everything a policy may consult beyond the plan itself: the wallet the
@@ -2700,7 +2721,8 @@ impl WalletMcpServer {
             "pending request network mismatch"
         );
         ensure!(
-            record.execution_plan.sender == wallet.address,
+            record.wallet_instance_id == wallet.instance_id
+                && record.execution_plan.sender == wallet.address,
             "pending request sender no longer matches the configured wallet"
         );
         Ok(record)
@@ -2720,7 +2742,7 @@ impl WalletMcpServer {
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
         ensure!(
-            record.wallet_id == wallet_id,
+            record.wallet_id == wallet_id && record.wallet_instance_id == wallet.instance_id,
             "pending request wallet mismatch"
         );
         ensure!(
@@ -2747,7 +2769,7 @@ impl WalletMcpServer {
         on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
-        let stored_policy = self.active_policy(&wallet.id)?;
+        let stored_policy = self.active_policy(&wallet)?;
         // Only what has to hold before the RPC is asked to execute anything.
         // The sender, chain, and digest are checked against this wallet and
         // network below, on the path both kinds of send share.
@@ -2791,7 +2813,7 @@ impl WalletMcpServer {
         on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
-        let stored_policy = self.active_policy(&wallet.id)?;
+        let stored_policy = self.active_policy(&wallet)?;
         let recorded = self
             .simulations
             .lock()
@@ -2799,7 +2821,7 @@ impl WalletMcpServer {
             .take(simulation_id, Utc::now())?;
         self.release_global_simulation(simulation_id);
         ensure!(
-            recorded.wallet_id == wallet.id,
+            recorded.wallet_instance_id == wallet.instance_id && recorded.wallet_id == wallet.id,
             "simulation {simulation_id} was recorded for wallet {}, not {}",
             recorded.wallet_id,
             wallet.id
@@ -3279,6 +3301,10 @@ const fn default_confirmations() -> u16 {
     1
 }
 
+const fn default_network_finality_confirmations() -> u16 {
+    ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS
+}
+
 fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
     let instruction = match record.status {
         TypedDataStatus::AwaitingApproval => Some(format!(
@@ -3422,6 +3448,10 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ExecutionStatus::Rejected => Some(
             "The user rejected this request. Do not recreate it unless they explicitly request a new transaction.".into(),
         ),
+        ExecutionStatus::Cancelled if record.settlement_transaction_hash.is_some()
+            && record.finalized_at.is_none() => Some(
+            "A cancellation receipt was observed but is not final yet. The wallet is revalidating it and will not sign another transaction for this wallet and chain until finality.".into(),
+        ),
         ExecutionStatus::Cancelled => Some(if record.cancel_transaction_hashes.is_empty() {
             "The signed request was cancelled because its policy revision changed before initial submission.".into()
         } else {
@@ -3432,6 +3462,10 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ),
         ExecutionStatus::Replaced => Some(
             "The signed transaction's nonce was consumed by a different mined transaction (for example one sent from the same key on another device), so these exact bytes can never mine and nothing was executed. Prepare a fresh plan only if the user still wants the action.".into(),
+        ),
+        ExecutionStatus::Submitted | ExecutionStatus::Reverted
+            if record.finalized_at.is_none() => Some(
+            "This receipt is provisional. The wallet is revalidating its block identity and retains the wallet/chain signing slot until the network finality depth is reached.".into(),
         ),
         ExecutionStatus::Submitted | ExecutionStatus::Reverted => None,
     };
@@ -3447,6 +3481,11 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
             .broadcast_transaction_hash
             .or(record.signed_transaction_hash),
         block_number: record.block_number,
+        block_hash: record.block_hash,
+        finalized: record
+            .settlement_transaction_hash
+            .as_ref()
+            .map(|_| record.finalized_at.is_some()),
         mined_fee: record.mined_fee,
         confirmations: None,
         receipt_status,
@@ -3511,11 +3550,12 @@ impl WalletMcpServer {
     /// request is made rather than after a person has read the payload and
     /// authenticated to sign it.
     fn require_provisioned_wallet(&self, wallet_id: &str) -> Result<()> {
+        let wallet = self.config.wallet(wallet_id)?;
         let present = self
             .policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
-            .get(wallet_id)?
+            .get_for_wallet(wallet_id, wallet.instance_id, wallet.address)?
             .is_some();
         anyhow::ensure!(
             present,

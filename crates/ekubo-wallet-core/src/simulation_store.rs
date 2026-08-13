@@ -45,6 +45,7 @@ pub const MAX_RECORDED_PLAN_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordedSimulation {
     pub simulation_id: Uuid,
+    pub wallet_instance_id: Uuid,
     pub wallet_id: String,
     pub chain_id: String,
     /// The exact plan that was simulated. The send takes the plan from here
@@ -86,9 +87,10 @@ impl SimulationStore {
     /// of work already done, and failing a simulation the RPC has already
     /// executed because the cache is full would waste exactly what it exists
     /// to save.
-    pub fn record(
+    pub fn record_for_instance(
         &mut self,
         wallet_id: &str,
+        wallet_instance_id: Uuid,
         chain_id: &str,
         plan: ExecutionPlan,
         plan_source: Option<String>,
@@ -99,6 +101,7 @@ impl SimulationStore {
         let plan_bytes = serde_json::to_vec(&plan).map_or(0, |bytes| bytes.len());
         let recorded = RecordedSimulation {
             simulation_id: Uuid::new_v4(),
+            wallet_instance_id,
             wallet_id: wallet_id.to_owned(),
             chain_id: chain_id.to_owned(),
             plan,
@@ -144,6 +147,27 @@ impl SimulationStore {
             recorded.simulation_id,
         );
         recorded
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn record(
+        &mut self,
+        wallet_id: &str,
+        chain_id: &str,
+        plan: ExecutionPlan,
+        plan_source: Option<String>,
+        result: SimulationResult,
+        now: DateTime<Utc>,
+    ) -> RecordedSimulation {
+        self.record_for_instance(
+            wallet_id,
+            Uuid::nil(),
+            chain_id,
+            plan,
+            plan_source,
+            result,
+            now,
+        )
     }
 
     /// Consume one recorded simulation. A second call for the same identifier

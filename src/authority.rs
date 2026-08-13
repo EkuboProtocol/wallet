@@ -21,8 +21,7 @@ use ekubo_wallet_core::{
     },
     execution::BroadcastResult,
     human_presence::{
-        HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
-        PresenceRequest, authorize_oauth_client, authorize_owner,
+        OwnerAuthorizationScope, PlatformHumanPresence, authorize_oauth_client, authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -602,6 +601,13 @@ pub struct OwnerReviewQueues {
     pub token_proposals: Vec<TokenProposal>,
 }
 
+fn transaction_observation_changed(
+    before: &PendingTransaction,
+    after: &PendingTransaction,
+) -> bool {
+    before.status != after.status || (before.finalized_at.is_none() && after.finalized_at.is_some())
+}
+
 impl OwnerApi {
     /// An owner capability over a throwaway database, for tests only.
     ///
@@ -650,13 +656,7 @@ impl OwnerApi {
             Arc::new(OsKeyStore),
             Arc::new(PlatformHumanPresence),
         );
-        let wallet = custody.create(wallet_id)?;
-        self.initialize_policy(&wallet.id, policy).with_context(|| {
-            format!(
-                "account {} was created but policy initialization failed; signing remains disabled",
-                wallet.id
-            )
-        })?;
+        let wallet = custody.create_with_policy(wallet_id, policy)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(wallet)
     }
@@ -671,17 +671,13 @@ impl OwnerApi {
             Arc::new(OsKeyStore),
             Arc::new(PlatformHumanPresence),
         );
-        let wallet = custody.import(wallet_id, key)?;
-        self.initialize_policy(&wallet.id, &WalletPolicy::require_approval_for_everything())?;
+        let wallet = custody.import_with_policy(
+            wallet_id,
+            key,
+            &WalletPolicy::require_approval_for_everything(),
+        )?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(wallet)
-    }
-
-    fn initialize_policy(&self, wallet_id: &str, policy: &WalletPolicy) -> Result<()> {
-        let mut policies = PolicyStore::production(self.config.data_dir())?;
-        policies.purge(wallet_id)?;
-        policies.put(wallet_id, policy, None)?;
-        Ok(())
     }
 
     async fn export_account(&self, wallet_id: &str) -> Result<zeroize::Zeroizing<String>> {
@@ -701,8 +697,8 @@ impl OwnerApi {
 
     pub fn account_removal_document(&self, wallet_id: &str) -> Result<ReviewDocument> {
         let wallet = self.config.wallet(wallet_id)?;
-        let in_flight =
-            PolicyStore::production(self.config.data_dir())?.in_flight_transactions(wallet_id)?;
+        let in_flight = PolicyStore::production(self.config.data_dir())?
+            .in_flight_transactions_for_wallet(&wallet)?;
         let mut request = ApprovalRequest::new(
             ApprovalKind::RemoveWallet,
             "Remove account",
@@ -728,7 +724,6 @@ impl OwnerApi {
         )
         .remove(wallet_id)
         .await?;
-        PolicyStore::production(self.config.data_dir())?.purge(wallet_id)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
     }
@@ -774,6 +769,22 @@ impl OwnerApi {
             session_preset,
             &authorization,
         )?;
+        if let Err(launch_error) = crate::launch_at_login::enable(&authorization) {
+            // The authorization code has not left this process yet. Revoke
+            // the just-created grant before reporting the persistence failure
+            // so a caller cannot exchange the code after an incomplete grant.
+            let rollback = self.desktop()?.revoke_client(client_id);
+            self.events
+                .publish(DomainEventKind::AgentConnectionChanged { client_id });
+            if let Err(rollback) = rollback {
+                return Err(launch_error).context(format!(
+                    "launch-at-login setup failed and the new agent grant could not be revoked: \
+                     {rollback:#}"
+                ));
+            }
+            return Err(launch_error)
+                .context("new agent grant was revoked because launch-at-login setup failed");
+        }
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
         Ok(code)
@@ -824,16 +835,38 @@ impl OwnerApi {
     }
 
     pub fn revoke_client(&self, client_id: Uuid) -> Result<()> {
-        self.desktop()?.revoke_client(client_id)?;
+        let mut desktop = self.desktop()?;
+        desktop.revoke_client(client_id)?;
+        let any_active = desktop
+            .clients()?
+            .iter()
+            .any(|client| client.authorized_at.is_some() && client.revoked_at.is_none());
+        drop(desktop);
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
+        if !any_active {
+            crate::launch_at_login::disable().context(
+                "agent access was revoked, but launch-at-login persistence could not be removed",
+            )?;
+        }
         Ok(())
     }
 
-    pub fn remove_client(&self, client_id: Uuid, authorization: &OwnerAuthorization) -> Result<()> {
-        self.desktop()?.remove_client(client_id, authorization)?;
+    pub fn remove_client(&self, client_id: Uuid) -> Result<()> {
+        let mut desktop = self.desktop()?;
+        desktop.remove_client(client_id)?;
+        let any_active = desktop
+            .clients()?
+            .iter()
+            .any(|client| client.authorized_at.is_some() && client.revoked_at.is_none());
+        drop(desktop);
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
+        if !any_active {
+            crate::launch_at_login::disable().context(
+                "agent registration was removed, but launch-at-login persistence could not be removed",
+            )?;
+        }
         Ok(())
     }
 
@@ -874,7 +907,12 @@ impl OwnerApi {
     }
 
     pub fn policy(&self, wallet_id: &str) -> Result<Option<StoredPolicy>> {
-        PolicyStore::production(self.config.data_dir())?.get(wallet_id)
+        let wallet = self.account(wallet_id)?;
+        PolicyStore::production(self.config.data_dir())?.get_for_wallet(
+            wallet_id,
+            wallet.instance_id,
+            wallet.address,
+        )
     }
 
     pub async fn install_policy(
@@ -883,24 +921,33 @@ impl OwnerApi {
         policy: &WalletPolicy,
         reviewed_revision: Option<u64>,
     ) -> Result<StoredPolicy> {
-        self.account(wallet_id)?;
+        let wallet = self.account(wallet_id)?;
         let before = self.policy(wallet_id)?;
         ensure_optional_revision(
             reviewed_revision,
             before.as_ref().map(|policy| policy.revision),
         )?;
-        PlatformHumanPresence
-            .confirm(&PresenceRequest::ReplacePolicy {
-                wallet: wallet_id.to_owned(),
-            })
-            .await?;
+        let baseline = WalletPolicy::require_approval_for_everything();
+        let current = before.as_ref().map_or(&baseline, |stored| &stored.policy);
+        let authorization = if crate::core::policy::is_tightening(current, policy) {
+            None
+        } else {
+            Some(authorize_owner(OwnerAuthorizationScope::PolicySettings).await?)
+        };
         let mut store = PolicyStore::production(self.config.data_dir())?;
-        let current = store.get(wallet_id)?;
+        let current = store.get_for_wallet(wallet_id, wallet.instance_id, wallet.address)?;
         ensure_optional_revision(
             reviewed_revision,
             current.as_ref().map(|policy| policy.revision),
         )?;
-        let installed = store.put(wallet_id, policy, reviewed_revision)?;
+        let installed = store.install_policy_for_instance(
+            wallet_id,
+            wallet.instance_id,
+            wallet.address,
+            policy,
+            reviewed_revision,
+            authorization.as_ref(),
+        )?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(installed)
     }
@@ -910,21 +957,30 @@ impl OwnerApi {
     }
 
     pub async fn apply_policy_proposal(&self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
-        self.account(&proposal.wallet_id)?;
+        let wallet = self.account(&proposal.wallet_id)?;
+        ensure!(
+            wallet.instance_id == proposal.wallet_instance_id
+                && wallet.address == proposal.wallet_address,
+            "the proposal belongs to a predecessor wallet identity"
+        );
         let before = PolicyStore::production(self.config.data_dir())?
-            .proposal(&proposal.wallet_id)?
+            .proposal_for_instance(proposal.wallet_instance_id)?
             .context("the policy proposal no longer exists")?;
         ensure!(
             before == *proposal,
             "the policy proposal changed before authentication; review it again"
         );
-        PlatformHumanPresence
-            .confirm(&PresenceRequest::ReplacePolicy {
-                wallet: proposal.wallet_id.clone(),
-            })
-            .await?;
+        let current = self
+            .policy(&proposal.wallet_id)?
+            .context("the wallet has no active policy")?;
+        let authorization = if crate::core::policy::is_tightening(&current.policy, &proposal.policy)
+        {
+            None
+        } else {
+            Some(authorize_owner(OwnerAuthorizationScope::PolicySettings).await?)
+        };
         let mut store = PolicyStore::production(self.config.data_dir())?;
-        let installed = store.consume_proposal(proposal)?;
+        let installed = store.apply_proposal(proposal, authorization.as_ref())?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(installed)
     }
@@ -1083,10 +1139,14 @@ impl OwnerApi {
         reviewed: &NetworkConfig,
         disabled: bool,
     ) -> Result<NetworkConfig> {
-        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
-        let updated = self
-            .config
-            .set_network_disabled(reviewed, disabled, &authorization)?;
+        let authorization = if disabled {
+            None
+        } else {
+            Some(authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?)
+        };
+        let updated =
+            self.config
+                .set_network_disabled(reviewed, disabled, authorization.as_ref())?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(updated)
     }
@@ -1309,7 +1369,7 @@ impl OwnerApi {
             .get(request_id)?;
         let network = self.config.network_by_chain_id(before.chain_id.as_str())?;
         let refreshed = reconcile_record(&pending, &network, before.clone(), true).await?;
-        if refreshed.status != before.status {
+        if transaction_observation_changed(&before, &refreshed) {
             self.publish_transaction_status(&refreshed);
         }
         Ok(refreshed)
@@ -1328,14 +1388,14 @@ impl OwnerApi {
             .lock()
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
-        let starting_status = before.status;
+        let starting = before.clone();
         let wallet = self.config.wallet(&before.wallet_id)?;
         let network = self.config.network_by_chain_id(before.chain_id.as_str())?;
         let current = reconcile_record(&pending, &network, before, true).await?;
-        if current.status != starting_status {
+        if transaction_observation_changed(&starting, &current) {
             self.publish_transaction_status(&current);
         }
-        let reconciled_status = current.status;
+        let reconciled = current.clone();
         let claimed = match current.status {
             PendingStatus::Signed => pending
                 .lock()
@@ -1363,7 +1423,7 @@ impl OwnerApi {
             ),
         };
         let (record, broadcast) = submit_claimed(&pending, &wallet, &network, claimed).await?;
-        if record.status != reconciled_status {
+        if transaction_observation_changed(&reconciled, &record) {
             self.publish_transaction_status(&record);
         }
         Ok(OwnerTransactionAction {
@@ -1386,7 +1446,7 @@ impl OwnerApi {
             .lock()
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
-        let starting_status = record.status;
+        let starting = record.clone();
         let wallet = self.config.wallet(&record.wallet_id)?;
         let network = self.config.network_by_chain_id(record.chain_id.as_str())?;
         let outcome = attempt_cancellation(
@@ -1408,14 +1468,14 @@ impl OwnerApi {
                 // returns an error.
                 if let Ok(store) = pending.lock()
                     && let Ok(current) = store.get(request_id)
-                    && current.status != starting_status
+                    && transaction_observation_changed(&starting, &current)
                 {
                     self.publish_transaction_status(&current);
                 }
                 return Err(error);
             }
         };
-        if record.status != starting_status {
+        if transaction_observation_changed(&starting, &record) {
             self.publish_transaction_status(&record);
         }
         Ok(OwnerTransactionAction {
@@ -1431,8 +1491,17 @@ impl OwnerApi {
             PendingStatus::Submitting | PendingStatus::Broadcast | PendingStatus::Cancelling => {
                 Some(crate::events::TransactionStage::Broadcast)
             }
+            PendingStatus::Confirmed | PendingStatus::Reverted if record.finalized_at.is_none() => {
+                Some(crate::events::TransactionStage::Broadcast)
+            }
             PendingStatus::Confirmed => Some(crate::events::TransactionStage::Confirmed),
             PendingStatus::Reverted => Some(crate::events::TransactionStage::Reverted),
+            PendingStatus::Cancelled
+                if record.settlement_transaction_hash.is_some()
+                    && record.finalized_at.is_none() =>
+            {
+                Some(crate::events::TransactionStage::Broadcast)
+            }
             PendingStatus::Cancelled => Some(crate::events::TransactionStage::Cancelled),
             PendingStatus::Replaced => Some(crate::events::TransactionStage::Replaced),
             PendingStatus::Rejected => None,
@@ -1473,9 +1542,11 @@ impl OwnerApi {
         let request = pending.get(request_id)?;
         let data_dir = self.config.data_dir().to_path_buf();
         let wallet_id = request.wallet_id.clone();
+        let wallet_instance_id = request.wallet_instance_id;
+        let wallet_address = request.execution_plan.sender;
         let read_policy = move || {
             PolicyStore::production(&data_dir)?
-                .get(&wallet_id)?
+                .get_for_wallet(&wallet_id, wallet_instance_id, wallet_address)?
                 .context("wallet has no installed policy")
         };
         let tokens = TokenStore::production(self.config.data_dir())?;
@@ -1546,8 +1617,9 @@ impl OwnerApi {
         encoding: ekubo_wallet_core::message::MessageEncoding,
         requester: &str,
     ) -> Result<PendingMessage> {
-        let queued = MessageStore::production(self.config.data_dir())?.create(
-            wallet_id,
+        let wallet = self.account(wallet_id)?;
+        let queued = MessageStore::production(self.config.data_dir())?.create_for_wallet(
+            &wallet,
             Some(&chain_id.to_string()),
             message,
             encoding,
@@ -1597,13 +1669,14 @@ impl OwnerApi {
         payload: &serde_json::Value,
         requester: &str,
     ) -> Result<PendingTypedData> {
+        let wallet = self.account(wallet_id)?;
         let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
         anyhow::ensure!(
             parsed_chain_id == chain_id,
             "typed-data domain chain does not match the request chain"
         );
-        let queued = TypedDataStore::production(self.config.data_dir())?.create(
-            wallet_id,
+        let queued = TypedDataStore::production(self.config.data_dir())?.create_for_wallet(
+            &wallet,
             chain_id,
             payload,
             digest,

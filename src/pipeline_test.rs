@@ -89,7 +89,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -119,6 +119,10 @@ struct StubChain {
     /// perfectly and still be an envelope no node will accept -- one that
     /// spends the whole native balance has nothing left to pay for itself.
     refuses_send: bool,
+    hide_receipts: AtomicBool,
+    receipt_succeeded: AtomicBool,
+    receipt_block_hash_byte: AtomicU8,
+    head_block_number: AtomicU64,
 }
 
 /// The one lie a stub tells, if it tells one.
@@ -159,7 +163,10 @@ impl StubChain {
     fn dispatch(&self, method: &str, params: &serde_json::Value) -> serde_json::Value {
         match method {
             "eth_chainId" => serde_json::json!(format!("{CHAIN_ID:#x}")),
-            "eth_blockNumber" => serde_json::json!(format!("{PARENT_NUMBER:#x}")),
+            "eth_blockNumber" => serde_json::json!(format!(
+                "{:#x}",
+                self.head_block_number.load(Ordering::SeqCst)
+            )),
             "eth_getBlockByNumber" => {
                 block_json_limited(PARENT_NUMBER, B256::repeat_byte(0xa9), BLOCK_GAS_LIMIT)
             }
@@ -208,11 +215,13 @@ impl StubChain {
             "eth_getTransactionByHash" => serde_json::Value::Null,
             "eth_getTransactionReceipt" => {
                 let hash: B256 = serde_json::from_value(params[0].clone()).unwrap();
-                if self.mined.lock().unwrap().contains(&hash) {
+                if self.mined.lock().unwrap().contains(&hash)
+                    && !self.hide_receipts.load(Ordering::SeqCst)
+                {
                     serde_json::json!({
                         "transactionHash": hash,
                         "transactionIndex": "0x0",
-                        "blockHash": B256::repeat_byte(0xbb),
+                        "blockHash": B256::repeat_byte(self.receipt_block_hash_byte.load(Ordering::SeqCst)),
                         "blockNumber": format!("{:#x}", PARENT_NUMBER + 2),
                         "from": Address::ZERO,
                         "to": Address::ZERO,
@@ -221,7 +230,7 @@ impl StubChain {
                         "contractAddress": null,
                         "logs": [],
                         "logsBloom": zero_bloom(),
-                        "status": "0x1",
+                        "status": if self.receipt_succeeded.load(Ordering::SeqCst) { "0x1" } else { "0x0" },
                         "type": "0x2",
                         "effectiveGasPrice": format!("{BASE_FEE:#x}"),
                     })
@@ -245,6 +254,10 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
     let address = listener.local_addr().unwrap();
     let chain = std::sync::Arc::new(StubChain {
         refuses_send: lie.refuses_send,
+        hide_receipts: AtomicBool::new(false),
+        receipt_succeeded: AtomicBool::new(true),
+        receipt_block_hash_byte: AtomicU8::new(0xbb),
+        head_block_number: AtomicU64::new(PARENT_NUMBER + 2),
         ..StubChain::default()
     });
     let serve_chain = chain.clone();
@@ -349,6 +362,7 @@ fn stub_network(address: SocketAddr) -> NetworkConfig {
         chain_id: CHAIN_ID,
         rpc_urls: vec![format!("http://{address}/").parse().unwrap()],
         rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
+        finality_confirmations: 2,
         max_gas_limit: Some(BLOCK_GAS_LIMIT.to_string()),
         max_fee_per_gas: None,
         native_currency: None,
@@ -371,8 +385,10 @@ fn pipeline_server(
     )
     .unwrap();
     let wallet_address = material.address();
-    keys.insert_new("primary", &material).unwrap();
+    let instance_id = uuid::Uuid::new_v4();
+    keys.insert_new(instance_id, &material).unwrap();
     let wallet = WalletMetadata {
+        instance_id,
         id: "primary".into(),
         address: wallet_address,
         created_at: Utc::now(),
@@ -394,7 +410,7 @@ fn pipeline_server(
         .unwrap()
     };
     let mut policies = open();
-    policies.put("primary", policy, None).unwrap();
+    policies.put_for_instance(&wallet, policy, None).unwrap();
     let server = WalletMcpServer::new(
         config,
         policies,
@@ -491,6 +507,91 @@ async fn automatic_path_signs_broadcasts_and_confirms_through_the_stub() {
     let bytes = hex::decode(serialized.trim_start_matches("0x")).unwrap();
     assert_eq!(format!("{:#x}", keccak256(&bytes)), hash);
     assert!(!record.approval_required, "automatic row needs no approval");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reorged_receipt_rolls_back_and_keeps_the_automatic_signing_slot() {
+    let (address, chain) = start_stub().await;
+    let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
+    let send = || SendExecutionPlanInput {
+        wallet_id: "primary".into(),
+        chain_id: CHAIN_ID.to_string(),
+        reference: Some(plan_reference(wallet.address)),
+        simulation_id: None,
+        request_id: None,
+        on_simulation_failure: OnSimulationFailure::RequestApproval,
+    };
+    let first = server
+        .wallet_send_execution_plan(Parameters(send()))
+        .await
+        .unwrap()
+        .0;
+    let request = RequestInput {
+        wallet_id: "primary".into(),
+        chain_id: CHAIN_ID.to_string(),
+        request_id: first.request_id,
+    };
+    let shallow = server
+        .pending
+        .lock()
+        .unwrap()
+        .get(first.request_id)
+        .unwrap();
+    assert_eq!(shallow.status, PendingStatus::Confirmed);
+    assert!(shallow.finalized_at.is_none());
+    assert!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .in_flight("primary", &CHAIN_ID.to_string())
+            .unwrap()
+            .is_some()
+    );
+
+    let blocked = server.wallet_send_execution_plan(Parameters(send())).await;
+    assert!(blocked.is_err_and(|error| {
+        error
+            .message
+            .contains("still holds this wallet and chain's signing slot")
+    }));
+    assert_eq!(chain.mined.lock().unwrap().len(), 1);
+
+    // A different canonical block identity replaces the provisional one.
+    chain.receipt_block_hash_byte.store(0xcc, Ordering::SeqCst);
+    let moved = server.reconcile_pending(&request).await.unwrap();
+    assert_eq!(moved.status, ExecutionStatus::Submitted);
+    assert_eq!(
+        moved.block_hash.as_deref(),
+        Some(format!("{:#x}", B256::repeat_byte(0xcc)).as_str())
+    );
+    assert_eq!(moved.finalized, Some(false));
+
+    // The receipt then disappears entirely: reconciliation restores the
+    // broadcast lifecycle instead of preserving a false success.
+    chain.hide_receipts.store(true, Ordering::SeqCst);
+    let rolled_back = server.reconcile_pending(&request).await.unwrap();
+    assert_eq!(rolled_back.status, ExecutionStatus::SubmissionPending);
+    assert!(rolled_back.block_hash.is_none());
+
+    // Once the replacement block is deep enough, the same receipt becomes
+    // final and the signing slot is released.
+    chain.hide_receipts.store(false, Ordering::SeqCst);
+    chain
+        .head_block_number
+        .store(PARENT_NUMBER + 13, Ordering::SeqCst);
+    let finalized = server.reconcile_pending(&request).await.unwrap();
+    assert_eq!(finalized.status, ExecutionStatus::Submitted);
+    assert_eq!(finalized.finalized, Some(true));
+    assert!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .in_flight("primary", &CHAIN_ID.to_string())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

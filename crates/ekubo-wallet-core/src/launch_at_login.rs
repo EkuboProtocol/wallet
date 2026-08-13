@@ -1,5 +1,10 @@
-//! Current-user launch-at-login registration for the tray-first desktop app.
+//! Core-enforced current-user launch registration.
+//!
+//! Enabling persistence expands the wallet's execution and listener surface,
+//! so it requires the same sealed authorization that granted agent access.
+//! Disabling it only removes authority and is deliberately authorization-free.
 
+use crate::human_presence::{OwnerAuthorization, OwnerAuthorizationScope};
 use anyhow::{Context, Result, ensure};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use directories::BaseDirs;
@@ -13,8 +18,10 @@ use tempfile::NamedTempFile;
 
 const HIDDEN_STARTUP_ARGUMENT: &str = "--hidden-startup";
 
-/// Install an idempotent current-user login registration for this executable.
-pub fn enable() -> Result<()> {
+/// Install the exact wallet login registration after core verifies the agent
+/// access grant that justifies it.
+pub fn enable(authorization: &OwnerAuthorization) -> Result<()> {
+    authorization.require(OwnerAuthorizationScope::AgentAccess)?;
     let executable = std::env::current_exe().context("could not locate the wallet executable")?;
     ensure!(
         executable.is_absolute(),
@@ -23,11 +30,31 @@ pub fn enable() -> Result<()> {
     enable_executable(&executable)
 }
 
+/// Remove the exact wallet login registration. This is idempotent and never
+/// asks for owner authorization because it can only reduce attack surface.
+pub fn disable() -> Result<()> {
+    disable_registration()
+}
+
+#[cfg(target_os = "macos")]
+fn registration_path() -> Result<std::path::PathBuf> {
+    Ok(BaseDirs::new()
+        .context("could not determine the user home directory")?
+        .home_dir()
+        .join("Library/LaunchAgents/org.ekubo.wallet.plist"))
+}
+
+#[cfg(target_os = "linux")]
+fn registration_path() -> Result<std::path::PathBuf> {
+    Ok(BaseDirs::new()
+        .context("could not determine the user config directory")?
+        .config_dir()
+        .join("autostart/org.ekubo.wallet.desktop"))
+}
+
 #[cfg(target_os = "macos")]
 fn enable_executable(executable: &Path) -> Result<()> {
-    let base = BaseDirs::new().context("could not determine the user home directory")?;
-    let directory = base.home_dir().join("Library/LaunchAgents");
-    let path = directory.join("org.ekubo.wallet.plist");
+    let path = registration_path()?;
     let executable = xml_escape(&executable.to_string_lossy());
     let document = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>org.ekubo.wallet</string><key>ProgramArguments</key><array><string>{executable}</string><string>{HIDDEN_STARTUP_ARGUMENT}</string></array><key>RunAtLoad</key><true/></dict></plist>\n"
@@ -37,8 +64,7 @@ fn enable_executable(executable: &Path) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn enable_executable(executable: &Path) -> Result<()> {
-    let base = BaseDirs::new().context("could not determine the user config directory")?;
-    let path = base.config_dir().join("autostart/org.ekubo.wallet.desktop");
+    let path = registration_path()?;
     let executable = desktop_exec_escape(&executable.to_string_lossy());
     let document = format!(
         "[Desktop Entry]\nType=Application\nName=Ekubo Wallet\nComment=Start the Ekubo Wallet tray service\nExec=\"{executable}\" {HIDDEN_STARTUP_ARGUMENT}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
@@ -46,7 +72,7 @@ fn enable_executable(executable: &Path) -> Result<()> {
     write_atomic(&path, document.as_bytes())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn enable_executable(executable: &Path) -> Result<()> {
     let value = format!(
         "\"{}\" {HIDDEN_STARTUP_ARGUMENT}",
@@ -73,9 +99,56 @@ fn enable_executable(executable: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn disable_registration() -> Result<()> {
+    remove_exact_file(&registration_path()?)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn remove_exact_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("could not remove {}", path.display())),
+    }
+}
+
+#[cfg(windows)]
+fn disable_registration() -> Result<()> {
+    let query = Command::new("reg.exe")
+        .args([
+            "QUERY",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "EkuboWallet",
+        ])
+        .status()
+        .context("could not inspect the current-user startup registry")?;
+    if !query.success() {
+        return Ok(());
+    }
+    let status = Command::new("reg.exe")
+        .args([
+            "DELETE",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "EkuboWallet",
+            "/f",
+        ])
+        .status()
+        .context("could not remove the current-user startup registry value")?;
+    ensure!(status.success(), "Windows rejected startup removal");
+    Ok(())
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn enable_executable(_executable: &Path) -> Result<()> {
     anyhow::bail!("launch at login is unsupported on this platform")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn disable_registration() -> Result<()> {
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

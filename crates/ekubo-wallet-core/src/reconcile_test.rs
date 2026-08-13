@@ -11,6 +11,8 @@ const fn receipt(succeeded: bool) -> ReceiptStatus {
     ReceiptStatus {
         succeeded,
         block_number: 100,
+        block_hash: alloy::primitives::B256::ZERO,
+        head_block_number: 100,
         gas_used: 21_000,
         effective_gas_price: 1_000_000_000,
     }

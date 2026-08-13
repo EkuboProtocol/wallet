@@ -82,7 +82,7 @@ fn defaults_form_a_valid_configuration() {
         networks.len()
     );
     validate_config(&crate::config::WalletConfig {
-        version: 2,
+        version: 3,
         wallets: Vec::new(),
         networks,
     })

@@ -46,6 +46,7 @@ impl SignatureQueue {
     pub fn create_or_reuse(
         &self,
         connection: &mut Connection,
+        wallet_instance_id: Uuid,
         wallet_id: &str,
         chain_key: u64,
         digest: B256,
@@ -58,11 +59,16 @@ impl SignatureQueue {
         let existing: Option<Uuid> = transaction
             .query_row(
                 &format!(
-                    "SELECT request_id FROM {} WHERE wallet_id = ?1 AND chain_id = ?2 \
+                    "SELECT request_id FROM {} WHERE wallet_instance_id = ?1 AND chain_id = ?2 \
                      AND digest = ?3 AND requester = ?4 AND status = 'awaiting_approval'",
                     self.table
                 ),
-                params![wallet_id, chain_key, Blob(digest), requester],
+                params![
+                    wallet_instance_id.to_string(),
+                    chain_key,
+                    Blob(digest),
+                    requester
+                ],
                 |row| row.get(0),
             )
             .optional()?;
@@ -72,10 +78,10 @@ impl SignatureQueue {
         }
         let awaiting: i64 = transaction.query_row(
             &format!(
-                "SELECT COUNT(*) FROM {} WHERE wallet_id = ?1 AND status = 'awaiting_approval'",
+                "SELECT COUNT(*) FROM {} WHERE wallet_instance_id = ?1 AND status = 'awaiting_approval'",
                 self.table
             ),
-            [wallet_id],
+            [wallet_instance_id.to_string()],
             |row| row.get(0),
         )?;
         ensure!(
@@ -118,22 +124,28 @@ impl SignatureQueue {
         &self,
         connection: &mut Connection,
         request_id: Uuid,
+        signer_wallet_instance_id: Uuid,
         signer_wallet_id: &str,
         expected_digest: B256,
         signature: &str,
     ) -> Result<()> {
         let signature = parse_signature(signature)?;
         let transaction = connection.transaction()?;
-        let (wallet_id, digest, status): (String, Blob<B256>, String) = transaction
+        let (wallet_instance_id, wallet_id, digest, status): (String, String, Blob<B256>, String) = transaction
             .query_row(
                 &format!(
-                    "SELECT wallet_id, digest, status FROM {} WHERE request_id = ?1",
+                    "SELECT wallet_instance_id, wallet_id, digest, status FROM {} WHERE request_id = ?1",
                     self.table
                 ),
                 [request_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .with_context(|| format!("unknown {} {request_id}", self.noun))?;
+        ensure!(
+            wallet_instance_id == signer_wallet_instance_id.to_string(),
+            "{} belongs to another wallet instance",
+            self.noun
+        );
         ensure!(
             wallet_id == signer_wallet_id,
             "{} belongs to another wallet",

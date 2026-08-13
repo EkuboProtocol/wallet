@@ -467,7 +467,7 @@ fn consent_page(client_name: &str, scope: &str, consent: &str) -> Response {
         .expect("writing OAuth consent HTML to a string cannot fail");
     }
     let body = format!(
-        "<h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose an access-token lifetime and the absolute refresh-session deadline. Shorter access tokens reduce the value of a leaked bearer token; the client can reuse its refresh credential until the paired deadline.</p><div class=\"choices\">{buttons}</div><small>Each choice is shown as access / refresh. Your agent harness is responsible for protecting both credentials; either can authorize wallet operations while valid. The wallet will ask for operating-system authentication after you choose, and revocation in Settings immediately invalidates both.</small>",
+        "<h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose an access-token lifetime and the absolute refresh-session deadline. Shorter access tokens reduce the value of a leaked bearer token; each refresh rotates that credential, and replay revokes the session.</p><div class=\"choices\">{buttons}</div><small>Each choice is shown as access / refresh. Your agent harness is responsible for protecting and atomically replacing both credentials; either can authorize wallet operations while valid. The wallet will ask for operating-system authentication after you choose, and revocation in Settings immediately invalidates both.</small>",
         escape_html(client_name),
         escape_html(client_name),
         escape_html(scope),

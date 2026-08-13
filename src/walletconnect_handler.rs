@@ -524,7 +524,16 @@ impl DesktopSession {
                 )),
             ),
             ("atomic".into(), json!(true)),
-            ("status".into(), json!(calls_status_code(record.status))),
+            (
+                "status".into(),
+                json!(if record.settlement_transaction_hash.is_some()
+                    && record.finalized_at.is_none()
+                {
+                    100
+                } else {
+                    calls_status_code(record.status)
+                }),
+            ),
         ]);
         if let Some(receipts) = receipts {
             status.insert("receipts".into(), receipts);
@@ -577,7 +586,11 @@ impl DesktopSession {
         let config = self.owner.config_store();
         let network = config.network_by_chain_id(&chain_id.to_string())?;
         let stored_policy = PolicyStore::production(config.data_dir())?
-            .get(&self.wallet().id)?
+            .get_for_wallet(
+                &self.wallet().id,
+                self.wallet().instance_id,
+                self.wallet().address,
+            )?
             .with_context(|| format!("wallet {} has no local policy", self.wallet().id))?;
         let policy_context = ekubo_wallet_core::core::predicate::PolicyContext {
             wallet: self.wallet().address,

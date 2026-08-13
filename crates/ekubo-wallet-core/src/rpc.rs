@@ -290,6 +290,11 @@ pub struct WalletStatus {
 pub struct ReceiptStatus {
     pub succeeded: bool,
     pub block_number: u64,
+    pub block_hash: B256,
+    /// Head observed by the same RPC client as the receipt. Keeping the two
+    /// reads on one client avoids manufacturing confirmation depth by mixing
+    /// endpoints at different chain views.
+    pub head_block_number: u64,
     /// What the transaction actually cost. Carried on every receipt lookup
     /// because the receipt already contains it: the price a transaction paid
     /// is otherwise unrecoverable after the fact, and `eth_gasPrice`-style
@@ -316,6 +321,13 @@ pub struct MinedFee {
 }
 
 impl ReceiptStatus {
+    #[must_use]
+    pub fn confirmations(&self) -> u64 {
+        self.head_block_number
+            .saturating_sub(self.block_number)
+            .saturating_add(1)
+    }
+
     /// Gas actually burned times the price actually paid.
     #[must_use]
     pub fn mined_fee(&self) -> MinedFee {
@@ -467,9 +479,10 @@ pub(crate) async fn transaction_receipt_through(
     expected_chain_id: u64,
     hash: B256,
 ) -> Result<Option<ReceiptStatus>> {
-    let (chain_id, receipt) = tokio::try_join!(
+    let (chain_id, receipt, head_block_number) = tokio::try_join!(
         with_timeout(client.chain_id()),
         with_timeout(client.transaction_receipt(hash)),
+        with_timeout(client.block_number()),
     )?;
     ensure!(
         chain_id == expected_chain_id,
@@ -501,10 +514,15 @@ pub(crate) async fn transaction_receipt_through(
             let block_number = receipt
                 .block_number
                 .context("RPC returned a receipt without a block number")?;
+            let block_hash = receipt
+                .block_hash
+                .context("RPC returned a receipt without a block hash")?;
             storable_receipt_fields(block_number, receipt.gas_used)?;
             Ok(ReceiptStatus {
                 succeeded: receipt.status(),
                 block_number,
+                block_hash,
+                head_block_number,
                 gas_used: receipt.gas_used,
                 effective_gas_price: receipt.effective_gas_price,
             })

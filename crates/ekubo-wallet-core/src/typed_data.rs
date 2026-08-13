@@ -10,6 +10,7 @@
 //! back to the waiting agent.
 
 use crate::{
+    config::WalletMetadata,
     policy_store::PolicyStore,
     signature_requests::{SignatureQueue, encode_signature, split_decision},
     sql::{Blob, Millis, RowExt},
@@ -75,7 +76,10 @@ impl TypedDataStatus {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct PendingTypedData {
     pub request_id: Uuid,
+    pub wallet_instance_id: Uuid,
     pub wallet_id: String,
+    #[schemars(with = "String")]
+    pub wallet_address: Address,
     pub chain_id: String,
     /// The exact EIP-712 payload: `types`, `primaryType`, `domain`, `message`.
     #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
@@ -620,9 +624,53 @@ impl TypedDataStore {
 
     /// Queue one typed-data payload for human review. An identical payload
     /// already awaiting approval for the same wallet is reused.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn create(
         &mut self,
         wallet_id: &str,
+        chain_id: u64,
+        typed_data: &serde_json::Value,
+        digest: B256,
+        requester: Option<&str>,
+    ) -> Result<PendingTypedData> {
+        self.create_bound(
+            Uuid::nil(),
+            wallet_id,
+            Address::ZERO,
+            chain_id,
+            typed_data,
+            digest,
+            requester,
+        )
+    }
+
+    pub fn create_for_wallet(
+        &mut self,
+        wallet: &WalletMetadata,
+        chain_id: u64,
+        typed_data: &serde_json::Value,
+        digest: B256,
+        requester: Option<&str>,
+    ) -> Result<PendingTypedData> {
+        self.database
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+            .context("wallet has no active policy")?;
+        self.create_bound(
+            wallet.instance_id,
+            &wallet.id,
+            wallet.address,
+            chain_id,
+            typed_data,
+            digest,
+            requester,
+        )
+    }
+
+    fn create_bound(
+        &mut self,
+        wallet_instance_id: Uuid,
+        wallet_id: &str,
+        wallet_address: Address,
         chain_id: u64,
         typed_data: &serde_json::Value,
         digest: B256,
@@ -632,6 +680,7 @@ impl TypedDataStore {
         let requester = requester.unwrap_or_default();
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
+            wallet_instance_id,
             wallet_id,
             chain_id,
             digest,
@@ -639,12 +688,14 @@ impl TypedDataStore {
             |transaction, request_id, now| {
                 transaction.execute(
                     "INSERT INTO pending_typed_data(
-                        request_id, wallet_id, chain_id, typed_data_json, digest,
+                        request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest,
                         requester, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'awaiting_approval', ?9, ?9)",
                     params![
                         request_id,
+                        wallet_instance_id.to_string(),
                         wallet_id,
+                        format!("{wallet_address:#x}"),
                         stored_chain_id,
                         serde_json::to_string(typed_data)?,
                         Blob(digest),
@@ -677,6 +728,7 @@ impl TypedDataStore {
     ///
     /// Crate-private: see the twin in `message.rs`. Its checks are about the
     /// row, not about anyone having reviewed, authenticated, or signed.
+    #[cfg(test)]
     pub(crate) fn store_signature(
         &mut self,
         request_id: Uuid,
@@ -687,7 +739,26 @@ impl TypedDataStore {
         QUEUE.store_signature(
             &mut self.database.connection,
             request_id,
+            Uuid::nil(),
             signer_wallet_id,
+            expected_digest,
+            signature,
+        )?;
+        self.get(request_id)
+    }
+
+    pub(crate) fn store_signature_for_wallet(
+        &mut self,
+        request_id: Uuid,
+        signer_wallet: &WalletMetadata,
+        expected_digest: B256,
+        signature: &str,
+    ) -> Result<PendingTypedData> {
+        QUEUE.store_signature(
+            &mut self.database.connection,
+            request_id,
+            signer_wallet.instance_id,
+            &signer_wallet.id,
             expected_digest,
             signature,
         )?;
@@ -730,28 +801,32 @@ impl TypedDataStore {
             .database
             .connection
             .query_row(
-                "SELECT wallet_id, chain_id, typed_data_json, digest, status,
+                "SELECT wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
                         created_at, updated_at, decided_at, signature, requester
                  FROM pending_typed_data WHERE request_id = ?1",
                 [request_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.blob::<B256>(3)?,
+                        row.get::<_, i64>(3)?,
                         row.get::<_, String>(4)?,
-                        row.time(5)?,
-                        row.time(6)?,
-                        row.time_opt(7)?,
-                        row.blob_opt::<[u8; 65]>(8)?,
-                        row.get::<_, String>(9)?,
+                        row.blob::<B256>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.time(7)?,
+                        row.time(8)?,
+                        row.time_opt(9)?,
+                        row.blob_opt::<[u8; 65]>(10)?,
+                        row.get::<_, String>(11)?,
                     ))
                 },
             )
             .with_context(|| format!("unknown typed-data request {request_id}"))?;
         let (
+            wallet_instance_id,
             wallet_id,
+            wallet_address,
             chain_id,
             typed_data_json,
             digest,
@@ -762,7 +837,11 @@ impl TypedDataStore {
             signature,
             requester,
         ) = row;
+        let wallet_instance_id = Uuid::parse_str(&wallet_instance_id)
+            .context("stored typed-data wallet instance is invalid")?;
         crate::config::validate_wallet_id(&wallet_id)?;
+        let wallet_address = Address::from_str(&wallet_address)
+            .context("stored typed-data wallet identity is invalid")?;
         let typed_data: serde_json::Value =
             serde_json::from_str(&typed_data_json).context("stored typed data is invalid JSON")?;
         // Re-derive the digest so a corrupted or edited row can never present
@@ -778,7 +857,9 @@ impl TypedDataStore {
             split_decision(decided_at, status == TypedDataStatus::Rejected);
         Ok(PendingTypedData {
             request_id,
+            wallet_instance_id,
             wallet_id,
+            wallet_address,
             chain_id: chain_id.to_string(),
             typed_data,
             digest: format!("{digest:#x}"),

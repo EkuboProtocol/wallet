@@ -124,6 +124,7 @@ pub(crate) fn parse(document: &str) -> Result<Vec<NetworkProfile>> {
                     // are worth and how much latency they will pay, and that
                     // is theirs to make.
                     rpc_strategy: crate::config::RpcStrategy::default(),
+                    finality_confirmations: crate::config::DEFAULT_FINALITY_CONFIRMATIONS,
                     max_gas_limit: chain.max_gas_limit,
                     // The registry never ships one, for the same reason it
                     // ships no strategy: what a fee is worth is the owner's

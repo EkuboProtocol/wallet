@@ -648,6 +648,52 @@ pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<Str
     lines
 }
 
+/// Whether `proposed` can be obtained solely through operations that never
+/// increase the outcome of any call (`deny < human approval < automatic`).
+///
+/// The proof is deliberately structural. Inserting a deny, deleting an allow,
+/// narrowing an allow, widening a deny, or replacing an allow with a deny can
+/// only reduce authority while preserving the relative order of every other
+/// rule. Dynamic programming accepts any composition of those operations and
+/// rejects edits whose safety cannot be proved, so an ambiguous transition is
+/// authenticated rather than guessed safe.
+#[must_use]
+pub fn is_tightening(current: &WalletPolicy, proposed: &WalletPolicy) -> bool {
+    let old = &current.rules;
+    let new = &proposed.rules;
+    let mut proved = vec![vec![false; new.len() + 1]; old.len() + 1];
+    proved[0][0] = true;
+    for old_index in 0..=old.len() {
+        for new_index in 0..=new.len() {
+            if !proved[old_index][new_index] {
+                continue;
+            }
+            if old_index < old.len() && old[old_index].effect == Effect::Allow {
+                proved[old_index + 1][new_index] = true;
+            }
+            if new_index < new.len() && new[new_index].effect == Effect::Deny {
+                proved[old_index][new_index + 1] = true;
+            }
+            if old_index < old.len()
+                && new_index < new.len()
+                && rule_transition_is_tightening(&old[old_index], &new[new_index])
+            {
+                proved[old_index + 1][new_index + 1] = true;
+            }
+        }
+    }
+    proved[old.len()][new.len()]
+}
+
+fn rule_transition_is_tightening(current: &Rule, proposed: &Rule) -> bool {
+    match (current.effect, proposed.effect) {
+        (Effect::Allow, Effect::Allow) => proposed.is_narrower_than(current),
+        (Effect::Deny, Effect::Deny) => current.is_narrower_than(proposed),
+        (Effect::Allow, Effect::Deny) => true,
+        (Effect::Deny, Effect::Allow) => false,
+    }
+}
+
 fn error(code: &str, message: String, step: Option<u32>) -> PolicyFinding {
     PolicyFinding {
         severity: FindingSeverity::Error,
