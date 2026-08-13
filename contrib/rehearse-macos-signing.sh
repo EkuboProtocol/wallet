@@ -2,12 +2,14 @@
 # Rehearse the macOS half of .github/workflows/release.yml against the real
 # credentials, without tagging or publishing anything.
 #
-# This runs the same sequence the release job runs: a throwaway keychain, the
-# .p12 imported into it, the vendored Apple intermediate imported beside it, a
-# hardened-runtime timestamped signature, the same `ditto` archive, and a real
-# `notarytool submit --wait`. A pass here means the credentials and the chain
-# are sound; what it cannot cover is the workflow's own secret plumbing, which
-# only a run on GitHub exercises.
+# This exercises the release job's credentials and signing chain: a throwaway
+# keychain, the .p12 imported into it, the vendored Apple intermediate imported
+# beside it, a hardened-runtime timestamped signature, a notarizable `ditto`
+# archive, and a real submission. Unlike release CI, which submits its finished
+# DMG without waiting, this smaller local rehearsal waits for Apple's verdict
+# so a pass proves the credentials, chain, and notarization result. It cannot
+# cover the workflow's own secret plumbing, which only a run on GitHub
+# exercises.
 #
 # Usage: contrib/rehearse-macos-signing.sh [path/to/binary]
 

@@ -6,10 +6,20 @@ does not repeat those checks. `cargo-packager` produces DMG, per-user NSIS,
 AppImage, and DEB artifacts on their native runners.
 
 The protected release environment requires the update-signing key on every
-platform and Apple signing/notarization credentials on macOS. Windows
-Authenticode signing is applied only when its trusted-signing configuration is
-available; the workflow currently permits an otherwise update-signed Windows
-installer when it is not.
+platform and Apple signing/notarization credentials on macOS. The macOS runner
+signs the app and DMG, submits the exact DMG that the release distributes to
+Apple's notary service, records the submission ID in the job summary, and exits
+as soon as the upload succeeds. It does not spend runner time waiting for
+Apple's verdict. Consequently, a successful release job means that the upload
+completed and Apple returned a submission ID, not that notarization was
+accepted. Once Apple accepts the DMG, it publishes tickets for the disk image
+and its nested app. Gatekeeper can retrieve those tickets online, including for
+a copy downloaded while notarization was still pending; because the release
+artifacts are not stapled, their first launch requires network access.
+
+Windows Authenticode signing is applied only when its trusted-signing
+configuration is available; the workflow currently permits an otherwise
+update-signed Windows installer when it is not.
 
 The release workflow also tests, validates, and publishes the cross-platform
 `ekubo-wallet.mcpb` Claude Desktop extension. The extension has no runtime
