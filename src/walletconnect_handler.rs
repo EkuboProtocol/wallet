@@ -465,15 +465,16 @@ impl DesktopSession {
                 ),
             });
         }
-        if !request
-            .scope
-            .chains
-            .iter()
-            .any(|chain| chain == &format!("eip155:{}", batch.chain_id))
-        {
+        // The session boundary already requires these selectors to match.
+        // Repeat the equality here as defense in depth: membership in the
+        // flattened chain list is insufficient because grants are relational.
+        if batch.chain_id != request.chain_id {
             return Ok(RequestOutcome::Error {
                 code: error_code::UNSUPPORTED_CHAIN_ID,
-                message: format!("Chain {} is not approved for this session.", batch.chain_id),
+                message: format!(
+                    "The batch names chain {}, but this request was authorized for chain {}.",
+                    batch.chain_id, request.chain_id
+                ),
             });
         }
         if batch.calls.len() > MAX_BATCH_CALLS {

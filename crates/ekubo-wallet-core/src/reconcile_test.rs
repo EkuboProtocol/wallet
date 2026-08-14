@@ -137,8 +137,8 @@ mod cancellation_configuration_tests {
             .join(" ");
         assert_eq!(
             prose.matches("Run the command again.").count(),
-            2,
-            "both refusals name the remedy, and the remedy is a retry"
+            4,
+            "both entry checks and both post-RPC rechecks name the remedy, and the remedy is a retry"
         );
         assert!(
             !body[..body.find("sign_cancellation(").unwrap()].contains("network_for_record("),

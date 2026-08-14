@@ -32,6 +32,24 @@ fn request(method: &str, chain: &str) -> SessionRequestParams {
     }
 }
 
+fn send_calls_request(outer_chain: &str, inner_chain: u64) -> SessionRequestParams {
+    SessionRequestParams {
+        chain_id: outer_chain.to_owned(),
+        request: SessionRequestPayload {
+            method: "wallet_sendCalls".to_owned(),
+            params: json!([{
+                "version": "2.0.0",
+                "chainId": format!("0x{inner_chain:x}"),
+                "atomicRequired": true,
+                "calls": [{
+                    "to": "0x2222222222222222222222222222222222222222"
+                }]
+            }]),
+            expiry_timestamp: None,
+        },
+    }
+}
+
 fn far_future() -> i64 {
     Utc::now().timestamp() + 3600
 }
@@ -96,6 +114,37 @@ fn a_method_cannot_cross_the_chain_namespace_that_granted_it() {
             far_future()
         )
         .is_err()
+    );
+}
+
+#[test]
+fn send_calls_inner_chain_cannot_cross_the_grant_on_the_outer_chain() {
+    let mut scope = scope();
+    scope.methods.push("wallet_sendCalls".into());
+    scope.grants = vec![
+        ScopeGrant {
+            chains: vec!["eip155:1".into()],
+            methods: vec!["wallet_sendCalls".into()],
+        },
+        ScopeGrant {
+            chains: vec!["eip155:10".into()],
+            methods: vec!["personal_sign".into()],
+        },
+    ];
+
+    let (code, message) = check_in_scope(&scope, &send_calls_request("eip155:1", 10), far_future())
+        .expect_err("the batch crossed into a chain where its method was not granted");
+    assert_eq!(code, error_code::UNAUTHORIZED_CHAIN);
+    assert!(message.contains("eip155:1"), "{message}");
+    assert!(message.contains("eip155:10"), "{message}");
+
+    assert!(
+        check_in_scope(&scope, &send_calls_request("eip155:1", 1), far_future()).is_ok(),
+        "a same-chain batch covered by the exact grant must still pass"
+    );
+    assert!(
+        check_in_scope(&scope, &send_calls_request("eip155:10", 1), far_future()).is_err(),
+        "the inverse mixed-grant request must also fail"
     );
 }
 

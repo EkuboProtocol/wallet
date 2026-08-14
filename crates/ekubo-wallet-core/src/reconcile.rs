@@ -18,9 +18,9 @@ use crate::{
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     custody::KeyStore,
     execution::{
-        BroadcastResult, ReceiptStatus as BroadcastReceiptStatus, SignedExecution,
-        broadcast_signed_cancellation, broadcast_signed_execution, sign_cancellation,
-        signed_transaction_nonce,
+        BroadcastResult, CancellationPreparation, ReceiptStatus as BroadcastReceiptStatus,
+        SignedExecution, broadcast_signed_cancellation, broadcast_signed_execution,
+        sign_cancellation, signed_transaction_nonce,
     },
     pending::{MAX_CANCELLATION_ATTEMPTS, PendingStatus, PendingStore, PendingTransaction},
     rpc::{ReceiptStatus, mined_transaction_count, transaction_known, transaction_receipt},
@@ -601,7 +601,11 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
             serialized_transaction: bytes,
             transaction_hash: hash.clone(),
         };
-        let broadcast = broadcast_signed_cancellation(&resend, wallet, network).await?;
+        let original = record
+            .serialized_transaction
+            .as_deref()
+            .context("broadcast transaction is missing its signed bytes")?;
+        let broadcast = broadcast_signed_cancellation(&resend, wallet, network, original).await?;
         let record = match broadcast.receipt_status {
             BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => {
                 let receipt = transaction_receipt(network, &hash)
@@ -622,7 +626,7 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
         return Ok((record, broadcast));
     }
 
-    let signed = sign_cancellation(
+    let preparation = sign_cancellation(
         wallet,
         network,
         record
@@ -633,16 +637,43 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
         keys,
     )
     .await?;
-    // Persist the exact envelope before first submission, mirroring the
-    // automatic signing path: recovery must know every hash that may reach
-    // the chain.
-    let stored = lock(pending)?.store_cancellation(
-        record.request_id,
-        record.cancel_transaction_hashes.last().map(String::as_str),
-        &signed.serialized_transaction,
-        &signed.transaction_hash,
-    )?;
-    let broadcast = broadcast_signed_cancellation(&signed, wallet, network).await?;
+    // RPC preparation can take long enough for an owner edit to land after
+    // the entry check above. Re-read the protected configuration after all
+    // awaits and before a new envelope is persisted or any bytes are sent, so
+    // a lowered fee/gas ceiling or replaced endpoint set wins that race.
+    ensure!(
+        config.wallet(&record.wallet_id)? == *wallet,
+        "wallet {} changed while this cancellation was being prepared; no cancellation was stored or broadcast. Run the command again.",
+        record.wallet_id
+    );
+    ensure!(
+        config.network_by_chain_id(&record.chain_id)? == *network,
+        "the network profile for chain {} changed while this cancellation was being prepared; no cancellation was stored or broadcast. Run the command again.",
+        record.chain_id
+    );
+    let (signed, stored) = match preparation {
+        CancellationPreparation::New(signed) => {
+            // Persist the exact envelope before first submission, mirroring
+            // the automatic signing path: recovery must know every hash that
+            // may reach the chain.
+            let stored = lock(pending)?.store_cancellation(
+                record.request_id,
+                record.cancel_transaction_hashes.last().map(String::as_str),
+                &signed.serialized_transaction,
+                &signed.transaction_hash,
+            )?;
+            (signed, stored)
+        }
+        // The newest envelope has reached the immutable fee bound. Sending
+        // its exact bytes again cannot widen the signed liability and does not
+        // consume another cancellation-history slot.
+        CancellationPreparation::Rebroadcast(signed) => (signed, record),
+    };
+    let original = stored
+        .serialized_transaction
+        .as_deref()
+        .context("broadcast transaction is missing its signed bytes")?;
+    let broadcast = broadcast_signed_cancellation(&signed, wallet, network, original).await?;
     let record = match broadcast.receipt_status {
         // The receipt belongs to the cancellation hash: it mined immediately.
         BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => {

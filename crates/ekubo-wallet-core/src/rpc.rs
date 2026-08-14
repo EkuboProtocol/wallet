@@ -37,31 +37,38 @@ const MAX_POOLED_CLIENTS: usize = 128;
 
 struct RpcChainClient {
     provider: DynProvider,
+    endpoint: url::Url,
+}
+
+impl RpcChainClient {
+    fn result<T, E: std::fmt::Display>(&self, result: std::result::Result<T, E>) -> Result<T> {
+        rpc_result(&self.endpoint, result)
+    }
 }
 
 #[async_trait]
 impl ChainClient for RpcChainClient {
     async fn chain_id(&self) -> Result<u64> {
-        rpc_result(self.provider.get_chain_id().await)
+        self.result(self.provider.get_chain_id().await)
     }
 
     async fn block_number(&self) -> Result<u64> {
-        rpc_result(self.provider.get_block_number().await)
+        self.result(self.provider.get_block_number().await)
     }
 
     async fn block_by_number(
         &self,
         block: BlockNumberOrTag,
     ) -> Result<Option<alloy::rpc::types::Block>> {
-        rpc_result(self.provider.get_block_by_number(block).await)
+        self.result(self.provider.get_block_by_number(block).await)
     }
 
     async fn balance(&self, address: Address, block: BlockId) -> Result<alloy::primitives::U256> {
-        rpc_result(self.provider.get_balance(address).block_id(block).await)
+        self.result(self.provider.get_balance(address).block_id(block).await)
     }
 
     async fn transaction_count(&self, address: Address, block: BlockId) -> Result<u64> {
-        rpc_result(
+        self.result(
             self.provider
                 .get_transaction_count(address)
                 .block_id(block)
@@ -70,11 +77,11 @@ impl ChainClient for RpcChainClient {
     }
 
     async fn code(&self, address: Address, block: BlockId) -> Result<Bytes> {
-        rpc_result(self.provider.get_code_at(address).block_id(block).await)
+        self.result(self.provider.get_code_at(address).block_id(block).await)
     }
 
     async fn call(&self, request: TransactionRequest, block: BlockId) -> Result<Bytes> {
-        rpc_result(self.provider.call(request).block(block).await)
+        self.result(self.provider.call(request).block(block).await)
     }
 
     async fn simulate_v1(
@@ -83,42 +90,45 @@ impl ChainClient for RpcChainClient {
         block_number: Option<u64>,
     ) -> Result<Vec<alloy::rpc::types::simulate::SimulatedBlock>> {
         let request = self.provider.simulate(&payload);
-        rpc_result(match block_number {
+        self.result(match block_number {
             Some(number) => request.number(number).await,
             None => request.await,
         })
     }
 
     async fn estimate_eip1559_fees(&self) -> Result<alloy::eips::eip1559::Eip1559Estimation> {
-        rpc_result(self.provider.estimate_eip1559_fees().await)
+        self.result(self.provider.estimate_eip1559_fees().await)
     }
 
     async fn estimate_gas(&self, request: TransactionRequest) -> Result<u64> {
-        rpc_result(self.provider.estimate_gas(request).await)
+        self.result(self.provider.estimate_gas(request).await)
     }
 
     async fn transaction_receipt(
         &self,
         hash: B256,
     ) -> Result<Option<alloy::rpc::types::TransactionReceipt>> {
-        rpc_result(self.provider.get_transaction_receipt(hash).await)
+        self.result(self.provider.get_transaction_receipt(hash).await)
     }
 
     async fn transaction_by_hash(
         &self,
         hash: B256,
     ) -> Result<Option<alloy::rpc::types::Transaction>> {
-        rpc_result(self.provider.get_transaction_by_hash(hash).await)
+        self.result(self.provider.get_transaction_by_hash(hash).await)
     }
 
     async fn send_transaction(&self, bytes: Bytes) -> Result<B256> {
-        rpc_result(self.provider.send_raw_transaction(&bytes).await)
+        self.result(self.provider.send_raw_transaction(&bytes).await)
             .map(|pending| *pending.tx_hash())
     }
 }
 
-fn rpc_result<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> Result<T> {
-    result.map_err(|error| rpc_error(&error))
+fn rpc_result<T, E: std::fmt::Display>(
+    endpoint: &url::Url,
+    result: std::result::Result<T, E>,
+) -> Result<T> {
+    result.map_err(|error| rpc_error(endpoint, &error))
 }
 
 /// A chain client backed by one configured RPC endpoint.
@@ -153,6 +163,7 @@ async fn client_for(endpoint: &url::Url) -> Result<SharedChainClient> {
         provider: ProviderBuilder::new()
             .connect_reqwest(http, endpoint.clone())
             .erased(),
+        endpoint: endpoint.clone(),
     });
     let mut entries = pool.lock().expect("endpoint provider pool lock");
     if let Some((_, existing)) = entries.iter().find(|(existing, _)| existing == endpoint) {
@@ -212,7 +223,11 @@ where
 pub async fn clients_for(network: &NetworkConfig) -> Result<Vec<SharedChainClient>> {
     let mut clients = Vec::new();
     for endpoint in endpoint_order(network) {
-        clients.push(client_for(endpoint).await?);
+        clients.push(
+            client_for(endpoint)
+                .await
+                .map_err(|error| redacted_endpoint_error(endpoint, &error))?,
+        );
     }
     Ok(clients)
 }
@@ -258,7 +273,9 @@ pub(crate) fn all_endpoints_failed(
         network.name
     );
     for (endpoint, error) in failures {
-        let _ = write!(message, "\n  {endpoint}: {error:#}");
+        let label = rpc_endpoint_label(endpoint);
+        let detail = redact_endpoint_text(endpoint, &format!("{error:#}"));
+        let _ = write!(message, "\n  {label}: {detail}");
     }
     anyhow::anyhow!(message)
 }
@@ -687,11 +704,46 @@ async fn with_timeout<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
         .context("RPC request timed out")?
 }
 
-/// One shared spelling for a failed RPC request. The error passes through
-/// unredacted, endpoint and all: the RPC URL is configuration, and a provider
-/// credential embedded in it is read-only and easy to rotate, so which exact
-/// endpoint failed is worth more than hiding it.
-pub fn rpc_error(error: &impl std::fmt::Display) -> anyhow::Error {
+/// An endpoint label safe to expose to agents, logs, and error surfaces.
+///
+/// Scheme, host, and port identify which provider failed without exposing a
+/// bearer credential commonly embedded in a URL path or query string.
+#[must_use]
+pub fn rpc_endpoint_label(endpoint: &url::Url) -> String {
+    let mut label = endpoint.clone();
+    if label.set_username("").is_err() || label.set_password(None).is_err() {
+        return format!("{}://<redacted>/", endpoint.scheme());
+    }
+    label.set_path("/");
+    label.set_query(None);
+    label.set_fragment(None);
+    label.to_string()
+}
+
+fn redact_endpoint_text(endpoint: &url::Url, text: &str) -> String {
+    let mut redacted = text.replace(endpoint.as_str(), &rpc_endpoint_label(endpoint));
+    // Transport stacks do not all format URLs alike. Some print the complete
+    // URL, while others put the path or query in a separate cause. Remove
+    // those credential-bearing components independently as well.
+    if endpoint.path() != "/" && !endpoint.path().is_empty() {
+        redacted = redacted.replace(endpoint.path(), "/<redacted>");
+    }
+    if let Some(query) = endpoint.query()
+        && !query.is_empty()
+    {
+        redacted = redacted.replace(query, "<redacted>");
+    }
+    redacted
+}
+
+fn redacted_endpoint_error(endpoint: &url::Url, error: &impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!(redact_endpoint_text(endpoint, &error.to_string()))
+}
+
+/// One shared spelling for a failed RPC request, preserving the provider's
+/// useful diagnostic while replacing its complete credential-bearing URL.
+pub fn rpc_error(endpoint: &url::Url, error: &impl std::fmt::Display) -> anyhow::Error {
+    let error = redact_endpoint_text(endpoint, &error.to_string());
     anyhow::anyhow!("RPC request failed: {error}")
 }
 

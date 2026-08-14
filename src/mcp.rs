@@ -328,8 +328,8 @@ struct PublicNetwork {
     chain_id: String,
     testnet: bool,
     /// Every endpoint configured for this network, in the order the wallet
-    /// tries them. Reported in full because failover reaches any of them, so
-    /// naming only the first would describe traffic that does not happen.
+    /// tries them. Each label contains only scheme, host, and port; paths and
+    /// query strings may carry provider credentials and never reach an agent.
     rpc_urls: Vec<String>,
     /// Whether endpoints are tried in configured or fresh random order.
     rpc_strategy: String,
@@ -1081,7 +1081,7 @@ struct SimulateOutput {
 impl WalletMcpServer {
     #[tool(
         name = "wallet_list",
-        description = "Discover all local wallets: ID, address, source, and creation time. Never returns private keys. Use list_networks separately to discover configured chains and RPC endpoints.",
+        description = "Discover all local wallets: ID, address, source, and creation time. Never returns private keys. Use list_networks separately to discover configured chains and redacted RPC endpoint hosts.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_list(&self) -> Result<Json<WalletInventory>, ErrorData> {
@@ -1102,7 +1102,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "list_networks",
-        description = "List every enabled globally configured network: name, decimal chain ID, every RPC URL the wallet may use, and endpoint selection strategy. Disabled profiles are owner-only and are not disclosed. This contains no wallet or private-key information.",
+        description = "List every enabled globally configured network: name, decimal chain ID, each RPC endpoint's scheme/host/port, and endpoint selection strategy. URL paths, queries, userinfo, and disabled profiles are owner-only and are not disclosed. This contains no wallet or private-key information.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn list_networks(&self) -> Result<Json<NetworkInventory>, ErrorData> {
@@ -1116,7 +1116,11 @@ impl WalletMcpServer {
                     name: network.name,
                     chain_id: network.chain_id.to_string(),
                     testnet: network.testnet,
-                    rpc_urls: network.rpc_urls.iter().map(ToString::to_string).collect(),
+                    rpc_urls: network
+                        .rpc_urls
+                        .iter()
+                        .map(ekubo_wallet_core::rpc::rpc_endpoint_label)
+                        .collect(),
                     rpc_strategy: network.rpc_strategy.to_string(),
                 })
                 .collect(),
