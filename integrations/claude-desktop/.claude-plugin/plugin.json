@@ -1,7 +1,7 @@
 {
   "name": "ekubo-wallet",
   "displayName": "Ekubo Wallet",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Connect Claude to Ekubo Wallet and its hosted companion.",
   "author": {
     "name": "Ekubo Protocol",

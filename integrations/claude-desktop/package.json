@@ -1,7 +1,7 @@
 {
   "name": "ekubo-wallet-claude-desktop",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "test": "node --test server/index.test.js",
