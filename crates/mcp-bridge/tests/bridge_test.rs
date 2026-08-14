@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-fn send(stdin: &mut std::process::ChildStdin, value: Value) {
+fn send(stdin: &mut std::process::ChildStdin, value: &Value) {
     serde_json::to_writer(&mut *stdin, &value).unwrap();
     stdin.write_all(b"\n").unwrap();
     stdin.flush().unwrap();
@@ -33,7 +33,7 @@ fn initializes_and_stays_useful_before_wallet_startup() {
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
     );
     let initialized = receive(&mut stdout);
     assert_eq!(initialized["id"], 1);
@@ -43,17 +43,17 @@ fn initializes_and_stays_useful_before_wallet_startup() {
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
     );
     let tools = receive(&mut stdout);
     assert_eq!(tools["result"], json!({"tools":[]}));
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"missing","arguments":{}}}),
+        &json!({"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"missing","arguments":{}}}),
     );
     let call = receive(&mut stdout);
     assert_eq!(call["id"], "call");
@@ -98,7 +98,7 @@ fn malformed_json_returns_a_protocol_error_without_stopping() {
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
     );
     assert_eq!(receive(&mut stdout)["id"], 1);
     stdin.write_all(b"{broken\n").unwrap();
@@ -106,7 +106,7 @@ fn malformed_json_returns_a_protocol_error_without_stopping() {
     assert_eq!(receive(&mut stdout)["error"]["code"], -32700);
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
     );
     assert_eq!(receive(&mut stdout)["result"], json!({"tools":[]}));
     drop(stdin);
@@ -128,7 +128,7 @@ fn oversized_harness_frames_are_rejected_at_the_transport_ceiling() {
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
     );
     assert_eq!(receive(&mut stdout)["id"], 1);
     let oversized = vec![b' '; 24 * 1024 * 1024 + 1];
@@ -149,6 +149,7 @@ fn oversized_harness_frames_are_rejected_at_the_transport_ceiling() {
 fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     use std::{
         fs,
+        os::unix::fs::PermissionsExt as _,
         os::unix::net::{UnixListener, UnixStream},
         thread,
     };
@@ -158,7 +159,7 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         stream.read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
     }
-    fn write(stream: &mut UnixStream, value: Value) {
+    fn write(stream: &mut UnixStream, value: &Value) {
         serde_json::to_writer(&mut *stream, &value).unwrap();
         stream.write_all(b"\n").unwrap();
         stream.flush().unwrap();
@@ -170,21 +171,20 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         let initialize = read(&mut reader);
         write(
             &mut writer,
-            json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fake-wallet","version":"1"}}}),
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fake-wallet","version":"1"}}}),
         );
         assert_eq!(read(&mut reader)["method"], "notifications/initialized");
         let list = read(&mut reader);
         assert_eq!(list["method"], "tools/list");
         write(
             &mut writer,
-            json!({"jsonrpc":"2.0","id":list["id"],"result":catalog}),
+            &json!({"jsonrpc":"2.0","id":list["id"],"result":catalog}),
         );
         (reader, writer)
     }
 
     let home = tempfile::tempdir().unwrap();
     fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
     let listener = UnixListener::bind(home.path().join("mcp.sock")).unwrap();
     let catalog = json!({"tools":[{"name":"wallet_test","description":"test","inputSchema":{"type":"object"}}]});
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -198,15 +198,15 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         assert_eq!(list["id"], 10);
         write(
             &mut first_write,
-            json!({"jsonrpc":"2.0","id":10,"result":fake_catalog}),
+            &json!({"jsonrpc":"2.0","id":10,"result":fake_catalog}),
         );
         write(
             &mut first_write,
-            json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"p","progress":1}}),
+            &json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"p","progress":1}}),
         );
         write(
             &mut first_write,
-            json!({"jsonrpc":"2.0","id":99,"method":"sampling/createMessage","params":{"messages":[]}}),
+            &json!({"jsonrpc":"2.0","id":99,"method":"sampling/createMessage","params":{"messages":[]}}),
         );
         assert_eq!(read(&mut first_read)["id"], 99);
         assert_eq!(read(&mut first_read)["method"], "notifications/cancelled");
@@ -224,11 +224,11 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         assert_eq!(second_call["id"], "resumed-b");
         write(
             &mut second_write,
-            json!({"jsonrpc":"2.0","id":"resumed-b","result":{"content":[{"type":"text","text":"second"}]}}),
+            &json!({"jsonrpc":"2.0","id":"resumed-b","result":{"content":[{"type":"text","text":"second"}]}}),
         );
         write(
             &mut second_write,
-            json!({"jsonrpc":"2.0","id":"resumed-a","result":{"content":[{"type":"text","text":"first"}]}}),
+            &json!({"jsonrpc":"2.0","id":"resumed-a","result":{"content":[{"type":"text","text":"first"}]}}),
         );
     });
 
@@ -243,12 +243,12 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
     );
     assert_eq!(receive(&mut stdout)["id"], 1);
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     );
     ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(
@@ -257,7 +257,7 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}),
+        &json!({"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}),
     );
     assert_eq!(receive(&mut stdout)["result"], catalog);
     assert_eq!(receive(&mut stdout)["method"], "notifications/progress");
@@ -266,15 +266,15 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     assert_eq!(server_request["method"], "sampling/createMessage");
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":99,"result":{"model":"test","role":"assistant","content":{"type":"text","text":"ok"}}}),
+        &json!({"jsonrpc":"2.0","id":99,"result":{"model":"test","role":"assistant","content":{"type":"text","text":"ok"}}}),
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"old","reason":"test"}}),
+        &json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"old","reason":"test"}}),
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":"interrupted","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
+        &json!({"jsonrpc":"2.0","id":"interrupted","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
     );
     let interrupted = receive(&mut stdout);
     assert_eq!(interrupted["id"], "interrupted");
@@ -288,11 +288,11 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     assert_eq!(ready_rx.recv_timeout(Duration::from_secs(8)).unwrap(), 2);
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":"resumed-a","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
+        &json!({"jsonrpc":"2.0","id":"resumed-a","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
     );
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0","id":"resumed-b","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
+        &json!({"jsonrpc":"2.0","id":"resumed-b","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
     );
     let resumed_b = receive(&mut stdout);
     let resumed_a = receive(&mut stdout);

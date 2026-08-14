@@ -109,11 +109,11 @@ fn request_id(message: &Value) -> Option<Value> {
         .filter(|_| message.get("method").is_some())
 }
 
-fn response(id: Value, result: Value) -> Vec<u8> {
+fn response(id: &Value, result: &Value) -> Vec<u8> {
     serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"result":result})).expect("JSON response")
 }
 
-fn error(id: Value, message: &str) -> Vec<u8> {
+fn error(id: &Value, message: &str) -> Vec<u8> {
     serde_json::to_vec(
         &json!({"jsonrpc":"2.0","id":id,"error":{"code":OFFLINE_CODE,"message":message}}),
     )
@@ -237,7 +237,7 @@ async fn run() -> Result<()> {
         .pointer("/params/protocolVersion")
         .cloned()
         .unwrap_or_else(|| json!("2025-11-25"));
-    emit(&mut stdout, &response(initialize_id, json!({
+    emit(&mut stdout, &response(&initialize_id, &json!({
         "protocolVersion": protocol,
         "capabilities": {"tools":{"listChanged":true}},
         "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":env!("CARGO_PKG_VERSION")},
@@ -252,10 +252,11 @@ async fn run() -> Result<()> {
     let mut backoff = Duration::from_millis(250);
 
     loop {
-        if upstream.is_none() && initialized.is_some() {
-            match connect(client).await {
-                Ok(stream) => {
-                    let connected: Result<_> = async {
+        if upstream.is_none()
+            && initialized.is_some()
+            && let Ok(stream) = connect(client).await
+        {
+            let connected: Result<_> = async {
                         let (read, mut write) = tokio::io::split(stream);
                         let mut read = BufReader::new(read);
                         write.write_all(&initialize_frame).await?;
@@ -279,26 +280,22 @@ async fn run() -> Result<()> {
                         Ok((read, write, refreshed))
                     }
                     .await;
-                    if let Ok((read, write, refreshed)) = connected {
-                        if refreshed != last_tools {
-                            last_tools = refreshed;
-                            emit(
-                                &mut stdout,
-                                br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
-                            )
-                            .await?;
-                        }
-                        upstream = Some((read, write));
-                        catalog_refresh_pending = false;
-                        backoff = Duration::from_millis(250);
-                    }
+            if let Ok((read, write, refreshed)) = connected {
+                if refreshed != last_tools {
+                    last_tools = refreshed;
+                    emit(
+                        &mut stdout,
+                        br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+                    )
+                    .await?;
                 }
-                Err(_) => {
-                    // The offline branch below waits for either harness input
-                    // or this backoff, so requests stay responsive while a
-                    // quiet harness still reconnects autonomously.
-                }
+                upstream = Some((read, write));
+                catalog_refresh_pending = false;
+                backoff = Duration::from_millis(250);
             }
+            // The offline branch below waits for either harness input or
+            // the backoff when this connection attempt fails, so requests
+            // stay responsive while a quiet harness reconnects.
         }
 
         if let Some((up_read, up_write)) = upstream.as_mut() {
@@ -314,12 +311,18 @@ async fn run() -> Result<()> {
                     up_write.write_all(&frame).await?;
                 }
                 frame = read_frame(up_read) => {
-                    match frame {
-                        Ok(Some(frame)) => {
+                    let Ok(Some(frame)) = frame else {
+                        for id in std::mem::take(&mut in_flight) {
+                            if let Ok(id) = serde_json::from_str(&id) { emit(&mut stdout, &error(&id, "Ekubo Wallet stopped while the request was in flight; the bridge will reconnect automatically" )).await?; }
+                        }
+                        upstream = None;
+                        catalog_refresh_pending = false;
+                        continue;
+                    };
                             let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
                                 for id in std::mem::take(&mut in_flight) {
                                     if let Ok(id) = serde_json::from_str(&id) {
-                                        emit(&mut stdout, &error(id, "Ekubo Wallet sent an invalid frame; the bridge will reconnect automatically")).await?;
+                                        emit(&mut stdout, &error(&id, "Ekubo Wallet sent an invalid frame; the bridge will reconnect automatically")).await?;
                                     }
                                 }
                                 upstream = None;
@@ -344,26 +347,15 @@ async fn run() -> Result<()> {
                                 up_write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"__ekubo_bridge_tools\",\"method\":\"tools/list\",\"params\":{}}\n").await?;
                                 catalog_refresh_pending = true;
                             }
-                        }
-                        Ok(None) | Err(_) => {
-                            for id in std::mem::take(&mut in_flight) {
-                                if let Ok(id) = serde_json::from_str(&id) { emit(&mut stdout, &error(id, "Ekubo Wallet stopped while the request was in flight; the bridge will reconnect automatically" )).await?; }
-                            }
-                            upstream = None;
-                            catalog_refresh_pending = false;
-                        }
-                    }
                 }
             }
         } else {
             let frame = if initialized.is_some() {
-                match tokio::time::timeout(backoff, read_frame(&mut stdin)).await {
-                    Ok(frame) => frame?,
-                    Err(_) => {
-                        backoff = (backoff * 2).min(Duration::from_secs(5));
-                        continue;
-                    }
-                }
+                let Ok(frame) = tokio::time::timeout(backoff, read_frame(&mut stdin)).await else {
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                    continue;
+                };
+                frame?
             } else {
                 read_frame(&mut stdin).await?
             };
@@ -378,17 +370,17 @@ async fn run() -> Result<()> {
                 Some("notifications/initialized") => initialized = Some(frame),
                 Some("tools/list") => {
                     if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &response(id, last_tools.clone())).await?;
+                        emit(&mut stdout, &response(&id, &last_tools)).await?;
                     }
                 }
                 Some("tools/call") => {
                     if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &error(id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
+                        emit(&mut stdout, &error(&id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
                     }
                 }
                 _ => {
                     if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &error(id, "Ekubo Wallet is not running")).await?;
+                        emit(&mut stdout, &error(&id, "Ekubo Wallet is not running")).await?;
                     }
                 }
             }
