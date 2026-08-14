@@ -106,6 +106,8 @@ fn harness_argument(kind: AgentKind) -> Result<&'static str> {
 fn claude_desktop_config(home: &Path, base: &BaseDirs) -> PathBuf {
     #[cfg(target_os = "macos")]
     let _ = base;
+    #[cfg(not(target_os = "macos"))]
+    let _ = home;
     #[cfg(target_os = "macos")]
     return home.join("Library/Application Support/Claude/claude_desktop_config.json");
     #[cfg(target_os = "windows")]
