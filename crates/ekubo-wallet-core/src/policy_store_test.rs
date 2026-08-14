@@ -387,6 +387,60 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
 }
 
 #[test]
+fn fresh_schema_has_no_mcp_oauth_authority_and_only_harness_attribution() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PolicyStore::open(&directory.path().join("wallet.db"), &key(42)).unwrap();
+    let names = store
+        .connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for removed in [
+        "mcp_clients",
+        "oauth_authorization_codes",
+        "oauth_access_tokens",
+        "oauth_refresh_tokens",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == removed),
+            "obsolete table {removed} exists"
+        );
+    }
+    for table in [
+        "pending_transactions",
+        "pending_messages",
+        "pending_typed_data",
+        "policy_proposals",
+        "network_proposals",
+        "token_proposals",
+    ] {
+        let columns = store
+            .connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            columns
+                .iter()
+                .any(|column| column == "requesting_harness_kind"),
+            "{table} lacks harness attribution"
+        );
+        assert!(
+            !columns
+                .iter()
+                .any(|column| column == "requesting_client_id"),
+            "{table} retains OAuth client attribution"
+        );
+    }
+}
+
+#[test]
 fn schema_change_underneath_a_live_connection_is_refused() {
     // A long-running server re-checks the version on every request. If the
     // file changes underneath it, requests fail instead of writing through an

@@ -33,7 +33,7 @@ use crate::{
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
-use ekubo_wallet_core::desktop_store::DesktopStore;
+use ekubo_wallet_core::desktop_store::{AgentKind, DesktopStore};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
@@ -159,7 +159,7 @@ pub(crate) struct WalletMcpServer {
     /// Where private keys live. Production uses the OS credential store;
     /// tests substitute an in-memory store so no real keychain is touched.
     keys: Arc<dyn KeyStore>,
-    requesting_client: Option<(uuid::Uuid, Arc<Mutex<DesktopStore>>)>,
+    requesting_client: Option<(AgentKind, Arc<Mutex<DesktopStore>>)>,
 }
 
 impl WalletMcpServer {
@@ -179,6 +179,7 @@ impl WalletMcpServer {
     pub(crate) fn production(
         config: ConfigStore,
         client_id: uuid::Uuid,
+        harness: AgentKind,
         desktop: Arc<Mutex<DesktopStore>>,
         global_quota: Arc<Mutex<GlobalAgentQuota>>,
         events: EventBus,
@@ -203,7 +204,7 @@ impl WalletMcpServer {
             tokens,
             Arc::new(OsKeyStore),
         )?;
-        server.requesting_client = Some((client_id, desktop));
+        server.requesting_client = Some((harness, desktop));
         server.client_namespace = client_id;
         server.global_quota = global_quota;
         server.events = events;
@@ -250,15 +251,15 @@ impl WalletMcpServer {
 
     fn with_attribution(
         &self,
-        apply: impl FnOnce(&mut DesktopStore, uuid::Uuid) -> Result<()>,
+        apply: impl FnOnce(&mut DesktopStore, AgentKind) -> Result<()>,
     ) -> Result<()> {
-        let Some((client_id, desktop)) = &self.requesting_client else {
+        let Some((harness, desktop)) = &self.requesting_client else {
             return Ok(());
         };
         let mut desktop = desktop
             .lock()
             .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))?;
-        apply(&mut desktop, *client_id)
+        apply(&mut desktop, *harness)
     }
 
     fn ensure_global_fork_capacity(&self) -> std::result::Result<(), ErrorData> {

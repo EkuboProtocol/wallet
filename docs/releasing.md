@@ -17,21 +17,19 @@ and its nested app. Gatekeeper can retrieve those tickets online, including for
 a copy downloaded while notarization was still pending; because the release
 artifacts are not stapled, their first launch requires network access.
 
-Windows Authenticode signing is applied only when its trusted-signing
-configuration is available; the workflow currently permits an otherwise
-update-signed Windows installer when it is not.
+Developer ID signing on macOS and Authenticode signing on Windows are mandatory.
+Linux packages contain the exact helper protected by the embedded SHA-256 and
+the release's Minisign chain. Packaging fails unless every native package
+contains an executable `ekubo-wallet-mcp-bridge`; the macOS and Windows checks
+also verify the helper's platform signature after extracting it from the
+package. The retired Claude Desktop plugin archive is not built or published.
 
-The release workflow also tests, validates, and publishes the cross-platform
-`ekubo-wallet-plugin.zip` Claude Desktop plugin. The plugin has no runtime
-dependency installation and contains no credential material. The obsolete
-MCPB format is not published because current Claude Desktop versions do not
-import it.
-
-Its manifest, npm package, and lockfile repeat the wallet's version. The
-plugin's own test suite holds all of them to the root `Cargo.toml`, and
-`contrib/sync-claude-desktop-version.py` is what rewrites them: bump the
-version in `Cargo.toml`, run the script, and commit what it changed. Tagging
-additionally requires the tag and manifest to name the same version.
+Before tagging, smoke-test a bridge launched by each supported harness (Codex,
+Claude Code, Claude Desktop, Gemini CLI, Cursor, and OpenCode). Start the
+harness while the wallet is closed, then open, close, and reopen the wallet.
+The harness must observe `notifications/tools/list_changed` and resume tool
+calls after both connections without restarting its own process. A harness
+release that no longer supports dynamic tool refresh blocks the wallet release.
 
 Native update artifacts are signed by a dedicated Minisign key held only in the
 protected release environment. CI compiles the public key into the app,

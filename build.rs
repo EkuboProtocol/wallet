@@ -4,6 +4,7 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     embed_windows_resources();
+    embed_bridge_digest();
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets the package version");
     println!(
         "cargo:rustc-env=EKUBO_WALLET_BUILD_VERSION={}",
@@ -19,6 +20,26 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=crates");
+}
+
+fn embed_bridge_digest() {
+    println!("cargo:rerun-if-env-changed=EKUBO_MCP_BRIDGE_SHA256");
+    let digest = env::var("EKUBO_MCP_BRIDGE_SHA256").unwrap_or_default();
+    let release = env::var("PROFILE").as_deref() == Ok("release");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    assert!(
+        !(release && target_os != "macos" && digest.is_empty()),
+        "release builds require EKUBO_MCP_BRIDGE_SHA256"
+    );
+    assert!(
+        digest.is_empty()
+            || (digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "EKUBO_MCP_BRIDGE_SHA256 must be 64 lowercase hexadecimal characters"
+    );
+    println!("cargo:rustc-env=EKUBO_COMPILED_MCP_BRIDGE_SHA256={digest}");
 }
 
 fn embed_windows_resources() {

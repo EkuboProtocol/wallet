@@ -7,20 +7,12 @@ const OWNER_AUTHORIZATION_LIFETIME: Duration = Duration::from_mins(2);
 /// The class of protected owner state one authentication may change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerAuthorizationScope {
-    AgentAccess,
     DappAccess,
     UpdateTrust,
     PolicySettings,
     NetworkSettings,
     NotificationPrivacy,
     TokenMetadata,
-}
-
-/// The exact client-management mutation named in an owner-presence prompt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentManagementOperation {
-    Revoke,
-    Remove,
 }
 
 /// Single-use proof that the owner authenticated the exact dapp review and
@@ -118,71 +110,6 @@ pub async fn authorize_owner(
     })
 }
 
-/// Authenticate an owner immediately before granting an OAuth client access.
-/// The client name is carried into the OS-owned prompt; the returned proof is
-/// still the same narrow, expiring AgentAccess capability required by storage.
-#[cfg(not(any(test, feature = "test-hooks")))]
-pub async fn authorize_oauth_client(
-    client_name: &str,
-    redirect_uri: &str,
-) -> Result<OwnerAuthorization, HumanPresenceError> {
-    let redirect_host = url::Url::parse(redirect_uri)
-        .ok()
-        .and_then(|uri| uri.host_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| "an unknown callback".into());
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::AuthorizeAgent {
-            client_name: client_name.to_owned(),
-            redirect_host,
-        })
-        .await?;
-    Ok(OwnerAuthorization {
-        scope: OwnerAuthorizationScope::AgentAccess,
-        granted_at: Instant::now(),
-    })
-}
-
-/// Authenticate an owner for one named revoke/remove operation. The caller
-/// wraps this proof with the exact encrypted registration it read before the
-/// prompt and consumes that wrapper during the post-authentication transaction.
-#[cfg(not(any(test, feature = "test-hooks")))]
-pub(crate) async fn authorize_agent_management(
-    client_name: &str,
-    operation: AgentManagementOperation,
-) -> Result<OwnerAuthorization, HumanPresenceError> {
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::ManageAgent {
-            client_name: client_name.to_owned(),
-            operation,
-        })
-        .await?;
-    Ok(OwnerAuthorization {
-        scope: OwnerAuthorizationScope::AgentAccess,
-        granted_at: Instant::now(),
-    })
-}
-
-#[cfg(any(test, feature = "test-hooks"))]
-pub async fn authorize_oauth_client(
-    _client_name: &str,
-    _redirect_uri: &str,
-) -> Result<OwnerAuthorization, HumanPresenceError> {
-    Ok(std::future::ready(OwnerAuthorization::for_test(
-        OwnerAuthorizationScope::AgentAccess,
-    ))
-    .await)
-}
-
-#[cfg(any(test, feature = "test-hooks"))]
-pub(crate) async fn authorize_agent_management(
-    _client_name: &str,
-    _operation: AgentManagementOperation,
-) -> Result<OwnerAuthorization, HumanPresenceError> {
-    Ok(OwnerAuthorization::for_test(
-        OwnerAuthorizationScope::AgentAccess,
-    ))
-}
-
 #[cfg(any(test, feature = "test-hooks"))]
 pub async fn authorize_owner(
     scope: OwnerAuthorizationScope,
@@ -203,41 +130,15 @@ pub async fn authorize_owner(
 /// reading. Those use explicit native confirmation without a biometric prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceRequest {
-    AuthorizeAgent {
-        client_name: String,
-        redirect_host: String,
-    },
-    ManageAgent {
-        client_name: String,
-        operation: AgentManagementOperation,
-    },
-    SignTransaction {
-        wallet: String,
-    },
-    SignTypedData {
-        wallet: String,
-    },
-    SignMessage {
-        wallet: String,
-    },
-    ExportPrivateKey {
-        wallet: String,
-    },
-    RemoveWallet {
-        wallet: String,
-    },
-    ReplacePolicy {
-        wallet: String,
-    },
-    ConfirmTokenNames {
-        count: usize,
-    },
-    ConfirmNetwork {
-        network: String,
-    },
-    ChangeProtectedSettings {
-        scope: OwnerAuthorizationScope,
-    },
+    SignTransaction { wallet: String },
+    SignTypedData { wallet: String },
+    SignMessage { wallet: String },
+    ExportPrivateKey { wallet: String },
+    RemoveWallet { wallet: String },
+    ReplacePolicy { wallet: String },
+    ConfirmTokenNames { count: usize },
+    ConfirmNetwork { network: String },
+    ChangeProtectedSettings { scope: OwnerAuthorizationScope },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -255,27 +156,6 @@ impl PresenceRequest {
     #[must_use]
     pub fn reason(&self) -> String {
         match self {
-            Self::AuthorizeAgent {
-                client_name,
-                redirect_host,
-            } => {
-                format!(
-                    "allow {} to access the wallet via {}",
-                    subject(client_name),
-                    subject(redirect_host)
-                )
-            }
-            Self::ManageAgent {
-                client_name,
-                operation,
-            } => match operation {
-                AgentManagementOperation::Revoke => {
-                    format!("revoke wallet access for {}", subject(client_name))
-                }
-                AgentManagementOperation::Remove => {
-                    format!("remove wallet registration for {}", subject(client_name))
-                }
-            },
             Self::SignTransaction { wallet } => {
                 format!("sign a transaction from wallet {}", subject(wallet))
             }
@@ -301,9 +181,6 @@ impl PresenceRequest {
                 format!("trust the RPC endpoint for network {}", subject(network))
             }
             Self::ChangeProtectedSettings { scope } => match scope {
-                OwnerAuthorizationScope::AgentAccess => {
-                    "change which local agents can access the wallet".into()
-                }
                 OwnerAuthorizationScope::DappAccess => {
                     "approve the dapp connection shown in Ekubo Wallet".into()
                 }

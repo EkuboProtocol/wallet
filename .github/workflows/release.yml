@@ -11,34 +11,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  claude-desktop:
-    permissions:
-      contents: read
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # The plugin is published on this release, so it has to name this
-      # release. The tag is held to the same version because it, and not
-      # Cargo.toml, is what `latest.json` reports to installed wallets.
-      - name: Require the plugin and the tag to name this wallet version
-        run: contrib/sync-claude-desktop-version.py --check --expect "${GITHUB_REF_NAME#v}"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: integrations/claude-desktop/package-lock.json
-      - name: Build Claude Desktop plugin
-        working-directory: integrations/claude-desktop
-        run: npm ci && npm test && npm run validate:plugin && npm run pack:plugin
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-packages-claude-desktop
-          path: integrations/claude-desktop/dist/ekubo-wallet-plugin.zip
-          if-no-files-found: error
-
   package:
     permissions:
       contents: read
+      id-token: write
     environment: release
     strategy:
       fail-fast: false
@@ -129,6 +105,80 @@ jobs:
 
           printf 'EKUBO_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
+      - name: Build the standalone MCP bridge before platform signing
+        shell: bash
+        run: cargo build --release -p mcp-bridge
+      - name: Sign the MCP bridge with Developer ID
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+        run: |
+          codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" target/release/ekubo-wallet-mcp-bridge
+          codesign --verify --strict --verbose=2 target/release/ekubo-wallet-mcp-bridge
+          codesign -dv --verbose=4 target/release/ekubo-wallet-mcp-bridge 2>&1 | grep -F 'Authority=Developer ID Application:'
+      - name: Require Windows bridge signing configuration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          TENANT: ${{ secrets.AZURE_TENANT_ID }}
+          CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          foreach ($value in @($env:ENDPOINT, $env:ACCOUNT, $env:PROFILE, $env:TENANT, $env:CLIENT)) {
+            if (-not $value) { throw "Windows bridge Authenticode configuration is required" }
+          }
+      - name: Sign the MCP bridge with Authenticode
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: target/release
+          files-folder-filter: ekubo-wallet-mcp-bridge.exe
+          cache-dependencies: false
+      - name: Verify the Authenticode-signed MCP bridge
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature target/release/ekubo-wallet-mcp-bridge.exe
+          if ($signature.Status -ne "Valid") { throw "MCP bridge Authenticode is $($signature.Status)" }
+      - name: Sign the Linux MCP bridge with Minisign
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo packager signer sign target/release/ekubo-wallet-mcp-bridge
+          test -s target/release/ekubo-wallet-mcp-bridge.sig
+      - name: Embed the exact signed MCP bridge digest
+        shell: bash
+        run: |
+          bridge=target/release/ekubo-wallet-mcp-bridge
+          if [ "$RUNNER_OS" = Windows ]; then bridge="$bridge.exe"; fi
+          if command -v sha256sum >/dev/null; then
+            digest="$(sha256sum "$bridge" | cut -d ' ' -f 1)"
+          else
+            digest="$(shasum -a 256 "$bridge" | cut -d ' ' -f 1)"
+          fi
+          printf 'EKUBO_MCP_BRIDGE_SHA256=%s\n' "$digest" >> "$GITHUB_ENV"
+      - name: Stage the signed bridge for cargo-packager
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          source=target/release/ekubo-wallet-mcp-bridge
+          suffix=
+          if [ "$RUNNER_OS" = Windows ]; then source="$source.exe"; suffix=.exe; fi
+          destination="target/release/ekubo-wallet-mcp-bridge-${host}${suffix}"
+          cp "$source" "$destination"
+          cmp "$source" "$destination"
       - name: Build native packages
         if: runner.os != 'Windows'
         shell: bash
@@ -180,6 +230,44 @@ jobs:
           } finally {
             $stream.Dispose()
           }
+      - name: Verify the Windows package contains the signed bridge
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem target/release/*setup.exe)
+          if ($installer.Count -ne 1) { throw "expected exactly one Windows installer" }
+          $extract = Join-Path $env:RUNNER_TEMP "ekubo-nsis-contents"
+          7z x "-o$extract" $installer[0].FullName | Out-Null
+          $bridges = @(Get-ChildItem -Recurse $extract -Filter ekubo-wallet-mcp-bridge.exe)
+          if ($bridges.Count -ne 1) { throw "Windows package does not contain exactly one MCP bridge" }
+          $sourceHash = (Get-FileHash -Algorithm SHA256 target/release/ekubo-wallet-mcp-bridge.exe).Hash
+          $packagedHash = (Get-FileHash -Algorithm SHA256 $bridges[0].FullName).Hash
+          if ($sourceHash -ne $packagedHash) { throw "Windows packaging changed the signed MCP bridge bytes" }
+          $signature = Get-AuthenticodeSignature $bridges[0].FullName
+          if ($signature.Status -ne "Valid") { throw "packaged MCP bridge Authenticode is $($signature.Status)" }
+      - name: Verify Linux packages contain the executable bridge
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(target/release/*.deb)
+          appimages=(target/release/*.AppImage)
+          test "${#debs[@]}" -eq 1
+          test "${#appimages[@]}" -eq 1
+          deb_extract="$RUNNER_TEMP/ekubo-deb-contents"
+          dpkg-deb -x "${debs[0]}" "$deb_extract"
+          deb_bridge="$(find "$deb_extract" -type f -name ekubo-wallet-mcp-bridge -print -quit)"
+          test -n "$deb_bridge"
+          test -x "$deb_bridge"
+          cmp target/release/ekubo-wallet-mcp-bridge "$deb_bridge"
+          extract="$RUNNER_TEMP/ekubo-appimage-contents"
+          mkdir "$extract"
+          (cd "$extract" && "$GITHUB_WORKSPACE/${appimages[0]}" --appimage-extract >/dev/null)
+          bridge="$(find "$extract/squashfs-root" -type f -name ekubo-wallet-mcp-bridge -print -quit)"
+          test -n "$bridge"
+          test -x "$bridge"
+          cmp target/release/ekubo-wallet-mcp-bridge "$bridge"
       - name: Verify signed macOS packages
         if: runner.os == 'macOS'
         shell: bash
@@ -191,6 +279,9 @@ jobs:
           test "${#dmgs[@]}" -eq 1
 
           codesign --verify --deep --strict --verbose=2 "$app"
+          test -x "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
+          codesign -dv --verbose=4 "$app/Contents/MacOS/ekubo-wallet-mcp-bridge" 2>&1 | grep -F 'Authority=Developer ID Application:'
           codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
           codesign --verify --strict --verbose=2 "${dmgs[0]}"
@@ -277,8 +368,7 @@ jobs:
           $installers = @(Get-ChildItem dist/*setup.exe)
           if ($installers.Count -ne 1) { throw "expected exactly one Windows installer" }
           (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash | Set-Content "$env:RUNNER_TEMP/pre-authenticode.sha256"
-      - name: Detect Windows signing configuration
-        id: windows-signing
+      - name: Require Windows signing configuration
         shell: pwsh
         env:
           ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
@@ -288,13 +378,10 @@ jobs:
           CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
         run: |
           if ($env:ENDPOINT -and $env:ACCOUNT -and $env:PROFILE -and $env:TENANT -and $env:CLIENT) {
-            "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            Write-Output "::notice::Publishing the Windows installer without Authenticode until the Trusted Signing account and profile are configured."
+            throw "Windows Authenticode configuration is required"
           }
       - name: Apply Authenticode to the Windows installer
-        if: steps.windows-signing.outputs.enabled == 'true'
         uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -330,13 +417,11 @@ jobs:
           if ($installers[0].VersionInfo.ProductVersion -ne $expectedVersion) {
             throw "final installer ProductVersion does not match release tag"
           }
-          if ('${{ steps.windows-signing.outputs.enabled }}' -eq 'true') {
-            $before = (Get-Content "$env:RUNNER_TEMP/pre-authenticode.sha256").Trim()
-            $after = (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash
-            if ($before -eq $after) { throw "Authenticode did not change the installer bytes" }
-            $authenticode = Get-AuthenticodeSignature $installers[0].FullName
-            if ($authenticode.Status -ne "Valid") { throw "final installer has invalid Authenticode: $($authenticode.Status)" }
-          }
+          $before = (Get-Content "$env:RUNNER_TEMP/pre-authenticode.sha256").Trim()
+          $after = (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash
+          if ($before -eq $after) { throw "Authenticode did not change the installer bytes" }
+          $authenticode = Get-AuthenticodeSignature $installers[0].FullName
+          if ($authenticode.Status -ne "Valid") { throw "final installer has invalid Authenticode: $($authenticode.Status)" }
           $publicKeyPath = "$env:RUNNER_TEMP/updater.pub"
           $signaturePath = "$env:RUNNER_TEMP/installer.sig"
           [IO.File]::WriteAllBytes($publicKeyPath, [Convert]::FromBase64String($env:EKUBO_UPDATER_PUBLIC_KEY.Trim()))
@@ -353,7 +438,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [package, finalize-windows, claude-desktop]
+    needs: [package, finalize-windows]
     runs-on: ubuntu-24.04
     environment: release
     permissions:

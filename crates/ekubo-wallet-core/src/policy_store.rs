@@ -1546,53 +1546,6 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  value_json TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
              ) STRICT",
-            "CREATE TABLE mcp_clients (
-                 client_id BLOB PRIMARY KEY NOT NULL CHECK (length(client_id) = 16),
-                 display_name TEXT NOT NULL,
-                 agent_kind TEXT NOT NULL CHECK (agent_kind IN (
-                     'codex', 'claude_code', 'gemini_cli', 'cursor', 'opencode', 'other'
-                 )),
-                 redirect_uris_json TEXT NOT NULL,
-                 registration_json TEXT,
-                 created_at INTEGER NOT NULL,
-                 authorized_at INTEGER,
-                 last_used_at INTEGER,
-                 revoked_at INTEGER
-             ) STRICT",
-            "CREATE TABLE oauth_authorization_codes (
-                 code_hash BLOB PRIMARY KEY NOT NULL CHECK (length(code_hash) = 32),
-                 client_id BLOB NOT NULL CHECK (length(client_id) = 16),
-                 redirect_uri TEXT NOT NULL,
-                 code_challenge TEXT NOT NULL,
-                 scope TEXT NOT NULL,
-                 resource TEXT NOT NULL,
-                 expires_at INTEGER NOT NULL,
-                 session_expires_at INTEGER NOT NULL,
-                 access_token_ttl_seconds INTEGER NOT NULL CHECK (access_token_ttl_seconds > 0),
-                 used_at INTEGER,
-                 FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
-             ) STRICT",
-            "CREATE TABLE oauth_access_tokens (
-                 token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
-                 client_id BLOB NOT NULL CHECK (length(client_id) = 16),
-                 scope TEXT NOT NULL,
-                 resource TEXT NOT NULL,
-                 created_at INTEGER NOT NULL,
-                 expires_at INTEGER NOT NULL,
-                 FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
-             ) STRICT",
-            "CREATE TABLE oauth_refresh_tokens (
-                 token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
-                 family_id BLOB NOT NULL CHECK (length(family_id) = 16),
-                 client_id BLOB NOT NULL CHECK (length(client_id) = 16),
-                 scope TEXT NOT NULL,
-                 resource TEXT NOT NULL,
-                 created_at INTEGER NOT NULL,
-                 expires_at INTEGER NOT NULL,
-                 access_token_ttl_seconds INTEGER NOT NULL CHECK (access_token_ttl_seconds > 0),
-                 consumed_at INTEGER,
-                 FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
-             ) STRICT",
             "CREATE TABLE wallet_instances (
                  instance_id TEXT PRIMARY KEY NOT NULL CHECK (length(instance_id) = 36),
                  wallet_id TEXT NOT NULL,
@@ -1632,8 +1585,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  plan_json TEXT NOT NULL,
                  plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
                  plan_source TEXT,
-                 requesting_client_id BLOB
-                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed', 'submitting',
@@ -1767,8 +1719,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- the deduplication that exists to keep the review short
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
-                 requesting_client_id BLOB
-                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER
@@ -1831,8 +1782,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- the deduplication that exists to keep the review short
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
-                 requesting_client_id BLOB
-                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
                  -- One decision per request; `status` names which one it was.
@@ -1877,8 +1827,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  source_revision INTEGER NOT NULL CHECK (source_revision > 0),
                  policy_json TEXT NOT NULL,
                  rationale TEXT NOT NULL,
-                 requesting_client_id BLOB
-                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
                  created_at INTEGER NOT NULL,
                  FOREIGN KEY (wallet_instance_id) REFERENCES wallet_instances(instance_id)
              ) STRICT",
@@ -1905,8 +1854,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
 const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_proposals (
      chain_id INTEGER PRIMARY KEY NOT NULL CHECK (chain_id > 0),
      profile_json TEXT NOT NULL,
-     requesting_client_id BLOB
-         CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
+     requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
      proposed_at INTEGER NOT NULL
  ) STRICT";
 
@@ -1923,8 +1871,7 @@ const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals 
      name TEXT,
      decimals INTEGER NOT NULL CHECK (decimals >= 0 AND decimals <= 255),
      source TEXT NOT NULL,
-     requesting_client_id BLOB
-         CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
+     requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
      proposed_at INTEGER NOT NULL,
      PRIMARY KEY (chain_id, address)
  ) STRICT";

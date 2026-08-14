@@ -104,7 +104,6 @@ fn quiet_snapshot() -> DesktopSnapshot {
         }),
         activity: Ok(Arc::from(Vec::new())),
         activity_sources: BTreeMap::new(),
-        clients: Ok(Vec::new()),
         accounts: Ok(Vec::new()),
         policies: BTreeMap::new(),
         legal_status: Ok(LegalStatus {
