@@ -719,8 +719,8 @@ fn about_row(
         // Each row is a name, a fact about it, and one control, and the
         // control sits a column away from the name. A rule between rows is
         // what keeps the pairing obvious without asking the eye to track
-        // across a gap. The last row has none: the copyright line below it is
-        // not another row.
+        // across a gap. The final rule separates the actionable rows from the
+        // informational copyright footer below them.
         .when(ruled, |row| {
             row.pb_2().border_b_1().border_color(cx.theme().border)
         })
@@ -9945,7 +9945,7 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
                         })),
-                    false,
+                    true,
                     cx,
                 ))
                 .child(
