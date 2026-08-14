@@ -21,7 +21,10 @@
 use crate::{core::execution_plan::ExecutionPlan, simulation::SimulationResult};
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 /// How long a recorded simulation may still be sent. Short: the whole point of
@@ -67,6 +70,7 @@ pub struct RecordedSimulation {
 #[derive(Debug, Default)]
 pub struct SimulationStore {
     recorded: BTreeMap<Uuid, RecordedSimulation>,
+    recorded_instants: BTreeMap<Uuid, Instant>,
 }
 
 impl SimulationStore {
@@ -78,6 +82,7 @@ impl SimulationStore {
     /// Drop one recorded result without consuming it as a send. Used when an
     /// application-wide client quota cannot retain another per-client entry.
     pub fn discard(&mut self, simulation_id: Uuid) -> bool {
+        self.recorded_instants.remove(&simulation_id);
         self.recorded.remove(&simulation_id).is_some()
     }
 
@@ -113,6 +118,8 @@ impl SimulationStore {
         };
         self.recorded
             .insert(recorded.simulation_id, recorded.clone());
+        self.recorded_instants
+            .insert(recorded.simulation_id, Instant::now());
         // The per-wallet cap evicts that wallet's own oldest. Evicting the
         // globally oldest to satisfy a per-wallet limit lets one wallet's
         // traffic delete another wallet's recorded simulation — a cross-wallet
@@ -174,6 +181,7 @@ impl SimulationStore {
     /// finds nothing, so a result can never authorize two sends.
     pub fn take(&mut self, simulation_id: Uuid, now: DateTime<Utc>) -> Result<RecordedSimulation> {
         self.prune(now);
+        self.recorded_instants.remove(&simulation_id);
         self.recorded.remove(&simulation_id).with_context(|| {
             format!(
                 "unknown, already sent, or expired simulation {simulation_id}. A recorded \
@@ -185,23 +193,40 @@ impl SimulationStore {
 
     /// Drop every expired entry.
     ///
-    /// Expired means the deadline has passed *or* the clock has moved behind
-    /// the moment the entry was recorded. `expires_at` is wall-clock
+    /// Expired means either the wall-clock deadline or the process-monotonic
+    /// lifetime has passed, or the clock moved behind the moment the entry was
+    /// recorded. `expires_at` is wall-clock
     /// arithmetic on a value the host can move backwards -- an NTP correction,
     /// a manual change, a suspended laptop resuming with a stale RTC -- and
     /// compared against a later wall-clock reading alone, a rollback makes an
     /// entry look younger than it is and keeps it sendable past the window it
     /// was given.
     ///
-    /// A `now` before `recorded_at` says the clock moved, which is the one
-    /// thing this can detect without a monotonic source. The safe reading of
+    /// A `now` before `recorded_at` says the clock moved. A smaller rollback
+    /// can still leave `now` after `recorded_at`, so every entry also keeps the
+    /// monotonic instant at which this process recorded it. The safe reading of
     /// "I cannot tell how long this has been here" is that it has been here
     /// too long: re-simulating costs one RPC round trip, and sending a stale
     /// result costs a signature over state the chain has left behind. Same
     /// rule, and the same reasoning, as `reconcile::lease_expired`.
     pub fn prune(&mut self, now: DateTime<Utc>) {
-        self.recorded
-            .retain(|_, entry| entry.expires_at > now && entry.recorded_at <= now);
+        let ttl = Duration::from_secs(u64::try_from(SIMULATION_TTL_SECONDS).unwrap_or_default());
+        let expired = self
+            .recorded
+            .iter()
+            .filter_map(|(simulation_id, entry)| {
+                let wall_expired = entry.expires_at <= now || entry.recorded_at > now;
+                let monotonic_expired = self
+                    .recorded_instants
+                    .get(simulation_id)
+                    .is_none_or(|recorded| recorded.elapsed() >= ttl);
+                (wall_expired || monotonic_expired).then_some(*simulation_id)
+            })
+            .collect::<Vec<_>>();
+        for simulation_id in expired {
+            self.recorded.remove(&simulation_id);
+            self.recorded_instants.remove(&simulation_id);
+        }
     }
 
     #[must_use]
@@ -251,6 +276,7 @@ impl SimulationStore {
                 return;
             };
             self.recorded.remove(&oldest);
+            self.recorded_instants.remove(&oldest);
         }
     }
 }

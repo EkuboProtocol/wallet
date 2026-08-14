@@ -15,7 +15,7 @@ use alloy::{
         transaction::SignerRecoverable,
     },
     eips::{eip2718::Decodable2718, eip2930::AccessList, eip7702::Authorization},
-    network::TxSignerSync,
+    network::{TransactionResponse as _, TxSignerSync},
     primitives::{B256, TxKind, U256, keccak256},
     signers::{SignerSync, local::PrivateKeySigner},
 };
@@ -217,7 +217,7 @@ impl SigningOverrides {
 
 /// Prepare fee and nonce fields through the configured RPC, then load the key
 /// only after every upstream request has completed and sign locally.
-pub async fn sign_execution<K: KeyStore + ?Sized>(
+pub(crate) async fn sign_execution<K: KeyStore + ?Sized>(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
@@ -378,7 +378,7 @@ pub(crate) fn authorization_for_send(
 }
 
 /// Load the key and sign exactly the already-reviewed preparation fields.
-pub fn sign_prepared_execution<K: KeyStore + ?Sized>(
+pub(crate) fn sign_prepared_execution<K: KeyStore + ?Sized>(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
@@ -412,6 +412,10 @@ pub fn sign_prepared_execution<K: KeyStore + ?Sized>(
         prepared.max_fee_per_gas >= prepared.max_priority_fee_per_gas,
         "prepared EIP-1559 fee fields are invalid"
     );
+    // Preparation may outlive a security-sensitive network update. Reapply
+    // the current ceiling immediately before key use instead of trusting the
+    // configuration that happened to be active when fees were fetched.
+    capped_fee(network, prepared.max_fee_per_gas)?;
 
     // All RPC preparation completed before this function loads key material.
     let local_signer = load_matching_signer(keys, wallet)?;
@@ -747,6 +751,12 @@ pub fn validate_signed_execution(
         ensure!(
             envelope.gas_limit() <= maximum.parse::<u64>()?,
             "signed transaction exceeds configured maximum gas limit"
+        );
+    }
+    if let Some(maximum) = network.max_fee_per_gas.as_deref() {
+        ensure!(
+            envelope.max_fee_per_gas() <= maximum.parse::<u128>()?,
+            "signed transaction exceeds configured maximum fee per gas"
         );
     }
     // And from below. This function is the last thing between a freshly signed
@@ -1116,7 +1126,7 @@ async fn send_exact_bytes(
     network: &NetworkConfig,
 ) -> Result<BroadcastResult> {
     let mut first_failure = None;
-    for client in crate::rpc::clients_for(network) {
+    for client in crate::rpc::clients_for(network).await? {
         let outcome = match send_exact_bytes_through(signed, network, client.as_ref()).await {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -1156,7 +1166,7 @@ async fn send_exact_bytes_through(
         .ok()
         .and_then(std::result::Result::ok)
         .flatten()
-        .is_some();
+        .is_some_and(|transaction| transaction.tx_hash() == hash);
     if !known {
         let bytes = decode_serialized(&signed.serialized_transaction)?;
         let failure =

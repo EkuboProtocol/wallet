@@ -221,7 +221,7 @@ fn selector_arguments_and_integer_comparisons_are_enforced() {
 }
 
 #[test]
-fn selector_matching_accepts_solidity_compatible_trailing_calldata() {
+fn selector_matching_refuses_policy_unchecked_trailing_calldata() {
     let subject = policy(json!({"version": 1, "rules": [{
         "effect": "allow",
         "calldata": {"selector": {"abi": "approve(address spender, uint256 amount)"}}
@@ -229,7 +229,7 @@ fn selector_matching_accepts_solidity_compatible_trailing_calldata() {
     let data = format!("{}00", approve(ROUTER, 1));
     assert_eq!(
         outcome(&subject, &one_call(TOKEN, &data, "0")),
-        PolicyOutcome::Allowed
+        PolicyOutcome::RequiresApproval
     );
 }
 
@@ -257,6 +257,19 @@ fn provably_shadowed_rules_are_rejected() {
     .unwrap_err();
     let error = format!("{error:#}");
     assert!(error.contains("rule 2 is unreachable"), "{error}");
+}
+
+#[test]
+fn equivalent_typed_literals_cannot_hide_a_shadowed_rule() {
+    let error = WalletPolicy::parse(serde_json::json!({
+        "version": 1,
+        "rules": [
+            {"effect": "allow", "chain_id": {"eq": "0x10"}},
+            {"effect": "deny", "chain_id": {"eq": "16"}}
+        ]
+    }))
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("rule 2 is unreachable"));
 }
 
 #[test]

@@ -6,6 +6,7 @@ use crate::{
 };
 use alloy::{
     eips::{BlockId, BlockNumberOrTag},
+    network::TransactionResponse as _,
     primitives::{Address, B256, Bytes},
     providers::{DynProvider, Provider, ProviderBuilder},
     rpc::types::{TransactionRequest, simulate::SimulatePayload},
@@ -131,26 +132,37 @@ fn rpc_result<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> Res
 /// underneath it) on every call meant every one of those reads paid a new TCP
 /// handshake, and a new TLS handshake for an `https` endpoint, instead of
 /// reusing one already open to the same endpoint.
-#[must_use]
-fn client_for(endpoint: &url::Url) -> SharedChainClient {
+async fn client_for(endpoint: &url::Url) -> Result<SharedChainClient> {
     let pool = RPC_CLIENTS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut entries = pool.lock().expect("endpoint provider pool lock");
-    if let Some(position) = entries
-        .iter()
-        .position(|(existing, _)| existing == endpoint)
     {
-        return entries[position].1.clone();
+        let entries = pool.lock().expect("endpoint provider pool lock");
+        if let Some((_, client)) = entries.iter().find(|(existing, _)| existing == endpoint) {
+            return Ok(client.clone());
+        }
     }
+
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if let Some(url::Host::Domain(domain)) = endpoint.host() {
+        let addresses = crate::plan_fetch::public_endpoint_addresses(endpoint, "RPC URL").await?;
+        builder = builder.resolve_to_addrs(domain, &addresses);
+    }
+    let http = builder.build().context("failed to build RPC HTTP client")?;
     let client: SharedChainClient = Arc::new(RpcChainClient {
         provider: ProviderBuilder::new()
-            .connect_http(endpoint.clone())
+            .connect_reqwest(http, endpoint.clone())
             .erased(),
     });
+    let mut entries = pool.lock().expect("endpoint provider pool lock");
+    if let Some((_, existing)) = entries.iter().find(|(existing, _)| existing == endpoint) {
+        return Ok(existing.clone());
+    }
     if entries.len() >= MAX_POOLED_CLIENTS {
         entries.remove(0);
     }
     entries.push((endpoint.clone(), client.clone()));
-    client
+    Ok(client)
 }
 
 /// Run one read against the network's clients, in the selected order, until
@@ -179,7 +191,11 @@ where
 {
     let mut failures = Vec::new();
     for endpoint in endpoint_order(network) {
-        match operation(client_for(endpoint)).await {
+        let result = match client_for(endpoint).await {
+            Ok(client) => operation(client).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(value) => return Ok(value),
             Err(error) => failures.push((endpoint, error)),
         }
@@ -193,11 +209,12 @@ where
 /// Keeping this here means simulation and submission never inspect URLs or
 /// reimplement selection. A future non-RPC factory can supply the same client
 /// objects without changing either operation.
-pub fn clients_for(network: &NetworkConfig) -> Vec<SharedChainClient> {
-    endpoint_order(network)
-        .into_iter()
-        .map(client_for)
-        .collect()
+pub async fn clients_for(network: &NetworkConfig) -> Result<Vec<SharedChainClient>> {
+    let mut clients = Vec::new();
+    for endpoint in endpoint_order(network) {
+        clients.push(client_for(endpoint).await?);
+    }
+    Ok(clients)
 }
 
 /// The order this request should visit the endpoints in.
@@ -659,7 +676,7 @@ pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) 
             "RPC reports chain {chain_id}, not {}",
             network.chain_id
         );
-        Ok(transaction.is_some())
+        Ok(transaction.is_some_and(|transaction| transaction.tx_hash() == hash))
     })
     .await
 }

@@ -33,6 +33,6 @@ pub use protocol::AppMetadata;
 pub use relay::{DEFAULT_RELAY_URL, RelayConfig};
 pub use session::{
     ApprovedScope, DappRequest, ProposalDecision, ProposalSummary, RequestOutcome,
-    SUPPORTED_EVENTS, Session, SessionEvent, SessionHandler,
+    SUPPORTED_EVENTS, ScopeGrant, Session, SessionEvent, SessionHandler,
 };
 pub use uri::PairingUri;

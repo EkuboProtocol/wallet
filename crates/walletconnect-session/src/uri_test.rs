@@ -111,3 +111,14 @@ fn something_that_is_not_a_pairing_link_is_told_where_to_find_one() {
         );
     }
 }
+
+#[test]
+fn an_oversized_link_is_rejected_before_query_decoding() {
+    let uri = format!(
+        "{}&relay-data={}",
+        valid(),
+        "a".repeat(MAX_PAIRING_URI_BYTES)
+    );
+    let error = PairingUri::parse(&uri, now()).expect_err("an oversized link was accepted");
+    assert!(format!("{error}").contains("exceeds"), "{error}");
+}

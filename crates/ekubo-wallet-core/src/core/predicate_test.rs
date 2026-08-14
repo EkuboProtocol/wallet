@@ -61,6 +61,7 @@ fn integers_are_decimal_without_a_prefix() {
     // 0x-prefixed hex is the other legal spelling and canonicalizes to decimal,
     // so the two forms of one number compare equal.
     assert_eq!(parse_literal("0x10", &ty).unwrap(), "16");
+    assert!(parse_literal("0x", &ty).is_err());
     assert!(parse_literal("ten", &ty).is_err());
     assert!(parse_literal("1_000", &ty).is_err());
     assert!(parse_literal("", &ty).is_err());
@@ -283,7 +284,7 @@ fn a_different_function_with_the_same_argument_shape_does_not_match() {
 }
 
 #[test]
-fn trailing_bytes_are_accepted_after_a_canonical_abi_prefix() {
+fn trailing_bytes_make_a_selector_predicate_unreadable() {
     let ctx = context();
     let mut data = encode(
         "approve(address spender, uint256 amount)",
@@ -297,9 +298,10 @@ fn trailing_bytes_are_accepted_after_a_canonical_abi_prefix() {
         &serde_json::json!({}),
     );
     assert!(rule.matches(&bytes(data.clone()), &ctx));
-    // Solidity ABI decoding ignores trailing calldata too.
+    // A target may inspect bytes beyond its ABI arguments directly. Policy
+    // therefore refuses to authorize any tail it did not decode and check.
     data.push(0xff);
-    assert!(rule.matches(&bytes(data), &ctx));
+    assert_eq!(rule.evaluate(&bytes(data), &ctx), Match::Unreadable);
 }
 
 #[test]
@@ -872,10 +874,10 @@ proptest! {
         prop_assert!(!rule.matches(&bytes(data[..length].to_vec()), &ctx));
     }
 
-    /// Appending data to a canonical call preserves the decoded ABI prefix,
-    /// whatever the shape.
+    /// Appending unchecked bytes makes every otherwise canonical shape
+    /// unreadable to the policy.
     #[test]
-    fn every_shape_tolerates_trailing_bytes(
+    fn every_shape_refuses_trailing_bytes(
         shape in prop_oneof![pinnable_shape(), array_shape()],
         tail in prop::collection::vec(any::<u8>(), 1..8),
     ) {
@@ -883,7 +885,7 @@ proptest! {
         let rule = selector(shape.abi, &serde_json::json!({}));
         let mut data = shape.calldata();
         data.extend_from_slice(&tail);
-        prop_assert!(rule.matches(&bytes(data), &ctx));
+        prop_assert_eq!(rule.evaluate(&bytes(data), &ctx), Match::Unreadable);
     }
 }
 
@@ -922,7 +924,7 @@ fn an_illegible_body_is_unreadable_rather_than_absent() {
 
     let mut trailing = honest.clone();
     trailing.push(0x00);
-    assert_eq!(rule.evaluate(&bytes(trailing), &ctx), Match::Yes);
+    assert_eq!(rule.evaluate(&bytes(trailing), &ctx), Match::Unreadable);
 
     let truncated = honest[..honest.len() - 1].to_vec();
     assert_eq!(rule.evaluate(&bytes(truncated), &ctx), Match::Unreadable);

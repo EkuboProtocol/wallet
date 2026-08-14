@@ -24,7 +24,7 @@ use ekubo_wallet_core::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     sanitize::terminal_safe_line,
-    simulation::simulate_execution,
+    simulation::simulate_external_execution,
     typed_data::{TypedDataStatus, TypedDataStore},
 };
 use serde_json::{Value, json};
@@ -153,11 +153,31 @@ impl DesktopSession {
         account: &ekubo_wallet_core::config::WalletMetadata,
         chains: Vec<String>,
         methods: Vec<String>,
+        requested_grants: &[walletconnect_session::ScopeGrant],
     ) -> ApprovedScope {
+        let grants = requested_grants
+            .iter()
+            .map(|requested| walletconnect_session::ScopeGrant {
+                chains: requested
+                    .chains
+                    .iter()
+                    .filter(|chain| chains.contains(chain))
+                    .cloned()
+                    .collect(),
+                methods: requested
+                    .methods
+                    .iter()
+                    .filter(|method| methods.contains(method))
+                    .cloned()
+                    .collect(),
+            })
+            .filter(|grant| !grant.chains.is_empty() && !grant.methods.is_empty())
+            .collect();
         ApprovedScope {
             address: account.address.to_checksum(None),
             chains,
             methods,
+            grants,
             events: SUPPORTED_EVENTS
                 .iter()
                 .map(|event| (*event).to_owned())
@@ -187,6 +207,16 @@ impl DesktopSession {
         }
         for method in &scope.methods {
             request = request.fact("Method", method);
+        }
+        for grant in &scope.grants {
+            request = request.fact(
+                "Chain-method grant",
+                format!(
+                    "{} → {}",
+                    join_or_none(&grant.chains),
+                    join_or_none(&grant.methods)
+                ),
+            );
         }
         request = request
             .section("Proposal details")
@@ -603,7 +633,7 @@ impl DesktopSession {
         let policy_context = ekubo_wallet_core::core::predicate::PolicyContext {
             wallet: self.wallet().address,
         };
-        let simulation = simulate_execution(
+        let simulation = simulate_external_execution(
             self.wallet(),
             &network,
             plan,
@@ -612,6 +642,11 @@ impl DesktopSession {
             None,
         )
         .await?;
+        if self.shutdown.is_cancelled() {
+            return Ok(Err(RequestOutcome::rejected(
+                "The WalletConnect session was disconnected.",
+            )));
+        }
         let pending = Mutex::new(PendingStore::production(config.data_dir())?);
         let disposition = ekubo_wallet_core::orchestrator::execute_automatic(
             config,
@@ -652,6 +687,11 @@ impl DesktopSession {
                 }
             }
         };
+        if self.shutdown.is_cancelled() {
+            return Ok(Err(RequestOutcome::rejected(
+                "The WalletConnect session was disconnected.",
+            )));
+        }
         let request_id = signed.request_id;
         self.broadcast(&network, signed).await?;
         Ok(Ok(
@@ -713,6 +753,12 @@ impl DesktopSession {
 #[async_trait(?Send)]
 impl SessionHandler for DesktopSession {
     async fn review_proposal(&self, proposal: &ProposalSummary) -> Result<ProposalDecision> {
+        if self.shutdown.is_cancelled() {
+            return Ok(ProposalDecision::Reject {
+                code: error_code::USER_REJECTED,
+                message: "The WalletConnect pairing was disconnected.".into(),
+            });
+        }
         let unavailable: Vec<String> = proposal
             .required_chains
             .iter()
@@ -770,7 +816,12 @@ impl SessionHandler for DesktopSession {
             .accounts
             .iter()
             .map(|account| {
-                let scope = Self::scope_for(account, chains.clone(), methods.clone());
+                let scope = Self::scope_for(
+                    account,
+                    chains.clone(),
+                    methods.clone(),
+                    &proposal.requested_grants,
+                );
                 ProposalChoice {
                     account: account.clone(),
                     document: Self::proposal_document(self.id, proposal, account, &scope),
@@ -778,7 +829,22 @@ impl SessionHandler for DesktopSession {
                 }
             })
             .collect();
-        match self.presenter.review(self.id, choices).await? {
+        let command = tokio::select! {
+            () = self.shutdown.cancelled() => {
+                return Ok(ProposalDecision::Reject {
+                    code: error_code::USER_REJECTED,
+                    message: "The WalletConnect pairing was disconnected.".into(),
+                });
+            }
+            result = self.presenter.review(self.id, choices) => result?,
+        };
+        if self.shutdown.is_cancelled() {
+            return Ok(ProposalDecision::Reject {
+                code: error_code::USER_REJECTED,
+                message: "The WalletConnect pairing was disconnected.".into(),
+            });
+        }
+        match command {
             ProposalCommand::Approve {
                 index,
                 authorization,
@@ -809,7 +875,8 @@ impl SessionHandler for DesktopSession {
                         fresh_chains.push(chain.clone());
                     }
                 }
-                let fresh_scope = Self::scope_for(&account, fresh_chains, methods);
+                let fresh_scope =
+                    Self::scope_for(&account, fresh_chains, methods, &proposal.requested_grants);
                 let fresh_document =
                     Self::proposal_document(self.id, proposal, &account, &fresh_scope);
                 authorization.verify(&fresh_document.identity, &account.id)?;
@@ -825,7 +892,12 @@ impl SessionHandler for DesktopSession {
 
     async fn handle_request(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
         self.update(SessionStatus::Connected, None, 1, None);
-        let result = self.dispatch(request).await;
+        let result = tokio::select! {
+            () = self.shutdown.cancelled() => Ok(RequestOutcome::rejected(
+                "The WalletConnect session was disconnected.",
+            )),
+            result = self.dispatch(request) => result,
+        };
         self.update(SessionStatus::Connected, None, 0, None);
         Ok(match result {
             Ok(outcome) => outcome,

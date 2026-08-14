@@ -28,7 +28,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Request ids remembered for replay protection at once.
 ///
@@ -94,9 +94,19 @@ pub struct ProposalSummary {
     pub optional_methods: Vec<String>,
     /// Events the dapp wants to be told about.
     pub events: Vec<String>,
+    /// Each namespace's chain-to-method relationship. The flattened fields
+    /// above are review text; these grants are the authorization boundary.
+    pub requested_grants: Vec<ScopeGrant>,
     /// The pairing topic, shown so a person can tell two concurrent proposals
     /// apart.
     pub pairing_topic: String,
+}
+
+/// Methods one proposal namespace requested for its own chains.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeGrant {
+    pub chains: Vec<String>,
+    pub methods: Vec<String>,
 }
 
 /// What the wallet decided about a proposal.
@@ -120,6 +130,8 @@ pub struct ApprovedScope {
     pub chains: Vec<String>,
     /// Methods the session may call.
     pub methods: Vec<String>,
+    /// Relational grants preserved from the proposal namespaces.
+    pub grants: Vec<ScopeGrant>,
     /// Events the session will be sent.
     pub events: Vec<String>,
 }
@@ -130,6 +142,13 @@ impl ApprovedScope {
             .iter()
             .map(|chain| format!("{chain}:{}", self.address))
             .collect()
+    }
+
+    fn allows(&self, chain: &str, method: &str) -> bool {
+        self.grants.iter().any(|grant| {
+            grant.chains.iter().any(|granted| granted == chain)
+                && grant.methods.iter().any(|granted| granted == method)
+        })
     }
 }
 
@@ -324,16 +343,10 @@ const SESSION_METHODS: [&str; 6] = [
     method::SESSION_EVENT,
 ];
 
-/// The ids this session has already answered, forgotten oldest-arrival first.
-///
-/// A set alone cannot say which entry is oldest without ordering by the value,
-/// and the value belongs to the peer. The queue records arrival; the set
-/// answers membership. They are kept in step by construction: every id in one
-/// is in the other.
+/// The ids this session has already answered.
 #[derive(Debug, Default)]
 struct AnsweredIds {
     seen: HashSet<u64>,
-    arrival: VecDeque<u64>,
 }
 
 impl AnsweredIds {
@@ -341,44 +354,28 @@ impl AnsweredIds {
         if !self.seen.insert(id) {
             return false;
         }
-        self.arrival.push_back(id);
-        while self.arrival.len() > MAX_ANSWERED_IDS {
-            if let Some(oldest) = self.arrival.pop_front() {
-                self.seen.remove(&oldest);
-            }
+        if self.seen.len() > MAX_ANSWERED_IDS {
+            // Forgetting an authenticated request makes its captured envelope
+            // executable again. A real dapp never needs thousands of distinct
+            // answerable requests in one session, so stop admission at the
+            // bound instead of weakening replay protection.
+            self.seen.remove(&id);
+            return false;
         }
         true
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        debug_assert_eq!(self.seen.len(), self.arrival.len());
         self.seen.len()
     }
 }
 
 /// Record `id` as answered, reporting whether it is new.
 ///
-/// The oldest ids go when the set is full, and *oldest* means the order they
-/// arrived in rather than their numeric value. Protocol ids are conventionally
-/// microsecond-scale timestamps, so the lowest usually is the oldest — but the
-/// id is a `u64` a peer chooses, and this set is the only thing standing
-/// between a captured envelope and a second execution of the request inside
-/// it.
-///
-/// Evicting the numerically smallest let the peer pick what was forgotten: a
-/// settled dapp sends enough high-valued answerable messages to push out the
-/// low id it used earlier, replays the authenticated envelope carrying that
-/// id, and `remember` reports it as new. `on_request` then dispatches it
-/// again, and for a policy-allowed `eth_sendTransaction` that reaches
-/// simulation, signing, and broadcast a second time at a fresh nonce, with no
-/// new review.
-///
-/// Arrival order is not something the peer can address. The bound is unchanged
-/// and still far above any burst a dapp legitimately produces while being well
-/// under what a peer could spend this process's memory on deliberately, and a
-/// relay's redelivery window is minutes, so nothing evicted at this depth is
-/// still eligible to arrive again.
+/// Once the set is full, no new id is admitted. Eviction would make an earlier
+/// authenticated request executable again; bounded denial of service is safer
+/// than replaying a transfer at a fresh nonce.
 fn remember(answered: &mut AnsweredIds, id: u64) -> bool {
     answered.remember(id)
 }
@@ -1031,11 +1028,7 @@ fn check_in_scope(
             format!("`{}` is not an eip155 chain identifier.", request.chain_id),
         ));
     }
-    if !scope
-        .methods
-        .iter()
-        .any(|method| method == &request.request.method)
-    {
+    if !scope.allows(&request.chain_id, &request.request.method) {
         return Err((
             error_code::UNSUPPORTED_METHODS,
             format!(
@@ -1124,16 +1117,27 @@ fn summarize(proposal: &SessionProposeParams, pairing_topic: &str) -> ProposalSu
     let mut optional_chains = BTreeSet::new();
     let mut optional_methods = BTreeSet::new();
     let mut events = BTreeSet::new();
+    let mut requested_grants = Vec::new();
 
     for (key, namespace) in &proposal.required_namespaces {
-        required_chains.extend(namespace_chains(key, namespace));
+        let chains = namespace_chains(key, namespace);
+        required_chains.extend(chains.iter().cloned());
         required_methods.extend(namespace.methods.iter().cloned());
         events.extend(namespace.events.iter().cloned());
+        requested_grants.push(ScopeGrant {
+            chains,
+            methods: namespace.methods.clone(),
+        });
     }
     for (key, namespace) in &proposal.optional_namespaces {
-        optional_chains.extend(namespace_chains(key, namespace));
+        let chains = namespace_chains(key, namespace);
+        optional_chains.extend(chains.iter().cloned());
         optional_methods.extend(namespace.methods.iter().cloned());
         events.extend(namespace.events.iter().cloned());
+        requested_grants.push(ScopeGrant {
+            chains,
+            methods: namespace.methods.clone(),
+        });
     }
     // A chain or method that is required is not also optional; showing it twice
     // would overstate what the dapp is asking for.
@@ -1151,6 +1155,7 @@ fn summarize(proposal: &SessionProposeParams, pairing_topic: &str) -> ProposalSu
         required_methods: required_methods.into_iter().collect(),
         optional_methods: optional_methods.into_iter().collect(),
         events: events.into_iter().collect(),
+        requested_grants,
         pairing_topic: pairing_topic.to_owned(),
     }
 }
@@ -1189,7 +1194,7 @@ fn settled_namespaces(
         let methods: Vec<String> = namespace
             .methods
             .iter()
-            .filter(|method| scope.methods.contains(method))
+            .filter(|method| chains.iter().any(|chain| scope.allows(chain, method)))
             .cloned()
             .collect();
         let events: Vec<String> = namespace

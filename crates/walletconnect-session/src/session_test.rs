@@ -13,6 +13,10 @@ fn scope() -> ApprovedScope {
         address: "0x1111111111111111111111111111111111111111".to_owned(),
         chains: vec!["eip155:1".to_owned(), "eip155:10".to_owned()],
         methods: vec!["personal_sign".to_owned(), "eth_sendTransaction".to_owned()],
+        grants: vec![ScopeGrant {
+            chains: vec!["eip155:1".to_owned(), "eip155:10".to_owned()],
+            methods: vec!["personal_sign".to_owned(), "eth_sendTransaction".to_owned()],
+        }],
         events: vec!["chainChanged".to_owned()],
     }
 }
@@ -69,6 +73,30 @@ fn a_method_the_session_never_approved_is_refused() {
     .expect_err("an unapproved method was accepted");
     assert_eq!(code, error_code::UNSUPPORTED_METHODS);
     assert!(message.contains("eth_signTypedData_v4"), "{message}");
+}
+
+#[test]
+fn a_method_cannot_cross_the_chain_namespace_that_granted_it() {
+    let mut scope = scope();
+    scope.grants = vec![
+        ScopeGrant {
+            chains: vec!["eip155:1".into()],
+            methods: vec!["personal_sign".into()],
+        },
+        ScopeGrant {
+            chains: vec!["eip155:10".into()],
+            methods: vec!["eth_sendTransaction".into()],
+        },
+    ];
+    assert!(check_in_scope(&scope, &request("personal_sign", "eip155:10"), far_future()).is_err());
+    assert!(
+        check_in_scope(
+            &scope,
+            &request("eth_sendTransaction", "eip155:1"),
+            far_future()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -505,26 +533,16 @@ fn a_pairings_own_deadline_outlives_the_moment_the_uri_was_pasted() {
 }
 
 #[test]
-fn the_replay_set_forgets_the_oldest_arrival_rather_than_growing() {
-    // "Oldest" is the order they arrived in, not their numeric value. The id
-    // is a u64 the peer chooses, and this set is the only thing between a
-    // captured envelope and a second execution of the request inside it.
+fn the_replay_set_stops_admitting_ids_at_its_bound() {
     let mut answered = AnsweredIds::default();
     let capacity = u64::try_from(MAX_ANSWERED_IDS).unwrap();
-    for id in 0..capacity * 2 {
+    for id in 0..capacity {
         assert!(remember(&mut answered, id), "every id here is new");
     }
     assert_eq!(answered.len(), MAX_ANSWERED_IDS);
-
-    // The first half arrived first and is gone; the second half is retained.
-    assert!(
-        remember(&mut answered, 0),
-        "the earliest arrival was forgotten"
-    );
-    assert!(
-        !remember(&mut answered, capacity * 2 - 1),
-        "and a redelivery inside the window is still caught, which is the whole point"
-    );
+    assert!(!remember(&mut answered, capacity));
+    assert!(!remember(&mut answered, 0));
+    assert_eq!(answered.len(), MAX_ANSWERED_IDS);
 }
 
 /// The eviction rule used to be "drop the numerically smallest", justified in
@@ -538,7 +556,7 @@ fn the_replay_set_forgets_the_oldest_arrival_rather_than_growing() {
 /// and a policy-allowed `eth_sendTransaction` reaches simulation, signing and
 /// broadcast a second time at a fresh nonce with no new review.
 #[test]
-fn a_peer_cannot_choose_which_answered_id_is_forgotten() {
+fn a_peer_cannot_evict_an_answered_id() {
     let mut answered = AnsweredIds::default();
     let capacity = u64::try_from(MAX_ANSWERED_IDS).unwrap();
     let high = u64::MAX - capacity * 2;
@@ -554,17 +572,13 @@ fn a_peer_cannot_choose_which_answered_id_is_forgotten() {
     let replayed = 1_000_u64;
     assert!(remember(&mut answered, replayed));
 
-    // One more message tips the cache over capacity. Exactly one entry has to
-    // go, and it is the one that arrived first -- not the one with the
-    // smallest number, which is the id the peer wants forgotten.
-    assert!(remember(&mut answered, high + capacity));
+    // One more message reaches the bound and is refused rather than evicting
+    // any authenticated request that could then be replayed.
+    assert!(!remember(&mut answered, high + capacity));
     assert!(
         !remember(&mut answered, replayed),
         "the id the dapp chose arrived after every other entry, so nothing about their values \
          may displace it"
     );
-    assert!(
-        remember(&mut answered, high),
-        "the entry that actually arrived first is the one that went"
-    );
+    assert!(!remember(&mut answered, high));
 }

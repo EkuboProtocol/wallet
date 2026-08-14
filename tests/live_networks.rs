@@ -475,6 +475,8 @@ struct Capabilities {
 
 async fn capabilities(network: &NetworkConfig) -> Capabilities {
     let client = ekubo_wallet_core::rpc::clients_for(network)
+        .await
+        .expect("shipped network RPC clients resolve")
         .into_iter()
         .next()
         .expect("shipped networks have an RPC client");

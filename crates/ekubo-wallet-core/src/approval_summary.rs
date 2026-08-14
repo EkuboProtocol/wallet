@@ -162,7 +162,7 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
     // does, so a token having one must not be the reason its allowance ceiling
     // goes unmentioned — and the tokens most likely to have a vendored
     // descriptor are exactly the ones worth approving carefully.
-    let warnings = standard_call_warnings(step.step, token, &display, standard.as_ref());
+    let mut warnings = standard_call_warnings(step.step, token, &display, standard.as_ref());
 
     if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>()
         && let Some(reading) = crate::clear_signing::interpret(
@@ -177,6 +177,7 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
         )
         .await
     {
+        warnings.extend(reading.warnings);
         return StepInterpretation {
             step: step.step,
             description: Some(reading.intent),

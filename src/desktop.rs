@@ -1406,6 +1406,7 @@ pub struct WalletWindow {
     private_key_error: Option<SharedString>,
     account_action_errors: BTreeMap<String, SharedString>,
     account_export: Option<AccountExport>,
+    export_clipboard: Arc<Mutex<Option<Zeroizing<String>>>>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
     route_errors: BTreeMap<Route, SharedString>,
@@ -1655,6 +1656,7 @@ struct LegalDisplayRow {
 }
 
 struct AccountExport {
+    token: uuid::Uuid,
     wallet_id: String,
     lease: Option<ExportLease>,
     copied: bool,
@@ -1688,6 +1690,8 @@ struct ActiveReview {
     scroll_handle: ScrollHandle,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
+    scroll_last_max: Option<gpui::Pixels>,
+    scroll_stable_samples: u8,
 }
 
 enum ActiveReviewCompletion {
@@ -1706,7 +1710,7 @@ enum ActiveReviewCompletion {
         response: oneshot::Sender<ProposalCommand>,
     },
     AccountRemoval {
-        wallet_id: String,
+        wallet: WalletMetadata,
     },
 }
 
@@ -3797,6 +3801,7 @@ impl WalletWindow {
             private_key_error: None,
             account_action_errors: BTreeMap::new(),
             account_export: None,
+            export_clipboard: Arc::new(Mutex::new(None)),
             legal_review: None,
             legal_gate: false,
             route_errors: BTreeMap::new(),
@@ -4850,7 +4855,7 @@ impl WalletWindow {
             return;
         }
         let Some(QueuedReview::WalletConnect(prompt)) = self.queued_reviews.receive(
-            self.active_review.is_some() || self.review_flow.is_in_progress(),
+            self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress(),
             QueuedReview::WalletConnect(prompt),
         ) else {
             return;
@@ -4872,11 +4877,13 @@ impl WalletWindow {
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
+            scroll_last_max: None,
+            scroll_stable_samples: 0,
         });
     }
 
     fn activate_next_queued_review(&mut self) {
-        if self.active_review.is_some() || self.review_flow.is_in_progress() {
+        if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             return;
         }
         let networks = self.cached_networks().unwrap_or_default().to_vec();
@@ -4920,6 +4927,9 @@ impl WalletWindow {
     /// unsolicited queued prompt. If there is no click waiting, continue the
     /// ordinary serial review flow.
     fn activate_next_waiting_surface(&mut self, cx: &mut Context<Self>) {
+        if self.legal_gate {
+            return;
+        }
         if self.activate_pending_notification(cx) {
             return;
         }
@@ -4930,10 +4940,18 @@ impl WalletWindow {
         }
     }
 
-    fn select_walletconnect_account(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_walletconnect_account(
+        &mut self,
+        generation: u64,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = self.active_review.as_mut() else {
             return;
         };
+        if active.state.generation() != generation {
+            return;
+        }
         let Some(ActiveReviewCompletion::WalletConnect {
             choices,
             selected_account,
@@ -4947,6 +4965,11 @@ impl WalletWindow {
         };
         *selected_account = index;
         active.state = ReviewState::new(choice.document.clone());
+        active.scroll_handle = ScrollHandle::new();
+        active.scroll_check_scheduled = false;
+        active.scroll_layout_ready = false;
+        active.scroll_last_max = None;
+        active.scroll_stable_samples = 0;
         cx.notify();
     }
 
@@ -5104,6 +5127,7 @@ impl WalletWindow {
 
     fn begin_account_export(&mut self, wallet_id: String, cx: &mut Context<Self>) {
         self.account_export = Some(AccountExport {
+            token: uuid::Uuid::new_v4(),
             wallet_id,
             lease: None,
             copied: false,
@@ -5122,6 +5146,7 @@ impl WalletWindow {
         }
         export.authenticating = true;
         export.error = None;
+        let token = export.token;
         let wallet_id = export.wallet_id.clone();
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, {
@@ -5134,7 +5159,7 @@ impl WalletWindow {
                 match result {
                     Ok(lease) => {
                         if let Some(export) = view.account_export.as_mut()
-                            && export.wallet_id == wallet_id
+                            && export.token == token
                         {
                             export.authenticating = false;
                             export.lease = Some(lease);
@@ -5144,7 +5169,7 @@ impl WalletWindow {
                     }
                     Err(error) => {
                         if let Some(export) = view.account_export.as_mut()
-                            && export.wallet_id == wallet_id
+                            && export.token == token
                         {
                             export.authenticating = false;
                             export.error =
@@ -5160,10 +5185,15 @@ impl WalletWindow {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let revealed = view.update(cx, |view, cx| {
                     cx.notify();
-                    view.account_export
+                    let revealed = view
+                        .account_export
                         .as_ref()
                         .and_then(|export| export.lease.as_ref())
-                        .is_some_and(|lease| !lease.concealed())
+                        .is_some_and(|lease| !lease.concealed());
+                    if !revealed {
+                        view.clear_export_clipboard(cx);
+                    }
+                    revealed
                 });
                 if !matches!(revealed, Ok(true)) {
                     break;
@@ -5175,6 +5205,7 @@ impl WalletWindow {
     }
 
     fn copy_account_export(&mut self, cx: &mut Context<Self>) {
+        self.clear_export_clipboard(cx);
         let Some(export) = self.account_export.as_mut() else {
             return;
         };
@@ -5183,8 +5214,14 @@ impl WalletWindow {
             cx.notify();
             return;
         };
-        let clipboard_value = value.to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(clipboard_value.clone()));
+        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+        if let Ok(mut clipboard) = self.export_clipboard.lock() {
+            *clipboard = Some(value);
+        }
+        let remaining = export
+            .lease
+            .as_ref()
+            .map_or(Duration::ZERO, ExportLease::remaining);
         export.copied = true;
         export.error = None;
         cx.spawn(async move |view, cx| {
@@ -5196,21 +5233,32 @@ impl WalletWindow {
                 cx.notify();
             });
             cx.background_executor()
-                .timer(PRIVATE_KEY_REVEAL_DURATION.saturating_sub(Duration::from_secs(1)))
+                .timer(remaining.saturating_sub(Duration::from_secs(1)))
                 .await;
-            cx.update(|cx| {
-                if cx
-                    .read_from_clipboard()
-                    .and_then(|item| item.text())
-                    .as_deref()
-                    == Some(clipboard_value.as_str())
-                {
-                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-                }
+            let _ = view.update(cx, |view, cx| {
+                view.clear_export_clipboard(cx);
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn clear_export_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Ok(mut stored) = self.export_clipboard.lock() else {
+            return;
+        };
+        let Some(secret) = stored.as_ref() else {
+            return;
+        };
+        if cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref()
+            == Some(secret.as_str())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+        }
+        stored.take();
     }
 
     fn open_policy_editor(&mut self, wallet_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -5518,16 +5566,20 @@ impl WalletWindow {
             return;
         }
         match self.owner.account_removal_document(&wallet_id) {
-            Ok(document) => {
+            Ok(review) => {
                 self.account_action_errors.remove(&wallet_id);
                 self.active_review = Some(ActiveReview {
-                    state: ReviewState::new(document),
+                    state: ReviewState::new(review.document),
                     simulation: None,
-                    completion: Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
+                    completion: Some(ActiveReviewCompletion::AccountRemoval {
+                        wallet: review.wallet,
+                    }),
                     awaiting_refresh: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
+                    scroll_last_max: None,
+                    scroll_stable_samples: 0,
                 });
             }
             Err(error) => {
@@ -5651,6 +5703,7 @@ impl WalletWindow {
         // modal in the app that trapped focus with no keyboard way out, and
         // dropping the lease conceals the key sooner rather than later.
         if self.account_export.is_some() {
+            self.clear_export_clipboard(cx);
             self.account_export = None;
             self.activate_next_waiting_surface(cx);
             cx.notify();
@@ -6984,6 +7037,8 @@ impl WalletWindow {
             active.scroll_handle = ScrollHandle::new();
             active.scroll_check_scheduled = false;
             active.scroll_layout_ready = false;
+            active.scroll_last_max = None;
+            active.scroll_stable_samples = 0;
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
             active.awaiting_refresh = false;
@@ -6999,7 +7054,7 @@ impl WalletWindow {
             return;
         }
         let Some(QueuedReview::Transaction(prompt)) = self.queued_reviews.receive(
-            self.active_review.is_some() || self.review_flow.is_in_progress(),
+            self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress(),
             QueuedReview::Transaction(Box::new(prompt)),
         ) else {
             return;
@@ -7017,11 +7072,13 @@ impl WalletWindow {
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
+            scroll_last_max: None,
+            scroll_stable_samples: 0,
         });
     }
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow.is_in_progress() {
+        if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
@@ -7037,6 +7094,8 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
+                    scroll_last_max: None,
+                    scroll_stable_samples: 0,
                 });
                 self.clear_route_error(Route::Activity);
             }
@@ -7051,7 +7110,7 @@ impl WalletWindow {
     }
 
     fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow.is_in_progress() {
+        if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
@@ -7067,6 +7126,8 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
+                    scroll_last_max: None,
+                    scroll_stable_samples: 0,
                 });
                 self.clear_route_error(Route::Activity);
             }
@@ -7081,7 +7142,8 @@ impl WalletWindow {
     }
 
     fn begin_transaction_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || !self.review_flow.begin_transaction() {
+        if self.legal_gate || self.active_review.is_some() || !self.review_flow.begin_transaction()
+        {
             self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
@@ -7122,21 +7184,30 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn update_review_scroll_state(&mut self, cx: &mut Context<Self>) {
+    fn update_review_scroll_state(&mut self, generation: u64, cx: &mut Context<Self>) {
         let Some(review) = self.active_review.as_mut() else {
             return;
         };
+        if review.state.generation() != generation {
+            return;
+        }
+        let max_offset = review.scroll_handle.max_offset().y;
+        if review.scroll_last_max == Some(max_offset) {
+            review.scroll_stable_samples = review.scroll_stable_samples.saturating_add(1);
+        } else {
+            review.scroll_last_max = Some(max_offset);
+            review.scroll_stable_samples = 1;
+        }
+        if review.scroll_stable_samples < 2 {
+            cx.notify();
+            return;
+        }
         if review.scroll_layout_ready
             && !review.state.approve_enabled()
-            && scroll_reached_end(
-                review.scroll_handle.offset().y,
-                review.scroll_handle.max_offset().y,
-            )
+            && scroll_reached_end(review.scroll_handle.offset().y, max_offset)
+            && review.state.mark_viewed_to_end(generation)
         {
-            let generation = review.state.generation();
-            if review.state.mark_viewed_to_end(generation) {
-                cx.notify();
-            }
+            cx.notify();
         }
     }
 
@@ -7154,7 +7225,9 @@ impl WalletWindow {
         }
         let permitted = match command {
             GuiReviewCommand::Approve => {
-                active.state.selected() == ReviewDecision::Approve && active.state.approve_enabled()
+                !self.legal_gate
+                    && active.state.selected() == ReviewDecision::Approve
+                    && active.state.approve_enabled()
             }
             GuiReviewCommand::Reject => active.state.selected() == ReviewDecision::Reject,
             GuiReviewCommand::Refresh | GuiReviewCommand::Close => true,
@@ -7206,10 +7279,10 @@ impl WalletWindow {
             }
             (
                 GuiReviewCommand::Close | GuiReviewCommand::Reject,
-                Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
+                Some(ActiveReviewCompletion::AccountRemoval { wallet }),
             ) => {
                 self.active_review = None;
-                self.account_action_errors.remove(&wallet_id);
+                self.account_action_errors.remove(&wallet.id);
             }
             (
                 GuiReviewCommand::Reject,
@@ -7299,13 +7372,13 @@ impl WalletWindow {
             }
             (
                 GuiReviewCommand::Approve,
-                Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
+                Some(ActiveReviewCompletion::AccountRemoval { wallet }),
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let task_wallet_id = wallet_id.clone();
+                let wallet_id = wallet.id.clone();
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.remove_account(&task_wallet_id).await
+                    owner.remove_account(&wallet).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11901,7 +11974,7 @@ impl WalletWindow {
                                 .toggled(index == *selected_account)
                                 .when(index == *selected_account, ButtonVariants::primary)
                                 .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.select_walletconnect_account(index, cx);
+                                    view.select_walletconnect_account(generation, index, cx);
                                 }))
                         }),
                     ));
@@ -12052,9 +12125,9 @@ impl WalletWindow {
                     .min_h_0()
                     .track_scroll(&active.scroll_handle)
                     .overflow_y_scrollbar()
-                    .on_scroll_wheel(cx.listener(|_, _, window, cx| {
-                        cx.defer_in(window, |view, _, cx| {
-                            view.update_review_scroll_state(cx);
+                    .on_scroll_wheel(cx.listener(move |_, _, window, cx| {
+                        cx.defer_in(window, move |view, _, cx| {
+                            view.update_review_scroll_state(generation, cx);
                         });
                     }))
                     .pr_2()
@@ -12366,6 +12439,7 @@ impl WalletWindow {
                         app_button("close-account-export")
                             .label(if visible.is_some() { "Done" } else { "Close" })
                             .on_click(cx.listener(|view, _, _, cx| {
+                                view.clear_export_clipboard(cx);
                                 view.account_export = None;
                                 view.activate_next_waiting_surface(cx);
                                 cx.notify();
@@ -12687,26 +12761,27 @@ impl Render for WalletWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach_window(window, cx);
         if let Some(review) = self.active_review.as_mut() {
+            let generation = review.state.generation();
             if review.scroll_layout_ready {
-                self.update_review_scroll_state(cx);
+                self.update_review_scroll_state(generation, cx);
             } else if !review.scroll_check_scheduled {
                 review.scroll_check_scheduled = true;
                 cx.on_next_frame(window, move |view, window, cx| {
-                    if let Some(review) = view.active_review.as_mut() {
+                    if let Some(review) = view.active_review.as_mut()
+                        && review.state.generation() == generation
+                    {
                         review.scroll_layout_ready = true;
                     }
-                    view.update_review_scroll_state(cx);
-                    if view
-                        .active_review
-                        .as_ref()
-                        .is_some_and(|review| !review.state.approve_enabled())
-                    {
+                    view.update_review_scroll_state(generation, cx);
+                    if view.active_review.as_ref().is_some_and(|review| {
+                        review.state.generation() == generation && !review.state.approve_enabled()
+                    }) {
                         // Scroll geometry may settle one frame after the
                         // content first renders. Recheck once so a document
                         // that already fits never asks for a meaningless
                         // scroll gesture.
-                        cx.on_next_frame(window, |view, _, cx| {
-                            view.update_review_scroll_state(cx);
+                        cx.on_next_frame(window, move |view, _, cx| {
+                            view.update_review_scroll_state(generation, cx);
                         });
                     }
                 });
@@ -13216,6 +13291,24 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     cx,
                 )
             });
+            let shutdown_clipboard = wallet_view.read(cx).export_clipboard.clone();
+            cx.on_app_quit(move |cx| {
+                if let Ok(mut stored) = shutdown_clipboard.lock()
+                    && let Some(secret) = stored.as_ref()
+                {
+                    if cx
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref()
+                        == Some(secret.as_str())
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                    }
+                    stored.take();
+                }
+                async {}
+            })
+            .detach();
             let shortcut_view = wallet_view.clone();
             cx.on_action(move |action: &NavigateRoute, cx| {
                 shortcut_view.update(cx, |view, cx| {
@@ -13384,7 +13477,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let tray_window = window_slot.clone();
             let tray_view = wallet_view.clone();
             let (tray_commands, mut tray_command_rx) = tokio::sync::mpsc::unbounded_channel();
-            std::thread::Builder::new()
+            let _tray_thread = std::thread::Builder::new()
                 .name("ekubo-tray-events".into())
                 .spawn(move || {
                     while let Some(command) = PlatformTray::recv_command() {
@@ -13392,8 +13485,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             break;
                         }
                     }
-                })
-                .expect("failed to start native tray event thread");
+                });
             cx.spawn(async move |cx| {
                 while let Some(command) = tray_command_rx.recv().await {
                     match command {
@@ -13430,19 +13522,25 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 loop {
                     match domain_events.recv().await {
                         Ok(event) => {
-                            let preferences = NotificationPreferences;
                             let owner = notification_owner.clone();
                             let described = tokio::task::spawn_blocking(move || {
-                                transaction_notification_context(&owner, &event)
-                                    .map(|context| (event, context))
+                                let context = transaction_notification_context(&owner, &event)?;
+                                let preferences = NotificationPreferences {
+                                    detailed_previews: owner
+                                        .detailed_notification_previews()
+                                        .ok()?,
+                                };
+                                Some((event, context, preferences))
                             })
                             .await
                             .ok()
                             .flatten();
                             if let Some(notification) =
-                                described.as_ref().and_then(|(event, context)| {
-                                    notification_for(event, context, preferences)
-                                })
+                                described
+                                    .as_ref()
+                                    .and_then(|(event, context, preferences)| {
+                                        notification_for(event, context, *preferences)
+                                    })
                             {
                                 notification_service.show(notification);
                             }

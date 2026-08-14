@@ -34,6 +34,7 @@ use crate::{
         sign_prepared_execution,
     },
     human_presence::{HumanPresence, PresenceRequest},
+    legal::{LegalStore, require_status_allows_use},
     message::{MessageStatus, MessageStore, PendingMessage},
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::{PolicyStore, StoredPolicy},
@@ -300,6 +301,7 @@ pub async fn approve_transaction(
     config: &ConfigStore,
     pending: PendingStore,
     tokens: crate::token_store::TokenStore,
+    legal: &LegalStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
     presenter: &dyn ReviewPresenter,
@@ -413,6 +415,11 @@ pub async fn approve_transaction(
             wallet: wallet.id.clone(),
         })
         .await?;
+
+    // Legal acceptance is wallet authority stored in the encrypted database,
+    // not a desktop-only overlay. Re-read it after the potentially long review
+    // and OS prompt so a deferred approval cannot cross a document revision.
+    require_status_allows_use(&legal.status()?)?;
 
     // Re-read all mutable local authority after the potentially long human
     // review. Signing below is synchronous and performs no RPC requests. The
@@ -832,7 +839,9 @@ async fn transaction_approval_request(
     if let Some(failure) = &simulation.simulation.failure {
         request = request.warning(format!(
             "Simulation {:?}: {} Recommended action: {:?}.",
-            failure.category, failure.message, failure.recommended_action
+            failure.category,
+            crate::sanitize::terminal_safe_line(&failure.message),
+            failure.recommended_action
         ));
     }
     Ok(request)
@@ -893,6 +902,7 @@ fn require_provisioned_wallet(
 pub async fn sign_reviewed_message(
     config: &ConfigStore,
     policies: &PolicyStore,
+    legal: &LegalStore,
     store: &mut MessageStore,
     request: &PendingMessage,
     wallet: &WalletMetadata,
@@ -901,6 +911,11 @@ pub async fn sign_reviewed_message(
     keys: &dyn KeyStore,
 ) -> Result<PendingMessage> {
     require_provisioned_wallet(policies, wallet)?;
+    require_status_allows_use(&legal.status()?)?;
+    ensure!(
+        digest == request.digest.parse::<B256>()?,
+        "reviewed message digest does not match the stored request"
+    );
 
     presence
         .confirm(&PresenceRequest::SignMessage {
@@ -908,6 +923,7 @@ pub async fn sign_reviewed_message(
         })
         .await?;
 
+    require_status_allows_use(&legal.status()?)?;
     // Presence can remain open while the owner changes or removes this
     // account's policy in another window. Re-read provisioning after the OS
     // prompt so the signature cannot cross that configuration boundary.
@@ -952,6 +968,7 @@ pub async fn sign_reviewed_message(
 pub async fn sign_reviewed_typed_data(
     config: &ConfigStore,
     policies: &PolicyStore,
+    legal: &LegalStore,
     store: &mut TypedDataStore,
     request: &PendingTypedData,
     wallet: &WalletMetadata,
@@ -960,6 +977,11 @@ pub async fn sign_reviewed_typed_data(
     keys: &dyn KeyStore,
 ) -> Result<PendingTypedData> {
     require_provisioned_wallet(policies, wallet)?;
+    require_status_allows_use(&legal.status()?)?;
+    ensure!(
+        digest == request.digest.parse::<B256>()?,
+        "reviewed typed-data digest does not match the stored request"
+    );
 
     presence
         .confirm(&PresenceRequest::SignTypedData {
@@ -967,6 +989,7 @@ pub async fn sign_reviewed_typed_data(
         })
         .await?;
 
+    require_status_allows_use(&legal.status()?)?;
     require_provisioned_wallet(policies, wallet)?;
     let current = store.get(request.request_id)?;
     ensure!(

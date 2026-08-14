@@ -46,8 +46,10 @@ pub struct TransactionContext {
     pub network: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NotificationPreferences;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotificationPreferences {
+    pub detailed_previews: bool,
+}
 
 /// Compose the banner for one lifecycle change.
 ///
@@ -59,12 +61,16 @@ pub struct NotificationPreferences;
 pub fn notification_for(
     event: &DomainEvent,
     context: &TransactionContext,
-    _preferences: NotificationPreferences,
+    preferences: NotificationPreferences,
 ) -> Option<WalletNotification> {
     let DomainEventKind::Transaction { request_id, stage } = &event.kind else {
         return None;
     };
-    let where_from = format!("{} on {}", context.account, context.network);
+    let where_from = if preferences.detailed_previews {
+        format!("{} on {}", context.account, context.network)
+    } else {
+        "Open Ekubo Wallet for details".to_owned()
+    };
     let (title, body, review) = match stage {
         TransactionStage::Proposed => (
             "Approval needed",

@@ -57,7 +57,8 @@ use tokio::sync::Semaphore;
 
 const RPC_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 const SIMULATION_TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_SIMULATIONS: usize = 2;
+const MAX_SIMULATIONS: usize = 3;
+const MAX_EXTERNAL_SIMULATIONS: usize = 2;
 const MAX_TRACKED_TOKENS: usize = 128;
 const BALANCE_PROBE_GAS: u64 = 100_000;
 pub(crate) const CANONICAL_CALIBUR: Address = address!("000000005c84F8Fd50b21CAC312528A64437030e");
@@ -69,6 +70,8 @@ const NATIVE_TRANSFER_EMITTER: Address = address!("eeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 static SIMULATION_SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_SIMULATIONS)));
+static EXTERNAL_SIMULATION_SLOTS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_EXTERNAL_SIMULATIONS)));
 static STANDARD_ERROR_ABI: LazyLock<Vec<Value>> = LazyLock::new(|| {
     vec![
         json!({"type":"error","name":"Error","inputs":[{"name":"message","type":"string"}]}),
@@ -303,7 +306,7 @@ pub async fn simulate_execution(
     // chain, and asking seven more endpoints returns the same answer more
     // slowly.
     let mut last = None;
-    let clients = crate::rpc::clients_for(network);
+    let clients = crate::rpc::clients_for(network).await?;
     let mut remaining = clients.len();
     for client in clients {
         remaining -= 1;
@@ -331,6 +334,25 @@ pub async fn simulate_execution(
     // configuration is a file: an empty list must not silently report a
     // successful simulation of nothing.
     last.context("network has no RPC endpoints to simulate against")
+}
+
+/// Simulate work initiated by an MCP client or dapp while reserving one
+/// process-wide slot for the owner's approval review. External callers can
+/// occupy at most two slots between them; owner review calls
+/// [`simulate_execution`] directly and can therefore still make progress.
+pub async fn simulate_external_execution(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    plan: &ExecutionPlan,
+    stored_policy: &StoredPolicy,
+    context: &PolicyContext,
+    fork: Option<&ForkPreface>,
+) -> Result<SimulationResult> {
+    let _external = Arc::clone(&EXTERNAL_SIMULATION_SLOTS)
+        .acquire_owned()
+        .await
+        .context("external simulation limiter was closed")?;
+    simulate_execution(wallet, network, plan, stored_policy, context, fork).await
 }
 
 async fn simulate_execution_through(

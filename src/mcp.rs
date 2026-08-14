@@ -22,7 +22,7 @@ use crate::{
     policy_store::PolicyStore,
     release_check::{self, ReleaseCheck},
     rpc::{WalletStatus, transaction_known, wallet_status},
-    simulation::{SimulationResult, simulate_execution},
+    simulation::{SimulationResult, simulate_external_execution},
     simulation_store::{MAX_RECORDED_SIMULATIONS, RecordedSimulation, SimulationStore},
     token_store::{StoredToken, TokenStore},
     typed_data::{
@@ -1257,7 +1257,7 @@ impl WalletMcpServer {
         }
         let preface = session.as_ref().map(ForkSession::preface);
         let policy_context = Self::policy_context(&wallet);
-        let mut result = simulate_execution(
+        let mut result = simulate_external_execution(
             &wallet,
             &network,
             &execution_plan,
@@ -2716,11 +2716,8 @@ impl WalletMcpServer {
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
         let wallet = self.config.wallet(&record.wallet_id)?;
-        let network = self.config.network_by_chain_id(&record.chain_id)?;
-        ensure!(
-            record.network_name == network.name,
-            "pending request network mismatch"
-        );
+        self.config
+            .network_for_record(&record.chain_id, &record.network_name)?;
         ensure!(
             record.wallet_instance_id == wallet.instance_id
                 && record.execution_plan.sender == wallet.address,
@@ -2736,12 +2733,13 @@ impl WalletMcpServer {
         request_id: uuid::Uuid,
     ) -> Result<PendingTransaction> {
         let wallet = self.config.wallet(wallet_id)?;
-        let network = self.config.network_by_chain_id(chain_id)?;
         let record = self
             .pending
             .lock()
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
+        self.config
+            .network_for_record(chain_id, &record.network_name)?;
         ensure!(
             record.wallet_id == wallet_id && record.wallet_instance_id == wallet.instance_id,
             "pending request wallet mismatch"
@@ -2749,10 +2747,6 @@ impl WalletMcpServer {
         ensure!(
             record.chain_id == chain_id,
             "pending request chain mismatch"
-        );
-        ensure!(
-            record.network_name == network.name,
-            "pending request network mismatch"
         );
         ensure!(
             record.execution_plan.sender == wallet.address,
@@ -2776,7 +2770,7 @@ impl WalletMcpServer {
         // network below, on the path both kinds of send share.
         plan.validate()?;
         let policy_context = Self::policy_context(&wallet);
-        let simulation = simulate_execution(
+        let simulation = simulate_external_execution(
             &wallet,
             &network,
             &plan,

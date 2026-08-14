@@ -169,23 +169,12 @@ pub fn parse_message_input(
     match (text, hex_bytes) {
         (Some(text), None) => {
             let bytes = text.as_bytes().to_vec();
-            validate_message_length(&bytes)?;
+            validate_message_shape(&bytes, MessageEncoding::Text)?;
             Ok((bytes, MessageEncoding::Text))
         }
         (None, Some(encoded)) => {
             let bytes = decode_message_hex(encoded)?;
-            validate_message_length(&bytes)?;
-            // The one shape a hex request can express that text cannot: a bare
-            // digest. Signing it is the legacy `eth_sign` operation under
-            // another name, and there is no rendering that tells a human what
-            // it authorizes.
-            ensure!(
-                bytes.len() != 32,
-                "refusing to sign a bare 32-byte value: an unprefixed digest is \
-                 indistinguishable from a transaction, permit, or EIP-7702 authorization \
-                 hash, and legacy eth_sign is not supported. Pass the message a human can \
-                 read as message_text, or use wallet_sign_typed_data for EIP-712."
-            );
+            validate_message_shape(&bytes, MessageEncoding::Hex)?;
             Ok((bytes, MessageEncoding::Hex))
         }
         (Some(_), Some(_)) => {
@@ -202,6 +191,22 @@ fn validate_message_length(message: &[u8]) -> Result<()> {
         "message is {} bytes and exceeds the {MAX_MESSAGE_BYTES}-byte maximum a human can \
          review at approval time",
         message.len()
+    );
+    Ok(())
+}
+
+fn validate_message_shape(message: &[u8], encoding: MessageEncoding) -> Result<()> {
+    validate_message_length(message)?;
+    // The one shape a hex request can express that text cannot: a bare
+    // digest. Signing it is legacy `eth_sign` under another name, and there is
+    // no rendering that tells a human what it authorizes. This belongs at the
+    // shared queue boundary so WalletConnect and every future adapter inherit
+    // the same refusal.
+    ensure!(
+        encoding != MessageEncoding::Hex || message.len() != 32,
+        "refusing to sign a bare 32-byte value: an unprefixed digest is indistinguishable from \
+         a transaction, permit, or EIP-7702 authorization hash, and legacy eth_sign is not \
+         supported"
     );
     Ok(())
 }
@@ -596,7 +601,7 @@ impl MessageStore {
         encoding: MessageEncoding,
         requester: Option<&str>,
     ) -> Result<PendingMessage> {
-        validate_message_length(message)?;
+        validate_message_shape(message, encoding)?;
         let digest = message_digest(message);
         // 0, not NULL, stands for "no chain declared": SQLite treats NULLs as
         // distinct in a unique index, which would silently disable the

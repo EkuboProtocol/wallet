@@ -175,12 +175,12 @@ impl SelectorPredicate {
         &self.args
     }
 
-    /// Whether `data` starts with a canonical call to this signature whose
+    /// Whether `data` is exactly a canonical call to this signature whose
     /// named arguments all satisfy their predicates.
     ///
     /// The selector decides the subject and the body decides the answer. Once
     /// the four bytes match, this call *is* the function named here, so a body
-    /// that will not decode or will not re-encode as its prefix is [`Match::Unreadable`]
+    /// that will not decode or re-encode exactly is [`Match::Unreadable`]
     /// rather than [`Match::No`]: the arguments are unknown, not absent.
     fn evaluate(&self, data: &[u8], context: &PolicyContext) -> Match {
         if data.len() < 4 || data[..4] != self.function.selector()[..] {
@@ -190,13 +190,14 @@ impl SelectorPredicate {
         let Ok(values) = self.function.abi_decode_input(body) else {
             return Match::Unreadable;
         };
-        // Require the decoded values to be the canonical prefix of the body.
-        // Solidity accepts trailing calldata, but dirty words, truncated
-        // heads, and malformed offsets must not satisfy a policy predicate.
+        // Authorize only bytes represented by the decoded arguments. Some
+        // contracts inspect trailing calldata directly, so accepting a
+        // canonical prefix would leave policy-unchecked bytes in what is
+        // signed.
         let Ok(canonical) = self.function.abi_encode_input_raw(&values) else {
             return Match::Unreadable;
         };
-        if !body.starts_with(&canonical) || !values.iter().all(within_declared_width) {
+        if body != canonical || !values.iter().all(within_declared_width) {
             return Match::Unreadable;
         }
         self.args
@@ -322,6 +323,51 @@ pub enum Predicate {
 }
 
 impl Predicate {
+    /// Normalize typed literals before comparing predicate coverage. Runtime
+    /// matching has always compared canonical values, so shadow analysis must
+    /// use the same representation or `16` and `0x10` describe identical
+    /// authority while appearing structurally different.
+    #[must_use]
+    pub(crate) fn normalized_for(&self, ty: &DynSolType) -> Self {
+        let literal = |value: &String, ty: &DynSolType| {
+            parse_literal(value, ty).unwrap_or_else(|_| value.clone())
+        };
+        match self {
+            Self::AnyValue => Self::AnyValue,
+            Self::Eq(value) => Self::Eq(literal(value, ty)),
+            Self::In(values) => Self::In(values.iter().map(|value| literal(value, ty)).collect()),
+            Self::Lt(value) => Self::Lt(literal(value, ty)),
+            Self::Lte(value) => Self::Lte(literal(value, ty)),
+            Self::Gt(value) => Self::Gt(literal(value, ty)),
+            Self::Gte(value) => Self::Gte(literal(value, ty)),
+            Self::Selector(selector) => {
+                let mut selector = (**selector).clone();
+                for input in &selector.function.inputs {
+                    if let Some(predicate) = selector.args.get_mut(&input.name)
+                        && let Ok(input_type) = DynSolType::parse(&input.selector_type())
+                    {
+                        *predicate = predicate.normalized_for(&input_type);
+                    }
+                }
+                Self::Selector(Box::new(selector))
+            }
+            Self::Each(inner) => element_type(ty).map_or_else(
+                || self.clone(),
+                |element| Self::Each(Box::new(inner.normalized_for(element))),
+            ),
+            Self::Any(items) => {
+                Self::Any(items.iter().map(|item| item.normalized_for(ty)).collect())
+            }
+            Self::All(items) => {
+                Self::All(items.iter().map(|item| item.normalized_for(ty)).collect())
+            }
+            Self::Not(inner) => Self::Not(Box::new(inner.normalized_for(ty))),
+            Self::Length(inner) => {
+                Self::Length(Box::new(inner.normalized_for(&DynSolType::Uint(256))))
+            }
+        }
+    }
+
     /// Whether this predicate can ever be satisfied by a value of type `ty`.
     ///
     /// Run when the policy document is parsed, against the types the rule's own
@@ -883,6 +929,10 @@ fn parse_literal(literal: &str, ty: &DynSolType) -> Result<String> {
         // and the author can still see what they meant.
         DynSolType::Uint(bits) => {
             let value = if literal.starts_with("0x") {
+                ensure!(
+                    literal.len() > 2,
+                    "a hexadecimal integer needs at least one digit"
+                );
                 U256::from_be_slice(&decode_hex_literal(literal)?)
             } else {
                 ensure!(

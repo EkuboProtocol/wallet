@@ -23,6 +23,10 @@ fn dapp_review_identity_is_stable_for_exactly_the_same_proposal_and_account() {
         required_methods: vec!["personal_sign".into()],
         optional_methods: Vec::new(),
         events: Vec::new(),
+        requested_grants: vec![walletconnect_session::ScopeGrant {
+            chains: vec!["eip155:1".into()],
+            methods: vec!["personal_sign".into()],
+        }],
         pairing_topic: "11".repeat(32),
     };
     let account = ekubo_wallet_core::config::WalletMetadata {
@@ -37,6 +41,7 @@ fn dapp_review_identity_is_stable_for_exactly_the_same_proposal_and_account() {
         &account,
         proposal.required_chains.clone(),
         proposal.required_methods.clone(),
+        &proposal.requested_grants,
     );
     let first = DesktopSession::proposal_document(review_id, &proposal, &account, &scope);
     let second = DesktopSession::proposal_document(review_id, &proposal, &account, &scope);

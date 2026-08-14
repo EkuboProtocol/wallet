@@ -236,6 +236,30 @@ fn a_clock_that_moved_backwards_does_not_refresh_a_simulation() {
     assert!(error.contains("expired simulation"), "{error}");
 }
 
+#[test]
+fn a_partial_clock_rollback_cannot_extend_the_monotonic_lifetime() {
+    let at = "2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let built = plan("1");
+    let outcome = result(&built);
+    let mut store = SimulationStore::default();
+    let recorded = store.record("primary", "1", built, None, outcome, at);
+
+    // Wall time claims only 110 seconds elapsed, but the process-local clock
+    // has observed 180. A partial rollback must not buy another ten seconds of
+    // signing authority.
+    store.recorded_instants.insert(
+        recorded.simulation_id,
+        Instant::now()
+            .checked_sub(Duration::from_mins(3))
+            .expect("the monotonic clock has at least three minutes of history"),
+    );
+    assert!(
+        store
+            .take(recorded.simulation_id, at + TimeDelta::seconds(110))
+            .is_err()
+    );
+}
+
 /// And the ordinary boundary is unchanged: the deadline still ends it.
 #[test]
 fn the_ordinary_expiry_boundary_is_unchanged() {

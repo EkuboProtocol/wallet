@@ -450,6 +450,12 @@ fn plan_reference(sender: Address) -> ekubo_wallet_core::plan_fetch::ArtifactRef
     }
 }
 
+fn legal_store(directory: &std::path::Path) -> LegalStore {
+    LegalStore::new(
+        PolicyStore::open(&directory.join("policies.db"), &DatabaseKey::new([9; 32])).unwrap(),
+    )
+}
+
 fn plan_data_uri(sender: Address) -> String {
     let plan = serde_json::json!({
         "schema_version": "1",
@@ -652,6 +658,7 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
             )
             .unwrap(),
         ),
+        &legal_store(directory.path()),
         &read_policy,
         record,
         &ApproveEverything,
@@ -844,6 +851,7 @@ async fn a_reviewer_can_re_simulate_before_approving() {
             )
             .unwrap(),
         ),
+        &legal_store(directory.path()),
         &read_policy,
         record,
         &presenter,
@@ -947,6 +955,7 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
             )
             .unwrap(),
         ),
+        &legal_store(directory.path()),
         &read_policy,
         record,
         &presenter,

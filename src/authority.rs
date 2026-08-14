@@ -600,6 +600,11 @@ pub struct OwnerReviewQueues {
     pub token_proposals: Vec<TokenProposal>,
 }
 
+pub struct OwnerAccountRemovalReview {
+    pub document: ReviewDocument,
+    pub wallet: WalletMetadata,
+}
+
 fn transaction_observation_changed(
     before: &PendingTransaction,
     after: &PendingTransaction,
@@ -712,7 +717,7 @@ impl OwnerApi {
         Ok(ExportLease::new(self.export_account(wallet_id).await?))
     }
 
-    pub fn account_removal_document(&self, wallet_id: &str) -> Result<ReviewDocument> {
+    pub fn account_removal_document(&self, wallet_id: &str) -> Result<OwnerAccountRemovalReview> {
         let wallet = self.config.wallet(wallet_id)?;
         let in_flight = PolicyStore::production(self.config.data_dir())?
             .in_flight_transactions_for_wallet(&wallet)?;
@@ -730,16 +735,19 @@ impl OwnerApi {
                 transaction.chain_id
             ));
         }
-        Ok(ReviewDocument::from_request(request, Vec::new()))
+        Ok(OwnerAccountRemovalReview {
+            document: ReviewDocument::from_request(request, Vec::new()),
+            wallet,
+        })
     }
 
-    pub async fn remove_account(&self, wallet_id: &str) -> Result<WalletMetadata> {
+    pub async fn remove_account(&self, reviewed: &WalletMetadata) -> Result<WalletMetadata> {
         let removed = CustodyService::new(
             self.config.clone(),
             Arc::new(OsKeyStore),
             Arc::new(PlatformHumanPresence),
         )
-        .remove(wallet_id)
+        .remove_reviewed(reviewed)
         .await?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
@@ -1421,10 +1429,12 @@ impl OwnerApi {
                 .context("wallet has no installed policy")
         };
         let tokens = TokenStore::production(self.config.data_dir())?;
+        let legal = LegalStore::production(self.config.data_dir())?;
         let result = approve_transaction(
             &self.config,
             pending,
             tokens,
+            &legal,
             &read_policy,
             request,
             presenter,
@@ -1578,9 +1588,11 @@ impl OwnerApi {
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
         let policies = PolicyStore::production(self.config.data_dir())?;
+        let legal = LegalStore::production(self.config.data_dir())?;
         let signed = sign_reviewed_message(
             &self.config,
             &policies,
+            &legal,
             &mut store,
             &request,
             &wallet,
@@ -1612,9 +1624,11 @@ impl OwnerApi {
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
         let policies = PolicyStore::production(self.config.data_dir())?;
+        let legal = LegalStore::production(self.config.data_dir())?;
         let signed = sign_reviewed_typed_data(
             &self.config,
             &policies,
+            &legal,
             &mut store,
             &request,
             &wallet,
@@ -1830,7 +1844,7 @@ fn ensure_reviewed_digest(reviewed: &str, current: &str) -> Result<()> {
 pub const PRIVATE_KEY_REVEAL_DURATION: Duration = Duration::from_secs(30);
 
 pub struct ExportLease {
-    value: Arc<Mutex<zeroize::Zeroizing<String>>>,
+    value: Mutex<zeroize::Zeroizing<String>>,
     expires_at: Instant,
 }
 
@@ -1840,25 +1854,21 @@ impl ExportLease {
     }
 
     fn new_for_duration(value: zeroize::Zeroizing<String>, duration: Duration) -> Self {
-        let value = Arc::new(Mutex::new(value));
-        let expiring = value.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(duration);
-            if let Ok(mut value) = expiring.lock() {
-                use zeroize::Zeroize as _;
-                value.zeroize();
-            }
-        });
         Self {
-            value,
+            value: Mutex::new(value),
             expires_at: Instant::now() + duration,
         }
     }
 
     #[must_use]
     pub fn concealed(&self) -> bool {
-        Instant::now() >= self.expires_at
-            || self.value.lock().map_or(true, |value| value.is_empty())
+        self.value.lock().map_or(true, |mut value| {
+            if Instant::now() >= self.expires_at {
+                use zeroize::Zeroize as _;
+                value.zeroize();
+            }
+            value.is_empty()
+        })
     }
 
     /// How much longer the key stays visible. A reveal that vanishes without
@@ -1874,13 +1884,13 @@ impl ExportLease {
 
     #[must_use]
     pub fn visible_value(&self) -> Option<zeroize::Zeroizing<String>> {
-        if self.concealed() {
-            return None;
-        }
-        self.value
-            .lock()
-            .ok()
-            .map(|value| zeroize::Zeroizing::new(value.to_string()))
+        self.value.lock().ok().and_then(|mut value| {
+            if Instant::now() >= self.expires_at {
+                use zeroize::Zeroize as _;
+                value.zeroize();
+            }
+            (!value.is_empty()).then(|| zeroize::Zeroizing::new(value.to_string()))
+        })
     }
 }
 

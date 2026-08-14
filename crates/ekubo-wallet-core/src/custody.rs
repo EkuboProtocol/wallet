@@ -7,6 +7,7 @@ use alloy::{primitives::Address, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use keyring::{Entry, Error as KeyringError};
+use rand::TryRng as _;
 use std::{fmt, sync::Arc};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -17,26 +18,36 @@ const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.instance";
 pub struct PrivateKeyMaterial([u8; 32]);
 
 impl PrivateKeyMaterial {
+    fn random() -> Result<Self> {
+        let mut material = Self([0_u8; 32]);
+        rand::rng()
+            .try_fill_bytes(&mut material.0)
+            .context("operating system randomness is unavailable")?;
+        PrivateKeySigner::from_slice(&material.0)
+            .context("operating system randomness produced an invalid secp256k1 scalar")?;
+        Ok(material)
+    }
+
     pub fn from_hex(value: &str) -> Result<Self> {
         let value = value.strip_prefix("0x").unwrap_or(value);
         ensure!(
             value.len() == 64,
             "private key must contain exactly 32 bytes"
         );
-        let mut bytes = [0_u8; 32];
-        hex::decode_to_slice(value, &mut bytes).context("private key must be hexadecimal")?;
-        PrivateKeySigner::from_slice(&bytes)
+        let mut material = Self([0_u8; 32]);
+        hex::decode_to_slice(value, &mut material.0).context("private key must be hexadecimal")?;
+        PrivateKeySigner::from_slice(&material.0)
             .context("private key is not a valid secp256k1 scalar")?;
-        Ok(Self(bytes))
+        Ok(material)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
         ensure!(bytes.len() == 32, "stored private key is not 32 bytes");
-        let mut material = [0_u8; 32];
-        material.copy_from_slice(bytes);
-        PrivateKeySigner::from_slice(&material)
+        let mut material = Self([0_u8; 32]);
+        material.0.copy_from_slice(bytes);
+        PrivateKeySigner::from_slice(&material.0)
             .context("stored private key is not a valid secp256k1 scalar")?;
-        Ok(Self(material))
+        Ok(material)
     }
 
     /// The address this key controls.
@@ -72,7 +83,14 @@ impl PrivateKeyMaterial {
     /// the disclosure before calling it.
     #[must_use]
     pub(crate) fn expose_hex(&self) -> Zeroizing<String> {
-        Zeroizing::new(format!("0x{}", hex::encode(self.0)))
+        use std::fmt::Write as _;
+
+        let mut encoded = Zeroizing::new(String::with_capacity(2 + self.0.len() * 2));
+        encoded.push_str("0x");
+        for byte in self.0 {
+            write!(&mut *encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        encoded
     }
 
     fn as_bytes(&self) -> &[u8; 32] {
@@ -336,8 +354,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     }
 
     pub fn create(&self, wallet_id: &str) -> Result<WalletMetadata> {
-        let signer = PrivateKeySigner::random();
-        let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
+        let key = PrivateKeyMaterial::random()?;
         self.add(wallet_id, &key, WalletSource::Created, None)
     }
 
@@ -348,8 +365,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         wallet_id: &str,
         policy: &WalletPolicy,
     ) -> Result<WalletMetadata> {
-        let signer = PrivateKeySigner::random();
-        let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
+        let key = PrivateKeyMaterial::random()?;
         self.add(wallet_id, &key, WalletSource::Created, Some(policy))
     }
 
@@ -584,9 +600,16 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 
     pub async fn remove(&self, wallet_id: &str) -> Result<WalletMetadata> {
         let metadata = self.config.wallet(wallet_id)?;
+        self.remove_reviewed(&metadata).await
+    }
+
+    /// Remove exactly the wallet instance whose address and identity were
+    /// shown to the owner before this core operation began.
+    pub async fn remove_reviewed(&self, metadata: &WalletMetadata) -> Result<WalletMetadata> {
+        let wallet_id = &metadata.id;
         self.presence
             .confirm(&PresenceRequest::RemoveWallet {
-                wallet: wallet_id.into(),
+                wallet: wallet_id.clone(),
             })
             .await?;
 
@@ -607,7 +630,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         // wallet's row on the strength of an approval given for its
         // predecessor.
         self.config
-            .with_lifecycle_lock(|| self.remove_locked(wallet_id, &metadata))
+            .with_lifecycle_lock(|| self.remove_locked(wallet_id, metadata))
     }
 
     fn remove_locked(&self, wallet_id: &str, metadata: &WalletMetadata) -> Result<WalletMetadata> {

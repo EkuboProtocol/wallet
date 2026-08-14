@@ -1376,7 +1376,14 @@ fn removing_an_account_puts_the_danger_on_the_button_that_destroys_the_key() {
     // Account removal inverts that: approving destroys a key that cannot be
     // recovered, and the red used to sit on the button that keeps it.
     let removal = review_decision_labels(Some(&ActiveReviewCompletion::AccountRemoval {
-        wallet_id: "primary".into(),
+        wallet: WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        },
     }));
     assert!(removal.approve_is_destructive);
     assert_eq!(removal.approve, "Authenticate & remove");

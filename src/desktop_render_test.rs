@@ -310,6 +310,8 @@ fn active_review(completion: ActiveReviewCompletion) -> ActiveReview {
         scroll_handle: ScrollHandle::new(),
         scroll_check_scheduled: false,
         scroll_layout_ready: false,
+        scroll_last_max: None,
+        scroll_stable_samples: 0,
     }
 }
 
@@ -323,7 +325,14 @@ fn every_review_kind_lays_out_its_decision_row(cx: &mut gpui::TestAppContext) {
     // worth laying out rather than reasoning about.
     for completion in [
         ActiveReviewCompletion::AccountRemoval {
-            wallet_id: "primary".into(),
+            wallet: WalletMetadata {
+                instance_id: uuid::Uuid::nil(),
+                id: "primary".into(),
+                address: alloy::primitives::Address::ZERO,
+                created_at: chrono::Utc::now(),
+                source: ekubo_wallet_core::config::WalletSource::Created,
+                exported_at: None,
+            },
         },
         ActiveReviewCompletion::Message {
             request_id: uuid::Uuid::new_v4(),
@@ -357,6 +366,7 @@ fn the_legal_and_export_overlays_lay_out(cx: &mut gpui::TestAppContext) {
     cx.update_entity(&view, |wallet, _| {
         wallet.legal_review = None;
         wallet.account_export = Some(AccountExport {
+            token: uuid::Uuid::new_v4(),
             wallet_id: "primary".into(),
             lease: None,
             copied: false,
