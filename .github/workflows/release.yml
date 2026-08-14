@@ -107,6 +107,8 @@ jobs:
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
       - name: Build the release workspace
         shell: bash
+        env:
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
         run: cargo build --release --workspace
       - name: Stage the bridge for cargo-packager
         shell: bash

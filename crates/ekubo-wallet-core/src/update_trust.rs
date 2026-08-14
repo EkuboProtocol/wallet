@@ -20,6 +20,7 @@ pub const PACKAGE_VERSION_MARKER: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\0"
 );
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 const PACKAGE_VERSION_MARKER_PREFIX: &[u8] = b"\0EKUBO-WALLET-PACKAGE-VERSION:";
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json";
@@ -29,6 +30,7 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 const MAX_SIGNATURE_BYTES: u64 = 64 << 10;
 const MAX_ARTIFACT_BYTES: u64 = 1 << 30;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const MAX_PACKAGED_BINARY_BYTES: u64 = 512 << 20;
 
 /// Authenticated metadata for a strictly newer update on this exact target.
@@ -383,6 +385,7 @@ fn verify_embedded_version_claim(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn embedded_binary_version(bytes: &[u8]) -> Result<cargo_packager_updater::semver::Version> {
     let mut versions = BTreeSet::new();
     for index in bytes
