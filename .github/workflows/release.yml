@@ -105,70 +105,10 @@ jobs:
 
           printf 'EKUBO_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
-      - name: Build the standalone MCP bridge before platform signing
+      - name: Build the standalone MCP bridge
         shell: bash
         run: cargo build --release -p mcp-bridge
-      - name: Sign the MCP bridge with Developer ID
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
-        run: |
-          codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" target/release/ekubo-wallet-mcp-bridge
-          codesign --verify --strict --verbose=2 target/release/ekubo-wallet-mcp-bridge
-          codesign -dv --verbose=4 target/release/ekubo-wallet-mcp-bridge 2>&1 | grep -F 'Authority=Developer ID Application:'
-      - name: Require Windows bridge signing configuration
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-          TENANT: ${{ secrets.AZURE_TENANT_ID }}
-          CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
-        run: |
-          foreach ($value in @($env:ENDPOINT, $env:ACCOUNT, $env:PROFILE, $env:TENANT, $env:CLIENT)) {
-            if (-not $value) { throw "Windows bridge Authenticode configuration is required" }
-          }
-      - name: Sign the MCP bridge with Authenticode
-        if: runner.os == 'Windows'
-        uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-          files-folder: target/release
-          files-folder-filter: ekubo-wallet-mcp-bridge.exe
-          cache-dependencies: false
-      - name: Verify the Authenticode-signed MCP bridge
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $signature = Get-AuthenticodeSignature target/release/ekubo-wallet-mcp-bridge.exe
-          if ($signature.Status -ne "Valid") { throw "MCP bridge Authenticode is $($signature.Status)" }
-      - name: Sign the Linux MCP bridge with Minisign
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: |
-          cargo packager signer sign target/release/ekubo-wallet-mcp-bridge
-          test -s target/release/ekubo-wallet-mcp-bridge.sig
-      - name: Embed the exact signed MCP bridge digest
-        shell: bash
-        run: |
-          bridge=target/release/ekubo-wallet-mcp-bridge
-          if [ "$RUNNER_OS" = Windows ]; then bridge="$bridge.exe"; fi
-          if command -v sha256sum >/dev/null; then
-            digest="$(sha256sum "$bridge" | cut -d ' ' -f 1)"
-          else
-            digest="$(shasum -a 256 "$bridge" | cut -d ' ' -f 1)"
-          fi
-          printf 'EKUBO_MCP_BRIDGE_SHA256=%s\n' "$digest" >> "$GITHUB_ENV"
-      - name: Stage the signed bridge for cargo-packager
+      - name: Stage the bridge for cargo-packager
         shell: bash
         run: |
           set -euo pipefail
@@ -230,7 +170,7 @@ jobs:
           } finally {
             $stream.Dispose()
           }
-      - name: Verify the Windows package contains the signed bridge
+      - name: Verify the Windows package contains the bridge
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -242,9 +182,7 @@ jobs:
           if ($bridges.Count -ne 1) { throw "Windows package does not contain exactly one MCP bridge" }
           $sourceHash = (Get-FileHash -Algorithm SHA256 target/release/ekubo-wallet-mcp-bridge.exe).Hash
           $packagedHash = (Get-FileHash -Algorithm SHA256 $bridges[0].FullName).Hash
-          if ($sourceHash -ne $packagedHash) { throw "Windows packaging changed the signed MCP bridge bytes" }
-          $signature = Get-AuthenticodeSignature $bridges[0].FullName
-          if ($signature.Status -ne "Valid") { throw "packaged MCP bridge Authenticode is $($signature.Status)" }
+          if ($sourceHash -ne $packagedHash) { throw "Windows packaging changed the MCP bridge bytes" }
       - name: Verify Linux packages contain the executable bridge
         if: runner.os == 'Linux'
         shell: bash
@@ -280,8 +218,6 @@ jobs:
 
           codesign --verify --deep --strict --verbose=2 "$app"
           test -x "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
-          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
-          codesign -dv --verbose=4 "$app/Contents/MacOS/ekubo-wallet-mcp-bridge" 2>&1 | grep -F 'Authority=Developer ID Application:'
           codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
           codesign --verify --strict --verbose=2 "${dmgs[0]}"
