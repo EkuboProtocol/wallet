@@ -17,9 +17,13 @@ and its nested app. Gatekeeper can retrieve those tickets online, including for
 a copy downloaded while notarization was still pending; because the release
 artifacts are not stapled, their first launch requires network access.
 
-Developer ID signing on macOS and Authenticode signing on Windows protect the
-distributed application packages. The release's Minisign chain protects native
-update artifacts on every platform. Packaging fails unless every native package
+Developer ID signing on macOS protects the distributed application package.
+Windows Authenticode publisher signing is enabled only when the protected
+release environment variable `AZURE_TRUSTED_SIGNING_ENABLED` is `true`; an
+unsigned Windows installer may otherwise be published and will show the normal
+Windows unknown-publisher warning. The release's mandatory Minisign chain
+protects native update artifacts on every platform. Packaging fails unless
+every native package
 contains a runnable `ekubo-wallet-mcp-bridge` that initializes over stdio,
 reports the tagged version, advertises dynamic tool refresh, and returns the
 deterministic offline tool catalog. The helper itself is not an authorization

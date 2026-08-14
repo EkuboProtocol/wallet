@@ -283,6 +283,8 @@ jobs:
     needs: package
     runs-on: windows-2025
     environment: release
+    env:
+      AUTHENTICODE_ENABLED: ${{ vars.AZURE_TRUSTED_SIGNING_ENABLED }}
     permissions:
       contents: read
       id-token: write
@@ -301,12 +303,14 @@ jobs:
         with:
           tool: rsign2@0.6.6
       - name: Capture the pre-Authenticode installer digest
+        if: env.AUTHENTICODE_ENABLED == 'true'
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem dist/*setup.exe)
           if ($installers.Count -ne 1) { throw "expected exactly one Windows installer" }
           (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash | Set-Content "$env:RUNNER_TEMP/pre-authenticode.sha256"
       - name: Require Windows signing configuration
+        if: env.AUTHENTICODE_ENABLED == 'true'
         shell: pwsh
         env:
           ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
@@ -320,6 +324,7 @@ jobs:
             throw "Windows Authenticode configuration is required"
           }
       - name: Apply Authenticode to the Windows installer
+        if: env.AUTHENTICODE_ENABLED == 'true'
         uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -355,11 +360,21 @@ jobs:
           if ($installers[0].VersionInfo.ProductVersion -ne $expectedVersion) {
             throw "final installer ProductVersion does not match release tag"
           }
-          $before = (Get-Content "$env:RUNNER_TEMP/pre-authenticode.sha256").Trim()
-          $after = (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash
-          if ($before -eq $after) { throw "Authenticode did not change the installer bytes" }
           $authenticode = Get-AuthenticodeSignature $installers[0].FullName
-          if ($authenticode.Status -ne "Valid") { throw "final installer has invalid Authenticode: $($authenticode.Status)" }
+          if ($env:AUTHENTICODE_ENABLED -eq "true") {
+            $before = (Get-Content "$env:RUNNER_TEMP/pre-authenticode.sha256").Trim()
+            $after = (Get-FileHash -Algorithm SHA256 $installers[0].FullName).Hash
+            if ($before -eq $after) { throw "Authenticode did not change the installer bytes" }
+            if ($authenticode.Status -ne "Valid") { throw "final installer has invalid Authenticode: $($authenticode.Status)" }
+          } elseif ($authenticode.Status -ne "NotSigned") {
+            throw "unsigned Windows release has unexpected Authenticode status: $($authenticode.Status)"
+          } else {
+            @(
+              "### Windows publisher signing omitted"
+              ""
+              "This release does not carry Authenticode because AZURE_TRUSTED_SIGNING_ENABLED was not enabled. The updater Minisign signature and signed metadata remain mandatory."
+            ) | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
           $publicKeyPath = "$env:RUNNER_TEMP/updater.pub"
           $signaturePath = "$env:RUNNER_TEMP/installer.sig"
           [IO.File]::WriteAllBytes($publicKeyPath, [Convert]::FromBase64String($env:EKUBO_UPDATER_PUBLIC_KEY.Trim()))
