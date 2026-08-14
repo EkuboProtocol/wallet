@@ -40,10 +40,12 @@ Native update artifacts are signed by a dedicated Minisign key held only in the
 protected release environment. CI compiles the public key into the app,
 publishes a signed `latest.json` binding version, target, format, canonical
 artifact URL, SHA-256 digest, and detached artifact signature, verifies the
-final platform-signed artifacts, and attaches Sigstore provenance. The updater
-also reads the package version back from the bundled application binary (or the
-NSIS ProductVersion) and requires it to equal the authenticated manifest
-version before installation.
+final artifacts, and attaches GitHub Sigstore provenance when the protected
+release environment variable `BUILD_PROVENANCE_ENABLED` is `true` and the
+repository plan supports attestations. The updater also reads the package
+version back from the bundled application binary (or the NSIS ProductVersion)
+and requires it to equal the authenticated manifest version before
+installation.
 
 Updates require explicit confirmation after the stable version is shown.
 Download completes and verifies before shutdown. The packaged macOS app,

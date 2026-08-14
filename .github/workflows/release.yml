@@ -484,6 +484,7 @@ jobs:
 
   attest:
     needs: publish
+    if: vars.BUILD_PROVENANCE_ENABLED == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
