@@ -105,9 +105,9 @@ jobs:
 
           printf 'EKUBO_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
-      - name: Build the standalone MCP bridge
+      - name: Build the release workspace
         shell: bash
-        run: cargo build --release -p mcp-bridge
+        run: cargo build --release --workspace
       - name: Stage the bridge for cargo-packager
         shell: bash
         run: |
