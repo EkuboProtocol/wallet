@@ -350,8 +350,6 @@ file follows in the appendix. Regenerate this document with
 - atk 0.18.2 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk3-rs
 - atk-sys 0.18.2 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk3-rs
 - av-scenechange 0.14.1 — Josh Holmer <jholmer.in@gmail.com> — https://github.com/rust-av/av-scenechange
-- axum 0.8.9 — https://github.com/tokio-rs/axum
-- axum-core 0.5.6 — https://github.com/tokio-rs/axum
 - base62 2.2.4 — François Bernier <frankbernier@gmail.com>, Chai T. Rex <ChaiTRex@users.noreply.github.com> — https://github.com/fbernier/base62
 - bitvec 1.1.1 — https://github.com/bitvecto-rs/bitvec
 - block 0.1.6 — Steven Sheldon — http://github.com/SSheldon/rust-block
@@ -598,10 +596,6 @@ file follows in the appendix. Regenerate this document with
 - zvariant_derive 5.13.1 — Zeeshan Ali Khan <zeeshanak@gnome.org> — https://github.com/z-galaxy/zbus/
 - zvariant_utils 3.5.0 — Zeeshan Ali Khan <zeeshanak@gnome.org>, turbocooler <turbocooler@cocaine.ninja> — https://github.com/z-galaxy/zbus/
 
-## MIT AND BSD-3-Clause
-
-- matchit 0.8.4 — Ibraheem Ahmed <ibraheem@ibraheem.ca> — https://github.com/ibraheemdev/matchit
-
 ## MIT OR Apache-2.0
 
 - accesskit 0.24.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
@@ -843,7 +837,6 @@ file follows in the appendix. Regenerate this document with
 - html5ever 0.27.0 — The html5ever Project Developers — https://github.com/servo/html5ever
 - http 1.5.0 — Alex Crichton <alex@alexcrichton.com>, Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http
 - httparse 1.10.1 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/httparse
-- httpdate 1.0.3 — Pyfisch <pyfisch@posteo.org> — https://github.com/pyfisch/httpdate
 - hybrid-array 0.4.14 — RustCrypto Developers — https://github.com/RustCrypto/hybrid-array
 - iana-time-zone 0.1.65 — Andrew Straw <strawman@astraw.com>, René Kijewski <rene.kijewski@fu-berlin.de>, Ryan Lopopolo <rjl@hyperbo.la> — https://github.com/strawlab/iana-time-zone
 - iana-time-zone-haiku 0.1.2 — René Kijewski <crates.io@k6i.de> — https://github.com/strawlab/iana-time-zone
@@ -1021,7 +1014,6 @@ file follows in the appendix. Regenerate this document with
 - serde_derive 1.0.229 — Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> — https://github.com/serde-rs/serde
 - serde_derive_internals 0.30.0 — Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> — https://github.com/serde-rs/serde
 - serde_json 1.0.151 — Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> — https://github.com/serde-rs/json
-- serde_path_to_error 0.1.20 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/path-to-error
 - serde_repr 0.1.21 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/serde-repr
 - serde_spanned 0.6.9 — https://github.com/toml-rs/toml
 - serde_spanned 1.1.1 — https://github.com/toml-rs/toml
@@ -1044,7 +1036,6 @@ file follows in the appendix. Regenerate this document with
 - smallvec 1.15.2 — The Servo Project Developers — https://github.com/servo/rust-smallvec
 - smol_str 0.3.6 — Aleksey Kladov <aleksey.kladov@gmail.com>, Lukas Wirth <lukastw97@gmail.com> — https://github.com/rust-lang/rust-analyzer/tree/master/lib/smol_str
 - socket2 0.6.5 — Alex Crichton <alex@alexcrichton.com>, Thomas de Zeeuw <thomasdezeeuw@gmail.com> — https://github.com/rust-lang/socket2
-- sse-stream 0.2.5 — 4t145 <u4t145@163.com> — https://github.com/4t145/sse-stream/
 - stable_deref_trait 1.2.1 — Robert Grosse <n210241048576@gmail.com> — https://github.com/storyyeller/stable_deref_trait
 - stacker 0.1.25 — Alex Crichton <alex@alexcrichton.com>, Simonas Kazlauskas <stacker@kazlauskas.me> — https://github.com/rust-lang/stacker
 - static_assertions 1.1.0 — Nikolai Vazquez — https://github.com/nvzqz/static-assertions-rs
@@ -1501,7 +1492,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: adler2 2.0.1, allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.91, atk 0.18.2, atk-sys 0.18.2, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, cairo-rs 0.18.5, cairo-sys-rs 0.18.2, concurrent-queue 2.5.0, const-hex 1.19.1, ctor 0.2.9, ctor 1.0.13, curve25519-dalek-derive 0.1.1, deku 0.20.3, deku_derive 0.20.3, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, enumn 0.1.14, erased-serde 0.4.10, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, flume 0.12.0, futures-lite 2.6.1, futures-utils-wasm 0.1.0, gdk 0.18.2, gdk-pixbuf 0.18.5, gdk-pixbuf-sys 0.18.0, gdk-sys 0.18.2, gio 0.18.4, gio-sys 0.18.1, glib 0.18.5, glib-macros 0.18.5, glib-sys 0.18.1, glow 0.17.0, gobject-sys 0.18.0, group 0.13.0, gtk 0.18.2, gtk-sys 0.18.2, gtk3-macros 0.18.2, hermit-abi 0.5.2, home 0.5.12, inventory 0.3.24, itoa 1.0.18, khronos-egl 6.0.0, link-section 0.19.3, linktime-proc-macro 0.2.3, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, macro-string 0.2.0, nybbles 0.4.8, once_cell 1.21.4, ordered-stream 0.2.0, pango 0.18.3, pango-sys 0.18.0, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, portable-atomic-util 0.2.7, prettyplease 0.2.37, proc-macro-crate 1.3.1, proc-macro-crate 2.0.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, raw-window-metal 1.1.0, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 1.1.0, rustc-hash 2.1.3, rustix 0.38.44, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 0.0.29, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_path_to_error 0.1.20, serde_repr 0.1.21, simd_cesu8 1.2.0, smol 2.0.2, smol_str 0.3.6, syn 1.0.109, syn 2.0.119, syn 3.0.3, system-deps 6.2.2, thiserror 1.0.69, thiserror 2.0.19, thiserror-impl 1.0.69, thiserror-impl 2.0.19, tinyvec 1.12.0, typeid 1.0.3, unicode-ident 1.0.24, utf-8 0.7.6, waker-fn 1.2.0, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wasm-streams 0.4.2, wasm_thread 0.3.3, winnow 0.5.40, winnow 0.7.15, winnow 1.0.4, wit-bindgen 0.57.1, x11 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zbus_polkit 5.0.0, zed-font-kit 0.14.1-zed, zmij 1.0.23, zvariant_utils 3.5.0
+## License text for: adler2 2.0.1, allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.91, atk 0.18.2, atk-sys 0.18.2, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, cairo-rs 0.18.5, cairo-sys-rs 0.18.2, concurrent-queue 2.5.0, const-hex 1.19.1, ctor 0.2.9, ctor 1.0.13, curve25519-dalek-derive 0.1.1, deku 0.20.3, deku_derive 0.20.3, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, enumn 0.1.14, erased-serde 0.4.10, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, flume 0.12.0, futures-lite 2.6.1, futures-utils-wasm 0.1.0, gdk 0.18.2, gdk-pixbuf 0.18.5, gdk-pixbuf-sys 0.18.0, gdk-sys 0.18.2, gio 0.18.4, gio-sys 0.18.1, glib 0.18.5, glib-macros 0.18.5, glib-sys 0.18.1, glow 0.17.0, gobject-sys 0.18.0, group 0.13.0, gtk 0.18.2, gtk-sys 0.18.2, gtk3-macros 0.18.2, hermit-abi 0.5.2, home 0.5.12, inventory 0.3.24, itoa 1.0.18, khronos-egl 6.0.0, link-section 0.19.3, linktime-proc-macro 0.2.3, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, macro-string 0.2.0, nybbles 0.4.8, once_cell 1.21.4, ordered-stream 0.2.0, pango 0.18.3, pango-sys 0.18.0, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, portable-atomic-util 0.2.7, prettyplease 0.2.37, proc-macro-crate 1.3.1, proc-macro-crate 2.0.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, raw-window-metal 1.1.0, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 1.1.0, rustc-hash 2.1.3, rustix 0.38.44, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 0.0.29, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_repr 0.1.21, simd_cesu8 1.2.0, smol 2.0.2, smol_str 0.3.6, syn 1.0.109, syn 2.0.119, syn 3.0.3, system-deps 6.2.2, thiserror 1.0.69, thiserror 2.0.19, thiserror-impl 1.0.69, thiserror-impl 2.0.19, tinyvec 1.12.0, typeid 1.0.3, unicode-ident 1.0.24, utf-8 0.7.6, waker-fn 1.2.0, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wasm-streams 0.4.2, wasm_thread 0.3.3, winnow 0.5.40, winnow 0.7.15, winnow 1.0.4, wit-bindgen 0.57.1, x11 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zbus_polkit 5.0.0, zed-font-kit 0.14.1-zed, zmij 1.0.23, zvariant_utils 3.5.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -3139,68 +3130,6 @@ MIT No Attribution (MIT-0)
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-## License text for: axum 0.8.9
-
-```text
-Copyright (c) 2019 axum Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-```
-
-## License text for: axum-core 0.5.6
-
-```text
-MIT License
-
-Copyright (c) 2019–2025 axum Contributors
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: backtrace 0.3.76, cc 1.4.0, cfg-if 1.0.4, cmake 0.1.58, filetime 0.2.29, find-msvc-tools 0.1.9, jobserver 0.1.35, js-sys 0.3.103, openssl-probe 0.2.1, openssl-src 300.5.0+3.5.0, openssl-sys 0.9.112, pkg-config 0.3.33, rustc-demangle 0.1.28, scoped-tls 1.0.1, socket2 0.6.5, stacker 0.1.25, wait-timeout 0.2.1, wasm-bindgen 0.2.126, wasm-bindgen-futures 0.4.76, wasm-bindgen-macro 0.2.126, wasm-bindgen-macro-support 0.2.126, wasm-bindgen-shared 0.2.126, web-sys 0.3.103
@@ -9151,30 +9080,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## License text for: httpdate 1.0.3
-
-```text
-Copyright (c) 2016 Pyfisch
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
-
 ## License text for: hyper 1.11.0, unicase 2.9.0
 
 ```text
@@ -10513,66 +10418,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
-
-## License text for: matchit 0.8.4
-
-```text
-MIT License
-
-Copyright (c) 2022 Ibraheem Ahmed
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-## License text for: matchit 0.8.4
-
-```text
-BSD 3-Clause License
-
-Copyright (c) 2013, Julien Schmidt
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## License text for: maybe-rayon 0.1.1
@@ -14224,32 +14069,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-```
-
-## License text for: sse-stream 0.2.5
-
-```text
-MIT License
-
-Copyright (c) 2024 4t145
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ## License text for: stable_deref_trait 1.2.1
