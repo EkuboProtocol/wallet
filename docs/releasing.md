@@ -17,12 +17,12 @@ and its nested app. Gatekeeper can retrieve those tickets online, including for
 a copy downloaded while notarization was still pending; because the release
 artifacts are not stapled, their first launch requires network access.
 
-Developer ID signing on macOS and Authenticode signing on Windows are mandatory.
-Linux packages contain the exact helper protected by the embedded SHA-256 and
-the release's Minisign chain. Packaging fails unless every native package
-contains an executable `ekubo-wallet-mcp-bridge`; the macOS and Windows checks
-also verify the helper's platform signature after extracting it from the
-package. The retired Claude Desktop plugin archive is not built or published.
+Developer ID signing on macOS and Authenticode signing on Windows protect the
+distributed application packages. The release's Minisign chain protects native
+update artifacts on every platform. Packaging fails unless every native package
+contains an executable, byte-exact `ekubo-wallet-mcp-bridge`. The helper itself
+is not an authorization boundary. The retired Claude Desktop plugin archive is
+not built or published.
 
 Before tagging, smoke-test a bridge launched by each supported harness (Codex,
 Claude Code, Claude Desktop, Gemini CLI, Cursor, and OpenCode). Start the

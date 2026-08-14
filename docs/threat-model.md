@@ -71,10 +71,11 @@ signing. Apple and Windows signing services and release keys remain trust
 dependencies whose compromise requires publication halt, key rotation through
 a trusted channel, and an audit of released bytes and workflow logs.
 
-The separately packaged MCP helper is covered by Developer ID on macOS,
-Authenticode on Windows, and Minisign on Linux. The wallet verifies it before
-atomically installing a versioned copy in its private per-user directory.
-Only debug builds may accept an unsigned build-tree helper.
+The signed native package covers the separately bundled MCP helper during
+distribution. The wallet atomically installs a versioned copy in its private
+per-user directory, but does not treat the helper's hash or code signature as
+authorization: any process already running as the same user can connect to the
+local MCP endpoint directly.
 
 ## Local platform and lifecycle
 

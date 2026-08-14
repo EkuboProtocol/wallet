@@ -4,9 +4,6 @@ use anyhow::{Context, Result, ensure};
 use directories::BaseDirs;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use serde_json::{Map, Value, json};
-use sha2::{Digest as _, Sha256};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::process::Command;
 use std::{
     fs,
     io::Write as _,
@@ -30,8 +27,6 @@ pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
 /// The credential-free hosted companion installed beside the wallet server.
 pub const COMPANION_SERVER_NAME: &str = "ekubo";
 pub const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
-#[cfg(not(target_os = "macos"))]
-const BRIDGE_SHA256: &str = env!("EKUBO_COMPILED_MCP_BRIDGE_SHA256");
 
 fn installed_bridge_path() -> Result<PathBuf> {
     let data_dir = ekubo_wallet_core::config::default_data_dir()?;
@@ -43,10 +38,9 @@ fn installed_bridge_path() -> Result<PathBuf> {
     )))
 }
 
-/// Verify the packaged bridge bytes and atomically install the versioned helper
-/// in the wallet's private per-user directory. Release builds only accept the
-/// helper shipped beside the wallet executable; debug builds may use the
-/// workspace build-tree binary.
+/// Atomically install the versioned helper in the wallet's private per-user
+/// directory. Release builds use the helper shipped beside the wallet
+/// executable; debug builds may use the workspace build-tree binary.
 pub fn install_bridge_helper() -> Result<PathBuf> {
     let installed = installed_bridge_path()?;
     let executable = std::env::current_exe().context("could not locate the wallet executable")?;
@@ -69,14 +63,6 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
     ensure!(source.is_file(), "the packaged MCP bridge is missing");
     let bytes = fs::read(&source).context("failed to read the packaged MCP bridge")?;
     ensure!(!bytes.is_empty(), "the packaged MCP bridge is empty");
-    let digest = hex::encode(Sha256::digest(&bytes));
-    #[cfg(all(debug_assertions, target_os = "macos"))]
-    let unsigned_build_tree = source != packaged;
-    #[cfg(all(debug_assertions, not(target_os = "macos")))]
-    let unsigned_build_tree = source != packaged && BRIDGE_SHA256.is_empty();
-    #[cfg(not(debug_assertions))]
-    let unsigned_build_tree = false;
-    verify_packaged_bridge(&source, &digest, unsigned_build_tree)?;
     if installed.is_file() && fs::read(&installed)? == bytes {
         return Ok(installed);
     }
@@ -103,60 +89,6 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
         "installed MCP bridge failed verification"
     );
     Ok(installed)
-}
-
-fn verify_packaged_bridge(source: &Path, digest: &str, unsigned_build_tree: bool) -> Result<()> {
-    if unsigned_build_tree {
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = digest;
-        let status = Command::new("/usr/bin/codesign")
-            .args([
-                "--verify",
-                "--strict",
-                "--test-requirement",
-                "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
-            ])
-            .arg(source)
-            .status()
-            .context("could not verify the packaged MCP bridge signature")?;
-        ensure!(
-            status.success(),
-            "the packaged MCP bridge is not signed with Developer ID"
-        );
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        #[cfg(not(target_os = "windows"))]
-        let _ = source;
-        #[cfg(target_os = "windows")]
-        {
-            let script = "$s=Get-AuthenticodeSignature -LiteralPath $env:EKUBO_BRIDGE_TO_VERIFY; if($s.Status -ne 'Valid'){exit 1}";
-            let status = Command::new("powershell.exe")
-                .args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    script,
-                ])
-                .env("EKUBO_BRIDGE_TO_VERIFY", source)
-                .status()
-                .context("could not verify the packaged MCP bridge signature")?;
-            ensure!(
-                status.success(),
-                "the packaged MCP bridge has invalid Authenticode"
-            );
-        }
-        ensure!(
-            digest == BRIDGE_SHA256,
-            "the packaged MCP bridge failed its embedded digest verification"
-        );
-        Ok(())
-    }
 }
 
 fn harness_argument(kind: AgentKind) -> Result<&'static str> {
