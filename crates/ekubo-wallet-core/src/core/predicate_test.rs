@@ -61,6 +61,7 @@ fn integers_are_decimal_without_a_prefix() {
     // 0x-prefixed hex is the other legal spelling and canonicalizes to decimal,
     // so the two forms of one number compare equal.
     assert_eq!(parse_literal("0x10", &ty).unwrap(), "16");
+    assert!(parse_literal("0x", &ty).is_err());
     assert!(parse_literal("ten", &ty).is_err());
     assert!(parse_literal("1_000", &ty).is_err());
     assert!(parse_literal("", &ty).is_err());

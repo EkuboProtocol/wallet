@@ -929,6 +929,10 @@ fn parse_literal(literal: &str, ty: &DynSolType) -> Result<String> {
         // and the author can still see what they meant.
         DynSolType::Uint(bits) => {
             let value = if literal.starts_with("0x") {
+                ensure!(
+                    literal.len() > 2,
+                    "a hexadecimal integer needs at least one digit"
+                );
                 U256::from_be_slice(&decode_hex_literal(literal)?)
             } else {
                 ensure!(
