@@ -168,6 +168,17 @@ jobs:
             digest="$(shasum -a 256 "$bridge" | cut -d ' ' -f 1)"
           fi
           printf 'EKUBO_MCP_BRIDGE_SHA256=%s\n' "$digest" >> "$GITHUB_ENV"
+      - name: Stage the signed bridge for cargo-packager
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          source=target/release/ekubo-wallet-mcp-bridge
+          suffix=
+          if [ "$RUNNER_OS" = Windows ]; then source="$source.exe"; suffix=.exe; fi
+          destination="target/release/ekubo-wallet-mcp-bridge-${host}${suffix}"
+          cp "$source" "$destination"
+          cmp "$source" "$destination"
       - name: Build native packages
         if: runner.os != 'Windows'
         shell: bash
@@ -219,6 +230,44 @@ jobs:
           } finally {
             $stream.Dispose()
           }
+      - name: Verify the Windows package contains the signed bridge
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem target/release/*setup.exe)
+          if ($installer.Count -ne 1) { throw "expected exactly one Windows installer" }
+          $extract = Join-Path $env:RUNNER_TEMP "ekubo-nsis-contents"
+          7z x "-o$extract" $installer[0].FullName | Out-Null
+          $bridges = @(Get-ChildItem -Recurse $extract -Filter ekubo-wallet-mcp-bridge.exe)
+          if ($bridges.Count -ne 1) { throw "Windows package does not contain exactly one MCP bridge" }
+          $sourceHash = (Get-FileHash -Algorithm SHA256 target/release/ekubo-wallet-mcp-bridge.exe).Hash
+          $packagedHash = (Get-FileHash -Algorithm SHA256 $bridges[0].FullName).Hash
+          if ($sourceHash -ne $packagedHash) { throw "Windows packaging changed the signed MCP bridge bytes" }
+          $signature = Get-AuthenticodeSignature $bridges[0].FullName
+          if ($signature.Status -ne "Valid") { throw "packaged MCP bridge Authenticode is $($signature.Status)" }
+      - name: Verify Linux packages contain the executable bridge
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(target/release/*.deb)
+          appimages=(target/release/*.AppImage)
+          test "${#debs[@]}" -eq 1
+          test "${#appimages[@]}" -eq 1
+          deb_extract="$RUNNER_TEMP/ekubo-deb-contents"
+          dpkg-deb -x "${debs[0]}" "$deb_extract"
+          deb_bridge="$(find "$deb_extract" -type f -name ekubo-wallet-mcp-bridge -print -quit)"
+          test -n "$deb_bridge"
+          test -x "$deb_bridge"
+          cmp target/release/ekubo-wallet-mcp-bridge "$deb_bridge"
+          extract="$RUNNER_TEMP/ekubo-appimage-contents"
+          mkdir "$extract"
+          (cd "$extract" && "$GITHUB_WORKSPACE/${appimages[0]}" --appimage-extract >/dev/null)
+          bridge="$(find "$extract/squashfs-root" -type f -name ekubo-wallet-mcp-bridge -print -quit)"
+          test -n "$bridge"
+          test -x "$bridge"
+          cmp target/release/ekubo-wallet-mcp-bridge "$bridge"
       - name: Verify signed macOS packages
         if: runner.os == 'macOS'
         shell: bash
@@ -230,6 +279,9 @@ jobs:
           test "${#dmgs[@]}" -eq 1
 
           codesign --verify --deep --strict --verbose=2 "$app"
+          test -x "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
+          codesign -dv --verbose=4 "$app/Contents/MacOS/ekubo-wallet-mcp-bridge" 2>&1 | grep -F 'Authority=Developer ID Application:'
           codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
           codesign --verify --strict --verbose=2 "${dmgs[0]}"

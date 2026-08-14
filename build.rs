@@ -26,17 +26,19 @@ fn embed_bridge_digest() {
     println!("cargo:rerun-if-env-changed=EKUBO_MCP_BRIDGE_SHA256");
     let digest = env::var("EKUBO_MCP_BRIDGE_SHA256").unwrap_or_default();
     let release = env::var("PROFILE").as_deref() == Ok("release");
-    if release && digest.is_empty() {
-        panic!("release builds require EKUBO_MCP_BRIDGE_SHA256");
-    }
-    if !digest.is_empty()
-        && (digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    {
-        panic!("EKUBO_MCP_BRIDGE_SHA256 must be 64 lowercase hexadecimal characters");
-    }
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    assert!(
+        !(release && target_os != "macos" && digest.is_empty()),
+        "release builds require EKUBO_MCP_BRIDGE_SHA256"
+    );
+    assert!(
+        digest.is_empty()
+            || (digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+        "EKUBO_MCP_BRIDGE_SHA256 must be 64 lowercase hexadecimal characters"
+    );
     println!("cargo:rustc-env=EKUBO_COMPILED_MCP_BRIDGE_SHA256={digest}");
 }
 

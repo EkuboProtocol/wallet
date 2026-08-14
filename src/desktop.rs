@@ -13450,7 +13450,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let status_tray = tray.clone();
             let server_events = events.clone();
             let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                McpIpcServer::start(&data_dir, agent, server_events).await
+                McpIpcServer::start(&data_dir, agent, server_events)
             });
             cx.spawn(async move |cx| match server_task.await {
                 Ok(server) => {

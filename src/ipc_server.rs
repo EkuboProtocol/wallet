@@ -61,7 +61,7 @@ pub struct McpIpcServer {
 }
 
 impl McpIpcServer {
-    pub async fn start(data_dir: &Path, agent: AgentApi, events: EventBus) -> Result<Self> {
+    pub fn start(data_dir: &Path, agent: AgentApi, events: EventBus) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -92,7 +92,7 @@ impl McpIpcServer {
             let listener_events = events.clone();
             let task = tokio::spawn(async move {
                 loop {
-                    let accepted = tokio::select! { _ = stopped.cancelled() => break, accepted = listener.accept() => accepted };
+                    let accepted = tokio::select! { () = stopped.cancelled() => break, accepted = listener.accept() => accepted };
                     let Ok((stream, _)) = accepted else {
                         break;
                     };
