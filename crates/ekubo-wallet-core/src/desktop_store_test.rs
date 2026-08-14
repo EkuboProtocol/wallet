@@ -772,9 +772,11 @@ fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
         )
         .unwrap();
 
-    store.attribute_transaction(attributed, client.id).unwrap();
     store
-        .attribute_typed_data(signature_request, client.id)
+        .attribute_transaction(attributed, AgentKind::Codex)
+        .unwrap();
+    store
+        .attribute_typed_data(signature_request, AgentKind::Codex)
         .unwrap();
 
     let attributions = store.request_attributions().unwrap();

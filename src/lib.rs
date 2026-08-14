@@ -13,7 +13,7 @@ pub mod dapp_identity;
 pub mod desktop;
 pub mod events;
 pub mod gui_review;
-pub mod http_server;
+pub mod ipc_server;
 pub mod mcp;
 pub mod notifications;
 pub mod release_check;

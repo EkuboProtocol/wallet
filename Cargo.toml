@@ -13,6 +13,7 @@ categories = ["cryptography::cryptocurrencies", "gui"]
 [workspace]
 members = [
     "crates/ekubo-wallet-core",
+    "crates/mcp-bridge",
     "crates/walletconnect-session",
     "crates/ztracing-compat",
 ]
@@ -35,7 +36,6 @@ walletconnect-session = { path = "crates/walletconnect-session" }
 alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
-axum = "0.8.6"
 base64 = "0.23.0"
 chrono = { version = "0.4.42", features = ["serde"] }
 directories = "6.0.0"
@@ -52,7 +52,7 @@ num-bigint = "0.5.1"
 notify-rust = "4.18.0"
 rand = "0.10.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
-rmcp = { version = "3.1.0", features = ["transport-streamable-http-server"] }
+rmcp = { version = "3.1.0", features = ["transport-io"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -63,7 +63,6 @@ tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7.17"
 toml_edit = "0.22.27"
-tower = "0.5.2"
 tray-icon = "0.24.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
@@ -100,7 +99,8 @@ sha2 = "0.10.9"
 product-name = "Ekubo Wallet"
 identifier = "org.ekubo.wallet"
 formats = ["app", "dmg", "nsis", "appimage", "deb"]
-before-packaging-command = "cargo build --release"
+before-packaging-command = "cargo build --release --workspace"
+external-binaries = ["target/release/ekubo-wallet-mcp-bridge"]
 resources = ["schemas", "contrib/polkit/com.ekubo.wallet.policy"]
 icons = ["assets/app-icon-512.png"]
 

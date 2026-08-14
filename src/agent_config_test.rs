@@ -1,28 +1,31 @@
 use super::*;
+use serde_json::json;
+
+const HELPER: &str = "/private/ekubo-wallet-mcp-bridge-1.0.1";
 
 #[test]
-fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns() {
-    let output = merge_codex(
-        "model = \"gpt\"\n[other]\nvalue = 7\n",
-        "http://127.0.0.1:50000/mcp",
-    )
-    .unwrap();
+fn codex_uses_exact_stdio_shape_and_removes_http_oauth_credentials() {
+    let before = r#"
+[unrelated]
+keep = true
+[mcp_servers.ekubo_wallet]
+url = "http://127.0.0.1:61744/mcp"
+auth = "oauth"
+bearer_token_env_var = "SECRET"
+http_headers = { Authorization = "Bearer secret" }
+"#;
+    let output = merge_codex(before, HELPER, "codex").unwrap();
     let parsed = output.parse::<DocumentMut>().unwrap();
-    assert_eq!(parsed["model"].as_str(), Some("gpt"));
-    assert_eq!(parsed["other"]["value"].as_integer(), Some(7));
-    assert!(parsed.get("mcp_oauth_credentials_store").is_none());
+    assert_eq!(parsed["unrelated"]["keep"].as_bool(), Some(true));
+    let local = parsed["mcp_servers"][LOCAL_SERVER_NAME].as_table().unwrap();
+    assert_eq!(local.len(), 2);
+    assert_eq!(local["command"].as_str(), Some(HELPER));
+    let args = local["args"].as_array().unwrap();
     assert_eq!(
-        parsed["mcp_servers"][LOCAL_SERVER_NAME]["url"].as_str(),
-        Some("http://127.0.0.1:50000/mcp")
-    );
-    assert_eq!(
-        parsed["mcp_servers"][LOCAL_SERVER_NAME]["auth"].as_str(),
-        Some("oauth")
-    );
-    assert!(
-        parsed["mcp_servers"][LOCAL_SERVER_NAME]
-            .get("http_headers")
-            .is_none()
+        args.iter()
+            .filter_map(toml_edit::Value::as_str)
+            .collect::<Vec<_>>(),
+        ["--client", "codex"]
     );
     assert_eq!(
         parsed["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str(),
@@ -30,308 +33,98 @@ fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns()
     );
 }
 
-/// Whatever else the entry held, the upsert leaves only the loopback URL and
-/// OAuth mode: a stdio field would contradict the transport, and a header or
-/// token field is a static credential this wallet never accepts.
 #[test]
-fn codex_upsert_clears_stdio_and_credential_fields() {
-    let output = merge_codex(
-        "[mcp_servers.ekubo_wallet]\ncommand = \"wallet\"\nargs = [\"serve\"]\nbearer_token_env_var = \"TOKEN\"\nhttp_headers = { Authorization = \"Bearer stale\" }\n\n",
-        "http://127.0.0.1:50000/mcp",
-    )
-    .unwrap();
-    let parsed = output.parse::<DocumentMut>().unwrap();
-    let local = &parsed["mcp_servers"][LOCAL_SERVER_NAME];
-    assert!(local.get("command").is_none());
-    assert!(local.get("args").is_none());
-    assert!(local.get("bearer_token_env_var").is_none());
-    assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:50000/mcp"));
-    assert_eq!(local["auth"].as_str(), Some("oauth"));
-    assert!(local.get("http_headers").is_none());
-    assert!(parsed.get("mcp_oauth_credentials_store").is_none());
-}
-
-#[test]
-fn codex_upsert_preserves_the_harness_wide_oauth_storage_policy() {
-    let output = merge_codex(
-        "mcp_oauth_credentials_store = \"file\"\n",
-        "http://127.0.0.1:61744/mcp",
-    )
-    .unwrap();
-    let parsed = output.parse::<DocumentMut>().unwrap();
-    assert_eq!(parsed["mcp_oauth_credentials_store"].as_str(), Some("file"));
-}
-
-#[test]
-fn every_json_shape_preserves_unrelated_servers() {
-    for (root, shape) in [
-        ("mcpServers", JsonShape::Url),
-        ("mcpServers", JsonShape::HttpUrl),
-        ("mcp", JsonShape::Remote),
-    ] {
-        let before =
-            format!(r#"{{"keep":true,"{root}":{{"unrelated":{{"url":"https://example.com"}}}}}}"#);
-        let output = merge_json(&before, root, shape, "http://127.0.0.1:50000/mcp").unwrap();
-        let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["keep"], true);
-        assert_eq!(parsed[root]["unrelated"]["url"], "https://example.com");
-        assert!(parsed[root][LOCAL_SERVER_NAME].get("headers").is_none());
-        assert_eq!(
-            parsed[root][COMPANION_SERVER_NAME]
-                .get("url")
-                .or_else(|| parsed[root][COMPANION_SERVER_NAME].get("httpUrl"))
-                .and_then(Value::as_str),
-            Some(COMPANION_SERVER_URL)
-        );
-    }
-}
-
-#[test]
-fn managed_json_diff_shows_only_changed_server_fields() {
-    let before =
-        r#"{"keep":{"large":"unrelated"},"mcpServers":{"other":{"url":"https://example.com"}}}"#;
-    let after = merge_json(
-        before,
-        "mcpServers",
-        JsonShape::Url,
-        "http://127.0.0.1:61744/mcp",
-    )
-    .unwrap();
-    let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
-
-    assert!(diff.contains("mcpServers.ekubo_wallet"));
-    assert!(diff.contains("http://127.0.0.1:61744/mcp"));
-    assert!(!diff.contains("large"));
-    assert!(!diff.contains("other"));
-}
-
-#[test]
-fn managed_codex_diff_does_not_echo_static_credentials_or_unrelated_settings() {
-    let before = "model = \"gpt\"\n[mcp_servers.ekubo_wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nhttp_headers = { Authorization = \"Bearer do-not-display\" }\n";
-    let after = merge_codex(before, "http://127.0.0.1:61744/mcp").unwrap();
-    let diff = managed_config_diff(AgentKind::Codex, before, &after).unwrap();
-
-    assert!(diff.contains("mcp_servers.ekubo_wallet"));
-    assert!(diff.contains("<credential field redacted>"));
-    assert!(!diff.contains("do-not-display"));
-    assert!(!diff.contains("model ="));
-}
-
-#[test]
-fn codex_upsert_removes_unknown_fields_only_inside_the_wallet_owned_entry() {
-    let before = "mcp_oauth_credentials_store = \"file\"\n\
-[mcp_servers.unrelated]\nurl = \"https://example.test/mcp\"\nfuture = \"keep\"\n\
-[mcp_servers.ekubo_wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nfuture_credential = \"remove\"\n";
-    let output = merge_codex(before, "http://127.0.0.1:61744/mcp").unwrap();
-    let parsed = output.parse::<DocumentMut>().unwrap();
-
-    assert_eq!(parsed["mcp_oauth_credentials_store"].as_str(), Some("file"));
-    assert_eq!(
-        parsed["mcp_servers"]["unrelated"]["future"].as_str(),
-        Some("keep")
-    );
-    let local = parsed["mcp_servers"][LOCAL_SERVER_NAME].as_table().unwrap();
-    assert_eq!(local.len(), 2);
-    assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:61744/mcp"));
-    assert_eq!(local["auth"].as_str(), Some("oauth"));
-}
-
-#[test]
-fn a_failed_install_restores_without_persisting_a_credential_backup() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("mcp.json");
-    fs::write(&path, "{\"keep\":true}\n").unwrap();
-    let preview = ConfigPreview {
-        path: path.clone(),
-        before: "{\"keep\":true}\n".into(),
-        after: "{".into(),
-        diff: "redacted test diff".into(),
-        validation: ConfigValidation::Installed {
-            kind: AgentKind::Cursor,
-        },
-    };
-    assert!(preview.install().is_err());
-    assert_eq!(fs::read_to_string(&path).unwrap(), "{\"keep\":true}\n");
-    let backups = fs::read_dir(directory.path())
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().contains(".backup-"))
-        .count();
-    assert_eq!(backups, 0);
-}
-
-#[test]
-fn successful_install_keeps_secret_prior_bytes_only_in_memory() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("mcp.json");
-    let secret = "Bearer must-not-be-copied";
-    fs::write(
-        &path,
-        format!(r#"{{"mcpServers":{{"other":{{"headers":{{"Authorization":"{secret}"}}}}}}}}"#),
-    )
-    .unwrap();
-    let preview = AgentAdapter {
-        kind: AgentKind::Cursor,
-        display_name: "Cursor",
-        config_path: path,
-    }
-    .preview_install()
-    .unwrap();
-
-    ConfigBatchInstall::install(vec![preview]).unwrap().commit();
-
-    let files = fs::read_dir(directory.path())
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .collect::<Vec<_>>();
-    assert_eq!(files.len(), 1);
-    assert!(files[0].file_name().to_string_lossy().eq("mcp.json"));
-}
-
-#[test]
-fn startup_shape_always_adds_both_wallet_managed_servers() {
-    for (root, shape) in [
-        ("mcpServers", JsonShape::Url),
-        ("mcpServers", JsonShape::HttpUrl),
-        ("mcp", JsonShape::Remote),
-    ] {
-        let output = merge_json("{}", root, shape, "http://127.0.0.1:61744/mcp").unwrap();
-        let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed[root].as_object().unwrap().len(), 2);
-        assert_eq!(
-            parsed[root][LOCAL_SERVER_NAME]
-                .get("url")
-                .or_else(|| parsed[root][LOCAL_SERVER_NAME].get("httpUrl"))
-                .and_then(Value::as_str),
-            Some("http://127.0.0.1:61744/mcp")
-        );
-        assert_eq!(
-            parsed[root][COMPANION_SERVER_NAME]
-                .get("url")
-                .or_else(|| parsed[root][COMPANION_SERVER_NAME].get("httpUrl"))
-                .and_then(Value::as_str),
-            Some(COMPANION_SERVER_URL)
-        );
-    }
-}
-
-#[test]
-fn managed_preview_contains_no_credential() {
-    let preview = ConfigPreview {
-        path: PathBuf::from("mcp.json"),
-        before: String::new(),
-        after: "http://127.0.0.1:61744/mcp".into(),
-        diff: "+http://127.0.0.1:61744/mcp".into(),
-        validation: ConfigValidation::Installed {
-            kind: AgentKind::Cursor,
-        },
-    };
-    assert!(!preview.diff.contains("Authorization"));
-    assert!(!preview.after.contains("Bearer"));
-}
-
-#[test]
-fn automatic_upserts_skip_files_that_are_already_exact() {
-    let preview = ConfigPreview {
-        path: PathBuf::from("mcp.json"),
-        before: "same".into(),
-        after: "same".into(),
-        diff: String::new(),
-        validation: ConfigValidation::Installed {
-            kind: AgentKind::Cursor,
-        },
-    };
-    assert!(!preview.has_changes());
-}
-
-#[test]
-fn managed_previews_always_use_the_fixed_oauth_resource() {
-    let directory = tempfile::tempdir().unwrap();
-    let adapter = AgentAdapter {
-        kind: AgentKind::Cursor,
-        display_name: "Cursor",
-        config_path: directory.path().join("mcp.json"),
-    };
-    let preview = adapter.preview_install().unwrap();
-    assert!(preview.after.contains("http://127.0.0.1:61744/mcp"));
-    assert!(preview.after.contains(COMPANION_SERVER_URL));
-    assert!(!preview.after.contains("Authorization"));
-}
-
-#[test]
-fn both_managed_entries_are_replaced_with_exact_credential_free_shapes() {
-    let before = format!(
-        r#"{{"mcpServers":{{"{LOCAL_SERVER_NAME}":{{"url":"http://127.0.0.1:1/mcp","headers":{{"Authorization":"Bearer local"}}}},"{COMPANION_SERVER_NAME}":{{"url":"https://wrong.test/mcp","headers":{{"Authorization":"Bearer remote"}}}},"keep":{{"url":"https://example.test/mcp","future":"preserved"}}}}}}"#
-    );
-    let output = merge_json(
-        &before,
-        "mcpServers",
-        JsonShape::Url,
-        "http://127.0.0.1:61744/mcp",
-    )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&output).unwrap();
-
-    assert_eq!(
-        parsed["mcpServers"][LOCAL_SERVER_NAME],
-        json!({"type": "http", "url": "http://127.0.0.1:61744/mcp"})
-    );
-    assert_eq!(
-        parsed["mcpServers"][COMPANION_SERVER_NAME],
-        json!({"type": "http", "url": COMPANION_SERVER_URL})
-    );
-    assert_eq!(parsed["mcpServers"]["keep"]["future"], "preserved");
-}
-
-#[test]
-fn install_rejects_a_parseable_config_with_static_credentials_and_rolls_back() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("mcp.json");
-    let before = "{\"keep\":true}\n";
-    fs::write(&path, before).unwrap();
-    let preview = ConfigPreview {
-        path: path.clone(),
-        before: before.into(),
-        after: format!(
-            "{{\"mcpServers\":{{\"{LOCAL_SERVER_NAME}\":{{\"type\":\"http\",\"url\":\"http://127.0.0.1:50000/mcp\",\"headers\":{{\"Authorization\":\"Bearer secret\"}}}}}}}}\n"
+fn every_json_harness_gets_exact_credential_free_stdio_shape() {
+    let cases = [
+        (
+            AgentKind::ClaudeCode,
+            "mcpServers",
+            JsonShape::Stdio,
+            "claude-code",
         ),
-        diff: "redacted test diff".into(),
-        validation: ConfigValidation::Installed {
-            kind: AgentKind::Cursor,
-        },
-    };
-    let error = preview.install().unwrap_err();
-    assert!(error.to_string().contains("validation failed"), "{error:#}");
-    assert_eq!(fs::read_to_string(path).unwrap(), before);
+        (
+            AgentKind::ClaudeDesktop,
+            "mcpServers",
+            JsonShape::Stdio,
+            "claude-desktop",
+        ),
+        (
+            AgentKind::GeminiCli,
+            "mcpServers",
+            JsonShape::Stdio,
+            "gemini-cli",
+        ),
+        (AgentKind::Cursor, "mcpServers", JsonShape::Stdio, "cursor"),
+        (AgentKind::Opencode, "mcp", JsonShape::Local, "opencode"),
+    ];
+    for (_kind, root, shape, client) in cases {
+        let before = format!(
+            r#"{{"keep":7,"{root}":{{"ekubo_wallet":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
+        );
+        let output = merge_json(&before, root, shape, HELPER, client).unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["keep"], 7);
+        assert_eq!(
+            parsed[root][LOCAL_SERVER_NAME],
+            json_server(shape, HELPER, client)
+        );
+        assert_eq!(
+            parsed[root][COMPANION_SERVER_NAME],
+            remote_json_server(shape, COMPANION_SERVER_URL)
+        );
+        let rendered = parsed[root][LOCAL_SERVER_NAME].to_string();
+        for forbidden in [
+            "61744",
+            "oauth",
+            "Authorization",
+            "TOKEN",
+            "secret",
+            "url",
+            "httpUrl",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "{client} retained {forbidden}: {rendered}"
+            );
+        }
+    }
 }
 
 #[test]
-fn a_multi_agent_install_restores_every_earlier_file_when_one_fails() {
-    let directory = tempfile::tempdir().unwrap();
-    let first_path = directory.path().join("first.json");
-    let second_path = directory.path().join("second.json");
-    let first_before = "{\"keep\":1}\n";
-    let second_before = "{\"keep\":2}\n";
-    fs::write(&first_path, first_before).unwrap();
-    fs::write(&second_path, second_before).unwrap();
-    let first = AgentAdapter {
-        kind: AgentKind::Cursor,
-        display_name: "Cursor",
-        config_path: first_path.clone(),
-    }
-    .preview_install()
-    .unwrap();
-    let invalid_second = ConfigPreview {
-        path: second_path.clone(),
-        before: second_before.into(),
-        after: "{".into(),
-        diff: "redacted test diff".into(),
-        validation: ConfigValidation::Installed {
-            kind: AgentKind::Cursor,
-        },
-    };
+fn malformed_or_wrong_root_documents_are_rejected() {
+    assert!(merge_codex("not = [toml", HELPER, "codex").is_err());
+    assert!(merge_json("[]", "mcpServers", JsonShape::Stdio, HELPER, "cursor").is_err());
+    assert!(
+        merge_json(
+            r#"{"mcpServers":[]}"#,
+            "mcpServers",
+            JsonShape::Stdio,
+            HELPER,
+            "cursor"
+        )
+        .is_err()
+    );
+}
 
-    assert!(ConfigBatchInstall::install(vec![first, invalid_second]).is_err());
-    assert_eq!(fs::read_to_string(first_path).unwrap(), first_before);
-    assert_eq!(fs::read_to_string(second_path).unwrap(), second_before);
+#[test]
+fn managed_diff_never_discloses_unrelated_credentials() {
+    let before = r#"{"secret":"do-not-print","mcpServers":{}}"#;
+    let after = merge_json(before, "mcpServers", JsonShape::Stdio, HELPER, "cursor").unwrap();
+    let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
+    assert!(!diff.contains("do-not-print"));
+    assert!(diff.contains("mcpServers.ekubo_wallet"));
+}
+
+#[test]
+fn local_and_companion_names_are_stable() {
+    assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet");
+    assert_eq!(COMPANION_SERVER_NAME, "ekubo");
+    assert_eq!(COMPANION_SERVER_URL, "https://mcp.ekubo.org/mcp");
+    assert_eq!(
+        json_server(JsonShape::Stdio, HELPER, "claude-desktop"),
+        json!({
+            "command": HELPER,
+            "args": ["--client", "claude-desktop"]
+        })
+    );
 }

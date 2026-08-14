@@ -109,6 +109,7 @@ impl OAuthSessionPreset {
 pub enum AgentKind {
     Codex,
     ClaudeCode,
+    ClaudeDesktop,
     GeminiCli,
     Cursor,
     Opencode,
@@ -123,6 +124,7 @@ impl AgentKind {
         match self {
             Self::Codex => "Codex",
             Self::ClaudeCode => "Claude Code",
+            Self::ClaudeDesktop => "Claude Desktop",
             Self::GeminiCli => "Gemini CLI",
             Self::Cursor => "Cursor",
             Self::Opencode => "opencode",
@@ -134,6 +136,7 @@ impl AgentKind {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude_code",
+            Self::ClaudeDesktop => "claude_desktop",
             Self::GeminiCli => "gemini_cli",
             Self::Cursor => "cursor",
             Self::Opencode => "opencode",
@@ -145,6 +148,7 @@ impl AgentKind {
         match value {
             "codex" => Ok(Self::Codex),
             "claude_code" => Ok(Self::ClaudeCode),
+            "claude_desktop" => Ok(Self::ClaudeDesktop),
             "gemini_cli" => Ok(Self::GeminiCli),
             "cursor" => Ok(Self::Cursor),
             "opencode" => Ok(Self::Opencode),
@@ -1178,15 +1182,14 @@ impl DesktopStore {
     /// wants attributed.
     pub fn request_attributions(&self) -> Result<std::collections::BTreeMap<Uuid, String>> {
         let mut statement = self.connection.prepare(
-            "SELECT r.request_id, c.display_name
+            "SELECT request_id, requesting_harness_kind
              FROM (
-                 SELECT request_id, requesting_client_id FROM pending_transactions
+                 SELECT request_id, requesting_harness_kind FROM pending_transactions
                  UNION ALL
-                 SELECT request_id, requesting_client_id FROM pending_messages
+                 SELECT request_id, requesting_harness_kind FROM pending_messages
                  UNION ALL
-                 SELECT request_id, requesting_client_id FROM pending_typed_data
-             ) r
-             JOIN mcp_clients c ON c.client_id = r.requesting_client_id",
+                 SELECT request_id, requesting_harness_kind FROM pending_typed_data
+             ) WHERE requesting_harness_kind IS NOT NULL",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -1194,46 +1197,49 @@ impl DesktopStore {
                 row.get::<_, String>(1)?,
             ))
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        rows.map(|row| {
+            let (request_id, harness) = row?;
+            Ok((request_id, AgentKind::parse(&harness)?.label().to_owned()))
+        })
+        .collect()
     }
 
-    pub fn attribute_transaction(&mut self, request_id: Uuid, client_id: Uuid) -> Result<()> {
-        self.attribute_uuid("pending_transactions", request_id, client_id)
+    pub fn attribute_transaction(&mut self, request_id: Uuid, harness: AgentKind) -> Result<()> {
+        self.attribute_uuid("pending_transactions", request_id, harness)
     }
 
-    pub fn attribute_typed_data(&mut self, request_id: Uuid, client_id: Uuid) -> Result<()> {
-        self.attribute_uuid("pending_typed_data", request_id, client_id)
+    pub fn attribute_typed_data(&mut self, request_id: Uuid, harness: AgentKind) -> Result<()> {
+        self.attribute_uuid("pending_typed_data", request_id, harness)
     }
 
-    pub fn attribute_message(&mut self, request_id: Uuid, client_id: Uuid) -> Result<()> {
-        self.attribute_uuid("pending_messages", request_id, client_id)
+    pub fn attribute_message(&mut self, request_id: Uuid, harness: AgentKind) -> Result<()> {
+        self.attribute_uuid("pending_messages", request_id, harness)
     }
 
-    fn attribute_uuid(&mut self, table: &str, request_id: Uuid, client_id: Uuid) -> Result<()> {
+    fn attribute_uuid(&mut self, table: &str, request_id: Uuid, harness: AgentKind) -> Result<()> {
         let sql = match table {
             "pending_transactions" => {
-                "UPDATE pending_transactions SET requesting_client_id = ?1 WHERE request_id = ?2"
+                "UPDATE pending_transactions SET requesting_harness_kind = ?1 WHERE request_id = ?2"
             }
             "pending_typed_data" => {
-                "UPDATE pending_typed_data SET requesting_client_id = ?1 WHERE request_id = ?2"
+                "UPDATE pending_typed_data SET requesting_harness_kind = ?1 WHERE request_id = ?2"
             }
             "pending_messages" => {
-                "UPDATE pending_messages SET requesting_client_id = ?1 WHERE request_id = ?2"
+                "UPDATE pending_messages SET requesting_harness_kind = ?1 WHERE request_id = ?2"
             }
             _ => anyhow::bail!("invalid attribution table"),
         };
-        let changed = self.connection.execute(
-            sql,
-            params![Blob(*client_id.as_bytes()), Blob(*request_id.as_bytes())],
-        )?;
+        let changed = self
+            .connection
+            .execute(sql, params![harness.as_str(), Blob(*request_id.as_bytes())])?;
         ensure!(changed == 1, "request disappeared before attribution");
         Ok(())
     }
 
-    pub fn attribute_policy_proposal(&mut self, wallet_id: &str, client_id: Uuid) -> Result<()> {
+    pub fn attribute_policy_proposal(&mut self, wallet_id: &str, harness: AgentKind) -> Result<()> {
         let changed = self.connection.execute(
-            "UPDATE policy_proposals SET requesting_client_id = ?1 WHERE wallet_id = ?2",
-            params![Blob(*client_id.as_bytes()), wallet_id],
+            "UPDATE policy_proposals SET requesting_harness_kind = ?1 WHERE wallet_id = ?2",
+            params![harness.as_str(), wallet_id],
         )?;
         ensure!(
             changed == 1,
@@ -1242,11 +1248,11 @@ impl DesktopStore {
         Ok(())
     }
 
-    pub fn attribute_network_proposal(&mut self, chain_id: u64, client_id: Uuid) -> Result<()> {
+    pub fn attribute_network_proposal(&mut self, chain_id: u64, harness: AgentKind) -> Result<()> {
         let changed = self.connection.execute(
-            "UPDATE network_proposals SET requesting_client_id = ?1 WHERE chain_id = ?2",
+            "UPDATE network_proposals SET requesting_harness_kind = ?1 WHERE chain_id = ?2",
             params![
-                Blob(*client_id.as_bytes()),
+                harness.as_str(),
                 i64::try_from(chain_id).context("chain ID out of range")?
             ],
         )?;
@@ -1260,15 +1266,15 @@ impl DesktopStore {
     pub fn attribute_token_proposals(
         &mut self,
         tokens: &[(u64, [u8; 20])],
-        client_id: Uuid,
+        harness: AgentKind,
     ) -> Result<()> {
         let transaction = self.connection.transaction()?;
         for (chain_id, address) in tokens {
             transaction.execute(
-                "UPDATE token_proposals SET requesting_client_id = ?1
+                "UPDATE token_proposals SET requesting_harness_kind = ?1
                  WHERE chain_id = ?2 AND address = ?3",
                 params![
-                    Blob(*client_id.as_bytes()),
+                    harness.as_str(),
                     i64::try_from(*chain_id).context("chain ID out of range")?,
                     Blob(*address)
                 ],

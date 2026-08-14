@@ -8,7 +8,7 @@ use crate::{
         PRIVATE_KEY_REVEAL_DURATION,
     },
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
-    http_server::McpHttpServer,
+    ipc_server::McpIpcServer,
     notifications::{
         NotificationPreferences, NotificationRoute, NotificationService as _,
         PlatformNotificationService, TransactionContext, initialize_platform_notifications,
@@ -30,7 +30,7 @@ use ekubo_wallet_core::approval::{
 use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
 use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
-use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, MCP_RESOURCE, McpClient};
+use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, McpClient};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
@@ -622,7 +622,7 @@ struct NavigateRoute {
 
 struct DesktopRuntime {
     _instance: Arc<Mutex<Option<SingleInstance>>>,
-    _server: Arc<Mutex<Option<McpHttpServer>>>,
+    _server: Arc<Mutex<Option<McpIpcServer>>>,
     _walletconnect: Arc<Mutex<crate::walletconnect::WalletConnectManager>>,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
     _pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
@@ -807,6 +807,7 @@ fn agent_login_instruction(kind: AgentKind) -> Option<AgentLoginInstruction> {
     let (harness, command_prefix, location) = match kind {
         AgentKind::Codex => ("Codex", "codex mcp login", "Run in a terminal."),
         AgentKind::ClaudeCode => ("Claude Code", "claude mcp login", "Run in a terminal."),
+        AgentKind::ClaudeDesktop => return None,
         AgentKind::GeminiCli => (
             "Gemini CLI",
             "/mcp auth",
@@ -9332,14 +9333,9 @@ impl WalletWindow {
                             .text_color(cx.theme().muted_foreground)
 .max_w(PROSE_MEASURE)
                             .child(selectable_label(
-                                "Installing writes this server into an agent's configuration file. Agents authenticate with OAuth credentials they obtain on their first connection; no key or secret is written to the file.",
+                                "Installing writes a credential-free stdio bridge into each agent's configuration. The bridge stays running and connects automatically whenever Ekubo Wallet opens.",
                             )),
                     )
-                    .child(copyable_value(
-                        "mcp-endpoint",
-                        "MCP server",
-                        MCP_RESOURCE.to_owned(),
-                    ))
                     .child(
                         h_flex()
                             .flex_wrap()
@@ -9385,18 +9381,6 @@ impl WalletWindow {
                             }),
                     )
                     .child(agents),
-            ))
-            .child(settings_section(
-                "Agent sessions",
-                GroupBox::new()
-                    .id("agent-session-settings")
-                    .child(login_commands)
-                    .child(
-                        div()
-                            .font_semibold()
-                            .child(selectable_label("Authorized sessions")),
-                    )
-                    .child(managed_agents),
             ))
             .child(self.render_updates(cx))
             .child(self.render_legal(cx))
@@ -13279,18 +13263,19 @@ pub fn run_desktop_hidden() -> Result<()> {
 
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
+    crate::agent_config::install_bridge_helper()?;
     let config = crate::config::ConfigStore::production()?;
     let (activation_tx, activation_rx) = std::sync::mpsc::channel();
     let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
         InstanceOutcome::Primary(instance) => instance,
         InstanceOutcome::ActivatedExisting => return Ok(()),
     };
+    let data_dir = config.data_dir().to_path_buf();
     let authority = ApplicationAuthority::open(config)?;
     let owner = authority.owner_api();
     let agent = authority.agent_api();
-    let oauth = authority.oauth_api();
     let events = authority.events();
-    let server_slot = Arc::new(Mutex::new(None::<McpHttpServer>));
+    let server_slot = Arc::new(Mutex::new(None::<McpIpcServer>));
     let pending_update = Arc::new(Mutex::new(None::<PreparedUpdate>));
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
     let walletconnect = Arc::new(Mutex::new(
@@ -13474,22 +13459,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 } => Some(*request_id),
                                 _ => None,
                             };
-                            if matches!(
-                                &event.kind,
-                                crate::events::DomainEventKind::OAuthAuthorizationRequested { .. }
-                            ) {
-                                // `navigate_route`, for the reason the tray
-                                // uses it: an agent that connects while the
-                                // legal documents are still open must not pull
-                                // the app to Settings behind a modal the reader
-                                // cannot dismiss.
-                                event_view.update(cx, |view, cx| {
-                                    view.navigate_route(Route::Settings, cx);
-                                });
-                                let _ = cx.update(|cx| {
-                                    show_wallet_window(cx, &event_view, &event_window)
-                                });
-                            }
                             if let crate::events::DomainEventKind::McpStatusChanged { online } =
                                 &event.kind
                             {
@@ -13698,7 +13667,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let status_tray = tray.clone();
             let server_events = events.clone();
             let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                McpHttpServer::start(oauth, agent, server_events).await
+                McpIpcServer::start(&data_dir, agent, server_events).await
             });
             cx.spawn(async move |cx| match server_task.await {
                 Ok(server) => {

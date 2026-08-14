@@ -573,10 +573,11 @@ pub struct AgentApi {
 }
 
 impl AgentApi {
-    pub(crate) fn server(&self, client_id: Uuid) -> Result<WalletMcpServer> {
+    pub(crate) fn server(&self, client_id: Uuid, harness: AgentKind) -> Result<WalletMcpServer> {
         WalletMcpServer::production(
             self.config.clone(),
             client_id,
+            harness,
             self.desktop.clone(),
             self.global_quota.clone(),
             self.events.clone(),
@@ -590,122 +591,6 @@ pub struct OwnerApi {
     config: ConfigStore,
     desktop: Arc<Mutex<DesktopStore>>,
     events: EventBus,
-}
-
-/// OAuth protocol capability held by the loopback transport. It has no owner
-/// settings, custody, policy, export, review, revocation, or removal methods.
-#[derive(Clone)]
-pub struct OAuthApi {
-    config: ConfigStore,
-    desktop: Arc<Mutex<DesktopStore>>,
-    events: EventBus,
-}
-
-impl OAuthApi {
-    fn desktop(&self) -> Result<std::sync::MutexGuard<'_, DesktopStore>> {
-        self.desktop
-            .lock()
-            .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))
-    }
-
-    pub fn register_client(
-        &self,
-        name: &str,
-        kind: AgentKind,
-        redirect_uris: &[String],
-        registration: Option<&serde_json::Value>,
-    ) -> Result<McpClient> {
-        self.desktop()?
-            .register_oauth_client(name, kind, redirect_uris, registration)
-    }
-
-    pub fn validate_authorization_request(
-        &self,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_challenge: &str,
-        scope: &str,
-        resource: &str,
-    ) -> Result<McpClient> {
-        self.desktop()?.validate_oauth_authorization_request(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-        )
-    }
-
-    pub async fn authorize_client(
-        &self,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_challenge: &str,
-        scope: &str,
-        resource: &str,
-        session_preset: OAuthSessionPreset,
-    ) -> Result<OAuthAuthorizationCode> {
-        let client = self.validate_authorization_request(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-        )?;
-        self.events
-            .publish(DomainEventKind::OAuthAuthorizationRequested { client_id });
-        tokio::task::yield_now().await;
-        require_current_acceptance(self.config.data_dir())?;
-        let authorization = authorize_oauth_client(&client.display_name, redirect_uri).await?;
-        let code = self.desktop()?.issue_authorization_code_with_session(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-            session_preset,
-            &client,
-            &authorization,
-        )?;
-        self.events
-            .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        Ok(code)
-    }
-
-    pub fn exchange_code(
-        &self,
-        code: &str,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_verifier: &str,
-        resource: &str,
-    ) -> Result<OAuthTokenPair> {
-        self.desktop()?.exchange_authorization_code(
-            code,
-            client_id,
-            redirect_uri,
-            code_verifier,
-            resource,
-        )
-    }
-
-    pub fn refresh_token(
-        &self,
-        refresh_token: &str,
-        client_id: Uuid,
-        resource: &str,
-    ) -> Result<OAuthTokenPair> {
-        self.desktop()?
-            .refresh_access_token(refresh_token, client_id, resource)
-    }
-
-    pub fn authenticate_access_token(
-        &self,
-        token: &str,
-        resource: &str,
-    ) -> Result<Option<ekubo_wallet_core::desktop_store::AuthenticatedClient>> {
-        self.desktop()?.authenticate_access_token(token, resource)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -2032,7 +1917,6 @@ impl ExportLease {
 
 pub struct ApplicationAuthority {
     owner: OwnerApi,
-    oauth: OAuthApi,
     agent: AgentApi,
     events: EventBus,
 }
@@ -2044,11 +1928,6 @@ impl ApplicationAuthority {
         let global_quota = Arc::new(Mutex::new(GlobalAgentQuota::default()));
         Ok(Self {
             owner: OwnerApi {
-                config: config.clone(),
-                desktop: desktop.clone(),
-                events: events.clone(),
-            },
-            oauth: OAuthApi {
                 config: config.clone(),
                 desktop: desktop.clone(),
                 events: events.clone(),
@@ -2071,11 +1950,6 @@ impl ApplicationAuthority {
     #[must_use]
     pub fn agent_api(&self) -> AgentApi {
         self.agent.clone()
-    }
-
-    #[must_use]
-    pub fn oauth_api(&self) -> OAuthApi {
-        self.oauth.clone()
     }
 
     #[must_use]
