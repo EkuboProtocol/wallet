@@ -32,6 +32,12 @@ const EVERY_STAGE: [TransactionStage; 7] = [
     TransactionStage::Cancelled,
 ];
 
+fn detailed() -> NotificationPreferences {
+    NotificationPreferences {
+        detailed_previews: true,
+    }
+}
+
 #[test]
 fn every_transaction_lifecycle_stage_says_what_happened_and_where() {
     for (stage, expected_title) in [
@@ -44,7 +50,7 @@ fn every_transaction_lifecycle_stage_says_what_happened_and_where() {
         (TransactionStage::Cancelled, "Transaction cancelled"),
     ] {
         let event = transaction_event(stage, Uuid::new_v4());
-        let notification = notification_for(&event, &context(), NotificationPreferences).unwrap();
+        let notification = notification_for(&event, &context(), detailed()).unwrap();
 
         assert_eq!(notification.title, expected_title);
         assert!(
@@ -63,7 +69,7 @@ fn banner_text_never_shows_the_request_identifier() {
     let request_id = Uuid::new_v4();
     for stage in EVERY_STAGE {
         let event = transaction_event(stage, request_id);
-        let notification = notification_for(&event, &context(), NotificationPreferences).unwrap();
+        let notification = notification_for(&event, &context(), detailed()).unwrap();
         let text = format!("{} {}", notification.title, notification.body);
 
         assert!(
@@ -88,7 +94,7 @@ fn proposed_transactions_route_to_review_and_lifecycle_updates_route_to_activity
             NotificationRoute::Activity(request_id)
         };
         let event = transaction_event(stage, request_id);
-        let notification = notification_for(&event, &context(), NotificationPreferences).unwrap();
+        let notification = notification_for(&event, &context(), detailed()).unwrap();
 
         assert_eq!(notification.route, expected);
     }
@@ -101,10 +107,27 @@ fn only_transaction_events_raise_a_banner() {
         kind: DomainEventKind::ConfigurationChanged,
     };
 
+    assert_eq!(notification_for(&event, &context(), detailed()), None);
+}
+
+#[test]
+fn private_previews_hide_account_and_network_names() {
+    let event = transaction_event(TransactionStage::Proposed, Uuid::new_v4());
+    let notification = notification_for(
+        &event,
+        &context(),
+        NotificationPreferences {
+            detailed_previews: false,
+        },
+    )
+    .unwrap();
+
     assert_eq!(
-        notification_for(&event, &context(), NotificationPreferences),
-        None
+        notification.body,
+        "Open Ekubo Wallet for details. Nothing is signed or sent until you decide."
     );
+    assert!(!notification.body.contains("trading"));
+    assert!(!notification.body.contains("Ethereum"));
 }
 
 #[test]

@@ -20,6 +20,10 @@ use zeroize::Zeroizing;
 
 /// The only relay protocol this wallet speaks.
 pub const RELAY_PROTOCOL_IRN: &str = "irn";
+/// Pairing links contain two 32-byte hex values plus a handful of routing
+/// fields. Keep an intentionally generous ceiling, applied before URL
+/// decoding allocates attacker-controlled query values.
+const MAX_PAIRING_URI_BYTES: usize = 4 * 1024;
 
 /// A parsed `wc:` pairing URI.
 #[derive(Debug)]
@@ -45,6 +49,10 @@ impl PairingUri {
     pub fn parse(input: &str, now: DateTime<Utc>) -> Result<Self> {
         let input = input.trim();
         ensure!(!input.is_empty(), "no pairing URI was given");
+        ensure!(
+            input.len() <= MAX_PAIRING_URI_BYTES,
+            "the pairing URI exceeds {MAX_PAIRING_URI_BYTES} bytes"
+        );
         ensure!(
             input.starts_with("wc:"),
             "a WalletConnect pairing URI starts with `wc:`. Copy the link from the dapp's \

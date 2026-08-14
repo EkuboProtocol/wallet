@@ -83,7 +83,14 @@ impl PrivateKeyMaterial {
     /// the disclosure before calling it.
     #[must_use]
     pub(crate) fn expose_hex(&self) -> Zeroizing<String> {
-        Zeroizing::new(format!("0x{}", hex::encode(self.0)))
+        use std::fmt::Write as _;
+
+        let mut encoded = Zeroizing::new(String::with_capacity(2 + self.0.len() * 2));
+        encoded.push_str("0x");
+        for byte in self.0 {
+            write!(&mut *encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        encoded
     }
 
     fn as_bytes(&self) -> &[u8; 32] {

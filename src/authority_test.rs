@@ -93,7 +93,7 @@ fn export_lease_counts_down_to_zero_and_stays_there() {
 }
 
 #[tokio::test]
-async fn notification_previews_are_always_detailed() {
+async fn notification_preview_preference_round_trips() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("wallet.db");
     let desktop = DesktopStore::open(&database, &DatabaseKey::new([13; 32])).unwrap();
@@ -107,7 +107,7 @@ async fn notification_previews_are_always_detailed() {
         .set_detailed_notification_previews(false)
         .await
         .unwrap();
-    assert!(owner.detailed_notification_previews().unwrap());
+    assert!(!owner.detailed_notification_previews().unwrap());
 }
 
 #[test]

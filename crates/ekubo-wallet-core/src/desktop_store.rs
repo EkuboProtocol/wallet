@@ -126,7 +126,9 @@ impl DesktopStore {
     }
 
     pub fn detailed_notification_previews(&self) -> Result<bool> {
-        Ok(true)
+        Ok(self
+            .setting("notification_detailed_previews")?
+            .unwrap_or(true))
     }
 
     pub fn set_detailed_notification_previews(

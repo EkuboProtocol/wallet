@@ -85,18 +85,22 @@ impl std::fmt::Debug for SymKey {
 impl SymKey {
     /// The key a pairing URI carried, as lowercase hex.
     pub fn from_hex(value: &str) -> Result<Self> {
-        let bytes = hex::decode(value).context("symmetric key must be hex")?;
-        let bytes: [u8; KEY_LENGTH] = bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("symmetric key must be {KEY_LENGTH} bytes"))?;
+        ensure!(
+            value.len() == KEY_LENGTH * 2,
+            "symmetric key must be {KEY_LENGTH} bytes"
+        );
+        let bytes =
+            zeroize::Zeroizing::new(hex::decode(value).context("symmetric key must be hex")?);
+        let mut key = [0_u8; KEY_LENGTH];
+        key.copy_from_slice(&bytes);
         // An all-zero key is not a key. It is what a peer sends when its own
         // key derivation silently failed, and accepting it would mean
         // "encrypting" every later payload under a value the whole world knows.
         ensure!(
-            bytes != [0u8; KEY_LENGTH],
+            key != [0u8; KEY_LENGTH],
             "symmetric key is all zero, which is never a real key"
         );
-        Ok(Self(bytes))
+        Ok(Self(key))
     }
 
     /// The relay topic this key addresses: hex of the SHA-256 of its raw

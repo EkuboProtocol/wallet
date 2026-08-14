@@ -310,11 +310,7 @@ impl RelayConnection {
     }
 
     /// Close the socket and stop both tasks.
-    pub fn close(self) {
-        drop(self.outgoing);
-        self.reader.abort();
-        self.writer.abort();
-    }
+    pub fn close(self) {}
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let id = next_call_id(&self.salt);
@@ -356,6 +352,13 @@ impl RelayConnection {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&id);
         }
+    }
+}
+
+impl Drop for RelayConnection {
+    fn drop(&mut self) {
+        self.reader.abort();
+        self.writer.abort();
     }
 }
 

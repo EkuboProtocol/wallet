@@ -13478,7 +13478,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let tray_window = window_slot.clone();
             let tray_view = wallet_view.clone();
             let (tray_commands, mut tray_command_rx) = tokio::sync::mpsc::unbounded_channel();
-            std::thread::Builder::new()
+            let _tray_thread = std::thread::Builder::new()
                 .name("ekubo-tray-events".into())
                 .spawn(move || {
                     while let Some(command) = PlatformTray::recv_command() {
@@ -13486,8 +13486,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             break;
                         }
                     }
-                })
-                .expect("failed to start native tray event thread");
+                });
             cx.spawn(async move |cx| {
                 while let Some(command) = tray_command_rx.recv().await {
                     match command {
@@ -13524,19 +13523,25 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 loop {
                     match domain_events.recv().await {
                         Ok(event) => {
-                            let preferences = NotificationPreferences;
                             let owner = notification_owner.clone();
                             let described = tokio::task::spawn_blocking(move || {
-                                transaction_notification_context(&owner, &event)
-                                    .map(|context| (event, context))
+                                let context = transaction_notification_context(&owner, &event)?;
+                                let preferences = NotificationPreferences {
+                                    detailed_previews: owner
+                                        .detailed_notification_previews()
+                                        .ok()?,
+                                };
+                                Some((event, context, preferences))
                             })
                             .await
                             .ok()
                             .flatten();
                             if let Some(notification) =
-                                described.as_ref().and_then(|(event, context)| {
-                                    notification_for(event, context, preferences)
-                                })
+                                described
+                                    .as_ref()
+                                    .and_then(|(event, context, preferences)| {
+                                        notification_for(event, context, *preferences)
+                                    })
                             {
                                 notification_service.show(notification);
                             }
