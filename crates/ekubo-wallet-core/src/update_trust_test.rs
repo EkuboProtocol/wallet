@@ -230,12 +230,8 @@ fn macos_updater_replaces_a_disposable_application_bundle() {
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"old\0EKUBO-WALLET-PACKAGE-VERSION:1.0.4\0").unwrap();
 
-    let mut candidate = update("2.0.0", "https://example.test/wallet.app.tar.gz");
-    candidate.extract_path = app;
-    candidate.format = UpdateFormat::App;
-    candidate
-        .install(macos_archive("2.0.0"))
-        .expect("cargo-packager replaces the disposable bundle");
+    install_macos_application(&app, &macos_archive("2.0.0"))
+        .expect("core atomically replaces the disposable bundle");
 
     let installed = std::fs::read(binary).expect("the replacement binary exists");
     assert!(
@@ -243,6 +239,32 @@ fn macos_updater_replaces_a_disposable_application_bundle() {
             .windows(b"EKUBO-WALLET-PACKAGE-VERSION:2.0.0".len())
             .any(|bytes| { bytes == b"EKUBO-WALLET-PACKAGE-VERSION:2.0.0" })
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn failed_macos_swap_leaves_the_installed_application_untouched() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"known-working-wallet").unwrap();
+
+    assert!(swap_macos_paths(&app, &directory.path().join("missing.app")).is_err());
+    assert_eq!(std::fs::read(binary).unwrap(), b"known-working-wallet");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn malformed_macos_archive_cannot_move_the_installed_application() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"known-working-wallet").unwrap();
+
+    assert!(install_macos_application(&app, b"not a gzip archive").is_err());
+    assert_eq!(std::fs::read(binary).unwrap(), b"known-working-wallet");
 }
 
 #[test]

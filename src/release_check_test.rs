@@ -7,6 +7,19 @@ use super::*;
 
 const REPOSITORY: &str = "EkuboProtocol/wallet";
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_relaunch_forces_a_new_instance() {
+    let application = Path::new("/Applications/Ekubo Wallet.app");
+    let command = macos_relaunch_command(application);
+
+    assert_eq!(command.get_program(), "/usr/bin/open");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        vec![std::ffi::OsStr::new("-n"), application.as_os_str()]
+    );
+}
+
 #[test]
 fn update_diagnostics_are_private_durable_and_single_line() {
     let directory = tempfile::tempdir().expect("a temporary directory");

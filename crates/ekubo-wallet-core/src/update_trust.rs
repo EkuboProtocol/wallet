@@ -8,7 +8,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cargo_packager_updater::{RemoteRelease, RemoteReleaseData, Update, UpdateFormat};
 use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest as _, Sha256};
-use std::{collections::BTreeSet, io::Read as _, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet,
+    io::Read as _,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 pub const UPDATER_PUBLIC_KEY: &str = env!("EKUBO_COMPILED_UPDATER_PUBLIC_KEY");
 pub const UPDATE_PUBLISHER: &str = "Ekubo, Inc.";
@@ -249,19 +254,112 @@ pub fn install_update(
         review_identity == prepared.review().identity(),
         "update metadata or package bytes changed after owner authentication"
     );
-    prepared
-        .update
-        .verify_authenticated_payload(&prepared.bytes)?;
+    let PreparedUpdate { update, bytes } = prepared;
+    update.verify_authenticated_payload(&bytes)?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let relaunch_path = Some(prepared.update.update.extract_path.clone());
+    let relaunch_path = Some(update.update.extract_path.clone());
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let relaunch_path = None;
-    prepared
+    #[cfg(target_os = "macos")]
+    install_macos_application(&update.update.extract_path, &bytes)?;
+    #[cfg(not(target_os = "macos"))]
+    update
         .update
-        .update
-        .install(prepared.bytes)
+        .install(bytes)
         .context("could not install update")?;
     Ok(relaunch_path)
+}
+
+/// Extract the signed bundle beside the installed application, then atomically
+/// exchange their names. `RENAME_SWAP` either leaves both paths untouched or
+/// commits the complete replacement, so an I/O failure cannot consume the
+/// working application while reporting that installation failed.
+#[cfg(target_os = "macos")]
+fn install_macos_application(application: &Path, bytes: &[u8]) -> Result<()> {
+    use std::path::Component;
+
+    ensure!(
+        std::fs::symlink_metadata(application)?.file_type().is_dir(),
+        "the installed macOS application is not a directory"
+    );
+    let parent = application
+        .parent()
+        .context("the installed macOS application has no parent directory")?;
+    let application_name = application
+        .file_name()
+        .context("the installed macOS application has no bundle name")?;
+    let transaction = tempfile::Builder::new()
+        .prefix(".ekubo-wallet-update-")
+        .tempdir_in(parent)
+        .context("could not stage the update beside the installed application")?;
+    let staging_root = transaction.path().join("staged");
+    std::fs::create_dir(&staging_root).context("could not create the update staging directory")?;
+
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = 0usize;
+    for entry in archive
+        .entries()
+        .context("the macOS update archive is invalid")?
+    {
+        let mut entry = entry.context("the macOS update archive entry is invalid")?;
+        let path = entry
+            .path()
+            .context("the macOS update archive path is invalid")?
+            .into_owned();
+        let mut components = path.components();
+        ensure!(
+            matches!(components.next(), Some(Component::Normal(root)) if root == application_name),
+            "the macOS update archive has an unexpected bundle root"
+        );
+        ensure!(
+            components.all(|component| matches!(component, Component::Normal(_))),
+            "the macOS update archive contains an unsafe path"
+        );
+        ensure!(
+            entry
+                .unpack_in(&staging_root)
+                .context("could not extract the macOS update archive")?,
+            "the macOS update archive escapes its staging directory"
+        );
+        entries = entries
+            .checked_add(1)
+            .context("the macOS update archive has too many entries")?;
+    }
+    ensure!(entries != 0, "the macOS update archive is empty");
+
+    let staged_application = staging_root.join(application_name);
+    ensure!(
+        std::fs::symlink_metadata(&staged_application)?
+            .file_type()
+            .is_dir(),
+        "the macOS update archive contains no application bundle"
+    );
+    swap_macos_paths(application, &staged_application)
+        .context("could not atomically replace the macOS application")?;
+
+    // The old application now lives under `transaction`; dropping it removes
+    // that backup only after the atomic exchange has succeeded.
+    drop(transaction);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn swap_macos_paths(left: &Path, right: &Path) -> Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+
+    let left = CString::new(left.as_os_str().as_bytes())
+        .context("the installed application path contains a null byte")?;
+    let right = CString::new(right.as_os_str().as_bytes())
+        .context("the staged application path contains a null byte")?;
+    // SAFETY: both pointers come from live `CString`s and remain valid for the
+    // duration of the call. `renamex_np` does not retain either pointer.
+    let result = unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 fn verify_packager_signature(

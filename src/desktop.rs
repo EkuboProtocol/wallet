@@ -88,6 +88,7 @@ const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
 const BUTTON_HEIGHT: gpui::Pixels = px(44.0);
+const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
@@ -13154,6 +13155,49 @@ fn release_single_instance(instance_slot: &Arc<Mutex<Option<SingleInstance>>>) -
     Ok(())
 }
 
+fn perform_desktop_shutdown(
+    server: Option<McpIpcServer>,
+    tokio: &tokio::runtime::Handle,
+    prepared: Option<PreparedUpdate>,
+    instance_slot: Arc<Mutex<Option<SingleInstance>>>,
+    data_dir: &Path,
+) -> Result<bool> {
+    if let Some(server) = server {
+        let stopped = tokio.block_on(tokio::time::timeout(
+            DESKTOP_SERVER_SHUTDOWN_TIMEOUT,
+            server.stop(),
+        ));
+        let failure = match stopped {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("local MCP server shutdown failed: {error:#}")),
+            Err(_) => Some(format!(
+                "local MCP server shutdown exceeded {} seconds",
+                DESKTOP_SERVER_SHUTDOWN_TIMEOUT.as_secs()
+            )),
+        };
+        if let Some(failure) = failure {
+            let _ = crate::release_check::record_update_diagnostic(data_dir, &failure);
+        }
+    }
+    let Some(prepared) = prepared else {
+        return Ok(false);
+    };
+
+    let handoff_data_dir = data_dir.to_path_buf();
+    crate::release_check::install_and_relaunch(
+        prepared.prepared,
+        prepared.authorization,
+        move || {
+            let _ = crate::release_check::record_update_diagnostic(
+                &handoff_data_dir,
+                "releasing the single-instance lock before relaunch",
+            );
+            release_single_instance(&instance_slot)
+        },
+    )?;
+    Ok(true)
+}
+
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
     crate::agent_config::install_bridge_helper()?;
@@ -13271,68 +13315,66 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     .ok()
                     .and_then(|mut server| server.take());
                 let tokio = tokio.clone();
-                let shutdown_update = shutdown_update.clone();
+                let prepared = shutdown_update
+                    .lock()
+                    .ok()
+                    .and_then(|mut update| update.take());
+                let update_requested = prepared.is_some();
+                if update_requested {
+                    let _ = crate::release_check::record_update_diagnostic(
+                        &update_data_dir,
+                        "authorized update installation started",
+                    );
+                }
+                let worker_data_dir = update_data_dir.clone();
+                // GPUI gives ordinary quit futures only 200 ms. Create the
+                // update worker before returning the future, then join it on
+                // the first poll so the process cannot exit mid-replacement.
+                let worker = std::thread::Builder::new()
+                    .name("ekubo-desktop-shutdown".into())
+                    .spawn(move || {
+                        perform_desktop_shutdown(
+                            server,
+                            &tokio,
+                            prepared,
+                            shutdown_instance,
+                            &worker_data_dir,
+                        )
+                    });
                 async move {
-                    if let Some(server) = server {
-                        let _ = tokio.spawn(server.stop()).await;
-                    }
-                    let prepared = shutdown_update
-                        .lock()
-                        .ok()
-                        .and_then(|mut update| update.take());
-                    if let Some(prepared) = prepared {
-                        let _ = crate::release_check::record_update_diagnostic(
-                            &update_data_dir,
-                            "authorized update installation started",
-                        );
-                        let handoff_instance = shutdown_instance.clone();
-                        let handoff_data_dir = update_data_dir.clone();
-                        let result = match std::thread::Builder::new()
-                            .name("ekubo-update-install".into())
-                            .spawn(move || {
-                                crate::release_check::install_and_relaunch(
-                                    prepared.prepared,
-                                    prepared.authorization,
-                                    move || {
-                                        let _ = crate::release_check::record_update_diagnostic(
-                                            &handoff_data_dir,
-                                            "releasing the single-instance lock before relaunch",
-                                        );
-                                        release_single_instance(&handoff_instance)
-                                    },
-                                )
-                            }) {
-                            Ok(worker) => worker.join().unwrap_or_else(|_| {
-                                Err(anyhow::anyhow!("the update installer thread panicked"))
-                            }),
-                            Err(error) => Err(error.into()),
-                        };
-                        match result {
-                            Ok(()) => {
-                                let _ = crate::release_check::record_update_diagnostic(
-                                    &update_data_dir,
-                                    "updated wallet relaunch command started",
-                                );
-                            }
-                            Err(error) => {
-                                let message =
-                                    format!("authorized update installation failed: {error:#}");
-                                let _ = crate::release_check::record_update_diagnostic(
-                                    &update_data_dir,
-                                    &message,
-                                );
-                                tracing::error!(%error, "authorized update installation failed");
-                                let _ = notify_rust::Notification::new()
-                                    .summary("Ekubo Wallet update failed")
-                                    .body(&format!(
-                                        "{message}. Details: {}",
-                                        crate::release_check::update_diagnostics_path(
-                                            &update_data_dir
-                                        )
+                    let result = match worker {
+                        Ok(worker) => worker.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("the desktop shutdown thread panicked"))
+                        }),
+                        Err(error) => Err(error.into()),
+                    };
+                    match result {
+                        Ok(true) => {
+                            let _ = crate::release_check::record_update_diagnostic(
+                                &update_data_dir,
+                                "updated wallet relaunch command completed",
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) if update_requested => {
+                            let message =
+                                format!("authorized update installation failed: {error:#}");
+                            let _ = crate::release_check::record_update_diagnostic(
+                                &update_data_dir,
+                                &message,
+                            );
+                            tracing::error!(%error, "authorized update installation failed");
+                            let _ = notify_rust::Notification::new()
+                                .summary("Ekubo Wallet update failed")
+                                .body(&format!(
+                                    "{message}. Details: {}",
+                                    crate::release_check::update_diagnostics_path(&update_data_dir)
                                         .display()
-                                    ))
-                                    .show();
-                            }
+                                ))
+                                .show();
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "desktop shutdown failed");
                         }
                     }
                 }

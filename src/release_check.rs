@@ -57,10 +57,7 @@ pub fn install_and_relaunch(
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = relaunch_path;
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(executable)
-        .spawn()
-        .context("could not relaunch updated application")?;
+    relaunch_macos_application(&executable).context("could not relaunch updated application")?;
     #[cfg(target_os = "linux")]
     std::process::Command::new(executable)
         .spawn()
@@ -118,10 +115,7 @@ fn relaunch_current_application() -> anyhow::Result<()> {
             .and_then(std::path::Path::parent)
             .and_then(std::path::Path::parent)
             .context("could not locate the current application bundle")?;
-        std::process::Command::new("open")
-            .arg(bundle)
-            .spawn()
-            .context("could not restart the current application")?;
+        relaunch_macos_application(bundle).context("could not restart the current application")?;
     }
     #[cfg(target_os = "linux")]
     {
@@ -140,6 +134,25 @@ fn relaunch_current_application() -> anyhow::Result<()> {
     .context("could not restart the current application")?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     anyhow::bail!("automatic updates are unsupported on this platform");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_relaunch_command(application: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("/usr/bin/open");
+    command.arg("-n").arg(application);
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn relaunch_macos_application(application: &Path) -> anyhow::Result<()> {
+    let status = macos_relaunch_command(application)
+        .status()
+        .context("could not run macOS LaunchServices")?;
+    anyhow::ensure!(
+        status.success(),
+        "macOS LaunchServices rejected the relaunch with {status}"
+    );
     Ok(())
 }
 
