@@ -140,17 +140,34 @@ impl Rule {
     /// Conservative: `false` means "cannot prove it", never "definitely not".
     #[must_use]
     pub fn is_narrower_than(&self, other: &Self) -> bool {
-        fn slot_narrower(mine: Option<&Predicate>, theirs: Option<&Predicate>) -> bool {
+        fn slot_narrower(
+            mine: Option<&Predicate>,
+            theirs: Option<&Predicate>,
+            ty: &DynSolType,
+        ) -> bool {
             match (mine, theirs) {
                 (_, None) => true,
                 (None, Some(_)) => false,
-                (Some(mine), Some(theirs)) => mine.is_narrower_than(theirs),
+                (Some(mine), Some(theirs)) => mine
+                    .normalized_for(ty)
+                    .is_narrower_than(&theirs.normalized_for(ty)),
             }
         }
-        slot_narrower(self.chain_id.as_ref(), other.chain_id.as_ref())
-            && slot_narrower(self.to.as_ref(), other.to.as_ref())
-            && slot_narrower(self.native_value.as_ref(), other.native_value.as_ref())
-            && slot_narrower(self.calldata.as_ref(), other.calldata.as_ref())
+        slot_narrower(
+            self.chain_id.as_ref(),
+            other.chain_id.as_ref(),
+            &DynSolType::Uint(256),
+        ) && slot_narrower(self.to.as_ref(), other.to.as_ref(), &DynSolType::Address)
+            && slot_narrower(
+                self.native_value.as_ref(),
+                other.native_value.as_ref(),
+                &DynSolType::Uint(256),
+            )
+            && slot_narrower(
+                self.calldata.as_ref(),
+                other.calldata.as_ref(),
+                &DynSolType::Bytes,
+            )
     }
 
     /// One reviewable line describing the authority this rule grants or takes

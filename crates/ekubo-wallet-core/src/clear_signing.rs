@@ -15,7 +15,11 @@
 //! authoritative over any descriptor reading.
 
 use crate::{approval_summary::TokenMetadataMap, sanitize::stripped_capped};
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::{
+    dyn_abi::{DynSolValue, JsonAbiExt},
+    json_abi::Function,
+    primitives::{Address, Bytes, I256, U256},
+};
 use clear_signing::{
     DataProvider, FormatOutcome, ResolvedDescriptor, TokenMeta, TransactionContext,
     engine::{DisplayEntry, DisplayModel},
@@ -46,9 +50,16 @@ pub(crate) use embedded::CLEARSIGN_FILES;
 pub(crate) struct VendoredRegistry {
     pub calldata: Vec<ResolvedDescriptor>,
     pub eip712: Vec<ResolvedDescriptor>,
+    calldata_formats: Vec<CanonicalFormat>,
     /// Files that failed to resolve or parse. A test asserts this is empty,
     /// so at runtime a failure only means one descriptor is unavailable.
     pub failures: Vec<(&'static str, String)>,
+}
+
+struct CanonicalFormat {
+    chain_id: u64,
+    address: String,
+    function: Function,
 }
 
 pub(crate) fn registry() -> &'static VendoredRegistry {
@@ -61,6 +72,7 @@ fn build_registry() -> VendoredRegistry {
     let mut registry = VendoredRegistry {
         calldata: Vec::new(),
         eip712: Vec::new(),
+        calldata_formats: Vec::new(),
         failures: Vec::new(),
     };
     for (path, contents) in CLEARSIGN_FILES {
@@ -76,7 +88,7 @@ fn build_registry() -> VendoredRegistry {
             continue;
         }
         match resolve_vendored(path, contents, &by_path) {
-            Ok(descriptor) => {
+            Ok((descriptor, resolved_json)) => {
                 let Some(deployment) = descriptor.context.deployments().first().cloned() else {
                     registry
                         .failures
@@ -89,7 +101,23 @@ fn build_registry() -> VendoredRegistry {
                     descriptor,
                 };
                 match resolved.descriptor.context {
-                    DescriptorContext::Contract(_) => registry.calldata.push(resolved),
+                    DescriptorContext::Contract(_) => {
+                        let formats = match parse_calldata_formats(&resolved_json) {
+                            Ok(formats) => formats,
+                            Err(error) => {
+                                registry.failures.push((path, error));
+                                continue;
+                            }
+                        };
+                        registry
+                            .calldata_formats
+                            .extend(formats.into_iter().map(|function| CanonicalFormat {
+                                chain_id: resolved.chain_id,
+                                address: resolved.address.clone(),
+                                function,
+                            }));
+                        registry.calldata.push(resolved);
+                    }
                     DescriptorContext::Eip712(_) => registry.eip712.push(resolved),
                 }
             }
@@ -106,9 +134,119 @@ fn resolve_vendored(
     path: &str,
     contents: &str,
     by_path: &BTreeMap<&str, &str>,
-) -> Result<Descriptor, String> {
+) -> Result<(Descriptor, String), String> {
     let resolved = resolve_includes(path, contents, by_path, 0)?;
-    serde_json::from_str(&resolved).map_err(|error| format!("invalid descriptor: {error}"))
+    let descriptor =
+        serde_json::from_str(&resolved).map_err(|error| format!("invalid descriptor: {error}"))?;
+    Ok((descriptor, resolved))
+}
+
+fn parse_calldata_formats(contents: &str) -> Result<Vec<Function>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(contents).map_err(|error| format!("invalid JSON: {error}"))?;
+    let formats = value
+        .pointer("/display/formats")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "calldata descriptor has no display formats".to_string())?;
+    formats
+        .keys()
+        .map(|signature| {
+            let canonical = canonical_human_signature(signature)?;
+            Function::parse(&canonical)
+                .map_err(|error| format!("invalid calldata format {signature:?}: {error}"))
+        })
+        .collect()
+}
+
+/// Alloy's human-readable ABI parser accepts names on top-level parameters,
+/// but not the names ERC-7730 places inside tuple parameters. Reduce the
+/// registry spelling to the type-only signature that determines the selector
+/// and ABI layout before handing it to Alloy.
+fn canonical_human_signature(signature: &str) -> Result<String, String> {
+    fn skip_space(bytes: &[u8], cursor: &mut usize) {
+        while bytes.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+            *cursor += 1;
+        }
+    }
+
+    fn identifier(bytes: &[u8], cursor: &mut usize) -> Option<String> {
+        let start = *cursor;
+        while bytes
+            .get(*cursor)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            *cursor += 1;
+        }
+        (*cursor > start).then(|| String::from_utf8_lossy(&bytes[start..*cursor]).into_owned())
+    }
+
+    fn parameter_type(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
+        skip_space(bytes, cursor);
+        let mut output = if bytes.get(*cursor) == Some(&b'(') {
+            *cursor += 1;
+            format!("({})", parameter_list(bytes, cursor)?)
+        } else {
+            identifier(bytes, cursor).ok_or_else(|| "expected ABI parameter type".to_string())?
+        };
+        skip_space(bytes, cursor);
+        while bytes.get(*cursor) == Some(&b'[') {
+            let start = *cursor;
+            *cursor += 1;
+            while bytes.get(*cursor).is_some_and(u8::is_ascii_digit) {
+                *cursor += 1;
+            }
+            if bytes.get(*cursor) != Some(&b']') {
+                return Err("unterminated ABI array suffix".to_string());
+            }
+            *cursor += 1;
+            output.push_str(&String::from_utf8_lossy(&bytes[start..*cursor]));
+            skip_space(bytes, cursor);
+        }
+        // A parameter name has no effect on the selector or encoding.
+        let _ = identifier(bytes, cursor);
+        skip_space(bytes, cursor);
+        Ok(output)
+    }
+
+    fn parameter_list(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
+        let mut types = Vec::new();
+        skip_space(bytes, cursor);
+        if bytes.get(*cursor) == Some(&b')') {
+            *cursor += 1;
+            return Ok(String::new());
+        }
+        loop {
+            types.push(parameter_type(bytes, cursor)?);
+            match bytes.get(*cursor) {
+                Some(b',') => {
+                    *cursor += 1;
+                    skip_space(bytes, cursor);
+                }
+                Some(b')') => {
+                    *cursor += 1;
+                    return Ok(types.join(","));
+                }
+                _ => return Err("expected `,` or `)` after ABI parameter".to_string()),
+            }
+        }
+    }
+
+    let bytes = signature.as_bytes();
+    let mut cursor = 0;
+    skip_space(bytes, &mut cursor);
+    let name =
+        identifier(bytes, &mut cursor).ok_or_else(|| "expected function name".to_string())?;
+    skip_space(bytes, &mut cursor);
+    if bytes.get(cursor) != Some(&b'(') {
+        return Err("expected `(` after function name".to_string());
+    }
+    cursor += 1;
+    let parameters = parameter_list(bytes, &mut cursor)?;
+    skip_space(bytes, &mut cursor);
+    if cursor != bytes.len() {
+        return Err("unexpected text after function signature".to_string());
+    }
+    Ok(format!("{name}({parameters})"))
 }
 
 /// Resolves a file's `includes` chain depth-first: an included file's own
@@ -163,6 +301,7 @@ pub struct CallEnvelope {
 pub struct ClearSigned {
     pub intent: String,
     pub fields: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// Token metadata provider bridging the plan's already-fetched display
@@ -235,6 +374,51 @@ impl DataProvider for RecordingProvider {
     }
 }
 
+fn is_canonical_descriptor_calldata(chain_id: u64, to: Address, calldata: &[u8]) -> bool {
+    let Some((selector, body)) = calldata.split_at_checked(4) else {
+        return false;
+    };
+    registry().calldata_formats.iter().any(|format| {
+        format.chain_id == chain_id
+            && format.address == format!("{to:#x}")
+            && selector == format.function.selector().as_slice()
+            && format
+                .function
+                .abi_decode_input(body)
+                .ok()
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .all(within_declared_width)
+                        .then(|| format.function.abi_encode_input_raw(&values).ok())
+                        .flatten()
+                })
+                .is_some_and(|canonical| canonical == body)
+    })
+}
+
+fn within_declared_width(value: &DynSolValue) -> bool {
+    match value {
+        DynSolValue::Uint(word, bits) => *bits >= 256 || *word < (U256::from(1) << *bits),
+        DynSolValue::Int(word, bits) => {
+            *bits >= 256 || (*word >= min_int(*bits) && *word <= max_int(*bits))
+        }
+        DynSolValue::FixedBytes(word, size) => word[*size..].iter().all(|byte| *byte == 0),
+        DynSolValue::Array(items) | DynSolValue::FixedArray(items) | DynSolValue::Tuple(items) => {
+            items.iter().all(within_declared_width)
+        }
+        _ => true,
+    }
+}
+
+fn max_int(bits: usize) -> I256 {
+    I256::try_from((U256::from(1) << (bits - 1)) - U256::from(1)).unwrap_or(I256::MAX)
+}
+
+fn min_int(bits: usize) -> I256 {
+    max_int(bits).wrapping_neg().wrapping_sub(I256::ONE)
+}
+
 async fn run_format(
     chain_id: u64,
     envelope: &CallEnvelope,
@@ -242,7 +426,7 @@ async fn run_format(
     value: U256,
     provider: &dyn DataProvider,
 ) -> Option<FormatOutcome> {
-    if calldata.len() < 4 {
+    if !is_canonical_descriptor_calldata(chain_id, envelope.to, calldata) {
         return None;
     }
     let from = format!("{:#x}", envelope.from);
@@ -288,13 +472,18 @@ pub async fn interpret(
 ) -> Option<ClearSigned> {
     let provider = MapProvider(metadata);
     match run_format(chain_id, &envelope, calldata, value, &provider).await? {
-        FormatOutcome::ClearSigned { model, .. } => Some(clear_signed(&model)),
+        FormatOutcome::ClearSigned { model, diagnostics } => {
+            Some(clear_signed(&model, &diagnostics))
+        }
         FormatOutcome::Fallback { .. } => None,
     }
 }
 
 /// Flattens the engine's display model into capped, sanitized lines.
-fn clear_signed(model: &DisplayModel) -> ClearSigned {
+fn clear_signed(
+    model: &DisplayModel,
+    diagnostics: &[clear_signing::FormatDiagnostic],
+) -> ClearSigned {
     let intent = model.interpolated_intent.as_ref().unwrap_or(&model.intent);
     let intent = match &model.owner {
         Some(owner) => stripped_capped(&format!("{owner} — {intent}"), MAX_TEXT_LEN),
@@ -308,7 +497,23 @@ fn clear_signed(model: &DisplayModel) -> ClearSigned {
     if dropped > 0 {
         fields.push(format!("… ({dropped} more fields)"));
     }
-    ClearSigned { intent, fields }
+    let warnings = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            stripped_capped(
+                &format!(
+                    "Clear-signing diagnostic ({}): {}",
+                    diagnostic.code, diagnostic.message
+                ),
+                MAX_TEXT_LEN,
+            )
+        })
+        .collect();
+    ClearSigned {
+        intent,
+        fields,
+        warnings,
+    }
 }
 
 fn push_line(fields: &mut Vec<String>, dropped: &mut usize, line: String) {

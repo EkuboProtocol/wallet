@@ -260,6 +260,19 @@ fn provably_shadowed_rules_are_rejected() {
 }
 
 #[test]
+fn equivalent_typed_literals_cannot_hide_a_shadowed_rule() {
+    let error = WalletPolicy::parse(serde_json::json!({
+        "version": 1,
+        "rules": [
+            {"effect": "allow", "chain_id": {"eq": "0x10"}},
+            {"effect": "deny", "chain_id": {"eq": "16"}}
+        ]
+    }))
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("rule 2 is unreachable"));
+}
+
+#[test]
 fn old_policy_vocabulary_is_rejected() {
     for document in [
         json!({"version": 1, "chains": {}}),

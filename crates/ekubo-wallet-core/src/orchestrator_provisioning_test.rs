@@ -12,6 +12,7 @@ use crate::{
     core::policy::WalletPolicy,
     custody::{Deletion, PrivateKeyMaterial},
     human_presence::HumanPresenceError,
+    legal::{LegalDocument, LegalStore},
     message::MessageEncoding,
     policy_store::DatabaseKey,
 };
@@ -33,6 +34,18 @@ impl HumanPresence for RecordingPresence {
     async fn confirm(&self, _request: &PresenceRequest) -> Result<(), HumanPresenceError> {
         self.0.store(true, Ordering::SeqCst);
         Err(HumanPresenceError::Denied("stub".into()))
+    }
+}
+
+struct PresenceThen<F>(F);
+
+impl<F> crate::sealed::SealedHumanPresence for PresenceThen<F> {}
+
+#[async_trait]
+impl<F: Fn() + Send + Sync> HumanPresence for PresenceThen<F> {
+    async fn confirm(&self, _request: &PresenceRequest) -> Result<(), HumanPresenceError> {
+        (self.0)();
+        Ok(())
     }
 }
 
@@ -77,6 +90,10 @@ impl HalfProvisioned {
     fn handle(&self) -> PolicyStore {
         PolicyStore::open(&self.directory.path().join("policies.db"), &KEY).unwrap()
     }
+
+    fn legal(&self) -> LegalStore {
+        LegalStore::new(self.handle())
+    }
 }
 
 fn half_provisioned(with_policy: bool) -> HalfProvisioned {
@@ -113,6 +130,13 @@ fn half_provisioned(with_policy: bool) -> HalfProvisioned {
                     crate::sql::Millis(wallet.created_at),
                 ],
             )
+            .unwrap();
+    }
+    let legal =
+        LegalStore::new(PolicyStore::open(&directory.path().join("policies.db"), &KEY).unwrap());
+    for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
+        legal
+            .record_acceptance(document, &document.digest())
             .unwrap();
     }
     HalfProvisioned {
@@ -157,11 +181,13 @@ async fn a_policyless_wallet_cannot_have_a_message_signed() {
     let digest = crate::message::message_digest(b"hello");
 
     let presence = RecordingPresence(AtomicBool::new(false));
+    let legal = fixture.legal();
     let error = format!(
         "{:#}",
         sign_reviewed_message(
             &fixture.config,
             &fixture.policies,
+            &legal,
             &mut store,
             &request,
             &fixture.wallet,
@@ -212,11 +238,13 @@ async fn a_policyless_wallet_cannot_have_typed_data_signed() {
         .unwrap();
 
     let presence = RecordingPresence(AtomicBool::new(false));
+    let legal = fixture.legal();
     let error = format!(
         "{:#}",
         sign_reviewed_typed_data(
             &fixture.config,
             &fixture.policies,
+            &legal,
             &mut store,
             &request,
             &fixture.wallet,
@@ -247,11 +275,13 @@ async fn a_provisioned_wallet_still_reaches_owner_authentication() {
     let digest = crate::message::message_digest(b"hello");
 
     let presence = RecordingPresence(AtomicBool::new(false));
+    let legal = fixture.legal();
     let error = format!(
         "{:#}",
         sign_reviewed_message(
             &fixture.config,
             &fixture.policies,
+            &legal,
             &mut store,
             &request,
             &fixture.wallet,
@@ -267,4 +297,51 @@ async fn a_provisioned_wallet_still_reaches_owner_authentication() {
         "the guard must not be refusing wallets that are provisioned"
     );
     assert!(!error.contains("has no policy"), "{error}");
+}
+
+#[tokio::test]
+async fn legal_acceptance_is_rechecked_after_owner_authentication() {
+    let fixture = half_provisioned(true);
+    let mut store = MessageStore::new(fixture.handle());
+    let request = store
+        .create("primary", None, b"hello", MessageEncoding::Text, None)
+        .unwrap();
+    let digest = crate::message::message_digest(b"hello");
+    let legal = fixture.legal();
+    let database_path = fixture.directory.path().join("policies.db");
+    let presence = PresenceThen(move || {
+        PolicyStore::open(&database_path, &KEY)
+            .unwrap()
+            .connection
+            .execute(
+                "DELETE FROM legal_acceptance WHERE document = 'privacy_policy'",
+                [],
+            )
+            .unwrap();
+    });
+
+    let error = format!(
+        "{:#}",
+        sign_reviewed_message(
+            &fixture.config,
+            &fixture.policies,
+            &legal,
+            &mut store,
+            &request,
+            &fixture.wallet,
+            digest,
+            &presence,
+            &UnusableKeys,
+        )
+        .await
+        .expect_err("stale legal acceptance must prevent signing")
+    );
+    assert!(
+        error.contains("Terms of Service and Privacy Policy"),
+        "{error}"
+    );
+    assert_eq!(
+        store.get(request.request_id).unwrap().status,
+        MessageStatus::AwaitingApproval
+    );
 }

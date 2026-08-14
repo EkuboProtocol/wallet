@@ -780,6 +780,14 @@ pub async fn ensure_public_endpoint(url: &Url, noun: &str) -> Result<()> {
         url.username().is_empty() && url.password().is_none(),
         "{noun} must not carry credentials in the URL"
     );
+    let _ = public_endpoint_addresses(url, noun).await?;
+    Ok(())
+}
+
+/// Resolve a domain-backed endpoint once and return only the addresses it is
+/// safe to pin into an HTTP client. Keeping the addresses is what closes the
+/// gap between admission-time DNS and the later connection.
+pub(crate) async fn public_endpoint_addresses(url: &Url, noun: &str) -> Result<Vec<SocketAddr>> {
     let host = url.host().with_context(|| format!("{noun} has no host"))?;
     let host_text = vetted_host(&host, false, noun)?;
     let port = url.port_or_known_default().unwrap_or(443);
@@ -788,7 +796,7 @@ pub async fn ensure_public_endpoint(url: &Url, noun: &str) -> Result<()> {
         resolved.iter().all(|address| is_public_ip(address.ip())),
         "{noun} resolves to a private or reserved address"
     );
-    Ok(())
+    Ok(resolved)
 }
 
 /// Whether an address is plausibly globally routable. `IpAddr::is_global` is

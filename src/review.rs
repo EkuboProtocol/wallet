@@ -1,4 +1,15 @@
 use crate::approval::{ReviewDecision, ReviewDocument};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_REVIEW_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_review_generation() -> u64 {
+    NEXT_REVIEW_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .expect("review generation space exhausted")
+}
 
 /// Security-relevant state for one focused native review.
 ///
@@ -16,10 +27,10 @@ pub struct ReviewState {
 
 impl ReviewState {
     #[must_use]
-    pub const fn new(document: ReviewDocument) -> Self {
+    pub fn new(document: ReviewDocument) -> Self {
         Self {
             document,
-            generation: 1,
+            generation: next_review_generation(),
             selected: ReviewDecision::Reject,
             viewed_to_end: false,
             scroll_offset: 0.0,
@@ -80,7 +91,7 @@ impl ReviewState {
     pub fn refresh(&mut self, document: ReviewDocument) {
         let identity_changed = self.document.identity != document.identity;
         self.document = document;
-        self.generation = self.generation.saturating_add(1);
+        self.generation = next_review_generation();
         self.selected = ReviewDecision::Reject;
         self.viewed_to_end = false;
         if identity_changed {

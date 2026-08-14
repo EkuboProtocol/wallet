@@ -1126,7 +1126,7 @@ async fn send_exact_bytes(
     network: &NetworkConfig,
 ) -> Result<BroadcastResult> {
     let mut first_failure = None;
-    for client in crate::rpc::clients_for(network) {
+    for client in crate::rpc::clients_for(network).await? {
         let outcome = match send_exact_bytes_through(signed, network, client.as_ref()).await {
             Ok(outcome) => outcome,
             Err(error) => {

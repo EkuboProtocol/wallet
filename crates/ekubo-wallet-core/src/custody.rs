@@ -593,9 +593,16 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 
     pub async fn remove(&self, wallet_id: &str) -> Result<WalletMetadata> {
         let metadata = self.config.wallet(wallet_id)?;
+        self.remove_reviewed(&metadata).await
+    }
+
+    /// Remove exactly the wallet instance whose address and identity were
+    /// shown to the owner before this core operation began.
+    pub async fn remove_reviewed(&self, metadata: &WalletMetadata) -> Result<WalletMetadata> {
+        let wallet_id = &metadata.id;
         self.presence
             .confirm(&PresenceRequest::RemoveWallet {
-                wallet: wallet_id.into(),
+                wallet: wallet_id.clone(),
             })
             .await?;
 
@@ -616,7 +623,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         // wallet's row on the strength of an approval given for its
         // predecessor.
         self.config
-            .with_lifecycle_lock(|| self.remove_locked(wallet_id, &metadata))
+            .with_lifecycle_lock(|| self.remove_locked(wallet_id, metadata))
     }
 
     fn remove_locked(&self, wallet_id: &str, metadata: &WalletMetadata) -> Result<WalletMetadata> {

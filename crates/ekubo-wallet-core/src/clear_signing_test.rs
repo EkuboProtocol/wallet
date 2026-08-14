@@ -53,6 +53,27 @@ async fn the_vendored_vetoken_descriptor_interprets_a_stake() {
 }
 
 #[tokio::test]
+async fn descriptor_interpretation_requires_exact_canonical_calldata() {
+    let (chain, address, mut calldata) = stake_fixture();
+    calldata.push(0);
+    let reading = interpret(
+        chain,
+        CallEnvelope {
+            from: Address::repeat_byte(0x11),
+            to: address,
+        },
+        &Bytes::from(calldata),
+        U256::ZERO,
+        &TokenMetadataMap::new(),
+    )
+    .await;
+    assert!(
+        reading.is_none(),
+        "trailing bytes must disable the descriptor"
+    );
+}
+
+#[tokio::test]
 async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
     // Run 6251, finding 186992. A stored symbol is text the wallet did not
     // author: it arrives from a token list, and a fresh database seeds

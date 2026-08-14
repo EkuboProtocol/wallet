@@ -323,6 +323,51 @@ pub enum Predicate {
 }
 
 impl Predicate {
+    /// Normalize typed literals before comparing predicate coverage. Runtime
+    /// matching has always compared canonical values, so shadow analysis must
+    /// use the same representation or `16` and `0x10` describe identical
+    /// authority while appearing structurally different.
+    #[must_use]
+    pub(crate) fn normalized_for(&self, ty: &DynSolType) -> Self {
+        let literal = |value: &String, ty: &DynSolType| {
+            parse_literal(value, ty).unwrap_or_else(|_| value.clone())
+        };
+        match self {
+            Self::AnyValue => Self::AnyValue,
+            Self::Eq(value) => Self::Eq(literal(value, ty)),
+            Self::In(values) => Self::In(values.iter().map(|value| literal(value, ty)).collect()),
+            Self::Lt(value) => Self::Lt(literal(value, ty)),
+            Self::Lte(value) => Self::Lte(literal(value, ty)),
+            Self::Gt(value) => Self::Gt(literal(value, ty)),
+            Self::Gte(value) => Self::Gte(literal(value, ty)),
+            Self::Selector(selector) => {
+                let mut selector = (**selector).clone();
+                for input in &selector.function.inputs {
+                    if let Some(predicate) = selector.args.get_mut(&input.name)
+                        && let Ok(input_type) = DynSolType::parse(&input.selector_type())
+                    {
+                        *predicate = predicate.normalized_for(&input_type);
+                    }
+                }
+                Self::Selector(Box::new(selector))
+            }
+            Self::Each(inner) => element_type(ty).map_or_else(
+                || self.clone(),
+                |element| Self::Each(Box::new(inner.normalized_for(element))),
+            ),
+            Self::Any(items) => {
+                Self::Any(items.iter().map(|item| item.normalized_for(ty)).collect())
+            }
+            Self::All(items) => {
+                Self::All(items.iter().map(|item| item.normalized_for(ty)).collect())
+            }
+            Self::Not(inner) => Self::Not(Box::new(inner.normalized_for(ty))),
+            Self::Length(inner) => {
+                Self::Length(Box::new(inner.normalized_for(&DynSolType::Uint(256))))
+            }
+        }
+    }
+
     /// Whether this predicate can ever be satisfied by a value of type `ty`.
     ///
     /// Run when the policy document is parsed, against the types the rule's own

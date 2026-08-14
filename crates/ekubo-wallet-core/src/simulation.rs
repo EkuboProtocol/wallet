@@ -306,7 +306,7 @@ pub async fn simulate_execution(
     // chain, and asking seven more endpoints returns the same answer more
     // slowly.
     let mut last = None;
-    let clients = crate::rpc::clients_for(network);
+    let clients = crate::rpc::clients_for(network).await?;
     let mut remaining = clients.len();
     for client in clients {
         remaining -= 1;

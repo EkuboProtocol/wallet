@@ -22,9 +22,19 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{str::FromStr, time::Duration};
+use std::{
+    str::FromStr,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 const MAX_BATCH_CALLS: usize = 128;
+const MAX_CONCURRENT_REFERENCE_RESOLUTIONS: usize = 4;
+static REFERENCE_RESOLUTION_SLOTS: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
+    Arc::new(tokio::sync::Semaphore::new(
+        MAX_CONCURRENT_REFERENCE_RESOLUTIONS,
+    ))
+});
 
 /// Individual `eth_call` requests one batch may hold in flight at once.
 ///
@@ -191,6 +201,10 @@ pub async fn resolve_read_input(
         input.calls.is_empty(),
         "pass exactly one of calls and reference"
     );
+    let _resolution = Arc::clone(&REFERENCE_RESOLUTION_SLOTS)
+        .acquire_owned()
+        .await
+        .context("read-call reference limiter was closed")?;
     let fetched = fetch_reference(&reference, ArtifactType::ReadCalls, policy).await?;
     let body: ReadCallsBody = serde_json::from_slice(&fetched.bytes)
         .context("read-call bundle is not a valid wallet_batch_eth_call argument object")?;

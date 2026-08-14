@@ -343,14 +343,8 @@ impl ConfigStore {
     ) -> Result<T> {
         create_private_dir(&self.data_dir)?;
         let lock_path = self.data_dir.join("config.lock");
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
+        let lock = open_private_file(&lock_path)
             .with_context(|| format!("failed to open {}", lock_path.display()))?;
-        set_private_handle_permissions(&lock)?;
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
 
@@ -400,14 +394,8 @@ impl ConfigStore {
     pub fn with_lifecycle_lock<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
         create_private_dir(&self.data_dir)?;
         let lock_path = self.data_dir.join("lifecycle.lock");
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
+        let lock = open_private_file(&lock_path)
             .with_context(|| format!("failed to open {}", lock_path.display()))?;
-        set_private_handle_permissions(&lock)?;
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let result = body();
