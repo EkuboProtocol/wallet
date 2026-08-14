@@ -8,12 +8,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cargo_packager_updater::{RemoteRelease, RemoteReleaseData, Update, UpdateFormat};
 use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest as _, Sha256};
-use std::{
-    collections::BTreeSet,
-    io::Read as _,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::{collections::BTreeSet, io::Read as _, path::PathBuf, time::Duration};
 
 pub const UPDATER_PUBLIC_KEY: &str = env!("EKUBO_COMPILED_UPDATER_PUBLIC_KEY");
 pub const UPDATE_PUBLISHER: &str = "Ekubo, Inc.";
