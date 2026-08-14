@@ -31,7 +31,14 @@ use std::sync::{Mutex, MutexGuard};
 
 /// How long a `submitting` lease may go untouched before a reader may assume
 /// the submitting process died mid-send and reclaim the record.
-pub const SUBMISSION_LEASE_SECONDS: i64 = 120;
+///
+/// Exact-byte broadcast may try eight configured endpoints. Each attempt has
+/// bounded chain, receipt, presence, send, and reconciliation RPC stages, so
+/// the full failover path can legitimately exceed two minutes. Fifteen minutes
+/// stays above that bounded worst case plus scheduling headroom; reclaiming a
+/// live sender is more dangerous than waiting because the transaction may
+/// already have reached the network.
+pub const SUBMISSION_LEASE_SECONDS: i64 = 15 * 60;
 
 fn lock(pending: &Mutex<PendingStore>) -> Result<MutexGuard<'_, PendingStore>> {
     pending

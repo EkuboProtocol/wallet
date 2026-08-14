@@ -94,9 +94,19 @@ pub struct ProposalSummary {
     pub optional_methods: Vec<String>,
     /// Events the dapp wants to be told about.
     pub events: Vec<String>,
+    /// Each namespace's chain-to-method relationship. The flattened fields
+    /// above are review text; these grants are the authorization boundary.
+    pub requested_grants: Vec<ScopeGrant>,
     /// The pairing topic, shown so a person can tell two concurrent proposals
     /// apart.
     pub pairing_topic: String,
+}
+
+/// Methods one proposal namespace requested for its own chains.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeGrant {
+    pub chains: Vec<String>,
+    pub methods: Vec<String>,
 }
 
 /// What the wallet decided about a proposal.
@@ -120,6 +130,8 @@ pub struct ApprovedScope {
     pub chains: Vec<String>,
     /// Methods the session may call.
     pub methods: Vec<String>,
+    /// Relational grants preserved from the proposal namespaces.
+    pub grants: Vec<ScopeGrant>,
     /// Events the session will be sent.
     pub events: Vec<String>,
 }
@@ -130,6 +142,13 @@ impl ApprovedScope {
             .iter()
             .map(|chain| format!("{chain}:{}", self.address))
             .collect()
+    }
+
+    fn allows(&self, chain: &str, method: &str) -> bool {
+        self.grants.iter().any(|grant| {
+            grant.chains.iter().any(|granted| granted == chain)
+                && grant.methods.iter().any(|granted| granted == method)
+        })
     }
 }
 
@@ -1009,11 +1028,7 @@ fn check_in_scope(
             format!("`{}` is not an eip155 chain identifier.", request.chain_id),
         ));
     }
-    if !scope
-        .methods
-        .iter()
-        .any(|method| method == &request.request.method)
-    {
+    if !scope.allows(&request.chain_id, &request.request.method) {
         return Err((
             error_code::UNSUPPORTED_METHODS,
             format!(
@@ -1102,16 +1117,27 @@ fn summarize(proposal: &SessionProposeParams, pairing_topic: &str) -> ProposalSu
     let mut optional_chains = BTreeSet::new();
     let mut optional_methods = BTreeSet::new();
     let mut events = BTreeSet::new();
+    let mut requested_grants = Vec::new();
 
     for (key, namespace) in &proposal.required_namespaces {
-        required_chains.extend(namespace_chains(key, namespace));
+        let chains = namespace_chains(key, namespace);
+        required_chains.extend(chains.iter().cloned());
         required_methods.extend(namespace.methods.iter().cloned());
         events.extend(namespace.events.iter().cloned());
+        requested_grants.push(ScopeGrant {
+            chains,
+            methods: namespace.methods.clone(),
+        });
     }
     for (key, namespace) in &proposal.optional_namespaces {
-        optional_chains.extend(namespace_chains(key, namespace));
+        let chains = namespace_chains(key, namespace);
+        optional_chains.extend(chains.iter().cloned());
         optional_methods.extend(namespace.methods.iter().cloned());
         events.extend(namespace.events.iter().cloned());
+        requested_grants.push(ScopeGrant {
+            chains,
+            methods: namespace.methods.clone(),
+        });
     }
     // A chain or method that is required is not also optional; showing it twice
     // would overstate what the dapp is asking for.
@@ -1129,6 +1155,7 @@ fn summarize(proposal: &SessionProposeParams, pairing_topic: &str) -> ProposalSu
         required_methods: required_methods.into_iter().collect(),
         optional_methods: optional_methods.into_iter().collect(),
         events: events.into_iter().collect(),
+        requested_grants,
         pairing_topic: pairing_topic.to_owned(),
     }
 }
@@ -1167,7 +1194,7 @@ fn settled_namespaces(
         let methods: Vec<String> = namespace
             .methods
             .iter()
-            .filter(|method| scope.methods.contains(method))
+            .filter(|method| chains.iter().any(|chain| scope.allows(chain, method)))
             .cloned()
             .collect();
         let events: Vec<String> = namespace

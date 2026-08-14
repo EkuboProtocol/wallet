@@ -22,7 +22,7 @@ use crate::{
     policy_store::PolicyStore,
     release_check::{self, ReleaseCheck},
     rpc::{WalletStatus, transaction_known, wallet_status},
-    simulation::{SimulationResult, simulate_execution},
+    simulation::{SimulationResult, simulate_external_execution},
     simulation_store::{MAX_RECORDED_SIMULATIONS, RecordedSimulation, SimulationStore},
     token_store::{StoredToken, TokenStore},
     typed_data::{
@@ -1257,7 +1257,7 @@ impl WalletMcpServer {
         }
         let preface = session.as_ref().map(ForkSession::preface);
         let policy_context = Self::policy_context(&wallet);
-        let mut result = simulate_execution(
+        let mut result = simulate_external_execution(
             &wallet,
             &network,
             &execution_plan,
@@ -2770,7 +2770,7 @@ impl WalletMcpServer {
         // network below, on the path both kinds of send share.
         plan.validate()?;
         let policy_context = Self::policy_context(&wallet);
-        let simulation = simulate_execution(
+        let simulation = simulate_external_execution(
             &wallet,
             &network,
             &plan,

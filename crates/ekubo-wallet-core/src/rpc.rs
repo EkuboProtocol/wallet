@@ -6,6 +6,7 @@ use crate::{
 };
 use alloy::{
     eips::{BlockId, BlockNumberOrTag},
+    network::TransactionResponse as _,
     primitives::{Address, B256, Bytes},
     providers::{DynProvider, Provider, ProviderBuilder},
     rpc::types::{TransactionRequest, simulate::SimulatePayload},
@@ -659,7 +660,7 @@ pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) 
             "RPC reports chain {chain_id}, not {}",
             network.chain_id
         );
-        Ok(transaction.is_some())
+        Ok(transaction.is_some_and(|transaction| transaction.tx_hash() == hash))
     })
     .await
 }

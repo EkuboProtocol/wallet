@@ -15,7 +15,7 @@ use alloy::{
         transaction::SignerRecoverable,
     },
     eips::{eip2718::Decodable2718, eip2930::AccessList, eip7702::Authorization},
-    network::TxSignerSync,
+    network::{TransactionResponse as _, TxSignerSync},
     primitives::{B256, TxKind, U256, keccak256},
     signers::{SignerSync, local::PrivateKeySigner},
 };
@@ -1166,7 +1166,7 @@ async fn send_exact_bytes_through(
         .ok()
         .and_then(std::result::Result::ok)
         .flatten()
-        .is_some();
+        .is_some_and(|transaction| transaction.tx_hash() == hash);
     if !known {
         let bytes = decode_serialized(&signed.serialized_transaction)?;
         let failure =

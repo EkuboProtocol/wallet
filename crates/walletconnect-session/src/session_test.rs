@@ -13,6 +13,10 @@ fn scope() -> ApprovedScope {
         address: "0x1111111111111111111111111111111111111111".to_owned(),
         chains: vec!["eip155:1".to_owned(), "eip155:10".to_owned()],
         methods: vec!["personal_sign".to_owned(), "eth_sendTransaction".to_owned()],
+        grants: vec![ScopeGrant {
+            chains: vec!["eip155:1".to_owned(), "eip155:10".to_owned()],
+            methods: vec!["personal_sign".to_owned(), "eth_sendTransaction".to_owned()],
+        }],
         events: vec!["chainChanged".to_owned()],
     }
 }
@@ -69,6 +73,30 @@ fn a_method_the_session_never_approved_is_refused() {
     .expect_err("an unapproved method was accepted");
     assert_eq!(code, error_code::UNSUPPORTED_METHODS);
     assert!(message.contains("eth_signTypedData_v4"), "{message}");
+}
+
+#[test]
+fn a_method_cannot_cross_the_chain_namespace_that_granted_it() {
+    let mut scope = scope();
+    scope.grants = vec![
+        ScopeGrant {
+            chains: vec!["eip155:1".into()],
+            methods: vec!["personal_sign".into()],
+        },
+        ScopeGrant {
+            chains: vec!["eip155:10".into()],
+            methods: vec!["eth_sendTransaction".into()],
+        },
+    ];
+    assert!(check_in_scope(&scope, &request("personal_sign", "eip155:10"), far_future()).is_err());
+    assert!(
+        check_in_scope(
+            &scope,
+            &request("eth_sendTransaction", "eip155:1"),
+            far_future()
+        )
+        .is_err()
+    );
 }
 
 #[test]
