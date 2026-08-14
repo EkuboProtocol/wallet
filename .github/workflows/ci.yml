@@ -112,16 +112,11 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # A cargo invocation cancelled part way through still saves what it
-          # built, and the entry cannot be replaced afterwards because the key
-          # already exists. That froze a cache holding only `cargo check`
-          # metadata, so every later run recompiled all 549 crates before it
-          # could link a test binary. Bump this prefix to discard a cache that
-          # is wrong rather than merely cold.
-          prefix-key: v1-rust
-          # Tests that fail still leave a fully compiled dependency graph
-          # behind, and that is the expensive half of this job.
-          cache-on-failure: true
+          # GitHub cache entries are immutable. The previous generation saved
+          # canceled jobs and could permanently capture a partial target tree,
+          # forcing every later run to rebuild its missing dependencies.
+          prefix-key: v2-rust
+          cache-on-failure: false
 
       # Link and run every integration test once on Linux. macOS and Windows
       # still compile those platform-specific targets below, but do not spend
@@ -140,7 +135,7 @@ jobs:
         if: runner.os != 'Linux'
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
-        run: cargo check --locked --workspace --all-features --bins --tests
+        run: cargo test --locked --workspace --all-features --no-run --jobs ${{ matrix.test_jobs }}
 
       - name: Run workspace unit tests
         if: runner.os != 'Linux'
@@ -169,9 +164,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: v1-rust
-          # A denied lint fails this job after the graph is already built.
-          cache-on-failure: true
+          prefix-key: v2-rust
+          cache-on-failure: false
 
       - name: Check formatting
         run: cargo fmt --all --check
