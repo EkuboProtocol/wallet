@@ -270,7 +270,7 @@ jobs:
       - name: Install Minisign verifier
         uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
-          tool: minisign@0.7.9
+          tool: rsign2@0.6.6
       - name: Capture the pre-Authenticode installer digest
         shell: pwsh
         run: |
@@ -342,7 +342,7 @@ jobs:
           [IO.File]::WriteAllBytes($publicKeyPath, [Convert]::FromBase64String($env:EKUBO_UPDATER_PUBLIC_KEY.Trim()))
           $encodedSignature = (Get-Content -Raw "$($installers[0].FullName).sig").Trim()
           [IO.File]::WriteAllBytes($signaturePath, [Convert]::FromBase64String($encodedSignature))
-          minisign -Vm $installers[0].FullName -x $signaturePath -p $publicKeyPath
+          rsign verify $installers[0].FullName -x $signaturePath -p $publicKeyPath
           if ($LASTEXITCODE -ne 0) { throw "final installer has an invalid updater signature" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -412,7 +412,7 @@ jobs:
       - name: Install Minisign verifier
         uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
-          tool: minisign@0.7.9
+          tool: rsign2@0.6.6
       - name: Sign update metadata and verify every final updater artifact
         shell: bash
         env:
@@ -430,7 +430,7 @@ jobs:
             test -s "$artifact.sig"
             decoded_signature="$RUNNER_TEMP/$(basename "$artifact").sig"
             base64 --decode < "$artifact.sig" > "$decoded_signature"
-            minisign -Vm "$artifact" -x "$decoded_signature" -p "$public_key"
+            rsign verify "$artifact" -x "$decoded_signature" -p "$public_key"
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
