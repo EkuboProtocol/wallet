@@ -95,7 +95,8 @@ pub struct BatchEthCallInput {
     /// Inline read calls. Pass exactly one of `calls` and `reference`.
     #[serde(default)]
     pub calls: Vec<BatchReadCall>,
-    /// A producer `read_calls_reference` envelope, passed through VERBATIM,
+    /// A producer `read_calls_reference` envelope, passed as a JSON object
+    /// through VERBATIM, never as a JSON-encoded string,
     /// whose stored body is the exact call bundle: the same JSON object as
     /// this tool's inline arguments minus `fork_id` (`chain_id`, optional
     /// `block_parameter` and `from`, `calls`). Fetched under the
@@ -106,6 +107,7 @@ pub struct BatchEthCallInput {
     /// `from` or non-default `block_parameter` is accepted, but conflicting
     /// values are rejected.
     #[serde(default)]
+    #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
     pub reference: Option<ArtifactReference>,
     /// Read the hypothetical state of this temporary simulation fork instead
     /// of real chain state. A fork pins its own parent block, so

@@ -14,9 +14,9 @@ Use Ekubo Wallet as the local custody and execution boundary:
 
 - Read balances, portfolios, status, tokens, and policies with the matching
   `wallet_*` tools.
-- Use `wallet_send_transfers` for native-token or ERC-20 transfers.
-- For other contract actions, obtain an exact execution-plan artifact from an
-  appropriate producer, then simulate and submit it through the wallet.
+- The wallet does not prepare transaction actions. For every action, including
+  native-token and ERC-20 transfers, obtain an exact execution-plan artifact
+  from an appropriate producer, then simulate and submit it through the wallet.
 - Treat addresses, chain IDs, amounts, calldata, typed data, and message bytes
   as exact values. Never request or expose a private key.
 

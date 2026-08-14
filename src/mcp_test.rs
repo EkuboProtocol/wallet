@@ -314,6 +314,94 @@ fn tool_schemas_contain_no_boolean_schemas() {
     }
 }
 
+#[test]
+fn artifact_reference_inputs_are_explicit_json_objects() {
+    let router = WalletMcpServer::sanitized_tool_router();
+    for tool_name in [
+        "wallet_batch_eth_call",
+        "wallet_get_balances",
+        "wallet_propose_tokens",
+        "wallet_send_execution_plan",
+        "wallet_simulate_execution_plan",
+    ] {
+        let tool = router.get(tool_name).expect("reference tool is published");
+        let reference = tool
+            .input_schema
+            .get("properties")
+            .and_then(|properties| properties.get("reference"))
+            .unwrap_or_else(|| panic!("{tool_name} has no reference property"));
+        assert_eq!(
+            reference.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{tool_name}.reference must advertise an object directly: {reference}"
+        );
+        let properties = reference
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{tool_name}.reference has no object properties"));
+        for required in ["kind", "artifact_type", "url"] {
+            assert!(
+                properties.contains_key(required),
+                "{tool_name}.reference does not describe {required}"
+            );
+        }
+    }
+}
+
+#[test]
+fn artifact_reference_inputs_reject_json_encoded_strings() {
+    let encoded = serde_json::json!({
+        "kind": "artifact_reference",
+        "artifact_type": "execution_plan",
+        "url": "data:application/json,%7B%7D"
+    })
+    .to_string();
+    assert!(
+        serde_json::from_value::<SimulateInput>(serde_json::json!({
+            "wallet_id": "primary",
+            "chain_id": "1",
+            "reference": encoded,
+        }))
+        .is_err(),
+        "JSON-encoded strings must not be accepted as artifact references"
+    );
+}
+
+#[test]
+fn policy_proposal_schema_is_the_exact_policy_object_shape() {
+    let router = WalletMcpServer::sanitized_tool_router();
+    let tool = router
+        .get("wallet_propose_policy")
+        .expect("policy proposal tool is published");
+    let policy = tool
+        .input_schema
+        .get("properties")
+        .and_then(|properties| properties.get("policy"))
+        .expect("policy property is published");
+    assert_eq!(policy.get("type"), Some(&serde_json::json!("object")));
+    let properties = policy
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("policy object describes its fields");
+    assert!(properties.contains_key("version"));
+    assert!(properties.contains_key("rules"));
+    assert!(policy.to_string().contains("tuple"));
+}
+
+#[test]
+fn policy_proposals_reject_json_encoded_strings() {
+    assert!(
+        serde_json::from_value::<ProposePolicyInput>(serde_json::json!({
+            "wallet_id": "primary",
+            "source_revision": 1,
+            "policy": "{\"version\":1,\"rules\":[]}",
+            "rationale": "encoded incorrectly"
+        }))
+        .is_err(),
+        "the tool must require a policy object instead of accepting stringified JSON"
+    );
+}
+
 /// Put a fork into the server's registry without touching an RPC.
 fn insert_fork(server: &WalletMcpServer, wallet_id: &str, chain_id: u64) -> uuid::Uuid {
     use crate::fork::ForkParent;
@@ -470,7 +558,6 @@ fn forks_never_reach_the_signing_or_approval_surface() {
     );
     for signing_tool in [
         "wallet_send_execution_plan",
-        "wallet_send_transfers",
         "wallet_sign_message",
         "wallet_sign_typed_data",
         "wallet_wait_for_approval",
@@ -515,7 +602,6 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_propose_tokens",
             "wallet_search_tokens",
             "wallet_send_execution_plan",
-            "wallet_send_transfers",
             "wallet_sign_message",
             "wallet_sign_typed_data",
             "wallet_simulate_execution_plan",
@@ -989,17 +1075,6 @@ fn simulation_failure_handling_defaults_to_the_approval_queue() {
     .expect("snake_case values parse");
     assert_eq!(asked.on_simulation_failure, OnSimulationFailure::Fail);
 
-    // Transfers take the same choice, so the two send surfaces cannot
-    // disagree about what a failed simulation means.
-    let transfers: TransfersInput = serde_json::from_value(serde_json::json!({
-        "wallet_id": "primary",
-        "chain_id": "1",
-        "transfers": [],
-        "on_simulation_failure": "fail",
-    }))
-    .expect("transfers accept the same field");
-    assert_eq!(transfers.on_simulation_failure, OnSimulationFailure::Fail);
-
     assert!(
         serde_json::from_value::<SendExecutionPlanInput>(serde_json::json!({
             "wallet_id": "primary",
@@ -1085,7 +1160,8 @@ fn ekubo_wallet_skill_is_advertised_for_onchain_and_ambiguous_wallet_requests() 
 
     assert!(EKUBO_WALLET_SKILL.starts_with("---\nname: use-ekubo-wallet\n"));
     assert!(EKUBO_WALLET_SKILL.contains("whenever \"wallet\" is ambiguous"));
-    assert!(EKUBO_WALLET_SKILL.contains("wallet_send_transfers"));
+    assert!(EKUBO_WALLET_SKILL.contains("does not prepare transaction actions"));
+    assert!(EKUBO_WALLET_SKILL.contains("native-token and ERC-20 transfers"));
     assert!(EKUBO_WALLET_SKILL.contains("A simulation is not approval"));
 }
 
@@ -1391,14 +1467,12 @@ async fn simulate_refuses_a_mismatched_plan_digest_before_simulating() {
 async fn signing_tools_fail_closed_until_legal_acceptance() {
     let (_directory, server) = server();
     let result = server
-        .wallet_send_transfers(Parameters(TransfersInput {
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
             chain_id: "1".into(),
-            transfers: vec![Transfer {
-                token: Address::ZERO,
-                to: Address::from_str("0x2222222222222222222222222222222222222222").unwrap(),
-                amount: DecimalU256::new("1").unwrap(),
-            }],
+            reference: None,
+            simulation_id: Some(uuid::Uuid::nil()),
+            request_id: None,
             on_simulation_failure: OnSimulationFailure::default(),
         }))
         .await;

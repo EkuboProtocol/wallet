@@ -385,6 +385,7 @@ fn schema_describes_the_ordered_v1_surface() {
     assert!(schema.contains("First matching rule wins"));
     assert!(schema.contains("native_value"));
     assert!(schema.contains("chain_id"));
+    assert!(schema.contains("tuple"));
     assert!(!schema.contains("max_calls_per_batch"));
     assert!(!schema.contains("ChainPolicy"));
 }

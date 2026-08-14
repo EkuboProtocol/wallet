@@ -201,8 +201,8 @@ pub struct PendingTransaction {
     pub execution_plan: ExecutionPlan,
     /// Where the plan's bytes came from — the TLS-vetted https host that
     /// served them, "inline data URI", or "a file on this machine" — shown as
-    /// an approval fact. None for plans this process built itself (transfers,
-    /// desktop).
+    /// an approval fact. None only for wallet-native recovery operations such
+    /// as replacing one of this wallet's pending transactions with a cancel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_source: Option<String>,
     pub digest: String,

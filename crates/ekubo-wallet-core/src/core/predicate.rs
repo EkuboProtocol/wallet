@@ -279,7 +279,8 @@ impl JsonSchema for SelectorPredicate {
 /// One predicate over one value.
 ///
 /// Externally tagged, so a document reads `{"in": ["0x…"]}`, `"any_value"`, or
-/// `{"each": {"selector": {"abi": "…"}}}`.
+/// `{"each": {"selector": {"abi": "…"}}}`, or
+/// `{"tuple": [{"eq": "1"}, null]}`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Predicate {
@@ -310,6 +311,11 @@ pub enum Predicate {
     /// Every element of an array satisfies the inner predicate. Applies only
     /// to an array value; an empty array satisfies it vacuously.
     Each(Box<Predicate>),
+    /// Constrains tuple components by position. The array must have exactly
+    /// the tuple's ABI arity; `null` leaves that position unconstrained.
+    /// Applies only to tuple values and composes with `each` for arrays of
+    /// tuples and with another `tuple` for nested tuples.
+    Tuple(Vec<Option<Predicate>>),
     /// At least one of these predicates matches. An empty list never matches.
     Any(Vec<Predicate>),
     /// All of these predicates match. An empty list matches vacuously.
@@ -355,6 +361,18 @@ impl Predicate {
                 || self.clone(),
                 |element| Self::Each(Box::new(inner.normalized_for(element))),
             ),
+            Self::Tuple(items) => match ty {
+                DynSolType::Tuple(types) if items.len() == types.len() => Self::Tuple(
+                    items
+                        .iter()
+                        .zip(types)
+                        .map(|(item, ty)| {
+                            item.as_ref().map(|predicate| predicate.normalized_for(ty))
+                        })
+                        .collect(),
+                ),
+                _ => self.clone(),
+            },
             Self::Any(items) => {
                 Self::Any(items.iter().map(|item| item.normalized_for(ty)).collect())
             }
@@ -401,6 +419,31 @@ impl Predicate {
                 Some(element) => inner.check_applicable(element),
                 None => bail!("an `each` predicate needs an array, not {ty:?}"),
             },
+            Self::Tuple(items) => {
+                let DynSolType::Tuple(types) = ty else {
+                    bail!("a `tuple` predicate needs a tuple, not {ty:?}");
+                };
+                ensure!(
+                    items.len() == types.len(),
+                    "a `tuple` predicate needs exactly {} elements, not {}",
+                    types.len(),
+                    items.len()
+                );
+                items
+                    .iter()
+                    .zip(types)
+                    .enumerate()
+                    .try_for_each(|(index, (predicate, ty))| {
+                        predicate.as_ref().map_or(Ok(()), |predicate| {
+                            predicate.check_applicable(ty).with_context(|| {
+                                format!(
+                                    "predicate on tuple element {} is not applicable",
+                                    index + 1
+                                )
+                            })
+                        })
+                    })
+            }
             Self::Any(inner) => {
                 ensure!(!inner.is_empty(), "an `any` predicate needs a branch");
                 inner.iter().try_for_each(|item| item.check_applicable(ty))
@@ -458,6 +501,17 @@ impl Predicate {
                     answer.and(inner.evaluate(item, context))
                 }),
                 None => Match::No,
+            },
+            Self::Tuple(predicates) => match value {
+                DynSolValue::Tuple(values) if predicates.len() == values.len() => predicates
+                    .iter()
+                    .zip(values)
+                    .fold(Match::Yes, |answer, (predicate, value)| {
+                        predicate.as_ref().map_or(answer, |predicate| {
+                            answer.and(predicate.evaluate(value, context))
+                        })
+                    }),
+                _ => Match::No,
             },
             Self::Any(inner) => inner.iter().fold(Match::No, |answer, item| {
                 answer.or(item.evaluate(value, context))
@@ -557,6 +611,14 @@ impl Predicate {
             (Self::Gte(left), Self::Gte(right)) => decimal_literal_cmp(left, right)
                 .is_some_and(|order| order != std::cmp::Ordering::Less),
             (Self::Each(left), Self::Each(right)) => left.is_narrower_than(right),
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => left
+                .iter()
+                .zip(right)
+                .all(|(left, right)| match (left, right) {
+                    (_, None) => true,
+                    (None, Some(_)) => false,
+                    (Some(left), Some(right)) => left.is_narrower_than(right),
+                }),
             // Containment reverses under negation: every value `not A` admits
             // is admitted by `not B` exactly when B admits everything A does.
             // Comparing these the same way round as the others would claim a
@@ -603,6 +665,7 @@ impl Predicate {
             | Self::AnyValue
             | Self::Selector(_)
             | Self::Each(_)
+            | Self::Tuple(_)
             | Self::Length(_) => {}
         }
     }
@@ -653,6 +716,22 @@ impl Predicate {
                 }
             }
             Self::Each(inner) => format!("every element is {}", inner.describe()),
+            Self::Tuple(items) => {
+                let constrained = items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, predicate)| {
+                        predicate.as_ref().map(|predicate| {
+                            format!("element {} is {}", index + 1, predicate.describe())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if constrained.is_empty() {
+                    "a tuple with unconstrained elements".into()
+                } else {
+                    format!("a tuple where {}", constrained.join(" and "))
+                }
+            }
             Self::Any(inner) => inner
                 .iter()
                 .map(Self::describe)

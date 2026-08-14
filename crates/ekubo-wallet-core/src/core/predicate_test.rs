@@ -220,6 +220,100 @@ fn each_requires_every_element() {
 }
 
 #[test]
+fn tuple_predicates_constrain_exact_positions_and_round_trip() {
+    let subject = predicate(serde_json::json!({
+        "tuple": [
+            { "eq": "24" },
+            null,
+            { "eq": "true" }
+        ]
+    }));
+    let ty = DynSolType::Tuple(vec![
+        DynSolType::Uint(256),
+        DynSolType::Address,
+        DynSolType::Bool,
+    ]);
+    subject.check_applicable(&ty).unwrap();
+
+    let matches = DynSolValue::Tuple(vec![
+        DynSolValue::Uint(U256::from(24), 256),
+        DynSolValue::Address(STRANGER),
+        DynSolValue::Bool(true),
+    ]);
+    let wrong_first = DynSolValue::Tuple(vec![
+        DynSolValue::Uint(U256::from(23), 256),
+        DynSolValue::Address(FRIEND),
+        DynSolValue::Bool(true),
+    ]);
+    assert!(subject.matches(&matches, &context()));
+    assert!(!subject.matches(&wrong_first, &context()));
+    assert_eq!(
+        serde_json::from_value::<Predicate>(serde_json::to_value(&subject).unwrap()).unwrap(),
+        subject
+    );
+    assert_eq!(
+        subject.describe(),
+        "a tuple where element 1 is exactly 24 and element 3 is exactly true"
+    );
+}
+
+#[test]
+fn tuple_predicates_require_the_abi_arity_and_a_tuple_subject() {
+    let pair = DynSolType::Tuple(vec![DynSolType::Uint(256), DynSolType::Bool]);
+    let too_short = predicate(serde_json::json!({ "tuple": [{ "eq": "1" }] }));
+    let too_long = predicate(serde_json::json!({
+        "tuple": [{ "eq": "1" }, null, null]
+    }));
+    assert!(
+        too_short
+            .check_applicable(&pair)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly 2")
+    );
+    assert!(
+        too_long
+            .check_applicable(&pair)
+            .unwrap_err()
+            .to_string()
+            .contains("exactly 2")
+    );
+    assert!(
+        too_short
+            .check_applicable(&DynSolType::Uint(256))
+            .unwrap_err()
+            .to_string()
+            .contains("needs a tuple")
+    );
+    assert!(!too_short.matches(&DynSolValue::Uint(U256::from(1), 256), &context()));
+}
+
+#[test]
+fn tuple_predicates_compose_for_nested_and_array_arguments() {
+    let subject = predicate(serde_json::json!({
+        "each": {
+            "tuple": [
+                { "tuple": [{ "eq": "7" }, null] },
+                { "eq": "true" }
+            ]
+        }
+    }));
+    let inner_type = DynSolType::Tuple(vec![DynSolType::Uint(256), DynSolType::Address]);
+    let item_type = DynSolType::Tuple(vec![inner_type, DynSolType::Bool]);
+    subject
+        .check_applicable(&DynSolType::Array(Box::new(item_type)))
+        .unwrap();
+    let value = DynSolValue::Array(vec![DynSolValue::Tuple(vec![
+        DynSolValue::Tuple(vec![
+            DynSolValue::Uint(U256::from(7), 256),
+            DynSolValue::Address(FRIEND),
+        ]),
+        DynSolValue::Bool(true),
+    ])]);
+    assert!(subject.matches(&value, &context()));
+}
+
+#[test]
 fn a_predicate_applied_to_the_wrong_shape_is_a_non_match_not_a_panic() {
     let ctx = context();
     // `each` over a scalar, an address literal over an integer, `$self` over a
@@ -536,6 +630,17 @@ fn a_selector_rule_is_narrower_when_it_constrains_more() {
     );
     assert!(tight.is_narrower_than(&loose));
     assert!(!loose.is_narrower_than(&tight));
+}
+
+#[test]
+fn tuple_subsumption_accounts_for_unconstrained_positions() {
+    let loose = predicate(serde_json::json!({ "tuple": [null, { "gte": "1" }] }));
+    let tight = predicate(serde_json::json!({
+        "tuple": [{ "eq": "7" }, { "gte": "2" }]
+    }));
+    assert!(tight.is_narrower_than(&loose));
+    assert!(!loose.is_narrower_than(&tight));
+    assert!(!predicate(serde_json::json!({ "tuple": [null] })).is_narrower_than(&loose));
 }
 
 // ---------------------------------------------------------------- fuzzing

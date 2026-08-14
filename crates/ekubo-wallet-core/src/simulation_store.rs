@@ -55,8 +55,8 @@ pub struct RecordedSimulation {
     /// rather than from the caller, so there is no second copy to disagree.
     pub plan: ExecutionPlan,
     /// Where the plan's bytes came from — the vetted https host or
-    /// "inline data URI" — carried through to approval-time display. None for
-    /// plans this process built itself.
+    /// "inline data URI" — carried through to approval-time display. None only
+    /// for wallet-native recovery operations such as cancellation.
     pub plan_source: Option<String>,
     pub result: SimulationResult,
     pub recorded_at: DateTime<Utc>,

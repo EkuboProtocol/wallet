@@ -634,6 +634,17 @@ pub fn json_schema() -> Value {
     schema
 }
 
+/// Emit the complete policy document schema inline at MCP argument sites.
+///
+/// Some MCP clients choose an argument encoding from only the field's local
+/// schema and do not follow `$ref` definitions. Keeping this field explicitly
+/// object-shaped makes the required `version` and `rules` input discoverable
+/// without accepting any representation the policy parser would reject.
+#[must_use]
+pub fn policy_object_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    WalletPolicy::json_schema(generator)
+}
+
 /// A minimized, human-readable diff of what the proposed policy permits
 /// relative to the current one, so a reviewer reads the signing authority they
 /// are about to add or remove rather than comparing JSON documents.

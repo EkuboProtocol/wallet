@@ -9344,6 +9344,7 @@ impl WalletWindow {
             )
             .child(
                 div()
+                    .debug_selector(|| "policy-editor-status".to_owned())
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(selectable_label(if creating {
@@ -9596,20 +9597,17 @@ impl WalletWindow {
     }
 
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut content = div()
-            .h_full()
-            .min_h(px(520.0))
-            .flex()
-            .flex_col()
-            .gap_4()
-            .when_some(self.policy_action_error.clone(), |content, error| {
+        let mut content = div().min_h(px(520.0)).flex().flex_col().gap_4().when_some(
+            self.policy_action_error.clone(),
+            |content, error| {
                 content.child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().danger)
                         .child(selectable_label(error)),
                 )
-            });
+            },
+        );
         let accounts = match self.cached_accounts() {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -9748,10 +9746,6 @@ impl WalletWindow {
             .and_then(|result| result.as_ref().ok());
         let reviewed_exact_document =
             validated.is_some_and(|review| current_document.as_ref() == review.document.as_str());
-        let revision = editor.source_revision.map_or_else(
-            || "No installed policy · signing disabled".to_owned(),
-            |revision| format!("Installed revision {revision}"),
-        );
         let mut editor_panel = div()
             .id("policy-json-editor")
             .anchor_scroll(Some(self.policy_editor_anchor.clone()))
@@ -9768,15 +9762,17 @@ impl WalletWindow {
             // No account name here: the header already names the account this
             // document belongs to, and repeating it pushed the policy itself
             // further down the page.
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_text(
-                        format!("policy-editor-revision-{}", editor.wallet_id),
-                        &revision,
-                    )),
-            )
+            .when(editor.source_revision.is_none(), |panel| {
+                panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_text(
+                            format!("policy-editor-revision-{}", editor.wallet_id),
+                            "No installed policy · signing disabled",
+                        )),
+                )
+            })
             .when_some(
                 editor
                     .validation
@@ -9795,6 +9791,7 @@ impl WalletWindow {
             .child(
                 div()
                 .id("policy-json-editor-input")
+                .debug_selector(|| "policy-json-editor-input".to_owned())
                 .flex_1()
                 .min_h(px(320.0))
                 .flex()
@@ -12874,6 +12871,8 @@ impl Render for ComponentLayerHost {
 }
 
 type WalletWindowSlot = Rc<RefCell<Option<WindowHandle<Root>>>>;
+#[cfg(target_os = "macos")]
+type DockReopenTarget = Rc<RefCell<Option<(Entity<WalletWindow>, WalletWindowSlot)>>>;
 
 fn dark_appearance(appearance: WindowAppearance) -> bool {
     matches!(
@@ -13151,7 +13150,22 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
 
-    gpui_platform::application()
+    let application = gpui_platform::application();
+    #[cfg(target_os = "macos")]
+    let dock_reopen_target: DockReopenTarget = Rc::new(RefCell::new(None));
+    #[cfg(target_os = "macos")]
+    application.on_reopen({
+        let dock_reopen_target = dock_reopen_target.clone();
+        move |cx| {
+            let Some((wallet_view, window_slot)) = dock_reopen_target.borrow().clone() else {
+                return;
+            };
+            if let Err(error) = show_wallet_window(cx, &wallet_view, &window_slot) {
+                tracing::error!(%error, "failed to reopen wallet from the macOS dock");
+            }
+        }
+    });
+    application
         .with_assets(WalletAssets::default())
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
@@ -13287,6 +13301,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 });
             });
             let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
+            #[cfg(target_os = "macos")]
+            dock_reopen_target
+                .borrow_mut()
+                .replace((wallet_view.clone(), window_slot.clone()));
             if !hidden_startup || tray.borrow().is_none() {
                 show_wallet_window(cx, &wallet_view, &window_slot)
                     .expect("failed to open the wallet window");

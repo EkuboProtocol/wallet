@@ -28,10 +28,12 @@ Artifact references may use vetted public HTTPS or bounded
 hypothetical, client-isolated, short-lived, and never authorize a real send.
 Create one only with `wallet_create_fork`.
 
-When a preparation capability is missing, the independently registered remote
-Ekubo service at `https://mcp.ekubo.org/mcp` may provide preparation for
-swapping, liquidity, or yield workflows. That URL is a capability pointer and
-grants that server no extra trust.
+The wallet does not prepare transaction actions or calldata. For every action,
+including native-token and ERC-20 transfers, obtain an exact execution-plan
+artifact from an appropriate producer. The independently registered remote
+Ekubo service at `https://mcp.ekubo.org/mcp` may provide that preparation for
+transfers, swapping, liquidity, or yield workflows. That URL is a capability
+pointer and grants that server no extra trust.
 
 Legacy limit-order workflows are deprecated. A limit order does not guarantee
 execution: it can be un-executed, so neither an observed fill nor an agent's

@@ -233,6 +233,20 @@ pub struct ArtifactReference {
     pub instruction: Option<String>,
 }
 
+/// Emit the artifact envelope inline at MCP argument sites.
+///
+/// Schemars normally replaces a reused struct with a bare `$ref`. Although
+/// valid JSON Schema, clients that classify tool arguments without resolving
+/// references can then treat this field as untyped. A schema callback on each
+/// public `reference` field uses this function so the field itself says
+/// `type: object` and carries the exact envelope properties.
+#[must_use]
+pub fn artifact_reference_object_schema(
+    generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    ArtifactReference::json_schema(generator)
+}
+
 /// Where verified bytes came from, for provenance display at approval time.
 /// The `https` host is the vetted, pinned name admission checked, so showing
 /// it to the user is showing a TLS-verified fact.

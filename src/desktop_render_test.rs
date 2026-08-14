@@ -284,6 +284,81 @@ fn an_action_button_is_the_width_of_its_label(cx: &mut gpui::TestAppContext) {
     release(cx, &view);
 }
 
+#[gpui::test]
+fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, cx| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        let document = wallet
+            .policy_json_input
+            .as_ref()
+            .expect("policy input is initialized")
+            .read(cx)
+            .value()
+            .to_string();
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            current_policy: Some(WalletPolicy::require_approval_for_everything()),
+            proposal: None,
+            validation: None,
+        });
+        assert!(document.is_empty());
+    });
+
+    let before = measure(
+        cx,
+        window,
+        &view,
+        &["policy-json-editor-input", "policy-editor-status"],
+    );
+    assert!(
+        before[1].is_none(),
+        "an installed policy must not spend editor space on its revision number"
+    );
+    let before = before[0].expect("policy JSON editor must be laid out");
+    assert!(
+        before.size.height >= px(320.0),
+        "the initial editor must honor its usable minimum height"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.policy_editor.as_mut().unwrap().validation = Some(Ok(PolicyDraftReview {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            document: String::new(),
+            policy: WalletPolicy::require_approval_for_everything(),
+            diff: (1..=24)
+                .map(|index| format!("+ rule {index} grants a deliberately long permission"))
+                .collect(),
+        }));
+    });
+    let after = measure(cx, window, &view, &["policy-json-editor-input"])[0]
+        .expect("policy JSON editor must remain laid out after review");
+    assert!(
+        after.size.height >= before.size.height,
+        "reviewing must extend the scrollable page instead of shrinking the editor: \
+         before {:?}, after {:?}",
+        before.size.height,
+        after.size.height
+    );
+
+    release(cx, &view);
+}
+
 /// A review document with the shape a real one has: a summary, effects, and
 /// exact bytes to disclose.
 fn review_document() -> ReviewDocument {

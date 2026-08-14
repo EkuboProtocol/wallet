@@ -27,6 +27,35 @@ language also supports integer comparisons (`lt`, `lte`, `gt`, `gte`) and
 composition with `any`, `all`, `not`, `each`, `selector`, and `length`.
 Advanced JSON is an escape hatch, not a separate policy path.
 
+A selector ABI must name every top-level parameter, and `args` refers to those
+names. For example, an ERC-20 approval capped at one million raw units is:
+
+```json
+{
+  "selector": {
+    "abi": "approve(address spender, uint256 amount)",
+    "args": {
+      "spender": { "eq": "0x1111111111111111111111111111111111111111" },
+      "amount": { "lte": "1000000" }
+    }
+  }
+}
+```
+
+Tuple components are constrained positionally because Solidity selector types
+do not preserve component names. A `tuple` array must have exactly the ABI
+tuple's arity; a predicate constrains that position and `null` leaves just that
+position unconstrained. This example constrains the first and third components:
+
+```json
+{ "tuple": [{ "eq": "1" }, null, { "eq": "true" }] }
+```
+
+Tuple predicates nest for nested tuples. For an array of tuples, compose the
+shapes as `{ "each": { "tuple": [...] } }`. Use the same exact-arity rule at
+every tuple level. The explicit `"any_value"` predicate remains valid, but
+`null` is the canonical spelling for an unconstrained tuple position.
+
 Prefer the narrowest rule that expresses the operation. Put exceptions before
 broad rules: order is authority, and installation rejects a later rule that is
 provably shadowed by an earlier one. There is no `from` matcher, chain map,

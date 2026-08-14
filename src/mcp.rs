@@ -3,11 +3,7 @@ use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
     config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
-    core::{
-        execution_plan::{DecimalU256, ExecutionPlan},
-        policy::WalletPolicy,
-        transfers::{Transfer, transfer_plan},
-    },
+    core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
     custody::{KeyStore, OsKeyStore},
     execution::ReceiptStatus,
     fork::{ForkSession, ForkStore, MAX_FORKS, MAX_PLANS_PER_FORK, pin_parent_block},
@@ -380,8 +376,9 @@ struct WalletNetworkInput {
 struct SimulateInput {
     wallet_id: String,
     chain_id: String,
-    /// The producer's `artifact_reference` envelope, passed through VERBATIM:
-    /// never rename, edit, restate, or reconstruct any of its fields. The
+    /// The producer's `artifact_reference` envelope, passed as a JSON object
+    /// through VERBATIM, never as a JSON-encoded string: never rename, edit,
+    /// restate, or reconstruct any of its fields. The
     /// wallet fetches the plan body itself and verifies the envelope's
     /// integrity digest and byte count over what it actually fetched, so what
     /// the agent saw prepared is what gets simulated. An inline plan travels
@@ -389,6 +386,7 @@ struct SimulateInput {
     /// of its exact bytes (integrity optional there). Public HTTPS artifacts
     /// must include their integrity digest and exact byte count. Local
     /// filesystem references are not accepted.
+    #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
     reference: ArtifactReference,
     /// Simulate on top of everything already applied to this temporary fork
     /// and, if execution succeeds, append this plan to it. Omit to simulate
@@ -399,28 +397,15 @@ struct SimulateInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct TransfersInput {
-    wallet_id: String,
-    chain_id: String,
-    /// Ordered transfers, which may mix the native token with any number of
-    /// ERC-20 contracts.
-    transfers: Vec<Transfer>,
-    /// What to do when the plan's simulation fails. It says nothing about
-    /// policy: a plan no rule covers always queues for human approval, and a
-    /// plan a `deny` rule matched always fails outright.
-    #[serde(default)]
-    on_simulation_failure: OnSimulationFailure,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct SendExecutionPlanInput {
     wallet_id: String,
     chain_id: String,
     /// The producer's `artifact_reference` envelope for the plan to simulate
-    /// and send, passed through VERBATIM. Provide exactly one of `reference`, `simulation_id`, or
-    /// `request_id`.
+    /// and send, passed as a JSON object through VERBATIM, never as a
+    /// JSON-encoded string. Provide exactly one of `reference`,
+    /// `simulation_id`, or `request_id`.
     #[serde(default)]
+    #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
     reference: Option<ArtifactReference>,
     /// The `simulation_id` of a plan already simulated against real chain
     /// state by `wallet_simulate_execution_plan`, which is sent without
@@ -667,8 +652,9 @@ struct ProposeTokensInput {
     #[serde(default)]
     tokens: Vec<ProposeTokenItem>,
     /// A producer's `artifact_reference` envelope of `artifact_type`
-    /// `token_list`, passed through VERBATIM: never rename, edit, restate, or
-    /// reconstruct any of its fields. The wallet fetches the list itself and
+    /// `token_list`, passed as a JSON object through VERBATIM, never as a
+    /// JSON-encoded string: never rename, edit, restate, or reconstruct any of
+    /// its fields. The wallet fetches the list itself and
     /// verifies the envelope's integrity digest and byte count over what it
     /// actually fetched. This changes only who carries the bytes — the
     /// entries still reach the owner as suggestions and are still named
@@ -676,6 +662,7 @@ struct ProposeTokensInput {
     /// same 10000-entry cap applies: a longer list is refused rather than
     /// truncated.
     #[serde(default)]
+    #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
     reference: Option<ArtifactReference>,
 }
 
@@ -782,9 +769,10 @@ struct GetBalancesInput {
     #[serde(default)]
     tokens: Vec<String>,
     /// A producer's `artifact_reference` envelope of `artifact_type`
-    /// `token_list`, passed through VERBATIM, whose entries supply the
-    /// addresses to read. Use this instead of restating a long list of
-    /// addresses. Only the addresses are used: this reads balances and never
+    /// `token_list`, passed as a JSON object through VERBATIM, never as a
+    /// JSON-encoded string, whose entries supply the addresses to read. Use
+    /// this instead of restating a long list of addresses. Only the addresses
+    /// are used: this reads balances and never
     /// consults or records what the list calls anything. Entries on other
     /// chains are ignored, so one canonical multi-chain list can be pointed
     /// at any chain. Two different caps apply: the referenced list itself is
@@ -792,6 +780,7 @@ struct GetBalancesInput {
     /// what survives the chain filter must still be at most 1000 addresses,
     /// which is what one balance request will carry.
     #[serde(default)]
+    #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
     reference: Option<ArtifactReference>,
     /// Read this temporary simulation fork's hypothetical balances instead of
     /// real chain state.
@@ -823,6 +812,20 @@ struct LegalOutput {
     instruction: String,
 }
 
+fn deserialize_policy_object<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "policy must be a JSON object, not JSON encoded as a string",
+        ))
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ProposePolicyInput {
@@ -830,9 +833,13 @@ struct ProposePolicyInput {
     /// The policy revision this proposal was written against, from
     /// `wallet_get_policy`. Must be the active revision.
     source_revision: u64,
-    /// The complete proposed replacement policy document. Read
-    /// `wallet://docs/policy-authoring` and `wallet://schemas/policy` first.
-    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    /// The complete proposed replacement policy document as a JSON object,
+    /// never as a JSON-encoded string. Read `wallet://docs/policy-authoring`
+    /// and `wallet://schemas/policy` first. Selector ABI parameters must be
+    /// named; tuple arguments use exact-arity positional `tuple` arrays where
+    /// `null` leaves one position unconstrained.
+    #[serde(deserialize_with = "deserialize_policy_object")]
+    #[schemars(schema_with = "ekubo_wallet_core::core::policy::policy_object_schema")]
     policy: serde_json::Value,
     /// Why this change is needed, shown verbatim to the human reviewer.
     /// Explain what the user asked for and which permissions enable it.
@@ -1928,39 +1935,6 @@ impl WalletMcpServer {
                 .map_err(|error| tool_error(&error))?;
         balances.fork = session.map(|session| session.read_context());
         Ok(Json(balances))
-    }
-
-    #[tool(
-        name = "wallet_send_transfers",
-        description = "Simulate, policy-check, locally sign, persist, and send a non-empty ordered list of token transfers. Each item names the token contract to move, where address 0x0000000000000000000000000000000000000000 is the native token, and a raw smallest-unit amount; native and ERC-20 transfers may be mixed freely in one list. ERC-20 items become transfer(address,uint256) calls. The whole list is sent as a single transaction: one transfer is direct, and multiple transfers execute atomically through canonical Calibur.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
-    )]
-    async fn wallet_send_transfers(
-        &self,
-        Parameters(input): Parameters<TransfersInput>,
-    ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
-        let wallet = self
-            .config
-            .wallet(&input.wallet_id)
-            .map_err(|error| tool_error(&error))?;
-        let network = self
-            .config
-            .network_by_chain_id(&input.chain_id)
-            .map_err(|error| tool_error(&error))?;
-        let chain_id = DecimalU256::new(input.chain_id).map_err(|error| tool_error(&error))?;
-        let plan = transfer_plan(&chain_id, wallet.address, input.transfers)
-            .map_err(|error| tool_error(&error))?;
-        let output =
-            Box::pin(self.send_new_plan(wallet, network, plan, None, input.on_simulation_failure))
-                .await
-                .map_err(|error| tool_error(&error))?;
-        self.publish_execution_status(&output);
-        Ok(Json(output))
     }
 
     #[tool(

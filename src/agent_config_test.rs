@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-const HELPER: &str = "/private/ekubo-wallet-mcp-bridge-1.0.4";
+const HELPER: &str = "/private/ekubo-wallet-mcp-bridge-1.1.0";
 
 #[test]
 fn codex_uses_exact_stdio_shape_and_removes_http_oauth_credentials() {

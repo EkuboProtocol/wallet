@@ -40,6 +40,7 @@
         { "$ref": "#/$defs/Gte" },
         { "$ref": "#/$defs/Selector" },
         { "$ref": "#/$defs/Each" },
+        { "$ref": "#/$defs/Tuple" },
         { "$ref": "#/$defs/Any" },
         { "$ref": "#/$defs/All" },
         { "$ref": "#/$defs/Not" },
@@ -63,6 +64,7 @@
       "required": ["abi"]
     },
     "Each": { "type": "object", "properties": { "each": { "$ref": "#/$defs/Predicate" } }, "required": ["each"], "additionalProperties": false },
+    "Tuple": { "type": "object", "properties": { "tuple": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] } } }, "required": ["tuple"], "additionalProperties": false },
     "Any": { "type": "object", "properties": { "any": { "type": "array", "items": { "$ref": "#/$defs/Predicate" } } }, "required": ["any"], "additionalProperties": false },
     "All": { "type": "object", "properties": { "all": { "type": "array", "items": { "$ref": "#/$defs/Predicate" } } }, "required": ["all"], "additionalProperties": false },
     "Not": { "type": "object", "properties": { "not": { "$ref": "#/$defs/Predicate" } }, "required": ["not"], "additionalProperties": false },
