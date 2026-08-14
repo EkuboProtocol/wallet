@@ -1073,7 +1073,6 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Signed),
         TransactionActions {
-            refresh: false,
             send: true,
             cancel: false,
             discard: true,
@@ -1082,7 +1081,6 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Broadcast),
         TransactionActions {
-            refresh: true,
             send: true,
             cancel: true,
             discard: false,
@@ -1091,7 +1089,6 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Cancelling),
         TransactionActions {
-            refresh: true,
             send: false,
             cancel: true,
             discard: false,
@@ -1100,12 +1097,33 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Confirmed),
         TransactionActions {
-            refresh: false,
             send: false,
             cancel: false,
             discard: false,
         }
     );
+}
+
+#[test]
+fn automatic_status_refresh_only_polls_transactions_the_network_can_advance() {
+    for status in [
+        PendingStatus::Submitting,
+        PendingStatus::Broadcast,
+        PendingStatus::Cancelling,
+    ] {
+        assert!(transaction_status_needs_automatic_refresh(status));
+    }
+    for status in [
+        PendingStatus::AwaitingApproval,
+        PendingStatus::Rejected,
+        PendingStatus::Signed,
+        PendingStatus::Confirmed,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+    ] {
+        assert!(!transaction_status_needs_automatic_refresh(status));
+    }
 }
 
 #[test]

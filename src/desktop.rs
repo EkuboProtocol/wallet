@@ -88,6 +88,8 @@ const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
 const BUTTON_HEIGHT: gpui::Pixels = px(44.0);
+const PAGE_CONTENT_MAX_WIDTH: gpui::Pixels = px(720.0);
+const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
@@ -889,7 +891,6 @@ fn token_list_url_draft(value: &str) -> Result<String> {
 // enum would still need to enumerate every valid combination.
 #[allow(clippy::struct_excessive_bools)]
 struct TransactionActions {
-    refresh: bool,
     send: bool,
     cancel: bool,
     discard: bool,
@@ -897,13 +898,6 @@ struct TransactionActions {
 
 fn transaction_actions(status: PendingStatus) -> TransactionActions {
     TransactionActions {
-        refresh: matches!(
-            status,
-            PendingStatus::Submitting
-                | PendingStatus::Broadcast
-                | PendingStatus::Cancelling
-                | PendingStatus::Replaced
-        ),
         send: matches!(status, PendingStatus::Signed | PendingStatus::Broadcast),
         cancel: matches!(
             status,
@@ -998,6 +992,22 @@ fn transaction_receipt_is_provisional(record: &PendingTransaction) -> bool {
         PendingStatus::Confirmed | PendingStatus::Reverted | PendingStatus::Cancelled
     ) && record.settlement_transaction_hash.is_some()
         && record.finalized_at.is_none()
+}
+
+/// Whether the network can still advance this row without another owner
+/// action. Signed-but-unsent bytes deliberately do not qualify: only pressing
+/// Send can change them. A terminal receipt remains refreshable until its
+/// block is final, because a reorg can still change that apparent outcome.
+const fn transaction_status_needs_automatic_refresh(status: PendingStatus) -> bool {
+    matches!(
+        status,
+        PendingStatus::Submitting | PendingStatus::Broadcast | PendingStatus::Cancelling
+    )
+}
+
+fn transaction_needs_status_refresh(record: &PendingTransaction) -> bool {
+    transaction_status_needs_automatic_refresh(record.status)
+        || transaction_receipt_is_provisional(record)
 }
 
 fn transaction_record_tone(record: &PendingTransaction) -> StatusTone {
@@ -1380,7 +1390,10 @@ pub struct WalletWindow {
     token_list_generation: u64,
     mcp_status: McpGatewayStatus,
     selected_record: Option<uuid::Uuid>,
+    inbox_tab: InboxTab,
     activity_busy: BTreeSet<uuid::Uuid>,
+    activity_refreshing: BTreeSet<uuid::Uuid>,
+    activity_refresh_task: Option<Task<()>>,
     activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
     /// Names the newest note on each row, so a timer set for an older one
     /// cannot take a newer one off the screen with it.
@@ -1625,6 +1638,12 @@ enum TokenImportState {
 enum AccountEntryMode {
     Create,
     Import,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InboxTab {
+    Waiting,
+    Decided,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1895,9 +1914,8 @@ struct NetworkEditorDraft {
 /// account of a failure the row's own status cannot show. A note that
 /// something went as asked is a receipt for a press, and the row already
 /// carries the result — so it says so briefly and then gets out of the way.
-/// It used to stay for the life of the process: "Checked with the network.
-/// The transaction was included in a block and its calls succeeded." sat under
-/// a row already labelled Confirmed until the app was restarted.
+/// Automatic status checks never create one: their spinner is the complete
+/// feedback, and the refreshed lifecycle label is their result.
 #[derive(Clone)]
 struct ActivityFeedback {
     message: SharedString,
@@ -2201,6 +2219,7 @@ fn render_activity_row(
     record: &OwnerActivityRecord,
     selected: bool,
     busy: bool,
+    refreshing: bool,
     feedback: Option<ActivityFeedback>,
     networks: &BTreeMap<u64, SharedString>,
     agent: Option<&SharedString>,
@@ -2218,7 +2237,6 @@ fn render_activity_row(
             let status = item.status;
             let available = transaction_actions(status);
             let inspect_editor = editor.clone();
-            let refresh_editor = editor.clone();
             let send_editor = editor.clone();
             let cancel_editor = editor.clone();
             let discard_editor = editor;
@@ -2237,20 +2255,6 @@ fn render_activity_row(
                         });
                     }),
                 )
-                .when(available.refresh, |buttons| {
-                    buttons.child(
-                        app_button(SharedString::from(format!(
-                            "refresh-transaction-{request_id}"
-                        )))
-                        .label(if busy { "Checking…" } else { "Check status" })
-                        .disabled(busy)
-                        .on_click(move |_, _, cx| {
-                            let _ = refresh_editor.update(cx, |view, cx| {
-                                view.refresh_transaction(request_id, cx);
-                            });
-                        }),
-                    )
-                })
                 .when(available.send, |buttons| {
                     buttons.child(
                         app_button(SharedString::from(format!(
@@ -2405,6 +2409,7 @@ fn render_activity_row(
                                 .items_center()
                                 .gap_2()
                                 .child(status_pill(summary.status, summary.tone, cx))
+                                .when(refreshing, |status| status.child(Spinner::new().small()))
                                 .child(
                                     selectable_text(
                                         format!("activity-row-title-{request_id}"),
@@ -3790,7 +3795,10 @@ impl WalletWindow {
             token_list_generation: 0,
             mcp_status: McpGatewayStatus::Starting,
             selected_record: None,
+            inbox_tab: InboxTab::Waiting,
             activity_busy: BTreeSet::new(),
+            activity_refreshing: BTreeSet::new(),
+            activity_refresh_task: None,
             activity_feedback: BTreeMap::new(),
             activity_feedback_seq: 0,
             history_clearing: false,
@@ -3873,6 +3881,23 @@ impl WalletWindow {
 
     fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut token_lists_created = false;
+        if self.activity_refresh_task.is_none() {
+            self.activity_refresh_task = Some(cx.spawn(async move |view, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(ACTIVITY_REFRESH_INTERVAL)
+                        .await;
+                    if view
+                        .update(cx, |view, cx| {
+                            view.refresh_visible_pending_transactions(cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
         if self.appearance_subscription.is_none() {
             let tray = self.tray.clone();
             self.appearance_subscription = Some(cx.observe_window_appearance(
@@ -4128,6 +4153,8 @@ impl WalletWindow {
     /// the list that has to grow whenever a field does, which is why it lives
     /// beside the fields rather than being spelled out at a call site.
     fn release_window_state(&mut self, cx: &mut Context<Self>) {
+        self.activity_refresh_task = None;
+        self.activity_refreshing.clear();
         self.command_palette = false;
         self.command_palette_list = None;
         self.command_palette_subscription = None;
@@ -5019,6 +5046,20 @@ impl WalletWindow {
         self.account_id_error = None;
         self.private_key_error = None;
         self.account_status = None;
+        cx.notify();
+    }
+
+    fn set_inbox_tab(&mut self, tab: InboxTab, cx: &mut Context<Self>) {
+        if self.inbox_tab == tab {
+            return;
+        }
+        self.inbox_tab = tab;
+        self.selected_record = None;
+        self.route_scroll_handle
+            .set_offset(gpui::point(px(0.0), px(0.0)));
+        if tab == InboxTab::Decided {
+            self.refresh_visible_pending_transactions(cx);
+        }
         cx.notify();
     }
 
@@ -6699,10 +6740,39 @@ impl WalletWindow {
         self.reload_desktop_snapshot(cx);
     }
 
+    fn refresh_visible_pending_transactions(&mut self, cx: &mut Context<Self>) {
+        if self.route != Route::Activity
+            || self.inbox_tab != InboxTab::Decided
+            || self.legal_gate
+            || self.active_review.is_some()
+        {
+            return;
+        }
+        let Ok(records) = self.cached_activity_records() else {
+            return;
+        };
+        let request_ids = records
+            .iter()
+            .filter_map(|record| match record {
+                OwnerActivityRecord::Transaction(record)
+                    if transaction_needs_status_refresh(record)
+                        && self.chain_id_is_visible(record.chain_id.parse().ok()) =>
+                {
+                    Some(record.request_id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.refresh_transaction(request_id, cx);
+        }
+    }
+
     fn refresh_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if !self.activity_busy.insert(request_id) {
             return;
         }
+        self.activity_refreshing.insert(request_id);
         self.activity_feedback.remove(&request_id);
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -6712,17 +6782,8 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.activity_busy.remove(&request_id);
+                view.activity_refreshing.remove(&request_id);
                 let updated = result.as_ref().ok().cloned();
-                let feedback = match result {
-                    Ok(record) => ActivityFeedback::note(format!(
-                        "Checked with the network. {}",
-                        record.status.explanation()
-                    )),
-                    Err(error) => ActivityFeedback::failure(format!(
-                        "The network could not be reached: {error:#}"
-                    )),
-                };
-                view.set_activity_feedback(request_id, feedback, cx);
                 view.synchronize_transaction_activity(request_id, updated, cx);
                 cx.notify();
             });
@@ -6926,19 +6987,9 @@ impl WalletWindow {
         if matches!(self.release_state, ReleaseDisplayState::Checking) {
             return;
         }
-        let data_dir = match crate::config::ConfigStore::production() {
-            Ok(config) => config.data_dir().to_path_buf(),
-            Err(error) => {
-                self.release_state = ReleaseDisplayState::Failed(
-                    format!("Could not locate release-check storage: {error:#}").into(),
-                );
-                cx.notify();
-                return;
-            }
-        };
         self.release_state = ReleaseDisplayState::Checking;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let check = crate::release_check::check(&data_dir).await;
+            let check = crate::release_check::check().await;
             let update = if check.update_available && !crate::UPDATER_PUBLIC_KEY.is_empty() {
                 tokio::task::spawn_blocking(crate::release_check::check_installable)
                     .await
@@ -7549,6 +7600,9 @@ impl WalletWindow {
             return;
         }
         self.set_route(route);
+        if route == Route::Activity && self.inbox_tab == InboxTab::Decided {
+            self.refresh_visible_pending_transactions(cx);
+        }
         if route == Route::Settings && matches!(self.release_state, ReleaseDisplayState::Idle) {
             self.check_latest_release(cx);
         }
@@ -7583,10 +7637,12 @@ impl WalletWindow {
         self.set_route(Route::Activity);
         match route {
             NotificationRoute::Review(request_id) => {
+                self.inbox_tab = InboxTab::Waiting;
                 self.selected_record = None;
                 self.begin_transaction_review(request_id, cx);
             }
             NotificationRoute::Activity(request_id) => {
+                self.inbox_tab = InboxTab::Decided;
                 self.selected_record = Some(request_id);
                 if self.activity_inspections.contains_key(&request_id) {
                     cx.notify();
@@ -8804,6 +8860,7 @@ impl WalletWindow {
         }
         let selected_record = self.selected_record;
         let busy = Arc::new(self.activity_busy.clone());
+        let refreshing = Arc::new(self.activity_refreshing.clone());
         let feedback = Arc::new(self.activity_feedback.clone());
         let no_sources = BTreeMap::new();
         let sources = self
@@ -8827,6 +8884,7 @@ impl WalletWindow {
                 record,
                 selected_record == Some(request_id),
                 busy.contains(&request_id),
+                refreshing.contains(&request_id),
                 feedback.get(&request_id).cloned(),
                 &networks,
                 sources.get(&request_id),
@@ -8888,24 +8946,52 @@ impl WalletWindow {
     }
 
     fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let waiting = self.inbox_tab == InboxTab::Waiting;
         div()
+            .w_full()
+            .p_5()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
             .flex()
             .flex_col()
-            // Same rhythm as the settings pane: the gap between "Waiting on
-            // you" and "Already decided" is a section break, not a row break.
-            .gap_6()
+            .gap_4()
             .child(
-                GroupBox::new()
-                    .id("activity-needs-review")
-                    .title("Waiting on you")
-                    .child(self.render_reviews(cx)),
+                TabBar::new("inbox-tabs")
+                    .w_full()
+                    .underline()
+                    .large()
+                    .selected_index(usize::from(!waiting))
+                    .child(Tab::new().label("Waiting on you"))
+                    .child(Tab::new().label("Already decided"))
+                    .on_click(cx.listener(|view, index: &usize, _, cx| {
+                        view.set_inbox_tab(
+                            if *index == 0 {
+                                InboxTab::Waiting
+                            } else {
+                                InboxTab::Decided
+                            },
+                            cx,
+                        );
+                    })),
             )
-            .child(
-                GroupBox::new()
-                    .id("inbox-history")
-                    .title("Already decided")
-                    .child(self.render_activity_history(cx)),
-            )
+            .when(waiting, |inbox| {
+                inbox.child(
+                    div()
+                        .id("activity-needs-review")
+                        .debug_selector(|| "activity-waiting-panel".to_owned())
+                        .child(self.render_reviews(cx)),
+                )
+            })
+            .when(!waiting, |inbox| {
+                inbox.child(
+                    div()
+                        .id("inbox-history")
+                        .debug_selector(|| "activity-decided-panel".to_owned())
+                        .child(self.render_activity_history(cx)),
+                )
+            })
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -9024,21 +9110,19 @@ impl WalletWindow {
         }
 
         div()
-            // Named so a render test can measure this cap rather than take it
-            // on trust. `debug_selector` is a documented no-op in release
-            // builds. Without the cap the pane lays out to 1800px in a 1400px
-            // window; the test asserts the difference.
+            // Named so the prose-specific render test can still inspect the
+            // pane within the route-wide cap. `debug_selector` is a documented
+            // no-op in release builds.
             .debug_selector(|| "settings-pane".to_owned())
             // A settings row puts its name at the left edge and its control at
             // the right, which is the desktop idiom and reads well until the
             // window is wide: at a thousand pixels the `View` beside a legal
             // document sat a hand's width from the document it opened, and the
             // pairing had to be inferred from vertical alignment alone. Every
-            // settings pane worth copying caps its measure for this reason —
-            // the control stays beside its subject however wide the window is.
-            // Only this route is capped; the token list and the policy
-            // document want every pixel they can get.
-            .max_w(px(720.0))
+            // settings pane worth copying caps its measure for this reason.
+            // The shared route container now applies that same measure to
+            // every screen, keeping each control beside its subject.
+            .w_full()
             .flex()
             .flex_col()
             // A settings pane's groups need more air than the rows inside
@@ -10753,18 +10837,6 @@ impl WalletWindow {
                 ));
             }
         }
-        content = content.child(
-            app_button("open-custom-network-editor")
-                .self_start()
-                .label("Add custom network")
-                .primary()
-                .icon(IconName::Plus)
-                .disabled(self.network_editor_open)
-                .on_click(cx.listener(|view, _, window, cx| {
-                    cx.stop_propagation();
-                    view.open_new_network_editor(window, cx);
-                })),
-        );
         content = match self.cached_networks() {
             // Nothing to list, and the reason matters: with testnet mode off,
             // a wallet whose networks are all test networks drew an empty page
@@ -12518,6 +12590,22 @@ impl WalletWindow {
                     ),
                 )
             }
+            Route::Networks => Some(
+                div()
+                    .debug_selector(|| "network-header-action".to_owned())
+                    .flex_none()
+                    .child(
+                        app_button("open-custom-network-editor")
+                            .label("Add custom network")
+                            .primary()
+                            .icon(IconName::Plus)
+                            .disabled(self.network_editor_open)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                cx.stop_propagation();
+                                view.open_new_network_editor(window, cx);
+                            })),
+                    ),
+            ),
             _ => None,
         }
     }
@@ -12593,6 +12681,80 @@ impl WalletWindow {
         } else {
             self.route_panel(cx)
         };
+        let header = div()
+            .debug_selector(|| "route-header-inner".to_owned())
+            .w_full()
+            .max_w(PAGE_CONTENT_MAX_WIDTH)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_3xl()
+                                    .font_medium()
+                                    .child(self.route.label()),
+                            )
+                            // A page title names the screen; this line says
+                            // what the screen is for, so nobody has to open a
+                            // tab to find out whether it is the one they want.
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(self.route.description()),
+                            ),
+                    )
+                    .when_some(self.route_header_actions(cx), |header, actions| {
+                        header.child(actions)
+                    })
+                    .when(self.desktop_snapshot_loading, |header| {
+                        header.child(Spinner::new().small())
+                    }),
+            )
+            .when_some(self.route_account_selector(cx), |header, selector| {
+                header.child(selector)
+            });
+        let content = div()
+            .debug_selector(|| "route-content-inner".to_owned())
+            .w_full()
+            .max_w(PAGE_CONTENT_MAX_WIDTH)
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when_some(self.desktop_snapshot_error.clone(), |content, error| {
+                content.child(
+                    selectable_error_alert("desktop-snapshot-error", error)
+                        .title("Wallet data unavailable"),
+                )
+            })
+            .when_some(
+                self.route_errors.get(&self.route).cloned(),
+                |content, error| {
+                    content.child(
+                        selectable_error_alert(
+                            SharedString::from(format!("route-error-{}", self.route.label())),
+                            error,
+                        )
+                        .title("Action could not be completed"),
+                    )
+                },
+            )
+            .child(route_panel);
         div()
             .flex_1()
             .min_w_0()
@@ -12609,49 +12771,8 @@ impl WalletWindow {
                     .bg(cx.theme().background)
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_start()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_3xl()
-                                            .font_medium()
-                                            .child(self.route.label()),
-                                    )
-                                    // A page title names the screen; this line
-                                    // says what the screen is for, so nobody
-                                    // has to open a tab to find out whether it
-                                    // is the one they want.
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .whitespace_normal()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(self.route.description()),
-                                    ),
-                            )
-                            .when_some(self.route_header_actions(cx), |header, actions| {
-                                header.child(actions)
-                            })
-                            .when(self.desktop_snapshot_loading, |header| {
-                                header.child(Spinner::new().small())
-                            }),
-                    )
-                    .when_some(self.route_account_selector(cx), |header, selector| {
-                        header.child(selector)
-                    }),
+                    .items_center()
+                    .child(header),
             )
             .child(
                 div()
@@ -12664,29 +12785,8 @@ impl WalletWindow {
                     .pb_5()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .when_some(self.desktop_snapshot_error.clone(), |content, error| {
-                        content.child(
-                            selectable_error_alert("desktop-snapshot-error", error)
-                                .title("Wallet data unavailable"),
-                        )
-                    })
-                    .when_some(
-                        self.route_errors.get(&self.route).cloned(),
-                        |content, error| {
-                            content.child(
-                                selectable_error_alert(
-                                    SharedString::from(format!(
-                                        "route-error-{}",
-                                        self.route.label()
-                                    )),
-                                    error,
-                                )
-                                .title("Action could not be completed"),
-                            )
-                        },
-                    )
-                    .child(route_panel),
+                    .items_center()
+                    .child(content),
             )
     }
 

@@ -257,10 +257,98 @@ fn the_settings_pane_is_capped_to_a_readable_measure(cx: &mut gpui::TestAppConte
         prose.size.width
     );
     assert!(
-        pane.size.width <= px(720.0),
+        pane.size.width <= PAGE_CONTENT_MAX_WIDTH,
         "the settings pane must stay within its measure, not stretch to the \
          {VIEWPORT:?} window: it was {:?}",
         pane.size.width
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn every_route_uses_the_same_centered_content_measure(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    for route in Route::ALL {
+        cx.update_entity(&view, |wallet, _| wallet.set_route(route));
+        let measured = measure(
+            cx,
+            window,
+            &view,
+            &["route-header-inner", "route-content-inner"],
+        );
+        let header = measured[0].expect("the fixed route header must be laid out");
+        let content = measured[1].expect("the scrolling route content must be laid out");
+        assert!(
+            header.size.width <= PAGE_CONTENT_MAX_WIDTH,
+            "{} header exceeded the shared measure: {:?}",
+            route.label(),
+            header.size.width
+        );
+        assert!(
+            content.size.width <= PAGE_CONTENT_MAX_WIDTH,
+            "{} content exceeded the shared measure: {:?}",
+            route.label(),
+            content.size.width
+        );
+        assert_eq!(
+            header.origin.x,
+            content.origin.x,
+            "{} header and body must share a left edge",
+            route.label()
+        );
+    }
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn inbox_tabs_render_one_queue_at_a_time(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Activity));
+
+    let waiting = measure(
+        cx,
+        window,
+        &view,
+        &["activity-waiting-panel", "activity-decided-panel"],
+    );
+    assert!(waiting[0].is_some());
+    assert!(waiting[1].is_none());
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_inbox_tab(InboxTab::Decided, cx);
+    });
+    let decided = measure(
+        cx,
+        window,
+        &view,
+        &["activity-waiting-panel", "activity-decided-panel"],
+    );
+    assert!(decided[0].is_none());
+    assert!(decided[1].is_some());
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn add_network_is_part_of_the_fixed_header(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Networks));
+
+    let measured = measure(
+        cx,
+        window,
+        &view,
+        &["route-header-inner", "network-header-action"],
+    );
+    let header = measured[0].expect("the fixed header must be laid out");
+    let action = measured[1].expect("the add-network action must be laid out");
+    assert!(action.origin.y >= header.origin.y);
+    assert!(
+        action.origin.y + action.size.height <= header.origin.y + header.size.height,
+        "the add-network action must remain inside the fixed header"
     );
     release(cx, &view);
 }
