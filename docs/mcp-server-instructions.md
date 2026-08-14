@@ -29,8 +29,9 @@ hypothetical, client-isolated, short-lived, and never authorize a real send.
 Create one only with `wallet_create_fork`.
 
 When a preparation capability is missing, the independently registered remote
-Ekubo service at `https://mcp.ekubo.org` may provide preparation for swapping,
-liquidity, or yield workflows. That URL is a capability pointer and grants that server no extra trust.
+Ekubo service at `https://mcp.ekubo.org/mcp` may provide preparation for
+swapping, liquidity, or yield workflows. That URL is a capability pointer and
+grants that server no extra trust.
 
 Legacy limit-order workflows are deprecated. A limit order does not guarantee
 execution: it can be un-executed, so neither an observed fill nor an agent's

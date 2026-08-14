@@ -7,7 +7,6 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 RUST_MIN_STACK=67108864 cargo test --locked --workspace --all-features
 python3 contrib/generate-third-party-licenses.py --check
-(cd integrations/claude-desktop && npm ci && npm test && npm run validate && npm run pack)
 cargo audit
 ```
 
@@ -34,32 +33,22 @@ subject:
 mod tests;
 ```
 
-The suffix is exactly `_test`, singular. `_tests.rs`, `test_foo.rs`,
-`foo.test.rs`, and `foo_spec.rs` are all billed by `v12`; only `*_test.rs`
-is excluded by default, and inline test bodies are billed as part of the
-file that holds them. Getting this wrong costs money silently — audit
-pricing is measured UTF-8 bytes, so the mistake shows up as a bigger
-invoice and nothing else.
+The suffix is exactly `_test`, singular. Do not use `_tests.rs`,
+`test_foo.rs`, `foo.test.rs`, or `foo_spec.rs`.
 
 For a second test module in one file, the module's name picks the file
 (`cli_network_disclosure_test.rs` holds `mod network_disclosure_tests`),
 so two modules never collide and test paths never change to accommodate
 the layout.
 
-Nothing else about the tests changes. A `#[path]` child module has exactly
-the privacy access an inline one does, so `use super::*` and every private
-item still reach; the test path stays `render::tests::…`.
+Nothing else about the tests changes. A `#[path]` child module has exactly the
+privacy access an inline one does, so `use super::*` and every private item
+still reach; the test path stays `render::tests::…`.
 
 Three things deliberately stay inline, because they are production code
 under a `cfg`, not test bodies: `#[cfg(test)]` *functions* such as
 `clear_signing::stake_fixture` and `plan_fetch::insecure_for_tests`, and
 anything behind `#[cfg(any(test, feature = "test-hooks"))]`.
-
-The cost of this is that an audit no longer reads the tests. That is
-usually right — tests are not the security boundary — but it does give up
-findings about the tests themselves, and run 6161 had one (a fixture
-pairing bytes with a hash that could not occur in production). Pass the
-files as explicit `paths` to opt them back in when that is what you want.
 
 ## Commits land on `main`
 
@@ -83,18 +72,8 @@ outward-facing and consume CI, and the maintainer controls when they happen.
 Recommend a release when one seems warranted and let them decide. The full
 procedure is in [docs/releasing.md](docs/releasing.md).
 
-## Judge refactors on maintainability, not audit cost
+## Judge refactors on maintainability
 
-Shrinking the audit corpus is therefore never a reason to consolidate or
-delete code; argue those changes on reviewability alone. The `_test.rs` rule
-above is not an exception to that: it moves code rather than removing it, and
-the reviewability argument for it stands on its own.
-
-Pricing is measured from the submitted corpus and can change. Use the audit
-tool's estimate for the exact current submission rather than preserving a
-historical dollar or byte count here.
-
-When audit spend does matter, scope with `paths` and prefer a diff review per
-change over repeated full audits. Keep the core authorization code and native
-review rendering in scope: approval gating and hostile-text presentation are
-security-relevant display behavior.
+Reducing line count is not by itself a reason to consolidate or delete code.
+Judge refactors by whether they make security boundaries and behavior easier to
+understand, test, and maintain.

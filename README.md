@@ -2,12 +2,14 @@
 
 Ekubo Wallet is a native GPUI desktop wallet for EVM accounts used by people,
 local AI agents, and WalletConnect dapps. One tray-first process owns encrypted
-state and private keys. There is no command-line, terminal, stdio, or webview
-mode.
+state and private keys. The separately bundled `ekubo-wallet-mcp-bridge` speaks
+stdio for local agent harnesses; the wallet application itself has no
+command-line, terminal, or webview mode.
 
 User-facing installation and usage documentation lives at
-[docs.ekubo.org](https://docs.ekubo.org/). This repository retains the source,
-build instructions, and implementation-specific security documentation.
+[docs.ekubo.org/wallet](https://docs.ekubo.org/wallet). This repository retains
+the source, build instructions, and implementation-specific security
+documentation.
 
 ## Development
 

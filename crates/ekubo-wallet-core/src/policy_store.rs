@@ -382,19 +382,17 @@ impl PolicyStore {
         Ok(Self { connection })
     }
 
-    /// Re-reads the schema version through this connection. A long-running
-    /// server holds its stores open, so a database replaced underneath it
-    /// would otherwise be written to
-    /// through a stale understanding of its shape. Refusing here turns that
-    /// into an explicit "restart the server" error on every request.
+    /// Re-reads the schema version through this connection. The long-running
+    /// wallet process keeps its stores open, so replacing a database underneath
+    /// it would otherwise leave the process writing against a stale schema.
+    /// Refusing here turns that into an explicit restart error on every request.
     pub fn assert_schema_current(&self) -> Result<()> {
-        let version = schema_version(&self.connection)?.context(
-            "policy database lost its schema version; restart the ekubo-wallet MCP server",
-        )?;
+        let version = schema_version(&self.connection)?
+            .context("policy database lost its schema version; restart Ekubo Wallet")?;
         ensure!(
             version == SCHEMA_VERSION,
             "policy database schema changed from {SCHEMA_VERSION} to {version} underneath \
-             this process; restart the ekubo-wallet MCP server"
+             this process; restart Ekubo Wallet"
         );
         Ok(())
     }

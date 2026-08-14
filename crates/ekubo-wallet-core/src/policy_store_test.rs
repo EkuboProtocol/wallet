@@ -442,9 +442,9 @@ fn fresh_schema_has_no_mcp_oauth_authority_and_only_harness_attribution() {
 
 #[test]
 fn schema_change_underneath_a_live_connection_is_refused() {
-    // A long-running server re-checks the version on every request. If the
-    // file changes underneath it, requests fail instead of writing through an
-    // unknown shape.
+    // A long-running wallet process re-checks the version on every request. If
+    // the file changes underneath it, requests fail instead of writing through
+    // an unknown shape.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
     let store = PolicyStore::open(&path, &key(3)).unwrap();
@@ -454,10 +454,7 @@ fn schema_change_underneath_a_live_connection_is_refused() {
         .execute("UPDATE schema_metadata SET version = version + 1", [])
         .unwrap();
     let error = store.assert_schema_current().unwrap_err().to_string();
-    assert!(
-        error.contains("restart the ekubo-wallet MCP server"),
-        "{error}"
-    );
+    assert!(error.contains("restart Ekubo Wallet"), "{error}");
 }
 
 #[test]

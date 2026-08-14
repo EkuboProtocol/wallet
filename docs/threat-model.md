@@ -77,7 +77,7 @@ The signed native package covers the separately bundled MCP helper during
 distribution. The wallet atomically installs a versioned copy in its private
 per-user directory, but does not treat the helper's hash or code signature as
 authorization: any process already running as the same user can connect to the
-local MCP endpoint directly.
+local MCP IPC listener directly.
 
 ## Local platform and lifecycle
 

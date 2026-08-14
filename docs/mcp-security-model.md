@@ -11,8 +11,8 @@ The wallet singleton listens on same-user local IPC only. macOS and Linux use
 `mcp.sock` inside the wallet's private `0700` data directory; the socket is
 `0600` and the accepted peer UID must match the directory owner. Windows uses
 a named pipe restricted to the current user's SID and verifies the connected
-peer SID. Code signatures protect packaged helper integrity, not IPC access.
-Same-user local code execution is the authorization boundary.
+peer SID. Native package signatures protect helper distribution integrity, not
+IPC access. Same-user local code execution is the authorization boundary.
 
 Every bridge connection receives a new MCP session UUID and a freshly
 restricted `WalletMcpServer`. The transport receives `AgentApi` only: it has no
