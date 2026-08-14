@@ -48,6 +48,18 @@ fn privacy_policy_discloses_reference_fetches() {
     assert!(policy.contains("data:application/json"));
 }
 
+#[test]
+fn privacy_policy_discloses_the_hosted_mcp_companion() {
+    let policy = privacy_policy();
+    assert!(policy.contains("## 7. Hosted MCP companion and agent tooling"));
+    assert!(policy.contains("https://mcp.ekubo.org/mcp"));
+    assert!(policy.contains("temporarily store execution plans"));
+    assert!(policy.contains("The hosted companion is operated by Ekubo, Inc."));
+    assert!(policy.contains("Neither entry contains a wallet key, access token"));
+    assert!(policy.contains("Claude Desktop receives\nonly the local entry"));
+    assert!(policy.contains("The wallet independently fetches the referenced bytes"));
+}
+
 /// A `connect` session opens a websocket to a relay operated by someone else,
 /// which is an outbound connection no other command makes. The policy has to
 /// name it, say what the operator can see, and say what it cannot.

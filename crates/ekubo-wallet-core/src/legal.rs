@@ -141,16 +141,18 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 5 — Effective 2026-08-13
+Version 6 — Effective 2026-08-14
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
 
-## 1. The developer collects nothing
+## 1. The wallet contains no telemetry
 
-This software is local-first. It contains no telemetry, no analytics, no
-crash reporting, and no developer-operated services. Ekubo, Inc. receives
-no data from your use of this software.
+This software is local-first. The wallet application contains no telemetry,
+analytics, or crash reporting and does not send usage data to the developer.
+Ekubo, Inc. operates the optional public MCP companion described in section 7.
+That service is separate from the local wallet process and can receive data
+when an agent or other client you use contacts it.
 
 ## 2. Requests to RPC endpoints
 
@@ -166,11 +168,13 @@ endpoints collect.
 Apart from these RPC endpoints, the referenced-artifact fetches described in
 section 4, the WalletConnect relay described in section 5, and the release and
 update activity described in section 6, this software makes no network
-requests. If you add or replace a network, requests for that network go to the
-endpoints you configure. The complete network configuration, including RPC
-URLs, is owner-controlled and stored in the encrypted local database. A fresh
-installation starts with bundled settings that you can inspect and replace in
-Networks. A disabled network sends no RPC requests until you enable it.
+requests. An agent or other client can separately contact the hosted companion
+described in section 7. If you add or replace a network, requests for that
+network go to the endpoints you configure. The complete network configuration,
+including RPC URLs, is owner-controlled and stored in the encrypted local
+database. A fresh installation starts with bundled settings that you can
+inspect and replace in Networks. A disabled network sends no RPC requests until
+you enable it.
 
 Enabled networks can list several endpoints run by unrelated operators. The
 wallet uses the configured strategy and can move to another endpoint when one
@@ -203,18 +207,19 @@ The request is an unauthenticated HTTPS GET for exactly the URL given. It
 carries no wallet address, key, credential, cookie, policy, or other data of
 yours, and the wallet sends nothing back to the host; only public https hosts
 on the default port are accepted, redirects and credentials in the URL are
-refused, and the response is size-capped. The operator of the host named by
-the URL is an independent third party outside the developer's control. It can
-observe your IP address, the time of the fetch, and which reference you
+refused, and the response is size-capped. The operator of the host named by the
+URL can observe your IP address, the time of the fetch, and which reference you
 fetched — and because a plan is prepared for a specific sender and action, a
 fetch tells that operator the machine at that address is about to simulate or
-sign that particular plan. Hosts may log or retain this under their own
-policies. Usually the host is the same producer that prepared the plan and
-therefore already knows its contents, but the URL comes from whatever
-produced the reference, so it can name any public host: fetching resolves a
-plan you are being asked to sign, and you should treat the reference with the
-same scrutiny as its source. The developer is not responsible for data those
-hosts collect.
+sign that particular plan. The operator is Ekubo, Inc. when the host is
+`mcp.ekubo.org`; any other host is operated by an independent third party
+outside the developer's control. Hosts may log or retain requests under their
+own policies. Usually the host is the same producer that prepared the plan and
+therefore already knows its contents, but the URL comes from whatever produced
+the reference, so it can name any public host: fetching resolves a plan you are
+being asked to sign, and you should treat the reference with the same scrutiny
+as its source. The developer is not responsible for data collected by
+third-party hosts.
 
 A plan or call bundle you hold inline travels instead as a
 `data:application/json` URI, which the wallet decodes locally and never
@@ -284,7 +289,28 @@ compiled into the running application before shutting down, installing it,
 and relaunching. Package formats without in-place update support use the
 GitHub Releases page instead.
 
-## 7. Data exposed through agents and tooling
+## 7. Hosted MCP companion and agent tooling
+
+When you install supported agent connections from Ekubo Wallet, the wallet
+adds a local `ekubo_wallet` entry to the agent's configuration. For harnesses
+whose configuration format supports remote MCP, it also adds a credential-free
+`ekubo` entry pointing to `https://mcp.ekubo.org/mcp`. Claude Desktop receives
+only the local entry in its configuration file; if you add the hosted companion
+through **Customize → Connectors**, that connector belongs to your Claude
+account. Neither entry contains a wallet key, access token, refresh token,
+authorization header, client secret, or other credential.
+
+The hosted companion is operated by Ekubo, Inc. and is not part of the local
+wallet's custody or authorization boundary. It can receive the tool arguments
+your agent sends to it, including wallet addresses, networks, token amounts,
+and requested actions. To hand exact actions to the wallet without placing
+large payloads in the conversation, it can temporarily store execution plans
+and other artifact bodies and return a reference URL. Those artifacts can
+identify the sender and the action being prepared. The service cannot read a
+private key from the wallet, approve a wallet request, install a signing policy,
+or sign a transaction. The wallet independently fetches the referenced bytes,
+verifies their integrity, simulates them, applies local policy, and signs only
+through its own review boundary.
 
 Any MCP client, agent, or other tooling you connect to this wallet can read
 what its tools return: wallet addresses, balances, token holdings,
