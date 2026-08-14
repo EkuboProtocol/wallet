@@ -175,12 +175,12 @@ impl SelectorPredicate {
         &self.args
     }
 
-    /// Whether `data` starts with a canonical call to this signature whose
+    /// Whether `data` is exactly a canonical call to this signature whose
     /// named arguments all satisfy their predicates.
     ///
     /// The selector decides the subject and the body decides the answer. Once
     /// the four bytes match, this call *is* the function named here, so a body
-    /// that will not decode or will not re-encode as its prefix is [`Match::Unreadable`]
+    /// that will not decode or re-encode exactly is [`Match::Unreadable`]
     /// rather than [`Match::No`]: the arguments are unknown, not absent.
     fn evaluate(&self, data: &[u8], context: &PolicyContext) -> Match {
         if data.len() < 4 || data[..4] != self.function.selector()[..] {
@@ -190,13 +190,14 @@ impl SelectorPredicate {
         let Ok(values) = self.function.abi_decode_input(body) else {
             return Match::Unreadable;
         };
-        // Require the decoded values to be the canonical prefix of the body.
-        // Solidity accepts trailing calldata, but dirty words, truncated
-        // heads, and malformed offsets must not satisfy a policy predicate.
+        // Authorize only bytes represented by the decoded arguments. Some
+        // contracts inspect trailing calldata directly, so accepting a
+        // canonical prefix would leave policy-unchecked bytes in what is
+        // signed.
         let Ok(canonical) = self.function.abi_encode_input_raw(&values) else {
             return Match::Unreadable;
         };
-        if !body.starts_with(&canonical) || !values.iter().all(within_declared_width) {
+        if body != canonical || !values.iter().all(within_declared_width) {
             return Match::Unreadable;
         }
         self.args

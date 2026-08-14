@@ -94,6 +94,32 @@ fn bare_thirty_two_byte_requests_are_refused() {
 }
 
 #[test]
+fn shared_queue_admission_refuses_hex_encoded_digests() {
+    let (_directory, mut store) = store();
+    let error = store
+        .create(
+            "wallet",
+            Some("1"),
+            &[0xab; 32],
+            MessageEncoding::Hex,
+            Some("dapp"),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("eth_sign is not supported"));
+    assert!(
+        store
+            .create(
+                "wallet",
+                Some("1"),
+                &[0xab; 32],
+                MessageEncoding::Text,
+                Some("dapp"),
+            )
+            .is_ok()
+    );
+}
+
+#[test]
 fn input_requires_exactly_one_encoding_and_a_reviewable_size() {
     assert!(parse_message_input(None, None).is_err());
     assert!(parse_message_input(Some("gm"), Some("0x676d")).is_err());

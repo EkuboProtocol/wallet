@@ -221,7 +221,7 @@ fn selector_arguments_and_integer_comparisons_are_enforced() {
 }
 
 #[test]
-fn selector_matching_accepts_solidity_compatible_trailing_calldata() {
+fn selector_matching_refuses_policy_unchecked_trailing_calldata() {
     let subject = policy(json!({"version": 1, "rules": [{
         "effect": "allow",
         "calldata": {"selector": {"abi": "approve(address spender, uint256 amount)"}}
@@ -229,7 +229,7 @@ fn selector_matching_accepts_solidity_compatible_trailing_calldata() {
     let data = format!("{}00", approve(ROUTER, 1));
     assert_eq!(
         outcome(&subject, &one_call(TOKEN, &data, "0")),
-        PolicyOutcome::Allowed
+        PolicyOutcome::RequiresApproval
     );
 }
 

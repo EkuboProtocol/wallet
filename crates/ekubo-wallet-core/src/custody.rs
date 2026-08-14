@@ -7,6 +7,7 @@ use alloy::{primitives::Address, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use keyring::{Entry, Error as KeyringError};
+use rand::TryRng as _;
 use std::{fmt, sync::Arc};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -17,26 +18,36 @@ const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.instance";
 pub struct PrivateKeyMaterial([u8; 32]);
 
 impl PrivateKeyMaterial {
+    fn random() -> Result<Self> {
+        let mut material = Self([0_u8; 32]);
+        rand::rng()
+            .try_fill_bytes(&mut material.0)
+            .context("operating system randomness is unavailable")?;
+        PrivateKeySigner::from_slice(&material.0)
+            .context("operating system randomness produced an invalid secp256k1 scalar")?;
+        Ok(material)
+    }
+
     pub fn from_hex(value: &str) -> Result<Self> {
         let value = value.strip_prefix("0x").unwrap_or(value);
         ensure!(
             value.len() == 64,
             "private key must contain exactly 32 bytes"
         );
-        let mut bytes = [0_u8; 32];
-        hex::decode_to_slice(value, &mut bytes).context("private key must be hexadecimal")?;
-        PrivateKeySigner::from_slice(&bytes)
+        let mut material = Self([0_u8; 32]);
+        hex::decode_to_slice(value, &mut material.0).context("private key must be hexadecimal")?;
+        PrivateKeySigner::from_slice(&material.0)
             .context("private key is not a valid secp256k1 scalar")?;
-        Ok(Self(bytes))
+        Ok(material)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
         ensure!(bytes.len() == 32, "stored private key is not 32 bytes");
-        let mut material = [0_u8; 32];
-        material.copy_from_slice(bytes);
-        PrivateKeySigner::from_slice(&material)
+        let mut material = Self([0_u8; 32]);
+        material.0.copy_from_slice(bytes);
+        PrivateKeySigner::from_slice(&material.0)
             .context("stored private key is not a valid secp256k1 scalar")?;
-        Ok(Self(material))
+        Ok(material)
     }
 
     /// The address this key controls.
@@ -336,8 +347,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     }
 
     pub fn create(&self, wallet_id: &str) -> Result<WalletMetadata> {
-        let signer = PrivateKeySigner::random();
-        let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
+        let key = PrivateKeyMaterial::random()?;
         self.add(wallet_id, &key, WalletSource::Created, None)
     }
 
@@ -348,8 +358,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         wallet_id: &str,
         policy: &WalletPolicy,
     ) -> Result<WalletMetadata> {
-        let signer = PrivateKeySigner::random();
-        let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
+        let key = PrivateKeyMaterial::random()?;
         self.add(wallet_id, &key, WalletSource::Created, Some(policy))
     }
 

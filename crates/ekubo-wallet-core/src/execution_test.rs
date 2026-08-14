@@ -444,6 +444,33 @@ fn a_configured_fee_ceiling_refuses_an_endpoint_that_names_more() {
     assert!(capped_fee(&network, 1).is_err());
 }
 
+#[test]
+fn signed_envelope_is_revalidated_against_the_current_fee_ceiling() {
+    let signer = PrivateKeySigner::from_slice(&[12; 32]).unwrap();
+    let wallet = wallet(&signer);
+    let plan = plan(wallet.address, 1);
+    let signed = finalize_digest(
+        sign_prepared(
+            &signer,
+            1,
+            1,
+            100_000,
+            101,
+            1,
+            &planned_call(&plan, wallet.address),
+            false,
+        )
+        .unwrap(),
+        &plan,
+    );
+    let mut network = network();
+    network.max_fee_per_gas = Some("100".into());
+    let error = validate_signed_execution(&signed, &wallet, &network, &plan)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("maximum fee per gas"), "{error}");
+}
+
 /// The window between recording a simulation and sending it. Nothing in
 /// `validate_send` moves when a delegation does -- it checks the wallet, the
 /// chain, the policy revision, the plan digest, and the fork flag -- so the

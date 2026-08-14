@@ -28,7 +28,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Request ids remembered for replay protection at once.
 ///
@@ -324,16 +324,10 @@ const SESSION_METHODS: [&str; 6] = [
     method::SESSION_EVENT,
 ];
 
-/// The ids this session has already answered, forgotten oldest-arrival first.
-///
-/// A set alone cannot say which entry is oldest without ordering by the value,
-/// and the value belongs to the peer. The queue records arrival; the set
-/// answers membership. They are kept in step by construction: every id in one
-/// is in the other.
+/// The ids this session has already answered.
 #[derive(Debug, Default)]
 struct AnsweredIds {
     seen: HashSet<u64>,
-    arrival: VecDeque<u64>,
 }
 
 impl AnsweredIds {
@@ -341,44 +335,28 @@ impl AnsweredIds {
         if !self.seen.insert(id) {
             return false;
         }
-        self.arrival.push_back(id);
-        while self.arrival.len() > MAX_ANSWERED_IDS {
-            if let Some(oldest) = self.arrival.pop_front() {
-                self.seen.remove(&oldest);
-            }
+        if self.seen.len() > MAX_ANSWERED_IDS {
+            // Forgetting an authenticated request makes its captured envelope
+            // executable again. A real dapp never needs thousands of distinct
+            // answerable requests in one session, so stop admission at the
+            // bound instead of weakening replay protection.
+            self.seen.remove(&id);
+            return false;
         }
         true
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        debug_assert_eq!(self.seen.len(), self.arrival.len());
         self.seen.len()
     }
 }
 
 /// Record `id` as answered, reporting whether it is new.
 ///
-/// The oldest ids go when the set is full, and *oldest* means the order they
-/// arrived in rather than their numeric value. Protocol ids are conventionally
-/// microsecond-scale timestamps, so the lowest usually is the oldest — but the
-/// id is a `u64` a peer chooses, and this set is the only thing standing
-/// between a captured envelope and a second execution of the request inside
-/// it.
-///
-/// Evicting the numerically smallest let the peer pick what was forgotten: a
-/// settled dapp sends enough high-valued answerable messages to push out the
-/// low id it used earlier, replays the authenticated envelope carrying that
-/// id, and `remember` reports it as new. `on_request` then dispatches it
-/// again, and for a policy-allowed `eth_sendTransaction` that reaches
-/// simulation, signing, and broadcast a second time at a fresh nonce, with no
-/// new review.
-///
-/// Arrival order is not something the peer can address. The bound is unchanged
-/// and still far above any burst a dapp legitimately produces while being well
-/// under what a peer could spend this process's memory on deliberately, and a
-/// relay's redelivery window is minutes, so nothing evicted at this depth is
-/// still eligible to arrive again.
+/// Once the set is full, no new id is admitted. Eviction would make an earlier
+/// authenticated request executable again; bounded denial of service is safer
+/// than replaying a transfer at a fresh nonce.
 fn remember(answered: &mut AnsweredIds, id: u64) -> bool {
     answered.remember(id)
 }

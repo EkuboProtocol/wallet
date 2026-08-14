@@ -832,7 +832,9 @@ async fn transaction_approval_request(
     if let Some(failure) = &simulation.simulation.failure {
         request = request.warning(format!(
             "Simulation {:?}: {} Recommended action: {:?}.",
-            failure.category, failure.message, failure.recommended_action
+            failure.category,
+            crate::sanitize::terminal_safe_line(&failure.message),
+            failure.recommended_action
         ));
     }
     Ok(request)
@@ -901,6 +903,10 @@ pub async fn sign_reviewed_message(
     keys: &dyn KeyStore,
 ) -> Result<PendingMessage> {
     require_provisioned_wallet(policies, wallet)?;
+    ensure!(
+        digest == request.digest.parse::<B256>()?,
+        "reviewed message digest does not match the stored request"
+    );
 
     presence
         .confirm(&PresenceRequest::SignMessage {
@@ -960,6 +966,10 @@ pub async fn sign_reviewed_typed_data(
     keys: &dyn KeyStore,
 ) -> Result<PendingTypedData> {
     require_provisioned_wallet(policies, wallet)?;
+    ensure!(
+        digest == request.digest.parse::<B256>()?,
+        "reviewed typed-data digest does not match the stored request"
+    );
 
     presence
         .confirm(&PresenceRequest::SignTypedData {
