@@ -189,6 +189,7 @@ pub enum SessionEvent<'a> {
     Settled {
         scope: &'a ApprovedScope,
         metadata: &'a AppMetadata,
+        expiry: i64,
     },
     RequestReceived {
         method: &'a str,
@@ -266,6 +267,8 @@ enum Woke {
 /// What both refusals say, because they are the same refusal: whatever the
 /// dapp asked for, the answer is that this session is over.
 const EXPIRED_REFUSAL: &str = "This session has expired. Reconnect to continue.";
+const EXTEND_REFUSAL: &str =
+    "This wallet controls the session lifetime. Disconnect and reconnect to approve a new session.";
 
 /// The refusal to send for a pairing whose deadline is `expiry`, at `now`, or
 /// `None` when it has not passed or the dapp never named one.
@@ -290,11 +293,15 @@ fn pairing_refusal(
 /// Whether a session whose deadline is `expiry` has reached it at `now`.
 ///
 /// One rule, used by the per-request scope check and by the gate that keeps
-/// every other session method out. Splitting the two is what let
-/// `wc_sessionExtend` through after the deadline and turned expiry into
-/// something a dapp could undo by itself.
+/// every other session method out. Extension is separately refused even
+/// before expiry because this wallet owns the deadline.
 const fn lapsed(expiry: i64, now: i64) -> bool {
     now >= expiry
+}
+
+fn controller_refusal(rpc_method: &str, _settled: &Settled) -> Option<(i64, &'static str)> {
+    (rpc_method == method::SESSION_EXTEND)
+        .then_some((error_code::UNAUTHORIZED_EXTEND, EXTEND_REFUSAL))
 }
 
 /// Which of the two topics an envelope authenticated on.
@@ -569,11 +576,9 @@ impl<'a> Session<'a> {
         }
         // Expiry ends the session's authority over everything, not only over
         // the requests `check_in_scope` measures. It used to be checked there
-        // alone, which left `wc_sessionExtend` reachable after the deadline —
-        // and `extend` sets a new one seven days out, so a dapp could wait for
-        // its session to lapse, extend it, and go on signing under a scope
-        // whose stated lifetime had ended, repeating that forever without the
-        // person ever seeing another connection review.
+        // alone, which once left `wc_sessionExtend` reachable after the
+        // deadline. The controller now refuses extension at every point, but
+        // this common gate still ensures no method answers after expiry.
         if origin == Origin::Session && self.expired() {
             let refusal = EXPIRED_REFUSAL;
             self.handler.notify(&SessionEvent::RequestRefused {
@@ -636,9 +641,14 @@ impl<'a> Session<'a> {
             // there is no way to ask them mid-flight without a second review
             // surface, so it is refused rather than accepted quietly.
             method::SESSION_EXTEND => {
-                self.extend();
+                let settled = self
+                    .settled
+                    .as_ref()
+                    .expect("a session-topic request has settled state");
+                let (code, refusal) = controller_refusal(&rpc_method, settled)
+                    .expect("session extension is always controller-refused");
                 self.respond_on_session(
-                    OutgoingResponse::result(message.id, json!(true)),
+                    OutgoingResponse::error(message.id, code, refusal),
                     tag::SESSION_EXTEND_RESPONSE,
                 )
                 .await?;
@@ -809,6 +819,7 @@ impl<'a> Session<'a> {
         self.handler.notify(&SessionEvent::Settled {
             scope: &scope,
             metadata: &proposal.proposer.metadata,
+            expiry,
         });
         self.settled = Some(Settled {
             topic: session_topic,
@@ -967,15 +978,6 @@ impl<'a> Session<'a> {
         self.settled
             .as_ref()
             .is_some_and(|settled| lapsed(settled.expiry, Utc::now().timestamp()))
-    }
-
-    /// Push the deadline out. Only reachable on a session that has not already
-    /// reached it — see the check in [`Self::receive`], which is what keeps
-    /// this from being a way to revive one.
-    fn extend(&mut self) {
-        if let Some(settled) = self.settled.as_mut() {
-            settled.expiry = Utc::now().timestamp() + SESSION_TTL_SECONDS;
-        }
     }
 
     fn relay_object(&self) -> Relay {

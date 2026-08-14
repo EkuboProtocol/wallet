@@ -8,10 +8,54 @@ const OWNER_AUTHORIZATION_LIFETIME: Duration = Duration::from_mins(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerAuthorizationScope {
     AgentAccess,
+    DappAccess,
+    UpdateTrust,
     PolicySettings,
     NetworkSettings,
     NotificationPrivacy,
     TokenMetadata,
+}
+
+/// The exact client-management mutation named in an owner-presence prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentManagementOperation {
+    Revoke,
+    Remove,
+}
+
+/// Single-use proof that the owner authenticated the exact dapp review and
+/// account which the session boundary is about to settle.
+pub struct DappAuthorization {
+    owner: OwnerAuthorization,
+    review_identity: String,
+    account_id: String,
+}
+
+impl DappAuthorization {
+    /// Consume the proof and bind settlement to a freshly generated review.
+    pub fn verify(self, review_identity: &str, account_id: &str) -> Result<(), HumanPresenceError> {
+        self.owner.require(OwnerAuthorizationScope::DappAccess)?;
+        if self.review_identity != review_identity || self.account_id != account_id {
+            return Err(HumanPresenceError::Denied(
+                "the dapp proposal or selected account changed after owner authentication".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Authenticate the owner for one exact dapp review. The returned proof is
+/// deliberately single-use and can settle only matching, freshly re-read state.
+pub async fn authorize_dapp_access(
+    review_identity: &str,
+    account_id: &str,
+) -> Result<DappAuthorization, HumanPresenceError> {
+    let owner = authorize_owner(OwnerAuthorizationScope::DappAccess).await?;
+    Ok(DappAuthorization {
+        owner,
+        review_identity: review_identity.to_owned(),
+        account_id: account_id.to_owned(),
+    })
 }
 
 /// Short-lived, scope-bound proof minted only after platform authentication.
@@ -45,6 +89,17 @@ impl OwnerAuthorization {
         Self {
             scope,
             granted_at: Instant::now(),
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn expired_for_test(scope: OwnerAuthorizationScope) -> Self {
+        Self {
+            scope,
+            granted_at: Instant::now()
+                .checked_sub(OWNER_AUTHORIZATION_LIFETIME + Duration::from_secs(1))
+                .expect("the monotonic clock has enough test history"),
         }
     }
 }
@@ -87,6 +142,26 @@ pub async fn authorize_oauth_client(
     })
 }
 
+/// Authenticate an owner for one named revoke/remove operation. The caller
+/// wraps this proof with the exact encrypted registration it read before the
+/// prompt and consumes that wrapper during the post-authentication transaction.
+#[cfg(not(any(test, feature = "test-hooks")))]
+pub(crate) async fn authorize_agent_management(
+    client_name: &str,
+    operation: AgentManagementOperation,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::ManageAgent {
+            client_name: client_name.to_owned(),
+            operation,
+        })
+        .await?;
+    Ok(OwnerAuthorization {
+        scope: OwnerAuthorizationScope::AgentAccess,
+        granted_at: Instant::now(),
+    })
+}
+
 #[cfg(any(test, feature = "test-hooks"))]
 pub async fn authorize_oauth_client(
     _client_name: &str,
@@ -96,6 +171,16 @@ pub async fn authorize_oauth_client(
         OwnerAuthorizationScope::AgentAccess,
     ))
     .await)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) async fn authorize_agent_management(
+    _client_name: &str,
+    _operation: AgentManagementOperation,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    Ok(OwnerAuthorization::for_test(
+        OwnerAuthorizationScope::AgentAccess,
+    ))
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -121,6 +206,10 @@ pub enum PresenceRequest {
     AuthorizeAgent {
         client_name: String,
         redirect_host: String,
+    },
+    ManageAgent {
+        client_name: String,
+        operation: AgentManagementOperation,
     },
     SignTransaction {
         wallet: String,
@@ -176,6 +265,17 @@ impl PresenceRequest {
                     subject(redirect_host)
                 )
             }
+            Self::ManageAgent {
+                client_name,
+                operation,
+            } => match operation {
+                AgentManagementOperation::Revoke => {
+                    format!("revoke wallet access for {}", subject(client_name))
+                }
+                AgentManagementOperation::Remove => {
+                    format!("remove wallet registration for {}", subject(client_name))
+                }
+            },
             Self::SignTransaction { wallet } => {
                 format!("sign a transaction from wallet {}", subject(wallet))
             }
@@ -203,6 +303,12 @@ impl PresenceRequest {
             Self::ChangeProtectedSettings { scope } => match scope {
                 OwnerAuthorizationScope::AgentAccess => {
                     "change which local agents can access the wallet".into()
+                }
+                OwnerAuthorizationScope::DappAccess => {
+                    "approve the dapp connection shown in Ekubo Wallet".into()
+                }
+                OwnerAuthorizationScope::UpdateTrust => {
+                    "install the authenticated application update shown in Ekubo Wallet".into()
                 }
                 OwnerAuthorizationScope::PolicySettings => {
                     "widen automatic signing policy permissions".into()

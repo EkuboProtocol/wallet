@@ -1,10 +1,9 @@
 //! Whether a newer signed desktop release exists.
 //!
 //! This module answers "am I behind?" for the Updates screen and the read-only
-//! `wallet_check_for_updates` MCP tool. The desktop can additionally consume
-//! the stable release's cargo-packager manifest and verify its native artifact
-//! with the public key compiled into the application. The release tag is
-//! validated before it enters a URL. Every
+//! `wallet_check_for_updates` MCP tool. The security kernel owns authenticated
+//! update discovery, download, authorization, and installation. The release tag
+//! used for the informational check is validated before it enters a URL. Every
 //! failure here — offline, rate limited, malformed JSON, an unwritable cache —
 //! resolves to "no update known" rather than an error, because nothing that
 //! depends on this answer should fail when the answer is merely unavailable.
@@ -16,50 +15,37 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json";
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// An update whose artifact URL and signature came from cargo-packager's
-/// stable-release manifest. `download` verifies the artifact with the public
-/// key compiled into this exact application binary before returning bytes.
-pub type InstallableUpdate = cargo_packager_updater::Update;
+pub use ekubo_wallet_core::update_trust::InstallableUpdate;
 
 pub fn check_installable() -> anyhow::Result<Option<InstallableUpdate>> {
-    anyhow::ensure!(
-        !crate::UPDATER_PUBLIC_KEY.is_empty(),
-        "this development build has no updater verification key"
-    );
-    #[cfg(target_os = "linux")]
-    anyhow::ensure!(
-        std::env::var_os("APPIMAGE").is_some(),
-        "automatic updates are available for the AppImage distribution"
-    );
-    let current = semver::Version::parse(crate::VERSION)
-        .context("the application version is not valid semantic versioning")?;
-    let endpoint = UPDATE_MANIFEST_URL
-        .parse()
-        .context("the compiled update manifest URL is invalid")?;
-    let config = cargo_packager_updater::Config {
-        endpoints: vec![endpoint],
-        pubkey: crate::UPDATER_PUBLIC_KEY.to_owned(),
-        windows: None,
-    };
-    cargo_packager_updater::UpdaterBuilder::new(current, config)
-        .timeout(UPDATE_TIMEOUT)
-        .build()
-        .context("could not initialize the signed updater")?
-        .check()
-        .context("could not read the signed release manifest")
+    ekubo_wallet_core::update_trust::check_installable()
 }
 
-/// Installs bytes already verified by [`InstallableUpdate::download`] and
-/// starts the replacement application where the platform installer does not
-/// do that itself.
-pub fn install_and_relaunch(update: &InstallableUpdate, bytes: Vec<u8>) -> anyhow::Result<()> {
+/// Gives an opaque, authenticated package back to core for re-verification and
+/// installation, then starts the replacement application on platforms whose
+/// installer does not do that itself.
+pub fn install_and_relaunch(
+    prepared: ekubo_wallet_core::update_trust::PreparedUpdate,
+    authorization: ekubo_wallet_core::update_trust::UpdateAuthorization,
+) -> anyhow::Result<()> {
+    let relaunch_path = match ekubo_wallet_core::update_trust::install_update(
+        prepared,
+        authorization,
+    ) {
+        Ok(path) => path,
+        Err(install_error) => {
+            relaunch_current_application().with_context(|| {
+                format!(
+                    "update installation failed ({install_error:#}) and the current application could not be restarted"
+                )
+            })?;
+            return Err(install_error);
+        }
+    };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let executable = update.extract_path.clone();
-    update.install(bytes).context("could not install update")?;
+    let executable = relaunch_path.context("the updater did not return a relaunch path")?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = relaunch_path;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .arg(executable)
@@ -69,6 +55,42 @@ pub fn install_and_relaunch(update: &InstallableUpdate, bytes: Vec<u8>) -> anyho
     std::process::Command::new(executable)
         .spawn()
         .context("could not relaunch updated application")?;
+    Ok(())
+}
+
+/// A failed post-quit update must not strand the owner with no wallet process.
+/// This path is used only after core refused or rolled back an installation.
+fn relaunch_current_application() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe().context("could not locate the current wallet")?;
+        let bundle = executable
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .context("could not locate the current application bundle")?;
+        std::process::Command::new("open")
+            .arg(bundle)
+            .spawn()
+            .context("could not restart the current application")?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let executable = std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .map_or_else(std::env::current_exe, Ok)?;
+        std::process::Command::new(executable)
+            .spawn()
+            .context("could not restart the current application")?;
+    }
+    #[cfg(target_os = "windows")]
+    std::process::Command::new(
+        std::env::current_exe().context("could not locate the current wallet")?,
+    )
+    .spawn()
+    .context("could not restart the current application")?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    anyhow::bail!("automatic updates are unsupported on this platform");
     Ok(())
 }
 

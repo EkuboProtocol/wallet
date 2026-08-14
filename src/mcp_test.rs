@@ -1807,8 +1807,9 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
     assert!(SERVER_INSTRUCTIONS.contains("Legacy limit-order workflows are deprecated"));
     assert!(SERVER_INSTRUCTIONS.contains("can be un-executed"));
     assert!(SERVER_INSTRUCTIONS.contains("src/extensions/SignedExclusiveSwap.sol"));
-    // Nothing outside the instruction text may mention it: no tool
-    // description, no resource, and above all no code path.
+    // No tool description or code path may privilege it. The security model
+    // separately names the companion because agent configuration always
+    // installs that exact credential-free endpoint.
     let router = WalletMcpServer::sanitized_tool_router();
     for tool in router.list_all() {
         let rendered = serde_json::to_string(&tool).unwrap();
@@ -1818,7 +1819,9 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
             tool.name
         );
     }
-    assert!(!SECURITY_MODEL.contains("ekubo.org"));
+    assert!(SECURITY_MODEL.contains("always-installed companion"));
+    assert!(SECURITY_MODEL.contains("Installing or repairing them creates no credential"));
+    assert!(!SECURITY_MODEL.contains("trusted plan producer"));
 }
 
 #[test]

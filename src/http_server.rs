@@ -1,7 +1,7 @@
 //! OAuth-protected, loopback-only Streamable HTTP transport.
 
 use crate::{
-    authority::{AgentApi, OwnerApi},
+    authority::{AgentApi, OAuthApi},
     events::{DomainEventKind, EventBus},
     mcp::WalletMcpServer,
 };
@@ -16,8 +16,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ekubo_wallet_core::desktop_store::{
-    AgentKind, AuthenticatedClient, DesktopStore, MCP_PORT, MCP_RESOURCE, MCP_SCOPE,
-    OAuthSessionPreset, OAuthTokenPair,
+    AgentKind, AuthenticatedClient, MCP_PORT, MCP_RESOURCE, MCP_SCOPE, OAuthSessionPreset,
+    OAuthTokenPair,
 };
 use rand::TryRng as _;
 use rmcp::transport::streamable_http_server::{
@@ -49,8 +49,7 @@ type ClientService = StreamableHttpService<WalletMcpServer, LocalSessionManager>
 struct HttpState {
     expected_host: String,
     issuer: String,
-    owner: OwnerApi,
-    clients: Arc<Mutex<DesktopStore>>,
+    oauth: OAuthApi,
     agent: AgentApi,
     services: Mutex<HashMap<Uuid, ClientService>>,
     pending_consents: Mutex<HashMap<String, PendingConsent>>,
@@ -70,12 +69,7 @@ pub struct McpHttpServer {
 }
 
 impl McpHttpServer {
-    pub async fn start(
-        owner: OwnerApi,
-        agent: AgentApi,
-        clients: Arc<Mutex<DesktopStore>>,
-        events: EventBus,
-    ) -> Result<Self> {
+    pub async fn start(oauth: OAuthApi, agent: AgentApi, events: EventBus) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", MCP_PORT))
             .await
             .with_context(|| {
@@ -94,8 +88,7 @@ impl McpHttpServer {
         let state = Arc::new(HttpState {
             issuer: format!("http://{expected_host}"),
             expected_host,
-            owner,
-            clients,
+            oauth,
             agent,
             services: Mutex::new(HashMap::new()),
             pending_consents: Mutex::new(HashMap::new()),
@@ -241,7 +234,7 @@ async fn register_client(state: Arc<HttpState>, request: Request) -> Response {
     }
     let raw_registration = serde_json::from_slice::<Value>(&body).ok();
     let kind = infer_agent_kind(&registration.client_name);
-    let client = match state.owner.register_oauth_client(
+    let client = match state.oauth.register_client(
         &registration.client_name,
         kind,
         &registration.redirect_uris,
@@ -350,7 +343,7 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
         );
     }
     let scope = query.scope.clone().unwrap_or_else(|| MCP_SCOPE.to_owned());
-    let client = match state.owner.validate_oauth_authorization_request(
+    let client = match state.oauth.validate_authorization_request(
         query.client_id,
         &query.redirect_uri,
         &query.code_challenge,
@@ -388,8 +381,8 @@ async fn finish_authorization(
     };
     let scope = query.scope.as_deref().unwrap_or(MCP_SCOPE);
     let result = state
-        .owner
-        .authorize_oauth_client(
+        .oauth
+        .authorize_client(
             query.client_id,
             &query.redirect_uri,
             &query.code_challenge,
@@ -549,15 +542,13 @@ async fn token(state: Arc<HttpState>, request: Request) -> Response {
             request.redirect_uri.as_deref(),
             request.code_verifier.as_deref(),
         ) {
-            (Some(code), Some(redirect_uri), Some(code_verifier)) => {
-                state.owner.exchange_oauth_code(
-                    code,
-                    request.client_id,
-                    redirect_uri,
-                    code_verifier,
-                    &request.resource,
-                )
-            }
+            (Some(code), Some(redirect_uri), Some(code_verifier)) => state.oauth.exchange_code(
+                code,
+                request.client_id,
+                redirect_uri,
+                code_verifier,
+                &request.resource,
+            ),
             _ => {
                 return oauth_error(
                     StatusCode::BAD_REQUEST,
@@ -569,8 +560,8 @@ async fn token(state: Arc<HttpState>, request: Request) -> Response {
         "refresh_token" => match request.refresh_token.as_deref() {
             Some(refresh_token) => {
                 state
-                    .owner
-                    .refresh_oauth_token(refresh_token, request.client_id, &request.resource)
+                    .oauth
+                    .refresh_token(refresh_token, request.client_id, &request.resource)
             }
             None => {
                 return oauth_error(
@@ -617,7 +608,13 @@ fn token_response(pair: &OAuthTokenPair) -> Response {
 }
 
 async fn dispatch_mcp(state: Arc<HttpState>, request: Request) -> Response {
-    let client = match authenticate_headers(request.headers(), &state.clients) {
+    let client = match authenticate_headers(request.headers(), |encoded| {
+        state
+            .oauth
+            .authenticate_access_token(encoded, MCP_RESOURCE)
+            .ok()
+            .flatten()
+    }) {
         Ok(client) => client,
         Err(response) => return response,
     };
@@ -700,10 +697,13 @@ fn is_owner_authorization_navigation(method: &Method, path: &str, headers: &Head
 }
 
 #[allow(clippy::result_large_err)]
-fn authenticate_headers(
+fn authenticate_headers<F>(
     headers: &HeaderMap,
-    clients: &Arc<Mutex<DesktopStore>>,
-) -> std::result::Result<AuthenticatedClient, Response> {
+    authenticate: F,
+) -> std::result::Result<AuthenticatedClient, Response>
+where
+    F: FnOnce(&str) -> Option<AuthenticatedClient>,
+{
     let Some(encoded) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -712,15 +712,7 @@ fn authenticate_headers(
     else {
         return Err(unauthorized_response());
     };
-    let authenticated = clients
-        .lock()
-        .ok()
-        .and_then(|mut clients| {
-            clients
-                .authenticate_access_token(encoded, MCP_RESOURCE)
-                .ok()
-        })
-        .flatten();
+    let authenticated = authenticate(encoded);
     authenticated.ok_or_else(unauthorized_response)
 }
 

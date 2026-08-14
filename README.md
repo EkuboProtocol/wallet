@@ -22,8 +22,9 @@ GPUI is pinned to Zed revision
 `26cc9366abb27ccedce386ac99a615a8fa7018da`. The application consumes only the
 Apache-2.0 GPUI infrastructure, not Zed's GPL workspace/UI crates.
 
-See [architecture](docs/architecture.md),
-[security boundary](docs/security-boundary.md), and
+See [architecture](docs/architecture.md), the system-wide
+[threat model](docs/threat-model.md), the code-oriented
+[security boundary](docs/security-boundary.md), and the
 [release process](docs/releasing.md).
 
 ## License

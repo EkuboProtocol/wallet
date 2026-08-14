@@ -449,11 +449,8 @@ fn the_pairing_key_stops_being_an_authority_once_a_session_settles() {
 
 #[test]
 fn the_deadline_is_the_same_deadline_for_every_method() {
-    // `wc_sessionExtend` sets a new deadline seven days out. If expiry were
-    // only an admission check on `wc_sessionRequest`, a dapp could let its
-    // session lapse, extend it, and go on signing under a scope whose stated
-    // lifetime had ended -- forever, and without the person ever seeing
-    // another connection review. Both gates read this one rule.
+    // The deadline applies to every method. A peer cannot revive a lapsed
+    // session and cannot extend a live controller-owned session either.
     assert!(lapsed(100, 100), "the deadline itself is past it");
     assert!(lapsed(100, 101));
     assert!(!lapsed(100, 99));
@@ -464,6 +461,26 @@ fn the_deadline_is_the_same_deadline_for_every_method() {
         .expect_err("a session at its deadline still served a request");
     assert_eq!(code, error_code::USER_DISCONNECTED);
     assert_eq!(message, EXPIRED_REFUSAL);
+}
+
+#[test]
+fn a_peer_is_not_authorized_to_extend_the_controller_owned_deadline() {
+    let approved_deadline = far_future();
+    let settled = Settled {
+        topic: "topic".into(),
+        key: SymKey::from_hex(&"11".repeat(32)).unwrap(),
+        scope: scope(),
+        metadata: AppMetadata::default(),
+        expiry: approved_deadline,
+    };
+    for _ in 0..2 {
+        let (code, message) = controller_refusal(method::SESSION_EXTEND, &settled)
+            .expect("the peer's extension request was accepted");
+        assert_eq!(code, 3004);
+        assert!(message.contains("controls the session lifetime"));
+        assert_eq!(settled.expiry, approved_deadline);
+    }
+    assert!(controller_refusal(method::SESSION_PING, &settled).is_none());
 }
 
 #[test]

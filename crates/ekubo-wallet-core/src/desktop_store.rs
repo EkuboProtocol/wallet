@@ -6,7 +6,10 @@
 //! them.
 
 use crate::{
-    human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
+    human_presence::{
+        AgentManagementOperation, HumanPresenceError, OwnerAuthorization, OwnerAuthorizationScope,
+        authorize_agent_management,
+    },
     policy_store::{DatabaseKey, PolicyStore},
     sql::{Blob, Millis},
 };
@@ -156,6 +159,8 @@ pub struct McpClient {
     pub id: Uuid,
     pub display_name: String,
     pub agent_kind: AgentKind,
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
     pub registration: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub authorized_at: Option<DateTime<Utc>>,
@@ -163,6 +168,54 @@ pub struct McpClient {
     #[serde(default)]
     pub session_expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Exact encrypted registration and operation captured before owner presence.
+/// Fields are private so callers cannot substitute a different client or turn
+/// a revoke prompt into removal.
+pub struct OAuthClientManagementReview {
+    expected: McpClient,
+    grant_identity: [u8; 32],
+    operation: AgentManagementOperation,
+}
+
+/// Single-use proof for one exact registered client and one exact operation.
+pub struct OAuthClientManagementAuthorization {
+    owner: OwnerAuthorization,
+    expected: McpClient,
+    grant_identity: [u8; 32],
+    operation: AgentManagementOperation,
+}
+
+impl OAuthClientManagementAuthorization {
+    /// Verify that this exact client-management proof authorized the expected
+    /// operation before another core-owned setting mutation shares it.
+    pub(crate) fn require_operation(
+        &self,
+        operation: AgentManagementOperation,
+    ) -> Result<(), HumanPresenceError> {
+        self.owner.require(OwnerAuthorizationScope::AgentAccess)?;
+        if self.operation != operation {
+            return Err(HumanPresenceError::Denied(
+                "owner authorization was granted for a different client operation".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Authenticate the client and operation captured by core immediately before
+/// the OS prompt. Applying the result consumes it and re-reads the same state.
+pub async fn authorize_oauth_client_management(
+    review: OAuthClientManagementReview,
+) -> std::result::Result<OAuthClientManagementAuthorization, HumanPresenceError> {
+    let owner = authorize_agent_management(&review.expected.display_name, review.operation).await?;
+    Ok(OAuthClientManagementAuthorization {
+        owner,
+        expected: review.expected,
+        grant_identity: review.grant_identity,
+        operation: review.operation,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,6 +400,7 @@ impl DesktopStore {
             id: Uuid::new_v4(),
             display_name: name.to_owned(),
             agent_kind,
+            redirect_uris: redirect_uris.to_vec(),
             registration: registration
                 .as_deref()
                 .map(serde_json::from_str)
@@ -371,7 +425,11 @@ impl DesktopStore {
                 Millis(client.created_at),
             ],
         )?;
-        Ok(client)
+        // Return the canonical persisted representation. SQLite stores these
+        // timestamps at millisecond precision, so returning the pre-insert
+        // value could make an immediate exact-identity comparison fail even
+        // though no client state changed.
+        Self::read_client(&self.connection, client.id, "new OAuth client disappeared")
     }
 
     pub fn oauth_client_for_authorization(
@@ -379,8 +437,24 @@ impl DesktopStore {
         client_id: Uuid,
         redirect_uri: &str,
     ) -> Result<McpClient> {
-        let stored = self
-            .connection
+        Self::oauth_client_for_authorization_on(&self.connection, client_id, redirect_uri)
+    }
+
+    fn read_client(
+        connection: &rusqlite::Connection,
+        client_id: Uuid,
+        unknown: &str,
+    ) -> Result<McpClient> {
+        let (
+            display_name,
+            kind,
+            redirects,
+            registration,
+            created_at,
+            authorized_at,
+            last_used_at,
+            revoked_at,
+        ) = connection
             .query_row(
                 "SELECT display_name, agent_kind, redirect_uris_json,
                         registration_json, created_at, authorized_at,
@@ -401,28 +475,12 @@ impl DesktopStore {
                 },
             )
             .optional()?
-            .context("unknown OAuth client")?;
-        let (
-            display_name,
-            kind,
-            redirects,
-            registration,
-            created_at,
-            authorized_at,
-            last_used_at,
-            revoked_at,
-        ) = stored;
-        let redirects: Vec<String> = serde_json::from_str(&redirects)?;
-        ensure!(
-            redirects
-                .iter()
-                .any(|registered| redirect_uri_matches(registered, redirect_uri)),
-            "OAuth redirect URI is not registered for this client"
-        );
+            .with_context(|| unknown.to_owned())?;
         Ok(McpClient {
             id: client_id,
             display_name,
             agent_kind: AgentKind::parse(&kind)?,
+            redirect_uris: serde_json::from_str(&redirects)?,
             registration: registration
                 .as_deref()
                 .map(serde_json::from_str)
@@ -433,6 +491,22 @@ impl DesktopStore {
             session_expires_at: None,
             revoked_at,
         })
+    }
+
+    fn oauth_client_for_authorization_on(
+        connection: &rusqlite::Connection,
+        client_id: Uuid,
+        redirect_uri: &str,
+    ) -> Result<McpClient> {
+        let client = Self::read_client(connection, client_id, "unknown OAuth client")?;
+        ensure!(
+            client
+                .redirect_uris
+                .iter()
+                .any(|registered| redirect_uri_matches(registered, redirect_uri)),
+            "OAuth redirect URI is not registered for this client"
+        );
+        Ok(client)
     }
 
     pub fn validate_oauth_authorization_request(
@@ -461,19 +535,35 @@ impl DesktopStore {
         scope: &str,
         resource: &str,
         session_preset: OAuthSessionPreset,
+        expected: &McpClient,
         authorization: &OwnerAuthorization,
     ) -> Result<OAuthAuthorizationCode> {
         authorization.require(OwnerAuthorizationScope::AgentAccess)?;
-        let _ = self.validate_oauth_authorization_request(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-        )?;
+        validate_code_challenge(code_challenge)?;
+        ensure!(scope == MCP_SCOPE, "unsupported OAuth scope");
+        ensure!(
+            resource == MCP_RESOURCE,
+            "OAuth resource does not match MCP endpoint"
+        );
         let code = OAuthSecret::generate()?;
         let now = Utc::now();
-        let transaction = self.connection.transaction()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current =
+            Self::oauth_client_for_authorization_on(&transaction, client_id, redirect_uri)?;
+        ensure!(
+            Self::security_identity_matches(&current, expected),
+            "OAuth client registration or grant changed after owner authentication"
+        );
+        let had_active_client = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM mcp_clients
+                 WHERE authorized_at IS NOT NULL AND revoked_at IS NULL
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
         transaction.execute(
             "DELETE FROM oauth_authorization_codes WHERE expires_at <= ?1",
             [Millis(now)],
@@ -495,49 +585,292 @@ impl DesktopStore {
                 session_preset.access_duration().num_seconds(),
             ],
         )?;
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE mcp_clients SET authorized_at = ?1, revoked_at = NULL
              WHERE client_id = ?2",
             params![Millis(now), Blob(*client_id.as_bytes())],
         )?;
-        transaction.commit()?;
+        ensure!(
+            changed == 1,
+            "OAuth client disappeared before authorization"
+        );
+        crate::launch_at_login::enable(authorization).context(
+            "launch-at-login setup failed before any OAuth authorization code was issued",
+        )?;
+        if let Err(issue_error) = transaction.commit() {
+            if !had_active_client {
+                crate::launch_at_login::rollback_enable(authorization).with_context(|| {
+                    format!(
+                        "OAuth grant commit failed ({issue_error}) and the unused launch-at-login registration could not be removed"
+                    )
+                })?;
+            }
+            return Err(issue_error.into());
+        }
         Ok(OAuthAuthorizationCode {
             code,
             redirect_uri: redirect_uri.to_owned(),
         })
     }
 
-    /// Immediately revoke an OAuth session. Revocation only removes authority,
-    /// so the owner surface deliberately does not require human presence.
-    pub fn revoke_client(&mut self, client_id: Uuid) -> Result<()> {
-        let transaction = self.connection.transaction()?;
-        let changed = transaction.execute(
-            "UPDATE mcp_clients SET revoked_at = ?1
-             WHERE client_id = ?2 AND authorized_at IS NOT NULL AND revoked_at IS NULL",
-            params![Millis(Utc::now()), Blob(*client_id.as_bytes())],
-        )?;
-        ensure!(changed == 1, "unknown or already revoked MCP client");
-        transaction.execute(
-            "DELETE FROM oauth_access_tokens WHERE client_id = ?1",
-            [Blob(*client_id.as_bytes())],
-        )?;
-        transaction.execute(
-            "DELETE FROM oauth_refresh_tokens WHERE client_id = ?1",
-            [Blob(*client_id.as_bytes())],
-        )?;
-        transaction.commit()?;
+    fn security_identity_matches(current: &McpClient, expected: &McpClient) -> bool {
+        current.id == expected.id
+            && current.display_name == expected.display_name
+            && current.agent_kind == expected.agent_kind
+            && current.redirect_uris == expected.redirect_uris
+            && current.registration == expected.registration
+            && current.created_at == expected.created_at
+            && current.authorized_at == expected.authorized_at
+            && current.revoked_at == expected.revoked_at
+    }
+
+    /// Capture the exact client and grant state which one owner prompt will
+    /// authorize. This is read-only; applying the proof re-reads it under the
+    /// same transaction that performs the mutation.
+    pub fn client_management_review(
+        &self,
+        client_id: Uuid,
+        operation: AgentManagementOperation,
+    ) -> Result<OAuthClientManagementReview> {
+        let expected = Self::read_client(&self.connection, client_id, "unknown MCP client")?;
+        Self::validate_client_management_state(&expected, operation)?;
+        Ok(OAuthClientManagementReview {
+            expected,
+            grant_identity: Self::grant_identity_on(&self.connection, client_id)?,
+            operation,
+        })
+    }
+
+    fn validate_client_management_state(
+        client: &McpClient,
+        _operation: AgentManagementOperation,
+    ) -> Result<()> {
+        ensure!(
+            client.authorized_at.is_some() && client.revoked_at.is_none(),
+            "unknown, unauthorized, or already revoked MCP client"
+        );
         Ok(())
     }
 
-    /// Delete a registration and every credential beneath it. Like revocation,
-    /// this can only reduce authority and deliberately needs no presence token.
-    pub fn remove_client(&mut self, client_id: Uuid) -> Result<()> {
-        let changed = self.connection.execute(
-            "DELETE FROM mcp_clients WHERE client_id = ?1",
-            params![Blob(*client_id.as_bytes())],
+    /// Consume one exact client-management proof, re-read its registration and
+    /// grant state after authentication, and mutate within that same immediate
+    /// `SQLCipher` transaction.
+    pub fn apply_client_management(
+        &mut self,
+        authorization: OAuthClientManagementAuthorization,
+    ) -> Result<()> {
+        let OAuthClientManagementAuthorization {
+            owner,
+            expected,
+            grant_identity: expected_grant_identity,
+            operation,
+        } = authorization;
+        owner.require(OwnerAuthorizationScope::AgentAccess)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = Self::read_client(&transaction, expected.id, "unknown MCP client")?;
+        ensure!(
+            Self::security_identity_matches(&current, &expected),
+            "OAuth client registration or grant changed after owner authentication"
+        );
+        ensure!(
+            Self::grant_identity_on(&transaction, expected.id)? == expected_grant_identity,
+            "OAuth credentials changed after owner authentication"
+        );
+        Self::validate_client_management_state(&current, operation)?;
+
+        match operation {
+            AgentManagementOperation::Revoke => {
+                let changed = transaction.execute(
+                    "UPDATE mcp_clients SET revoked_at = ?1
+                     WHERE client_id = ?2 AND authorized_at IS NOT NULL AND revoked_at IS NULL",
+                    params![Millis(Utc::now()), Blob(*expected.id.as_bytes())],
+                )?;
+                ensure!(changed == 1, "unknown or already revoked MCP client");
+                transaction.execute(
+                    "DELETE FROM oauth_authorization_codes WHERE client_id = ?1",
+                    [Blob(*expected.id.as_bytes())],
+                )?;
+                transaction.execute(
+                    "DELETE FROM oauth_access_tokens WHERE client_id = ?1",
+                    [Blob(*expected.id.as_bytes())],
+                )?;
+                transaction.execute(
+                    "DELETE FROM oauth_refresh_tokens WHERE client_id = ?1",
+                    [Blob(*expected.id.as_bytes())],
+                )?;
+            }
+            AgentManagementOperation::Remove => {
+                let changed = transaction.execute(
+                    "DELETE FROM mcp_clients WHERE client_id = ?1",
+                    [Blob(*expected.id.as_bytes())],
+                )?;
+                ensure!(changed == 1, "unknown MCP client");
+            }
+        }
+        let any_active = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM mcp_clients
+                 WHERE authorized_at IS NOT NULL AND revoked_at IS NULL
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
         )?;
-        ensure!(changed == 1, "unknown MCP client");
+        let disabled_launch = if any_active {
+            None
+        } else {
+            let authorization = OAuthClientManagementAuthorization {
+                owner,
+                expected,
+                grant_identity: expected_grant_identity,
+                operation,
+            };
+            crate::launch_at_login::disable_for_client_management(&authorization, operation)
+                .context(
+                    "launch-at-login persistence could not be removed before changing agent access",
+                )?;
+            Some(authorization)
+        };
+        if let Err(change_error) = transaction.commit() {
+            if let Some(authorization) = disabled_launch.as_ref() {
+                crate::launch_at_login::rollback_disable(authorization, operation).with_context(
+                    || {
+                        format!(
+                            "agent access commit failed ({change_error}) and launch-at-login persistence could not be restored"
+                        )
+                    },
+                )?;
+            }
+            return Err(change_error.into());
+        }
         Ok(())
+    }
+
+    fn grant_identity_on(connection: &rusqlite::Connection, client_id: Uuid) -> Result<[u8; 32]> {
+        fn field(digest: &mut Sha256, bytes: &[u8]) {
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        }
+        fn integer(digest: &mut Sha256, value: i64) {
+            field(digest, &value.to_be_bytes());
+        }
+        fn optional_integer(digest: &mut Sha256, value: Option<i64>) {
+            match value {
+                Some(value) => {
+                    field(digest, &[1]);
+                    integer(digest, value);
+                }
+                None => field(digest, &[0]),
+            }
+        }
+
+        let client = Blob(*client_id.as_bytes());
+        let mut digest = Sha256::new();
+        digest.update(b"ekubo-oauth-grant-state-v1");
+
+        let mut codes = connection.prepare(
+            "SELECT code_hash, redirect_uri, code_challenge, scope, resource,
+                    expires_at, session_expires_at, access_token_ttl_seconds, used_at
+             FROM oauth_authorization_codes
+             WHERE client_id = ?1
+             ORDER BY code_hash",
+        )?;
+        let rows = codes.query_map([client], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+            ))
+        })?;
+        for row in rows {
+            let (hash, redirect, challenge, scope, resource, expiry, session, ttl, used) = row?;
+            field(&mut digest, b"code");
+            for value in [
+                hash.as_slice(),
+                redirect.as_bytes(),
+                challenge.as_bytes(),
+                scope.as_bytes(),
+                resource.as_bytes(),
+            ] {
+                field(&mut digest, value);
+            }
+            for value in [expiry, session, ttl] {
+                integer(&mut digest, value);
+            }
+            optional_integer(&mut digest, used);
+        }
+        drop(codes);
+
+        let mut access = connection.prepare(
+            "SELECT token_hash, scope, resource, created_at, expires_at
+             FROM oauth_access_tokens
+             WHERE client_id = ?1
+             ORDER BY token_hash",
+        )?;
+        let rows = access.query_map([client], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (hash, scope, resource, created, expiry) = row?;
+            field(&mut digest, b"access");
+            for value in [hash.as_slice(), scope.as_bytes(), resource.as_bytes()] {
+                field(&mut digest, value);
+            }
+            integer(&mut digest, created);
+            integer(&mut digest, expiry);
+        }
+        drop(access);
+
+        let mut refresh = connection.prepare(
+            "SELECT token_hash, family_id, scope, resource, created_at, expires_at,
+                    access_token_ttl_seconds, consumed_at
+             FROM oauth_refresh_tokens
+             WHERE client_id = ?1
+             ORDER BY token_hash",
+        )?;
+        let rows = refresh.query_map([client], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+            ))
+        })?;
+        for row in rows {
+            let (hash, family, scope, resource, created, expiry, ttl, consumed) = row?;
+            field(&mut digest, b"refresh");
+            for value in [
+                hash.as_slice(),
+                family.as_slice(),
+                scope.as_bytes(),
+                resource.as_bytes(),
+            ] {
+                field(&mut digest, value);
+            }
+            for value in [created, expiry, ttl] {
+                integer(&mut digest, value);
+            }
+            optional_integer(&mut digest, consumed);
+        }
+
+        Ok(digest.finalize().into())
     }
 
     pub fn exchange_authorization_code(
@@ -765,8 +1098,8 @@ impl DesktopStore {
 
     pub fn clients(&self) -> Result<Vec<McpClient>> {
         let mut statement = self.connection.prepare(
-            "SELECT c.client_id, c.display_name, c.agent_kind, c.registration_json,
-                    c.created_at, c.authorized_at, c.last_used_at, c.revoked_at,
+            "SELECT c.client_id, c.display_name, c.agent_kind, c.redirect_uris_json,
+                    c.registration_json, c.created_at, c.authorized_at, c.last_used_at, c.revoked_at,
                     NULLIF(MAX(
                         COALESCE(
                             (SELECT MAX(t.expires_at)
@@ -790,12 +1123,13 @@ impl DesktopStore {
                 Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(0)?.0),
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Millis>(4)?.0,
-                row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Millis>(5)?.0,
                 row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(8)?.map(|value| value.0),
+                row.get::<_, Option<Millis>>(9)?.map(|value| value.0),
             ))
         })?;
         rows.map(|row| {
@@ -803,6 +1137,7 @@ impl DesktopStore {
                 id,
                 display_name,
                 kind,
+                redirects,
                 registration,
                 created_at,
                 authorized_at,
@@ -814,6 +1149,7 @@ impl DesktopStore {
                 id,
                 display_name,
                 agent_kind: AgentKind::parse(&kind)?,
+                redirect_uris: serde_json::from_str(&redirects)?,
                 registration: registration
                     .as_deref()
                     .map(serde_json::from_str)

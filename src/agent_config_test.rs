@@ -5,16 +5,12 @@ fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns()
     let output = merge_codex(
         "model = \"gpt\"\n[other]\nvalue = 7\n",
         "http://127.0.0.1:50000/mcp",
-        true,
     )
     .unwrap();
     let parsed = output.parse::<DocumentMut>().unwrap();
     assert_eq!(parsed["model"].as_str(), Some("gpt"));
     assert_eq!(parsed["other"]["value"].as_integer(), Some(7));
-    assert_eq!(
-        parsed["mcp_oauth_credentials_store"].as_str(),
-        Some("keyring")
-    );
+    assert!(parsed.get("mcp_oauth_credentials_store").is_none());
     assert_eq!(
         parsed["mcp_servers"][LOCAL_SERVER_NAME]["url"].as_str(),
         Some("http://127.0.0.1:50000/mcp")
@@ -28,6 +24,10 @@ fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns()
             .get("http_headers")
             .is_none()
     );
+    assert_eq!(
+        parsed["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str(),
+        Some(COMPANION_SERVER_URL)
+    );
 }
 
 /// Whatever else the entry held, the upsert leaves only the loopback URL and
@@ -38,7 +38,6 @@ fn codex_upsert_clears_stdio_and_credential_fields() {
     let output = merge_codex(
         "[mcp_servers.ekubo_wallet]\ncommand = \"wallet\"\nargs = [\"serve\"]\nbearer_token_env_var = \"TOKEN\"\nhttp_headers = { Authorization = \"Bearer stale\" }\n\n",
         "http://127.0.0.1:50000/mcp",
-        false,
     )
     .unwrap();
     let parsed = output.parse::<DocumentMut>().unwrap();
@@ -49,25 +48,18 @@ fn codex_upsert_clears_stdio_and_credential_fields() {
     assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:50000/mcp"));
     assert_eq!(local["auth"].as_str(), Some("oauth"));
     assert!(local.get("http_headers").is_none());
-    assert_eq!(
-        parsed["mcp_oauth_credentials_store"].as_str(),
-        Some("keyring")
-    );
+    assert!(parsed.get("mcp_oauth_credentials_store").is_none());
 }
 
 #[test]
-fn codex_upsert_replaces_file_oauth_storage_with_the_os_keyring() {
+fn codex_upsert_preserves_the_harness_wide_oauth_storage_policy() {
     let output = merge_codex(
         "mcp_oauth_credentials_store = \"file\"\n",
         "http://127.0.0.1:61744/mcp",
-        false,
     )
     .unwrap();
     let parsed = output.parse::<DocumentMut>().unwrap();
-    assert_eq!(
-        parsed["mcp_oauth_credentials_store"].as_str(),
-        Some("keyring")
-    );
+    assert_eq!(parsed["mcp_oauth_credentials_store"].as_str(), Some("file"));
 }
 
 #[test]
@@ -79,11 +71,18 @@ fn every_json_shape_preserves_unrelated_servers() {
     ] {
         let before =
             format!(r#"{{"keep":true,"{root}":{{"unrelated":{{"url":"https://example.com"}}}}}}"#);
-        let output = merge_json(&before, root, shape, "http://127.0.0.1:50000/mcp", false).unwrap();
+        let output = merge_json(&before, root, shape, "http://127.0.0.1:50000/mcp").unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["keep"], true);
         assert_eq!(parsed[root]["unrelated"]["url"], "https://example.com");
         assert!(parsed[root][LOCAL_SERVER_NAME].get("headers").is_none());
+        assert_eq!(
+            parsed[root][COMPANION_SERVER_NAME]
+                .get("url")
+                .or_else(|| parsed[root][COMPANION_SERVER_NAME].get("httpUrl"))
+                .and_then(Value::as_str),
+            Some(COMPANION_SERVER_URL)
+        );
     }
 }
 
@@ -96,7 +95,6 @@ fn managed_json_diff_shows_only_changed_server_fields() {
         "mcpServers",
         JsonShape::Url,
         "http://127.0.0.1:61744/mcp",
-        false,
     )
     .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
@@ -110,13 +108,32 @@ fn managed_json_diff_shows_only_changed_server_fields() {
 #[test]
 fn managed_codex_diff_does_not_echo_static_credentials_or_unrelated_settings() {
     let before = "model = \"gpt\"\n[mcp_servers.ekubo_wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nhttp_headers = { Authorization = \"Bearer do-not-display\" }\n";
-    let after = merge_codex(before, "http://127.0.0.1:61744/mcp", false).unwrap();
+    let after = merge_codex(before, "http://127.0.0.1:61744/mcp").unwrap();
     let diff = managed_config_diff(AgentKind::Codex, before, &after).unwrap();
 
     assert!(diff.contains("mcp_servers.ekubo_wallet"));
     assert!(diff.contains("<credential field redacted>"));
     assert!(!diff.contains("do-not-display"));
     assert!(!diff.contains("model ="));
+}
+
+#[test]
+fn codex_upsert_removes_unknown_fields_only_inside_the_wallet_owned_entry() {
+    let before = "mcp_oauth_credentials_store = \"file\"\n\
+[mcp_servers.unrelated]\nurl = \"https://example.test/mcp\"\nfuture = \"keep\"\n\
+[mcp_servers.ekubo_wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nfuture_credential = \"remove\"\n";
+    let output = merge_codex(before, "http://127.0.0.1:61744/mcp").unwrap();
+    let parsed = output.parse::<DocumentMut>().unwrap();
+
+    assert_eq!(parsed["mcp_oauth_credentials_store"].as_str(), Some("file"));
+    assert_eq!(
+        parsed["mcp_servers"]["unrelated"]["future"].as_str(),
+        Some("keep")
+    );
+    let local = parsed["mcp_servers"][LOCAL_SERVER_NAME].as_table().unwrap();
+    assert_eq!(local.len(), 2);
+    assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:61744/mcp"));
+    assert_eq!(local["auth"].as_str(), Some("oauth"));
 }
 
 #[test]
@@ -131,7 +148,6 @@ fn a_failed_install_restores_without_persisting_a_credential_backup() {
         diff: "redacted test diff".into(),
         validation: ConfigValidation::Installed {
             kind: AgentKind::Cursor,
-            companion: false,
         },
     };
     assert!(preview.install().is_err());
@@ -159,7 +175,7 @@ fn successful_install_keeps_secret_prior_bytes_only_in_memory() {
         display_name: "Cursor",
         config_path: path,
     }
-    .preview_install(false)
+    .preview_install()
     .unwrap();
 
     ConfigBatchInstall::install(vec![preview]).unwrap().commit();
@@ -173,21 +189,28 @@ fn successful_install_keeps_secret_prior_bytes_only_in_memory() {
 }
 
 #[test]
-fn startup_shape_does_not_add_or_restore_the_remote_companion() {
+fn startup_shape_always_adds_both_wallet_managed_servers() {
     for (root, shape) in [
         ("mcpServers", JsonShape::Url),
         ("mcpServers", JsonShape::HttpUrl),
         ("mcp", JsonShape::Remote),
     ] {
-        let output = merge_json("{}", root, shape, "http://127.0.0.1:61744/mcp", false).unwrap();
+        let output = merge_json("{}", root, shape, "http://127.0.0.1:61744/mcp").unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert!(parsed[root].get(COMPANION_SERVER_NAME).is_none());
+        assert_eq!(parsed[root].as_object().unwrap().len(), 2);
         assert_eq!(
             parsed[root][LOCAL_SERVER_NAME]
                 .get("url")
                 .or_else(|| parsed[root][LOCAL_SERVER_NAME].get("httpUrl"))
                 .and_then(Value::as_str),
             Some("http://127.0.0.1:61744/mcp")
+        );
+        assert_eq!(
+            parsed[root][COMPANION_SERVER_NAME]
+                .get("url")
+                .or_else(|| parsed[root][COMPANION_SERVER_NAME].get("httpUrl"))
+                .and_then(Value::as_str),
+            Some(COMPANION_SERVER_URL)
         );
     }
 }
@@ -201,7 +224,6 @@ fn managed_preview_contains_no_credential() {
         diff: "+http://127.0.0.1:61744/mcp".into(),
         validation: ConfigValidation::Installed {
             kind: AgentKind::Cursor,
-            companion: false,
         },
     };
     assert!(!preview.diff.contains("Authorization"));
@@ -217,7 +239,6 @@ fn automatic_upserts_skip_files_that_are_already_exact() {
         diff: String::new(),
         validation: ConfigValidation::Installed {
             kind: AgentKind::Cursor,
-            companion: false,
         },
     };
     assert!(!preview.has_changes());
@@ -231,9 +252,35 @@ fn managed_previews_always_use_the_fixed_oauth_resource() {
         display_name: "Cursor",
         config_path: directory.path().join("mcp.json"),
     };
-    let preview = adapter.preview_install(false).unwrap();
+    let preview = adapter.preview_install().unwrap();
     assert!(preview.after.contains("http://127.0.0.1:61744/mcp"));
+    assert!(preview.after.contains(COMPANION_SERVER_URL));
     assert!(!preview.after.contains("Authorization"));
+}
+
+#[test]
+fn both_managed_entries_are_replaced_with_exact_credential_free_shapes() {
+    let before = format!(
+        r#"{{"mcpServers":{{"{LOCAL_SERVER_NAME}":{{"url":"http://127.0.0.1:1/mcp","headers":{{"Authorization":"Bearer local"}}}},"{COMPANION_SERVER_NAME}":{{"url":"https://wrong.test/mcp","headers":{{"Authorization":"Bearer remote"}}}},"keep":{{"url":"https://example.test/mcp","future":"preserved"}}}}}}"#
+    );
+    let output = merge_json(
+        &before,
+        "mcpServers",
+        JsonShape::Url,
+        "http://127.0.0.1:61744/mcp",
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(
+        parsed["mcpServers"][LOCAL_SERVER_NAME],
+        json!({"type": "http", "url": "http://127.0.0.1:61744/mcp"})
+    );
+    assert_eq!(
+        parsed["mcpServers"][COMPANION_SERVER_NAME],
+        json!({"type": "http", "url": COMPANION_SERVER_URL})
+    );
+    assert_eq!(parsed["mcpServers"]["keep"]["future"], "preserved");
 }
 
 #[test]
@@ -251,7 +298,6 @@ fn install_rejects_a_parseable_config_with_static_credentials_and_rolls_back() {
         diff: "redacted test diff".into(),
         validation: ConfigValidation::Installed {
             kind: AgentKind::Cursor,
-            companion: false,
         },
     };
     let error = preview.install().unwrap_err();
@@ -273,7 +319,7 @@ fn a_multi_agent_install_restores_every_earlier_file_when_one_fails() {
         display_name: "Cursor",
         config_path: first_path.clone(),
     }
-    .preview_install(false)
+    .preview_install()
     .unwrap();
     let invalid_second = ConfigPreview {
         path: second_path.clone(),
@@ -282,7 +328,6 @@ fn a_multi_agent_install_restores_every_earlier_file_when_one_fails() {
         diff: "redacted test diff".into(),
         validation: ConfigValidation::Installed {
             kind: AgentKind::Cursor,
-            companion: false,
         },
     };
 

@@ -134,9 +134,15 @@ impl DesktopSession {
         self.owner.network_by_chain_id(chain_id).ok()
     }
 
-    fn update(&self, status: SessionStatus, dapp_name: Option<String>, active_requests: usize) {
+    fn update(
+        &self,
+        status: SessionStatus,
+        dapp_name: Option<String>,
+        active_requests: usize,
+        expires_at: Option<i64>,
+    ) {
         if let Ok(mut manager) = self.manager.lock() {
-            manager.update(self.id, status, dapp_name, active_requests);
+            manager.update(self.id, status, dapp_name, active_requests, expires_at);
         }
         self.events.publish(DomainEventKind::WalletConnectChanged {
             session_id: self.id.to_string(),
@@ -160,6 +166,7 @@ impl DesktopSession {
     }
 
     fn proposal_document(
+        review_id: uuid::Uuid,
         proposal: &ProposalSummary,
         account: &ekubo_wallet_core::config::WalletMetadata,
         scope: &ApprovedScope,
@@ -192,6 +199,7 @@ impl DesktopSession {
         for caution in dapp.cautions {
             request = request.warning(caution);
         }
+        request.id = review_id;
         ReviewDocument::from_request(request, Vec::new())
     }
 
@@ -765,20 +773,48 @@ impl SessionHandler for DesktopSession {
                 let scope = Self::scope_for(account, chains.clone(), methods.clone());
                 ProposalChoice {
                     account: account.clone(),
-                    document: Self::proposal_document(proposal, account, &scope),
+                    document: Self::proposal_document(self.id, proposal, account, &scope),
                     scope,
                 }
             })
             .collect();
         match self.presenter.review(self.id, choices).await? {
-            ProposalCommand::Approve(index) => {
+            ProposalCommand::Approve {
+                index,
+                authorization,
+            } => {
                 ensure!(
                     index < self.accounts.len(),
                     "review selected an unknown account"
                 );
+                let expected = &self.accounts[index];
+                let account = self.owner.account(&expected.id)?;
+                ensure!(
+                    account == *expected,
+                    "the selected account changed after owner authentication"
+                );
+                let unavailable: Vec<String> = proposal
+                    .required_chains
+                    .iter()
+                    .filter(|chain| self.network_for(chain).is_none())
+                    .cloned()
+                    .collect();
+                ensure!(
+                    unavailable.is_empty(),
+                    "required network state changed after owner authentication"
+                );
+                let mut fresh_chains = proposal.required_chains.clone();
+                for chain in &proposal.optional_chains {
+                    if self.network_for(chain).is_some() && !fresh_chains.contains(chain) {
+                        fresh_chains.push(chain.clone());
+                    }
+                }
+                let fresh_scope = Self::scope_for(&account, fresh_chains, methods);
+                let fresh_document =
+                    Self::proposal_document(self.id, proposal, &account, &fresh_scope);
+                authorization.verify(&fresh_document.identity, &account.id)?;
                 self.selected.set(index);
-                let scope = Self::scope_for(&self.accounts[index], chains, methods);
-                Ok(ProposalDecision::Approve(scope))
+                Ok(ProposalDecision::Approve(fresh_scope))
             }
             ProposalCommand::Reject | ProposalCommand::Close => Ok(ProposalDecision::Reject {
                 code: error_code::USER_REJECTED,
@@ -788,9 +824,9 @@ impl SessionHandler for DesktopSession {
     }
 
     async fn handle_request(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
-        self.update(SessionStatus::Connected, None, 1);
+        self.update(SessionStatus::Connected, None, 1, None);
         let result = self.dispatch(request).await;
-        self.update(SessionStatus::Connected, None, 0);
+        self.update(SessionStatus::Connected, None, 0, None);
         Ok(match result {
             Ok(outcome) => outcome,
             Err(error) => RequestOutcome::failed(format!("{error:#}")),
@@ -800,19 +836,24 @@ impl SessionHandler for DesktopSession {
     fn notify(&self, event: &SessionEvent<'_>) {
         match event {
             SessionEvent::Pairing | SessionEvent::ProposalReceived => {
-                self.update(SessionStatus::AwaitingProposal, None, 0);
+                self.update(SessionStatus::AwaitingProposal, None, 0, None);
             }
-            SessionEvent::Settled { metadata, .. } => self.update(
+            SessionEvent::Settled {
+                metadata, expiry, ..
+            } => self.update(
                 SessionStatus::Connected,
                 Some(DappIdentity::of(metadata).headline()),
                 0,
+                Some(*expiry),
             ),
-            SessionEvent::RequestReceived { .. } => self.update(SessionStatus::Connected, None, 1),
+            SessionEvent::RequestReceived { .. } => {
+                self.update(SessionStatus::Connected, None, 1, None);
+            }
             SessionEvent::RequestAnswered { .. } | SessionEvent::RequestRefused { .. } => {
-                self.update(SessionStatus::Connected, None, 0);
+                self.update(SessionStatus::Connected, None, 0, None);
             }
             SessionEvent::DappDisconnected { .. } => {
-                self.update(SessionStatus::Disconnecting, None, 0);
+                self.update(SessionStatus::Disconnecting, None, 0, None);
             }
             SessionEvent::Ping | SessionEvent::RelayReconnected => {}
         }

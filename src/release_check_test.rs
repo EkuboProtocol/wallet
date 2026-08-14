@@ -8,19 +8,11 @@ use super::*;
 const REPOSITORY: &str = "EkuboProtocol/wallet";
 
 #[test]
-fn installable_updates_use_only_the_stable_release_manifest() {
+fn core_and_desktop_package_versions_cannot_drift() {
     assert_eq!(
-        UPDATE_MANIFEST_URL,
-        "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json"
+        ekubo_wallet_core::update_trust::PACKAGE_VERSION_MARKER,
+        format!("\0EKUBO-WALLET-PACKAGE-VERSION:{}\0", crate::VERSION)
     );
-    assert!(!UPDATE_MANIFEST_URL.contains("prerelease"));
-}
-
-#[test]
-fn updater_private_material_is_never_compiled_into_the_module() {
-    let source = include_str!("release_check.rs");
-    assert!(source.contains("UPDATER_PUBLIC_KEY"));
-    assert!(!source.contains("UPDATER_PRIVATE_KEY"));
 }
 
 fn at(text: &str) -> DateTime<Utc> {

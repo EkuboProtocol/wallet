@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "test": "node --test server/index.test.js",
-    "validate": "mcpb validate .",
-    "pack": "mcpb pack . dist/ekubo-wallet.mcpb"
+    "validate:plugin": "claude plugin validate --strict .",
+    "pack:plugin": "node scripts/pack-plugin.js"
   },
   "devDependencies": {
-    "@anthropic-ai/mcpb": "2.1.2"
+    "@anthropic-ai/claude-code": "2.1.231"
   }
 }

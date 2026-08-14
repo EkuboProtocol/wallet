@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ekubo_wallet": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.js"]
+    },
+    "ekubo": {
+      "type": "http",
+      "url": "https://mcp.ekubo.org/mcp"
+    }
+  }
+}

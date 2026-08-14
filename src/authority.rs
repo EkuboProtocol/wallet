@@ -17,11 +17,12 @@ use ekubo_wallet_core::{
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{
         AgentKind, AppearancePreference, DesktopStore, McpClient, OAuthAuthorizationCode,
-        OAuthSessionPreset, OAuthTokenPair,
+        OAuthSessionPreset, OAuthTokenPair, authorize_oauth_client_management,
     },
     execution::BroadcastResult,
     human_presence::{
-        OwnerAuthorizationScope, PlatformHumanPresence, authorize_oauth_client, authorize_owner,
+        AgentManagementOperation, DappAuthorization, OwnerAuthorizationScope,
+        PlatformHumanPresence, authorize_dapp_access, authorize_oauth_client, authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -591,6 +592,122 @@ pub struct OwnerApi {
     events: EventBus,
 }
 
+/// OAuth protocol capability held by the loopback transport. It has no owner
+/// settings, custody, policy, export, review, revocation, or removal methods.
+#[derive(Clone)]
+pub struct OAuthApi {
+    config: ConfigStore,
+    desktop: Arc<Mutex<DesktopStore>>,
+    events: EventBus,
+}
+
+impl OAuthApi {
+    fn desktop(&self) -> Result<std::sync::MutexGuard<'_, DesktopStore>> {
+        self.desktop
+            .lock()
+            .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))
+    }
+
+    pub fn register_client(
+        &self,
+        name: &str,
+        kind: AgentKind,
+        redirect_uris: &[String],
+        registration: Option<&serde_json::Value>,
+    ) -> Result<McpClient> {
+        self.desktop()?
+            .register_oauth_client(name, kind, redirect_uris, registration)
+    }
+
+    pub fn validate_authorization_request(
+        &self,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_challenge: &str,
+        scope: &str,
+        resource: &str,
+    ) -> Result<McpClient> {
+        self.desktop()?.validate_oauth_authorization_request(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+        )
+    }
+
+    pub async fn authorize_client(
+        &self,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_challenge: &str,
+        scope: &str,
+        resource: &str,
+        session_preset: OAuthSessionPreset,
+    ) -> Result<OAuthAuthorizationCode> {
+        let client = self.validate_authorization_request(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+        )?;
+        self.events
+            .publish(DomainEventKind::OAuthAuthorizationRequested { client_id });
+        tokio::task::yield_now().await;
+        require_current_acceptance(self.config.data_dir())?;
+        let authorization = authorize_oauth_client(&client.display_name, redirect_uri).await?;
+        let code = self.desktop()?.issue_authorization_code_with_session(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+            session_preset,
+            &client,
+            &authorization,
+        )?;
+        self.events
+            .publish(DomainEventKind::AgentConnectionChanged { client_id });
+        Ok(code)
+    }
+
+    pub fn exchange_code(
+        &self,
+        code: &str,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_verifier: &str,
+        resource: &str,
+    ) -> Result<OAuthTokenPair> {
+        self.desktop()?.exchange_authorization_code(
+            code,
+            client_id,
+            redirect_uri,
+            code_verifier,
+            resource,
+        )
+    }
+
+    pub fn refresh_token(
+        &self,
+        refresh_token: &str,
+        client_id: Uuid,
+        resource: &str,
+    ) -> Result<OAuthTokenPair> {
+        self.desktop()?
+            .refresh_access_token(refresh_token, client_id, resource)
+    }
+
+    pub fn authenticate_access_token(
+        &self,
+        token: &str,
+        resource: &str,
+    ) -> Result<Option<ekubo_wallet_core::desktop_store::AuthenticatedClient>> {
+        self.desktop()?.authenticate_access_token(token, resource)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OwnerReviewQueues {
     pub transactions: Vec<PendingTransaction>,
@@ -609,6 +726,21 @@ fn transaction_observation_changed(
 }
 
 impl OwnerApi {
+    pub async fn authorize_update_install(
+        &self,
+        review: &ekubo_wallet_core::update_trust::UpdateReview,
+    ) -> Result<ekubo_wallet_core::update_trust::UpdateAuthorization> {
+        Ok(ekubo_wallet_core::update_trust::authorize_update(review).await?)
+    }
+
+    pub async fn authorize_dapp_connection(
+        &self,
+        document: &ReviewDocument,
+        account: &WalletMetadata,
+    ) -> Result<DappAuthorization> {
+        Ok(authorize_dapp_access(&document.identity, &account.id).await?)
+    }
+
     /// An owner capability over a throwaway database, for tests only.
     ///
     /// `ApplicationAuthority::open` deliberately goes straight to
@@ -621,8 +753,11 @@ impl OwnerApi {
     /// release binary contains it.
     #[cfg(test)]
     pub(crate) fn for_test(data_dir: &std::path::Path) -> Result<Self> {
-        use ekubo_wallet_core::policy_store::{DATABASE_FILE, DatabaseKey};
+        use ekubo_wallet_core::policy_store::{
+            DATABASE_FILE, DatabaseKey, register_test_database_key,
+        };
 
+        register_test_database_key(data_dir, [0x43; 32])?;
         let key = DatabaseKey::new([0x43; 32]);
         let desktop = DesktopStore::open(&data_dir.join(DATABASE_FILE), &key)?;
         Ok(Self {
@@ -728,145 +863,27 @@ impl OwnerApi {
         Ok(removed)
     }
 
-    pub fn register_oauth_client(
-        &self,
-        name: &str,
-        kind: AgentKind,
-        redirect_uris: &[String],
-        managed_registration: Option<&serde_json::Value>,
-    ) -> Result<McpClient> {
-        self.desktop()?
-            .register_oauth_client(name, kind, redirect_uris, managed_registration)
-    }
-
-    pub async fn authorize_oauth_client(
-        &self,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_challenge: &str,
-        scope: &str,
-        resource: &str,
-        session_preset: OAuthSessionPreset,
-    ) -> Result<OAuthAuthorizationCode> {
-        let client = self.desktop()?.validate_oauth_authorization_request(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-        )?;
-        self.events
-            .publish(DomainEventKind::OAuthAuthorizationRequested { client_id });
-        tokio::task::yield_now().await;
-        require_current_acceptance(self.config.data_dir())?;
-        let authorization = authorize_oauth_client(&client.display_name, redirect_uri).await?;
-        let code = self.desktop()?.issue_authorization_code_with_session(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-            session_preset,
-            &authorization,
-        )?;
-        if let Err(launch_error) = crate::launch_at_login::enable(&authorization) {
-            // The authorization code has not left this process yet. Revoke
-            // the just-created grant before reporting the persistence failure
-            // so a caller cannot exchange the code after an incomplete grant.
-            let rollback = self.desktop()?.revoke_client(client_id);
-            self.events
-                .publish(DomainEventKind::AgentConnectionChanged { client_id });
-            if let Err(rollback) = rollback {
-                return Err(launch_error).context(format!(
-                    "launch-at-login setup failed and the new agent grant could not be revoked: \
-                     {rollback:#}"
-                ));
-            }
-            return Err(launch_error)
-                .context("new agent grant was revoked because launch-at-login setup failed");
-        }
-        self.events
-            .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        Ok(code)
-    }
-
-    pub fn validate_oauth_authorization_request(
-        &self,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_challenge: &str,
-        scope: &str,
-        resource: &str,
-    ) -> Result<McpClient> {
-        self.desktop()?.validate_oauth_authorization_request(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-        )
-    }
-
-    pub fn exchange_oauth_code(
-        &self,
-        code: &str,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_verifier: &str,
-        resource: &str,
-    ) -> Result<OAuthTokenPair> {
-        self.desktop()?.exchange_authorization_code(
-            code,
-            client_id,
-            redirect_uri,
-            code_verifier,
-            resource,
-        )
-    }
-
-    pub fn refresh_oauth_token(
-        &self,
-        refresh_token: &str,
-        client_id: Uuid,
-        resource: &str,
-    ) -> Result<OAuthTokenPair> {
-        self.desktop()?
-            .refresh_access_token(refresh_token, client_id, resource)
-    }
-
-    pub fn revoke_client(&self, client_id: Uuid) -> Result<()> {
+    pub async fn revoke_client(&self, client_id: Uuid) -> Result<()> {
+        let review = self
+            .desktop()?
+            .client_management_review(client_id, AgentManagementOperation::Revoke)?;
+        let authorization = authorize_oauth_client_management(review).await?;
         let mut desktop = self.desktop()?;
-        desktop.revoke_client(client_id)?;
-        let any_active = desktop
-            .clients()?
-            .iter()
-            .any(|client| client.authorized_at.is_some() && client.revoked_at.is_none());
-        drop(desktop);
+        desktop.apply_client_management(authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        if !any_active {
-            crate::launch_at_login::disable().context(
-                "agent access was revoked, but launch-at-login persistence could not be removed",
-            )?;
-        }
         Ok(())
     }
 
-    pub fn remove_client(&self, client_id: Uuid) -> Result<()> {
+    pub async fn remove_client(&self, client_id: Uuid) -> Result<()> {
+        let review = self
+            .desktop()?
+            .client_management_review(client_id, AgentManagementOperation::Remove)?;
+        let authorization = authorize_oauth_client_management(review).await?;
         let mut desktop = self.desktop()?;
-        desktop.remove_client(client_id)?;
-        let any_active = desktop
-            .clients()?
-            .iter()
-            .any(|client| client.authorized_at.is_some() && client.revoked_at.is_none());
-        drop(desktop);
+        desktop.apply_client_management(authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        if !any_active {
-            crate::launch_at_login::disable().context(
-                "agent registration was removed, but launch-at-login persistence could not be removed",
-            )?;
-        }
         Ok(())
     }
 
@@ -2015,8 +2032,8 @@ impl ExportLease {
 
 pub struct ApplicationAuthority {
     owner: OwnerApi,
+    oauth: OAuthApi,
     agent: AgentApi,
-    desktop: Arc<Mutex<DesktopStore>>,
     events: EventBus,
 }
 
@@ -2031,13 +2048,17 @@ impl ApplicationAuthority {
                 desktop: desktop.clone(),
                 events: events.clone(),
             },
+            oauth: OAuthApi {
+                config: config.clone(),
+                desktop: desktop.clone(),
+                events: events.clone(),
+            },
             agent: AgentApi {
                 config,
                 desktop: desktop.clone(),
                 global_quota,
                 events: events.clone(),
             },
-            desktop,
             events,
         })
     }
@@ -2053,8 +2074,8 @@ impl ApplicationAuthority {
     }
 
     #[must_use]
-    pub fn desktop_store(&self) -> Arc<Mutex<DesktopStore>> {
-        self.desktop.clone()
+    pub fn oauth_api(&self) -> OAuthApi {
+        self.oauth.clone()
     }
 
     #[must_use]

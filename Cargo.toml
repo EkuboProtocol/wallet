@@ -38,7 +38,6 @@ async-trait = "0.1.89"
 axum = "0.8.6"
 base64 = "0.23.0"
 chrono = { version = "0.4.42", features = ["serde"] }
-cargo-packager-updater = "0.2.3"
 directories = "6.0.0"
 fs2 = "0.4.3"
 futures = "0.3.31"
@@ -52,8 +51,6 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 num-bigint = "0.5.1"
 notify-rust = "4.18.0"
 rand = "0.10.0"
-# Same feature set as the core crate's, so the release check adds a call site
-# rather than a build.
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.1.0", features = ["transport-streamable-http-server"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }

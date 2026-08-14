@@ -33,6 +33,24 @@ fn write_unknown_schema(path: &Path, key: &DatabaseKey, version: i64) {
 }
 
 #[test]
+fn a_registered_test_directory_never_reaches_the_credential_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(DATABASE_FILE);
+    drop(PolicyStore::open(&path, &key(77)).unwrap());
+
+    register_test_database_key(directory.path(), [77; 32]).unwrap();
+    assert!(PolicyStore::production(directory.path()).is_ok());
+
+    let unrelated = tempfile::tempdir().unwrap();
+    assert!(
+        registered_test_database_key(unrelated.path())
+            .unwrap()
+            .is_none(),
+        "a test key must be scoped to its exact data directory"
+    );
+}
+
+#[test]
 fn a_network_suggestion_waits_and_the_latest_one_prevails() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");

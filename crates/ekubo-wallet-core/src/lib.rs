@@ -46,3 +46,4 @@ pub mod sql;
 pub mod token_list;
 pub mod token_store;
 pub mod typed_data;
+pub mod update_trust;
