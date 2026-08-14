@@ -756,19 +756,18 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
             "RPC URL must use http:// or https://"
         );
         // Userinfo is a credential written in the one part of a URL that does
-        // not have to look like one, and this wallet quotes its endpoints back
-        // verbatim: `list_networks` hands them to the agent, the desktop shows
-        // them, and the disclosure text names them. A field repeated on
-        // every read cannot hold a secret, so it is refused here rather than
-        // redacted at each of the places it would otherwise surface — and
-        // refused without echoing the URL, since the message that named it
-        // would publish the thing it is complaining about. Checked before the
-        // duplicate test below, which does echo.
+        // not have to look like one. The owner-only editor may show complete
+        // endpoints, while agent and error surfaces use the core's redacted
+        // label. Userinfo is still refused because standard URL renderers and
+        // transport errors can surface it unexpectedly. Refuse without
+        // echoing the URL, since the message that named it would publish the
+        // thing it is complaining about. Checked before the duplicate test
+        // below, which does echo.
         ensure!(
             rpc_url.username().is_empty() && rpc_url.password().is_none(),
-            "an RPC URL for network {} carries a username or password; this wallet repeats its \
-             endpoints verbatim to the agent and on screen, so a credential there would be \
-             disclosed. Remove it from the URL.",
+            "an RPC URL for network {} carries a username or password; credentials in URL \
+             userinfo can be exposed by transport errors and standard URL renderers. Remove it \
+             from the URL.",
             network.name
         );
         // A list that names one endpoint twice is shorter than it looks: the

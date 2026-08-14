@@ -23,6 +23,7 @@ use super::{
         SettledNamespace, error_code, method, request_id, tag, ttl,
     },
     relay::{RelayConfig, RelayConnection},
+    request as dapp_request,
     uri::PairingUri,
 };
 use anyhow::{Context, Result, bail};
@@ -1036,6 +1037,31 @@ fn check_in_scope(
                 request.request.method
             ),
         ));
+    }
+    // EIP-5792 carries a second, effective chain selector inside
+    // `wallet_sendCalls`. Authorizing only the outer WalletConnect selector
+    // turns relational chain-method grants into two independent sets: a dapp
+    // can arrive on a chain where this method is granted, then execute the
+    // batch on another approved chain where it is not. Keep the two selectors
+    // identical at the session boundary so no handler or signing path ever
+    // sees that confused-deputy request.
+    if request.request.method == "wallet_sendCalls" {
+        let batch = dapp_request::parse_send_calls(&request.request.params).map_err(|error| {
+            (
+                error_code::INVALID_METHOD,
+                format!("The wallet_sendCalls request could not be read: {error:#}"),
+            )
+        })?;
+        let effective_chain = format!("{EIP155}:{}", batch.chain_id);
+        if effective_chain != request.chain_id {
+            return Err((
+                error_code::UNAUTHORIZED_CHAIN,
+                format!(
+                    "wallet_sendCalls names {effective_chain} inside a request authorized for {}.",
+                    request.chain_id
+                ),
+            ));
+        }
     }
     Ok(())
 }
