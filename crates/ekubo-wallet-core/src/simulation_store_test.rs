@@ -249,7 +249,9 @@ fn a_partial_clock_rollback_cannot_extend_the_monotonic_lifetime() {
     // signing authority.
     store.recorded_instants.insert(
         recorded.simulation_id,
-        Instant::now() - Duration::from_secs(180),
+        Instant::now()
+            .checked_sub(Duration::from_mins(3))
+            .expect("the monotonic clock has at least three minutes of history"),
     );
     assert!(
         store

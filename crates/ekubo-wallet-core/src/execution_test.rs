@@ -449,7 +449,7 @@ fn signed_envelope_is_revalidated_against_the_current_fee_ceiling() {
     let signer = PrivateKeySigner::from_slice(&[12; 32]).unwrap();
     let wallet = wallet(&signer);
     let plan = plan(wallet.address, 1);
-    let signed = finalize_digest(
+    let signed_envelope = finalize_digest(
         sign_prepared(
             &signer,
             1,
@@ -465,7 +465,7 @@ fn signed_envelope_is_revalidated_against_the_current_fee_ceiling() {
     );
     let mut network = network();
     network.max_fee_per_gas = Some("100".into());
-    let error = validate_signed_execution(&signed, &wallet, &network, &plan)
+    let error = validate_signed_execution(&signed_envelope, &wallet, &network, &plan)
         .unwrap_err()
         .to_string();
     assert!(error.contains("maximum fee per gas"), "{error}");

@@ -7205,10 +7205,9 @@ impl WalletWindow {
         if review.scroll_layout_ready
             && !review.state.approve_enabled()
             && scroll_reached_end(review.scroll_handle.offset().y, max_offset)
+            && review.state.mark_viewed_to_end(generation)
         {
-            if review.state.mark_viewed_to_end(generation) {
-                cx.notify();
-            }
+            cx.notify();
         }
     }
 
