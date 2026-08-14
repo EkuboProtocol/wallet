@@ -106,7 +106,6 @@ jobs:
           printf 'EKUBO_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
       - name: Build the release workspace
-        shell: bash
         env:
           EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
         run: cargo build --release --workspace
@@ -182,9 +181,8 @@ jobs:
           7z x "-o$extract" $installer[0].FullName | Out-Null
           $bridges = @(Get-ChildItem -Recurse $extract -Filter ekubo-wallet-mcp-bridge.exe)
           if ($bridges.Count -ne 1) { throw "Windows package does not contain exactly one MCP bridge" }
-          $sourceHash = (Get-FileHash -Algorithm SHA256 target/release/ekubo-wallet-mcp-bridge.exe).Hash
-          $packagedHash = (Get-FileHash -Algorithm SHA256 $bridges[0].FullName).Hash
-          if ($sourceHash -ne $packagedHash) { throw "Windows packaging changed the MCP bridge bytes" }
+          $expectedVersion = $env:GITHUB_REF_NAME.Substring(1)
+          python contrib/verify-mcp-bridge.py "$($bridges[0].FullName)" $expectedVersion
       - name: Verify Linux packages contain the executable bridge
         if: runner.os == 'Linux'
         shell: bash
@@ -200,14 +198,14 @@ jobs:
           deb_bridge="$(find "$deb_extract" -type f -name ekubo-wallet-mcp-bridge -print -quit)"
           test -n "$deb_bridge"
           test -x "$deb_bridge"
-          cmp target/release/ekubo-wallet-mcp-bridge "$deb_bridge"
+          python3 contrib/verify-mcp-bridge.py "$deb_bridge" "${GITHUB_REF_NAME#v}"
           extract="$RUNNER_TEMP/ekubo-appimage-contents"
           mkdir "$extract"
           (cd "$extract" && "$GITHUB_WORKSPACE/${appimages[0]}" --appimage-extract >/dev/null)
           bridge="$(find "$extract/squashfs-root" -type f -name ekubo-wallet-mcp-bridge -print -quit)"
           test -n "$bridge"
           test -x "$bridge"
-          cmp target/release/ekubo-wallet-mcp-bridge "$bridge"
+          python3 contrib/verify-mcp-bridge.py "$bridge" "${GITHUB_REF_NAME#v}"
       - name: Verify signed macOS packages
         if: runner.os == 'macOS'
         shell: bash
@@ -220,6 +218,8 @@ jobs:
 
           codesign --verify --deep --strict --verbose=2 "$app"
           test -x "$app/Contents/MacOS/ekubo-wallet-mcp-bridge"
+          python3 contrib/verify-mcp-bridge.py \
+            "$app/Contents/MacOS/ekubo-wallet-mcp-bridge" "${GITHUB_REF_NAME#v}"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Authority=Developer ID Application:'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
           codesign --verify --strict --verbose=2 "${dmgs[0]}"

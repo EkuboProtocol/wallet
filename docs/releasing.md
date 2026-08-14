@@ -20,9 +20,10 @@ artifacts are not stapled, their first launch requires network access.
 Developer ID signing on macOS and Authenticode signing on Windows protect the
 distributed application packages. The release's Minisign chain protects native
 update artifacts on every platform. Packaging fails unless every native package
-contains an executable, byte-exact `ekubo-wallet-mcp-bridge`. The helper itself
-is not an authorization boundary. The retired Claude Desktop plugin archive is
-not built or published.
+contains a runnable `ekubo-wallet-mcp-bridge` that initializes over stdio,
+reports the tagged version, advertises dynamic tool refresh, and returns the
+deterministic offline tool catalog. The helper itself is not an authorization
+boundary. The retired Claude Desktop plugin archive is not built or published.
 
 Before tagging, smoke-test a bridge launched by each supported harness (Codex,
 Claude Code, Claude Desktop, Gemini CLI, Cursor, and OpenCode). Start the
