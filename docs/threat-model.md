@@ -36,15 +36,17 @@ format, canonical URL, and verified digest.
 Harnesses spawn a minimal stdio bridge which survives wallet downtime and
 connects to the singleton through same-user local IPC. Unix uses a `0600`
 socket in the wallet's `0700` data directory and rejects a foreign UID. Windows
-uses a current-user-only named-pipe DACL and rejects a foreign peer SID. Helper
-signatures establish package integrity and do not authorize IPC.
+uses a current-user-only named-pipe DACL and rejects a foreign peer SID. Native
+package signatures establish distribution integrity and do not authorize IPC.
 
 Each bridge connection creates a fresh restricted MCP server and session UUID.
 Only `AgentApi` enters that server; owner authorization, raw storage, custody,
 exports, and owner-only mutations do not. Harness kind is informational
 activity attribution only. The local stack has no HTTP or OAuth surface.
 Managed configurations contain only the installed helper command with a fixed
-`--client` argument and the independent hosted companion URL.
+`--client` argument and, where that file format supports remote MCP, the
+independent hosted companion URL. Claude Desktop keeps the remote companion in
+its account-level custom connectors instead of `claude_desktop_config.json`.
 
 ## WalletConnect and dapps
 

@@ -8,7 +8,9 @@ harness-kind attribution for agent activity. It contains no local MCP client,
 grant, access-token, refresh-token, or authorization-code tables.
 
 Managed harness configuration files contain only the absolute installed bridge
-command with its fixed `--client` argument and the hosted companion URL. They
+command with its fixed `--client` argument and, where supported, the hosted
+companion URL. Claude Desktop's hosted companion is an account-level custom
+connector and is never written to its local stdio configuration. These files
 are not sources of wallet authority and contain no wallet-managed credential.
 
 Desktop private keys use `org.ekubo.wallet.private-key`.

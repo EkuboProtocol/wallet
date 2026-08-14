@@ -214,7 +214,7 @@ impl ConfigPreview {
     }
 
     /// Verify that an unchanged file still contains the exact credential-free
-    /// bridge command and hosted companion shape.
+    /// bridge command and, where supported, hosted companion shape.
     pub fn validate_current(&self) -> Result<()> {
         let installed = fs::read_to_string(&self.path)
             .context("failed to read installed agent configuration")?;
@@ -324,13 +324,33 @@ impl AgentAdapter {
         let client = harness_argument(self.kind)?;
         let after = match self.kind {
             AgentKind::Codex => merge_codex(&before, &command, client)?,
-            AgentKind::ClaudeCode | AgentKind::ClaudeDesktop | AgentKind::Cursor => {
-                merge_json(&before, "mcpServers", JsonShape::Stdio, &command, client)?
+            AgentKind::ClaudeCode | AgentKind::Cursor => merge_json(
+                &before,
+                "mcpServers",
+                JsonShape::Stdio,
+                &command,
+                client,
+                true,
+            )?,
+            AgentKind::ClaudeDesktop => merge_json(
+                &before,
+                "mcpServers",
+                JsonShape::Stdio,
+                &command,
+                client,
+                false,
+            )?,
+            AgentKind::GeminiCli => merge_json(
+                &before,
+                "mcpServers",
+                JsonShape::Gemini,
+                &command,
+                client,
+                true,
+            )?,
+            AgentKind::Opencode => {
+                merge_json(&before, "mcp", JsonShape::Local, &command, client, true)?
             }
-            AgentKind::GeminiCli => {
-                merge_json(&before, "mcpServers", JsonShape::Gemini, &command, client)?
-            }
-            AgentKind::Opencode => merge_json(&before, "mcp", JsonShape::Local, &command, client)?,
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         };
         let diff = managed_config_diff(self.kind, &before, &after)?;
@@ -428,6 +448,7 @@ fn merge_json(
     shape: JsonShape,
     command: &str,
     client: &str,
+    include_companion: bool,
 ) -> Result<String> {
     let mut document: Value = if before.trim().is_empty() {
         json!({})
@@ -446,10 +467,17 @@ fn merge_json(
         LOCAL_SERVER_NAME.into(),
         json_server(shape, command, client),
     );
-    servers.insert(
-        COMPANION_SERVER_NAME.into(),
-        remote_json_server(shape, COMPANION_SERVER_URL),
-    );
+    if include_companion {
+        servers.insert(
+            COMPANION_SERVER_NAME.into(),
+            remote_json_server(shape, COMPANION_SERVER_URL),
+        );
+    } else {
+        // Claude Desktop reserves this file for local stdio servers. Its
+        // remote MCP services are account-level custom connectors managed in
+        // Claude's UI, so repair also removes our obsolete remote JSON entry.
+        servers.remove(COMPANION_SERVER_NAME);
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
 }
 
@@ -770,13 +798,20 @@ fn validate_json_shape(contents: &str, kind: AgentKind) -> Result<()> {
         local == &json_server(shape, &command.to_string_lossy(), client),
         "local MCP server contains unmanaged fields"
     );
-    let companion = servers
-        .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
-        .context("companion MCP server is missing")?;
-    ensure!(
-        companion == &remote_json_server(shape, COMPANION_SERVER_URL),
-        "companion MCP server has an incorrect or credential-bearing shape"
-    );
+    if kind == AgentKind::ClaudeDesktop {
+        ensure!(
+            servers.is_some_and(|servers| !servers.contains_key(COMPANION_SERVER_NAME)),
+            "Claude Desktop remote companion must be an account connector, not an mcpServer"
+        );
+    } else {
+        let companion = servers
+            .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
+            .context("companion MCP server is missing")?;
+        ensure!(
+            companion == &remote_json_server(shape, COMPANION_SERVER_URL),
+            "companion MCP server has an incorrect or credential-bearing shape"
+        );
+    }
     Ok(())
 }
 

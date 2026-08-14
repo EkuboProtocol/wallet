@@ -50,6 +50,7 @@ fn recognized_balance_effects_separate_the_symbol_from_the_exact_address() {
 #[test]
 fn the_install_button_reflects_what_is_left_to_install() {
     let agent = |installed| DetectedAgent {
+        kind: AgentKind::Codex,
         display_name: "Agent",
         config_path: "agent.json".into(),
         installed,

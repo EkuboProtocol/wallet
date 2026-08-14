@@ -30,7 +30,7 @@ use ekubo_wallet_core::approval::{
 use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
 use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
-use ekubo_wallet_core::desktop_store::AppearancePreference;
+use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
@@ -1166,6 +1166,7 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
         .into_iter()
         .filter(AgentAdapter::detected)
         .map(|adapter| DetectedAgent {
+            kind: adapter.kind,
             display_name: adapter.display_name,
             config_path: adapter.config_path.display().to_string(),
             installed: adapter
@@ -2427,6 +2428,7 @@ fn render_activity_row(
 
 #[derive(Clone)]
 struct DetectedAgent {
+    kind: AgentKind,
     display_name: &'static str,
     config_path: String,
     installed: std::result::Result<bool, SharedString>,
@@ -8796,6 +8798,11 @@ impl WalletWindow {
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let claude_desktop_detected = matches!(
+            &self.detected_agents,
+            AgentDetectionState::Ready(detected)
+                if detected.iter().any(|agent| agent.kind == AgentKind::ClaudeDesktop)
+        );
         let mut agents = div().flex().flex_col().gap_1();
         match &self.detected_agents {
             AgentDetectionState::Loading => {
@@ -9089,6 +9096,44 @@ impl WalletWindow {
                                 "Installing writes a credential-free stdio bridge into each agent's configuration. The bridge stays running and connects automatically whenever Ekubo Wallet opens.",
                             )),
                     )
+                    .when(claude_desktop_detected, |group| {
+                        group.child(
+                            h_flex()
+                                .w_full()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_medium()
+                                                .child("Claude Desktop hosted connector"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .max_w(PROSE_MEASURE)
+                                                .child(selectable_label(
+                                                    "In Claude Desktop, open Customize → Connectors, add a custom connector named Ekubo, then paste this URL. Remote connectors belong to your Claude account and cannot be installed through claude_desktop_config.json.",
+                                                )),
+                                        ),
+                                )
+                                .child(copy_button(
+                                    "copy-claude-desktop-connector-url",
+                                    crate::agent_config::COMPANION_SERVER_URL.to_owned(),
+                                    "Copy Claude Desktop connector URL",
+                                )),
+                        )
+                    })
                     .child(
                         div()
                             .text_sm()

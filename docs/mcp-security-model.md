@@ -29,10 +29,12 @@ is retained for useful offline errors, and the bridge reconnects without a
 harness restart.
 
 Managed agent configuration contains the absolute installed helper path and
-exact fixed harness argument under `ekubo_wallet`. It also retains the
-credential-free, always-installed companion `https://mcp.ekubo.org/mcp` under
-`ekubo`.
-Installing or repairing them creates no credential and requires no owner
+exact fixed harness argument under `ekubo_wallet`. Harnesses that support
+remote MCP in the same file also receive the credential-free companion
+`https://mcp.ekubo.org/mcp` under `ekubo`. Claude Desktop is different: its
+JSON file contains only local stdio servers, so the user adds the companion as
+an account-level custom connector through Customize → Connectors. Installing
+or repairing managed file entries creates no credential and requires no owner
 authentication.
 The local transport has no HTTP listener, OAuth routes, bearer credentials, or
 login flow. The hosted companion is an independent HTTPS service.

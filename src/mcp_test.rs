@@ -1808,8 +1808,9 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
     assert!(SERVER_INSTRUCTIONS.contains("can be un-executed"));
     assert!(SERVER_INSTRUCTIONS.contains("src/extensions/SignedExclusiveSwap.sol"));
     // No tool description or code path may privilege it. The security model
-    // separately names the companion because agent configuration always
-    // installs that exact credential-free endpoint.
+    // separately names the companion because supported harness configuration
+    // installs that exact credential-free endpoint, while Claude Desktop uses
+    // the same endpoint as an account-level connector.
     let router = WalletMcpServer::sanitized_tool_router();
     for tool in router.list_all() {
         let rendered = serde_json::to_string(&tool).unwrap();
@@ -1819,8 +1820,8 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
             tool.name
         );
     }
-    assert!(SECURITY_MODEL.contains("always-installed companion"));
-    assert!(SECURITY_MODEL.contains("Installing or repairing them creates no credential"));
+    assert!(SECURITY_MODEL.contains("account-level custom connector"));
+    assert!(SECURITY_MODEL.contains("creates no credential"));
     assert!(!SECURITY_MODEL.contains("trusted plan producer"));
 }
 

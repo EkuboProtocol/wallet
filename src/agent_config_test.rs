@@ -41,27 +41,35 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
             "mcpServers",
             JsonShape::Stdio,
             "claude-code",
-        ),
-        (
-            AgentKind::ClaudeDesktop,
-            "mcpServers",
-            JsonShape::Stdio,
-            "claude-desktop",
+            true,
         ),
         (
             AgentKind::GeminiCli,
             "mcpServers",
             JsonShape::Gemini,
             "gemini-cli",
+            true,
         ),
-        (AgentKind::Cursor, "mcpServers", JsonShape::Stdio, "cursor"),
-        (AgentKind::Opencode, "mcp", JsonShape::Local, "opencode"),
+        (
+            AgentKind::Cursor,
+            "mcpServers",
+            JsonShape::Stdio,
+            "cursor",
+            true,
+        ),
+        (
+            AgentKind::Opencode,
+            "mcp",
+            JsonShape::Local,
+            "opencode",
+            true,
+        ),
     ];
-    for (_kind, root, shape, client) in cases {
+    for (_kind, root, shape, client, include_companion) in cases {
         let before = format!(
             r#"{{"keep":7,"{root}":{{"ekubo_wallet":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
         );
-        let output = merge_json(&before, root, shape, HELPER, client).unwrap();
+        let output = merge_json(&before, root, shape, HELPER, client, include_companion).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["keep"], 7);
         assert_eq!(
@@ -91,16 +99,38 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
 }
 
 #[test]
+fn claude_desktop_keeps_only_local_stdio_in_its_config() {
+    let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
+    let output = merge_json(
+        before,
+        "mcpServers",
+        JsonShape::Stdio,
+        HELPER,
+        "claude-desktop",
+        false,
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["mcpServers"]["keep"]["command"], "keep");
+    assert_eq!(
+        parsed["mcpServers"][LOCAL_SERVER_NAME],
+        json_server(JsonShape::Stdio, HELPER, "claude-desktop")
+    );
+    assert!(parsed["mcpServers"].get(COMPANION_SERVER_NAME).is_none());
+}
+
+#[test]
 fn malformed_or_wrong_root_documents_are_rejected() {
     assert!(merge_codex("not = [toml", HELPER, "codex").is_err());
-    assert!(merge_json("[]", "mcpServers", JsonShape::Stdio, HELPER, "cursor").is_err());
+    assert!(merge_json("[]", "mcpServers", JsonShape::Stdio, HELPER, "cursor", true).is_err());
     assert!(
         merge_json(
             r#"{"mcpServers":[]}"#,
             "mcpServers",
             JsonShape::Stdio,
             HELPER,
-            "cursor"
+            "cursor",
+            true,
         )
         .is_err()
     );
@@ -109,7 +139,15 @@ fn malformed_or_wrong_root_documents_are_rejected() {
 #[test]
 fn managed_diff_never_discloses_unrelated_credentials() {
     let before = r#"{"secret":"do-not-print","mcpServers":{}}"#;
-    let after = merge_json(before, "mcpServers", JsonShape::Stdio, HELPER, "cursor").unwrap();
+    let after = merge_json(
+        before,
+        "mcpServers",
+        JsonShape::Stdio,
+        HELPER,
+        "cursor",
+        true,
+    )
+    .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
     assert!(!diff.contains("do-not-print"));
     assert!(diff.contains("mcpServers.ekubo_wallet"));
