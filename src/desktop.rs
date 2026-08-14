@@ -1,6 +1,6 @@
 use crate::{
     BUILD_VERSION,
-    agent_config::{AgentAdapter, LOCAL_SERVER_NAME},
+    agent_config::AgentAdapter,
     assets::{PENCIL_ICON, WalletAssets},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioAccount,
@@ -30,7 +30,7 @@ use ekubo_wallet_core::approval::{
 use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
 use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
-use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, McpClient};
+use ekubo_wallet_core::desktop_store::AppearancePreference;
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
@@ -323,6 +323,10 @@ fn agents_all_installed(state: &AgentDetectionState) -> bool {
     }
 }
 
+fn agents_any_installed(state: &AgentDetectionState) -> bool {
+    matches!(state, AgentDetectionState::Ready(detected) if detected.iter().any(|agent| agent.installed.as_ref().copied().unwrap_or(false)))
+}
+
 /// Which account tab the policies page shows as selected. The editor owns the
 /// selection, so an account whose editor has not opened yet — or that has been
 /// deleted out from under the editor — falls back to the first tab.
@@ -410,10 +414,7 @@ fn account_switcher(
 /// positionless and complete.
 ///
 /// Markdown cannot. Backslash escapes are ignored inside the constructs that
-/// swallow punctuation — an autolinked URL keeps every backslash the escaper
-/// put in it, which is how `http://127.0.0.1:61744/mcp` reached the screen as
-/// `http://127\.0\.0\.1:61744/mcp`. Escaping harder cannot fix that, because
-/// the escapes are the thing being displayed.
+/// swallow punctuation. HTML keeps the escaped text literal.
 fn html_escaped_plain_text(value: &str) -> SharedString {
     let mut html = String::with_capacity(value.len());
     for (index, line) in value.split('\n').enumerate() {
@@ -771,76 +772,6 @@ fn legal_acceptance_detail(
     (legal_acceptance_label(status).into(), color)
 }
 
-fn agent_session_expiry_label(
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> (String, bool) {
-    let Some(expires_at) = expires_at else {
-        return ("No active session (expired or not completed)".into(), true);
-    };
-    let timestamp = expires_at.format("%b %d, %Y at %H:%M UTC");
-    if expires_at <= now {
-        (format!("Expired {timestamp}"), true)
-    } else {
-        (format!("Expires {timestamp}"), false)
-    }
-}
-
-fn visible_agent_sessions<'a>(
-    clients: &'a [McpClient],
-    hidden: &BTreeSet<uuid::Uuid>,
-) -> Vec<&'a McpClient> {
-    clients
-        .iter()
-        .filter(|client| client.revoked_at.is_none() && !hidden.contains(&client.id))
-        .collect()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AgentLoginInstruction {
-    harness: &'static str,
-    command: String,
-    location: &'static str,
-}
-
-fn agent_login_instruction(kind: AgentKind) -> Option<AgentLoginInstruction> {
-    let (harness, command_prefix, location) = match kind {
-        AgentKind::Codex => ("Codex", "codex mcp login", "Run in a terminal."),
-        AgentKind::ClaudeCode => ("Claude Code", "claude mcp login", "Run in a terminal."),
-        AgentKind::ClaudeDesktop => return None,
-        AgentKind::GeminiCli => (
-            "Gemini CLI",
-            "/mcp auth",
-            "Paste inside an interactive Gemini CLI session.",
-        ),
-        AgentKind::Cursor => (
-            "Cursor",
-            "cursor-agent mcp login",
-            "Run in a terminal with Cursor Agent installed.",
-        ),
-        AgentKind::Opencode => ("opencode", "opencode mcp auth", "Run in a terminal."),
-        AgentKind::Other => return None,
-    };
-    Some(AgentLoginInstruction {
-        harness,
-        command: format!("{command_prefix} {LOCAL_SERVER_NAME}"),
-        location,
-    })
-}
-
-fn installed_agent_login_instructions(
-    detected: &AgentDetectionState,
-) -> Vec<AgentLoginInstruction> {
-    let AgentDetectionState::Ready(detected) = detected else {
-        return Vec::new();
-    };
-    detected
-        .iter()
-        .filter(|agent| agent.installed.as_ref().is_ok_and(|installed| *installed))
-        .filter_map(|agent| agent_login_instruction(agent.kind))
-        .collect()
-}
-
 fn format_asset_amount(raw: &str, decimals: Option<u8>, base_unit: &str) -> String {
     let Some(decimals) = decimals else {
         return format!("{raw} {base_unit}");
@@ -997,11 +928,9 @@ impl StatusTone {
 
 /// Whether an agent can reach this wallet right now.
 ///
-/// The tray menu has always said this — "Agents cannot connect right now" —
-/// but the window never did. The gateway binds one fixed loopback port, so
-/// another process already holding it leaves every agent unable to connect
-/// while Settings still shows the endpoint, the install button, and a list of
-/// configured agents, all of them describing a server that is not running.
+/// The listener status shared by the tray and Settings. Bridges keep running
+/// independently, so an offline listener means they will wait and reconnect
+/// when the wallet makes same-user IPC available again.
 #[derive(Clone)]
 enum McpGatewayStatus {
     Starting,
@@ -1202,8 +1131,32 @@ fn upsert_detected_agents() -> Result<String> {
     let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
     batch.commit();
     Ok(format!(
-        "Set up {} that this machine has installed; {} changed. Sign in from each agent when you next use it.",
+        "Set up {} that this machine has installed; {} changed. Running bridges connect automatically whenever Ekubo Wallet opens.",
         pluralize(detected, "agent"),
+        pluralize(changed, "configuration file")
+    ))
+}
+
+fn remove_detected_agents() -> Result<String> {
+    let adapters = AgentAdapter::supported()?
+        .into_iter()
+        .filter(AgentAdapter::detected)
+        .collect::<Vec<_>>();
+    if adapters.is_empty() {
+        return Ok("No supported agent installations were detected.".into());
+    }
+    let previews = adapters
+        .into_iter()
+        .map(|adapter| adapter.preview_remove())
+        .collect::<Result<Vec<_>>>()?;
+    let changed = previews
+        .iter()
+        .filter(|preview| preview.has_changes())
+        .count();
+    let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
+    batch.commit();
+    Ok(format!(
+        "Removed Ekubo's managed entries from {}.",
         pluralize(changed, "configuration file")
     ))
 }
@@ -1213,7 +1166,6 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
         .into_iter()
         .filter(AgentAdapter::detected)
         .map(|adapter| DetectedAgent {
-            kind: adapter.kind,
             display_name: adapter.display_name,
             config_path: adapter.config_path.display().to_string(),
             installed: adapter
@@ -1440,7 +1392,7 @@ pub struct WalletWindow {
     agent_install_confirmed: bool,
     detected_agents: AgentDetectionState,
     detected_agents_generation: u64,
-    hidden_agent_sessions: BTreeSet<uuid::Uuid>,
+    active_bridges: usize,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
     account_entry_mode: AccountEntryMode,
@@ -1513,7 +1465,6 @@ struct DesktopSnapshot {
     /// it carries, and a history list is not worth failing to draw over the
     /// attribution it could not read.
     activity_sources: BTreeMap<uuid::Uuid, SharedString>,
-    clients: std::result::Result<Vec<McpClient>, SharedString>,
     accounts: std::result::Result<Vec<WalletMetadata>, SharedString>,
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
     legal_status: std::result::Result<LegalStatus, SharedString>,
@@ -1542,7 +1493,6 @@ impl DesktopSnapshot {
                 )
             })
             .collect();
-        let clients = cache_result(owner.clients());
         let accounts = cache_result(owner.accounts());
         let legal_status = cache_result(owner.legal_status());
         let networks = cache_result(owner.networks());
@@ -1577,7 +1527,6 @@ impl DesktopSnapshot {
             reviews,
             activity,
             activity_sources,
-            clients,
             accounts,
             policies,
             legal_status,
@@ -2478,7 +2427,6 @@ fn render_activity_row(
 
 #[derive(Clone)]
 struct DetectedAgent {
-    kind: AgentKind,
     display_name: &'static str,
     config_path: String,
     installed: std::result::Result<bool, SharedString>,
@@ -3836,7 +3784,7 @@ impl WalletWindow {
             agent_install_confirmed: false,
             detected_agents: AgentDetectionState::Loading,
             detected_agents_generation: 0,
-            hidden_agent_sessions: BTreeSet::new(),
+            active_bridges: 0,
             account_id_input: None,
             private_key_input: None,
             account_entry_mode: AccountEntryMode::Create,
@@ -4260,13 +4208,6 @@ impl WalletWindow {
                 view.desktop_snapshot_loading = false;
                 match result {
                     Ok(snapshot) => {
-                        if let Ok(clients) = &snapshot.clients {
-                            view.hidden_agent_sessions.retain(|client_id| {
-                                clients.iter().any(|client| {
-                                    client.id == *client_id && client.revoked_at.is_some()
-                                })
-                            });
-                        }
                         if let Ok(networks) = &snapshot.networks {
                             if let Some(list) = view.token_list.as_ref() {
                                 list.update(cx, |list, cx| {
@@ -4323,13 +4264,6 @@ impl WalletWindow {
             .activity
             .as_ref()
             .cloned()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-    }
-
-    fn cached_clients(&self) -> Result<&[McpClient]> {
-        self.snapshot()?
-            .clients
-            .as_deref()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
@@ -5778,12 +5712,46 @@ impl WalletWindow {
         self.reinstall_detected_agents(true, cx);
     }
 
+    fn remove_detected_agents_from_menu(&mut self, cx: &mut Context<Self>) {
+        if self.agent_reinstall == AgentReinstallState::Running {
+            return;
+        }
+        self.clear_route_error(Route::Settings);
+        self.agent_reinstall = AgentReinstallState::Running;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(remove_detected_agents)
+                .await
+                .context("agent configuration removal task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                if let Err(error) = result {
+                    view.set_route_error(
+                        Route::Settings,
+                        format!("Could not remove the MCP server: {error:#}"),
+                    );
+                }
+                view.agent_install_confirmed = false;
+                view.reload_detected_agents(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn detected_agents_need_install(&self) -> bool {
         agents_need_install(&self.detected_agents)
     }
 
     fn detected_agents_all_installed(&self) -> bool {
         agents_all_installed(&self.detected_agents)
+    }
+
+    fn detected_agents_any_installed(&self) -> bool {
+        agents_any_installed(&self.detected_agents)
     }
 
     /// The accounts list is background-cached and never depends on the
@@ -6999,34 +6967,6 @@ impl WalletWindow {
                     );
                     cx.notify();
                 }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn revoke_agent(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
-        self.clear_route_error(Route::Settings);
-        let owner = self.owner.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(
-                cx,
-                async move { owner.revoke_client(client_id).await },
-            );
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                match result {
-                    Ok(()) => {
-                        view.hidden_agent_sessions.insert(client_id);
-                        view.reload_desktop_snapshot(cx);
-                    }
-                    Err(error) => view.set_route_error(
-                        Route::Settings,
-                        format!("Could not revoke agent: {error:#}"),
-                    ),
-                }
-                cx.notify();
             });
         })
         .detach();
@@ -8857,193 +8797,6 @@ impl WalletWindow {
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut agents = div().flex().flex_col().gap_1();
-        let login_instructions = installed_agent_login_instructions(&self.detected_agents);
-        let mut login_commands = div().w_full().flex().flex_col().gap_3();
-        if login_instructions.is_empty() {
-            login_commands = login_commands.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .max_w(PROSE_MEASURE)
-                    .child(selectable_label(
-                        "Install the MCP server into a detected agent to see its sign-in command.",
-                    )),
-            );
-        } else {
-            login_commands = login_commands.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-.max_w(PROSE_MEASURE)
-                    .child(selectable_label("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose paired access-token and refresh-session lifetimes.")),
-            );
-            for instruction in login_instructions {
-                let command = instruction.command.clone();
-                let command_for_copy = command.clone();
-                login_commands = login_commands.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .p_3()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(div().font_semibold().child(selectable_text(
-                            format!("agent-login-title-{}", instruction.harness),
-                            &format!("Sign in from {}", instruction.harness),
-                        )))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .max_w(PROSE_MEASURE)
-                                .child(selectable_text(
-                                    format!("agent-login-location-{}", instruction.harness),
-                                    instruction.location,
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .flex_wrap()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(cx.theme().radius)
-                                        .bg(cx.theme().muted)
-                                        .font_family(MONO_FONT_FAMILY)
-                                        .text_sm()
-                                        .overflow_hidden()
-                                        .child(
-                                            selectable_text(
-                                                SharedString::from(format!(
-                                                    "agent-login-command-{}",
-                                                    instruction.harness
-                                                )),
-                                                &command,
-                                            )
-                                            .truncate(),
-                                        ),
-                                )
-                                .child(
-                                    copy_button(
-                                        SharedString::from(format!(
-                                            "copy-agent-login-{}",
-                                            instruction.harness
-                                        )),
-                                        command_for_copy,
-                                        "Copy agent login command",
-                                    )
-                                    .large(),
-                                ),
-                        ),
-                );
-            }
-        }
-        let clients = self.cached_clients().unwrap_or_default();
-        let visible_sessions = visible_agent_sessions(clients, &self.hidden_agent_sessions);
-        let mut managed_agents = div().flex().flex_col().gap_1();
-        for item in &visible_sessions {
-            let client_id = item.id;
-            let (expiration, expired) =
-                agent_session_expiry_label(item.session_expires_at, chrono::Utc::now());
-            let last_used = item.last_used_at.map_or_else(
-                || "Not used yet".into(),
-                |last_used| format!("Last used {}", last_used.format("%b %d, %Y at %H:%M UTC")),
-            );
-            managed_agents = managed_agents.child(
-                ListItem::new(SharedString::from(format!("managed-agent-{client_id}"))).child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            // The session's two facts — when it was last used
-                            // and when it expires — read as one stacked block
-                            // on the left, so the Revoke button is the only
-                            // thing on the right and can center against them.
-                            h_flex()
-                                .w_full()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(div().font_semibold().truncate().child(
-                                            selectable_text(
-                                                format!("managed-agent-title-{client_id}"),
-                                                &format!(
-                                                    "{} · {}",
-                                                    item.display_name,
-                                                    item.agent_kind.label()
-                                                ),
-                                            ),
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .max_w(PROSE_MEASURE)
-                                                .child(selectable_text(
-                                                    format!("managed-agent-last-used-{client_id}"),
-                                                    &last_used,
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(if expired {
-                                                    cx.theme().danger
-                                                } else {
-                                                    cx.theme().muted_foreground
-                                                })
-                                                .child(selectable_text(
-                                                    format!("managed-agent-expiry-{client_id}"),
-                                                    &expiration,
-                                                )),
-                                        ),
-                                )
-                                .when(!expired, |row| {
-                                    row.child(
-                                        div().flex_none().child(
-                                            app_button(SharedString::from(format!(
-                                                "revoke-agent-{client_id}"
-                                            )))
-                                            .label("Revoke")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.revoke_agent(client_id, cx);
-                                            })),
-                                        ),
-                                    )
-                                }),
-                        ),
-                ),
-            );
-        }
-        if visible_sessions.is_empty() {
-            managed_agents = managed_agents.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .max_w(PROSE_MEASURE)
-                    .child(selectable_label("No authorized agent sessions.")),
-            );
-        }
         match &self.detected_agents {
             AgentDetectionState::Loading => {
                 agents = agents.child(
@@ -9337,6 +9090,16 @@ impl WalletWindow {
                             )),
                     )
                     .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(format!(
+                                "{} active bridge{} connected.",
+                                self.active_bridges,
+                                if self.active_bridges == 1 { "" } else { "s" }
+                            ))),
+                    )
+                    .child(
                         h_flex()
                             .flex_wrap()
                             .items_center()
@@ -9366,6 +9129,19 @@ impl WalletWindow {
                                     )
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.reinstall_detected_agents_from_menu(cx);
+                                    })),
+                            )
+                            .child(
+                                app_button("remove-all-detected-agents")
+                                    .label("Remove from all agents")
+                                    .disabled(
+                                        self.legal_gate
+                                            || self.agent_reinstall
+                                                == AgentReinstallState::Running
+                                            || !self.detected_agents_any_installed(),
+                                    )
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.remove_detected_agents_from_menu(cx);
                                     })),
                             )
                             .when(self.detected_agents_all_installed(), |row| {
@@ -13299,7 +13075,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let tray = Rc::new(RefCell::new(
                 PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
             ));
-            let initial_agents = owner.clients().map_or(0, |clients| clients.len());
             let initial_networks = owner.networks().unwrap_or_default();
             let initial_testnet_mode = owner.testnet_mode().unwrap_or(false);
             let initial_pending_reviews = owner.reviews(None).map_or(0, |queues| {
@@ -13309,7 +13084,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 tray.update(&TraySnapshot {
                     pending_reviews: initial_pending_reviews,
                     mcp_online: false,
-                    connected_agents: initial_agents,
+                    connected_agents: 0,
                     walletconnect_sessions: 0,
                 });
             }
@@ -13446,10 +13221,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let event_owner = owner.clone();
             let event_tray = tray.clone();
             let event_walletconnect = walletconnect.clone();
-            let event_window = window_slot.clone();
             let event_tokio = gpui_tokio::Tokio::handle(cx);
             cx.spawn(async move |cx| {
                 let mut mcp_online = false;
+                let mut connected_bridges = 0;
                 loop {
                     let changed = match view_events.recv().await {
                         Ok(event) => {
@@ -13463,6 +13238,16 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind
                             {
                                 mcp_online = *online;
+                            }
+                            if let crate::events::DomainEventKind::AgentConnectionChanged {
+                                active_connections,
+                            } = &event.kind
+                            {
+                                connected_bridges = *active_connections;
+                                event_view.update(cx, |view, cx| {
+                                    view.active_bridges = *active_connections;
+                                    cx.notify();
+                                });
                             }
                             let portfolio_changed = matches!(
                                 &event.kind,
@@ -13527,7 +13312,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                             testnet_mode,
                                         )
                                     }),
-                                    owner.clients().map_or(0, |clients| clients.len()),
+                                    connected_bridges,
                                     sessions,
                                 )
                             })
@@ -13660,8 +13445,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 }
             })
             .detach();
-
-            wallet_view.update(cx, |view, cx| view.reinstall_detected_agents(false, cx));
 
             let slot = server_slot.clone();
             let status_tray = tray.clone();

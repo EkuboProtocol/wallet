@@ -55,9 +55,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] 
 rmcp = { version = "3.1.0", features = ["transport-io"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 semver = "1.0.28"
+sha2 = "0.10.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
-serde_urlencoded = "0.7.1"
 subtle = "2.6.1"
 tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -80,12 +80,14 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = ["N
 
 [target.'cfg(windows)'.dependencies]
 interprocess = "2.4.3"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [build-dependencies]
 embed-resource = "3.0.11"
 
 [dev-dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core", features = ["test-hooks"] }
+walkdir = "2.5.0"
 # The fake platform behind `TestAppContext`, so the desktop's routes and
 # overlays can be laid out and painted in a test with no display attached.
 # Dev-dependencies do not apply to `cargo build --release`.
@@ -93,7 +95,6 @@ gpui = { git = "https://github.com/zed-industries/zed", features = ["test-suppor
 # The offscreen Metal renderer behind `capture_screenshot`, so the interface
 # can be rasterised and looked at on a machine with no display attached.
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
-sha2 = "0.10.9"
 
 [package.metadata.packager]
 product-name = "Ekubo Wallet"

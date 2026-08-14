@@ -1,7 +1,12 @@
+#![cfg_attr(windows, allow(unsafe_code))]
+
 use anyhow::{Context, Result, ensure};
+#[cfg(unix)]
 use directories::BaseDirs;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, env, path::PathBuf, time::Duration};
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::{collections::BTreeSet, env, time::Duration};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
@@ -51,6 +56,7 @@ fn arguments() -> Result<ClientKind> {
     ClientKind::parse(&args[1])
 }
 
+#[cfg(unix)]
 fn data_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("EKUBO_WALLET_HOME") {
         ensure!(!path.is_empty(), "EKUBO_WALLET_HOME cannot be empty");
@@ -71,12 +77,29 @@ fn data_dir() -> Result<PathBuf> {
 
 async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
     let mut frame = Vec::new();
-    let read = reader.read_until(b'\n', &mut frame).await?;
-    if read == 0 {
-        return Ok(None);
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if frame.is_empty() {
+                Ok(None)
+            } else {
+                anyhow::bail!("MCP frame ended before its newline")
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        ensure!(
+            frame.len() + take <= MAX_FRAME_BYTES,
+            "MCP frame exceeds 24 MiB"
+        );
+        frame.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if frame.last() == Some(&b'\n') {
+            return Ok(Some(frame));
+        }
     }
-    ensure!(frame.len() <= MAX_FRAME_BYTES, "MCP frame exceeds 24 MiB");
-    Ok(Some(frame))
 }
 
 fn request_id(message: &Value) -> Option<Value> {
@@ -97,6 +120,13 @@ fn error(id: Value, message: &str) -> Vec<u8> {
     .expect("JSON error")
 }
 
+fn parse_error() -> Vec<u8> {
+    serde_json::to_vec(
+        &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid MCP JSON frame"}}),
+    )
+    .expect("JSON parse error")
+}
+
 async fn emit(stdout: &mut tokio::io::Stdout, bytes: &[u8]) -> Result<()> {
     stdout.write_all(bytes).await?;
     stdout.write_all(b"\n").await?;
@@ -114,8 +144,68 @@ async fn connect(client: ClientKind) -> Result<tokio::net::UnixStream> {
 }
 
 #[cfg(windows)]
-async fn connect(_client: ClientKind) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    anyhow::bail!("Windows named-pipe transport is not available in this build")
+async fn connect(client: ClientKind) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let mut stream = ClientOptions::new().open(windows_pipe_name()?)?;
+    let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
+    stream.write_all(&hello).await?;
+    stream.write_all(b"\n").await?;
+    Ok(stream)
+}
+
+#[cfg(windows)]
+fn windows_pipe_name() -> Result<String> {
+    Ok(format!(
+        r"\\.\pipe\ekubo-wallet-mcp-{}",
+        current_user_sid_string()?.replace('-', "_")
+    ))
+}
+
+#[cfg(windows)]
+fn current_user_sid_string() -> Result<String> {
+    use std::ptr;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, LocalFree},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    unsafe {
+        let mut token: HANDLE = ptr::null_mut();
+        ensure!(
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0,
+            "could not open current-user token"
+        );
+        let mut size = 0;
+        let _ = GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut size);
+        ensure!(size > 0, "could not size current-user token");
+        let mut buffer = vec![0u8; size as usize];
+        ensure!(
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                size,
+                &mut size
+            ) != 0,
+            "could not read current-user token"
+        );
+        let sid = (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid;
+        let mut text = ptr::null_mut();
+        ensure!(
+            ConvertSidToStringSidW(sid, &mut text) != 0,
+            "could not format current-user SID"
+        );
+        let length = (0..).take_while(|offset| *text.add(*offset) != 0).count();
+        let result = String::from_utf16(std::slice::from_raw_parts(text, length))?;
+        LocalFree(text.cast());
+        CloseHandle(token);
+        Ok(result)
+    }
 }
 
 #[tokio::main]
@@ -158,41 +248,50 @@ async fn run() -> Result<()> {
     let mut upstream = None;
     let mut last_tools = json!({"tools":[]});
     let mut in_flight = BTreeSet::<String>::new();
+    let mut catalog_refresh_pending = false;
     let mut backoff = Duration::from_millis(250);
 
     loop {
         if upstream.is_none() && initialized.is_some() {
             match connect(client).await {
                 Ok(stream) => {
-                    let (read, mut write) = tokio::io::split(stream);
-                    let mut read = BufReader::new(read);
-                    write.write_all(&initialize_frame).await?;
-                    let _ = read_frame(&mut read)
-                        .await?
-                        .context("wallet closed during initialization")?;
-                    if let Some(frame) = &initialized {
-                        write.write_all(frame).await?;
+                    let connected: Result<_> = async {
+                        let (read, mut write) = tokio::io::split(stream);
+                        let mut read = BufReader::new(read);
+                        write.write_all(&initialize_frame).await?;
+                        let initialize_response = read_frame(&mut read)
+                            .await?
+                            .context("wallet closed during initialization")?;
+                        let initialize_response: Value = serde_json::from_slice(&initialize_response)
+                            .context("invalid wallet initialize response")?;
+                        ensure!(initialize_response.get("result").is_some(), "wallet rejected MCP initialization");
+                        if let Some(frame) = &initialized {
+                            write.write_all(frame).await?;
+                        }
+                        write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"__ekubo_bridge_tools\",\"method\":\"tools/list\",\"params\":{}}\n").await?;
+                        let catalog_frame = read_frame(&mut read)
+                            .await?
+                            .context("wallet closed while listing tools")?;
+                        let catalog: Value = serde_json::from_slice(&catalog_frame)
+                            .context("invalid wallet tool catalog")?;
+                        let refreshed = catalog.get("result").cloned().context("wallet rejected tools/list")?;
+                        ensure!(refreshed.get("tools").and_then(Value::as_array).is_some(), "wallet returned an invalid tool catalog");
+                        Ok((read, write, refreshed))
                     }
-                    write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"__ekubo_bridge_tools\",\"method\":\"tools/list\",\"params\":{}}\n").await?;
-                    let catalog_frame = read_frame(&mut read)
-                        .await?
-                        .context("wallet closed while listing tools")?;
-                    let catalog: Value = serde_json::from_slice(&catalog_frame)
-                        .context("invalid wallet tool catalog")?;
-                    let refreshed = catalog
-                        .get("result")
-                        .cloned()
-                        .unwrap_or_else(|| json!({"tools":[]}));
-                    if refreshed != last_tools {
-                        last_tools = refreshed;
-                        emit(
-                            &mut stdout,
-                            br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
-                        )
-                        .await?;
+                    .await;
+                    if let Ok((read, write, refreshed)) = connected {
+                        if refreshed != last_tools {
+                            last_tools = refreshed;
+                            emit(
+                                &mut stdout,
+                                br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+                            )
+                            .await?;
+                        }
+                        upstream = Some((read, write));
+                        catalog_refresh_pending = false;
+                        backoff = Duration::from_millis(250);
                     }
-                    upstream = Some((read, write));
-                    backoff = Duration::from_millis(250);
                 }
                 Err(_) => {
                     // The offline branch below waits for either harness input
@@ -206,7 +305,10 @@ async fn run() -> Result<()> {
             tokio::select! {
                 frame = read_frame(&mut stdin) => {
                     let Some(frame) = frame? else { return Ok(()); };
-                    let message: Value = serde_json::from_slice(&frame).context("invalid harness MCP frame")?;
+                    let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
+                        emit(&mut stdout, &parse_error()).await?;
+                        continue;
+                    };
                     if initialized.is_none() && message.get("method").and_then(Value::as_str) == Some("notifications/initialized") { initialized = Some(frame.clone()); }
                     if let Some(id) = request_id(&message) { in_flight.insert(id.to_string()); }
                     up_write.write_all(&frame).await?;
@@ -214,16 +316,41 @@ async fn run() -> Result<()> {
                 frame = read_frame(up_read) => {
                     match frame {
                         Ok(Some(frame)) => {
-                            let message: Value = serde_json::from_slice(&frame).context("invalid wallet MCP frame")?;
+                            let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
+                                for id in std::mem::take(&mut in_flight) {
+                                    if let Ok(id) = serde_json::from_str(&id) {
+                                        emit(&mut stdout, &error(id, "Ekubo Wallet sent an invalid frame; the bridge will reconnect automatically")).await?;
+                                    }
+                                }
+                                upstream = None;
+                                catalog_refresh_pending = false;
+                                continue;
+                            };
+                            if catalog_refresh_pending
+                                && message.get("id").and_then(Value::as_str) == Some("__ekubo_bridge_tools")
+                            {
+                                catalog_refresh_pending = false;
+                                if message.get("result").and_then(|result| result.get("tools")).is_some() {
+                                    last_tools = message["result"].clone();
+                                }
+                                continue;
+                            }
                             if let Some(id) = message.get("id") { in_flight.remove(&id.to_string()); }
                             if message.get("result").and_then(|r| r.get("tools")).is_some() { last_tools = message["result"].clone(); }
                             emit(&mut stdout, frame.strip_suffix(b"\n").unwrap_or(&frame)).await?;
+                            if message.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed")
+                                && !catalog_refresh_pending
+                            {
+                                up_write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"__ekubo_bridge_tools\",\"method\":\"tools/list\",\"params\":{}}\n").await?;
+                                catalog_refresh_pending = true;
+                            }
                         }
                         Ok(None) | Err(_) => {
                             for id in std::mem::take(&mut in_flight) {
                                 if let Ok(id) = serde_json::from_str(&id) { emit(&mut stdout, &error(id, "Ekubo Wallet stopped while the request was in flight; the bridge will reconnect automatically" )).await?; }
                             }
                             upstream = None;
+                            catalog_refresh_pending = false;
                         }
                     }
                 }
@@ -243,8 +370,10 @@ async fn run() -> Result<()> {
             let Some(frame) = frame else {
                 return Ok(());
             };
-            let message: Value =
-                serde_json::from_slice(&frame).context("invalid harness MCP frame")?;
+            let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
+                emit(&mut stdout, &parse_error()).await?;
+                continue;
+            };
             match message.get("method").and_then(Value::as_str) {
                 Some("notifications/initialized") => initialized = Some(frame),
                 Some("tools/list") => {

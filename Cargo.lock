@@ -3294,7 +3294,6 @@ dependencies = [
  "semver 1.0.28",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "sha2 0.10.9",
  "subtle",
  "tempfile",
@@ -3306,7 +3305,9 @@ dependencies = [
  "tray-icon",
  "url",
  "uuid 1.24.0",
+ "walkdir",
  "walletconnect-session",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -6277,6 +6278,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

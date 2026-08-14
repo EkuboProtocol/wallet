@@ -42,40 +42,6 @@ fn a_hostile_name_cannot_repaint_the_platform_dialog() {
 }
 
 #[test]
-fn oauth_prompt_names_and_sanitizes_the_client_and_callback_host() {
-    let reason = PresenceRequest::AuthorizeAgent {
-        client_name: "Codex\nforged".into(),
-        redirect_host: "127.0.0.1\u{202e}".into(),
-    }
-    .reason();
-    assert_eq!(
-        reason,
-        "allow Codex forged to access the wallet via 127.0.0.1"
-    );
-    assert!(!reason.contains('\n') && !reason.contains('\u{202e}'));
-}
-
-#[test]
-fn agent_management_prompts_bind_the_exact_destructive_operation() {
-    assert_eq!(
-        PresenceRequest::ManageAgent {
-            client_name: "Codex".into(),
-            operation: AgentManagementOperation::Revoke,
-        }
-        .reason(),
-        "revoke wallet access for Codex"
-    );
-    assert_eq!(
-        PresenceRequest::ManageAgent {
-            client_name: "Codex".into(),
-            operation: AgentManagementOperation::Remove,
-        }
-        .reason(),
-        "remove wallet registration for Codex"
-    );
-}
-
-#[test]
 fn an_empty_name_still_names_something() {
     assert_eq!(
         PresenceRequest::SignMessage {
@@ -94,7 +60,7 @@ fn owner_authorization_is_scope_bound() {
         .unwrap();
     assert!(
         authorization
-            .require(OwnerAuthorizationScope::AgentAccess)
+            .require(OwnerAuthorizationScope::UpdateTrust)
             .is_err()
     );
 }
@@ -118,10 +84,10 @@ fn dapp_authorization_is_exact_and_single_use() {
 fn protected_setting_prompts_name_the_security_boundary() {
     assert_eq!(
         PresenceRequest::ChangeProtectedSettings {
-            scope: OwnerAuthorizationScope::AgentAccess,
+            scope: OwnerAuthorizationScope::UpdateTrust,
         }
         .reason(),
-        "change which local agents can access the wallet"
+        "install the authenticated application update shown in Ekubo Wallet"
     );
     assert_eq!(
         PresenceRequest::ChangeProtectedSettings {

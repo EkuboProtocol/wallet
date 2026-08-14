@@ -21,7 +21,7 @@ pub enum DomainEventKind {
     },
     ConfigurationChanged,
     AgentConnectionChanged {
-        client_id: Uuid,
+        active_connections: usize,
     },
     WalletConnectChanged {
         session_id: String,

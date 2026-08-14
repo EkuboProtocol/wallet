@@ -19,7 +19,6 @@ on:
       - "contrib/polkit/**"
       - "contrib/rehearse-macos-signing.sh"
       - "contrib/rpc-probe/**"
-      - "contrib/sync-claude-desktop-version.py"
       - "contrib/vendor-default-tokens.py"
       - "crates/ekubo-wallet-core/clearsign/README.md"
       - "docs/approval-ux.md"
@@ -29,7 +28,6 @@ on:
       - "docs/storage.md"
       - "examples/abi-decoding.json"
       - "examples/policy.json"
-      - "integrations/claude-desktop/README.md"
       - "schemas/**"
       - "scripts/**"
   push:
@@ -48,7 +46,6 @@ on:
       - "contrib/polkit/**"
       - "contrib/rehearse-macos-signing.sh"
       - "contrib/rpc-probe/**"
-      - "contrib/sync-claude-desktop-version.py"
       - "contrib/vendor-default-tokens.py"
       - "crates/ekubo-wallet-core/clearsign/README.md"
       - "docs/approval-ux.md"
@@ -58,7 +55,6 @@ on:
       - "docs/storage.md"
       - "examples/abi-decoding.json"
       - "examples/policy.json"
-      - "integrations/claude-desktop/README.md"
       - "schemas/**"
       - "scripts/**"
   workflow_dispatch:
@@ -81,32 +77,6 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  claude-desktop:
-    name: Claude Desktop plugin
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: integrations/claude-desktop
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: integrations/claude-desktop/package-lock.json
-
-      - name: Install pinned build dependencies
-        run: npm ci
-
-      - name: Test credential-free bridge
-        run: npm test
-
-      - name: Validate and pack Claude plugin
-        run: npm run validate:plugin && npm run pack:plugin
-
   test:
     name: Test (${{ matrix.runner }})
     strategy:

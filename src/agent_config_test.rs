@@ -51,7 +51,7 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
         (
             AgentKind::GeminiCli,
             "mcpServers",
-            JsonShape::Stdio,
+            JsonShape::Gemini,
             "gemini-cli",
         ),
         (AgentKind::Cursor, "mcpServers", JsonShape::Stdio, "cursor"),
@@ -127,4 +127,34 @@ fn local_and_companion_names_are_stable() {
             "args": ["--client", "claude-desktop"]
         })
     );
+}
+
+#[test]
+fn removal_deletes_only_wallet_managed_entries_for_every_shape() {
+    let codex = r#"
+[mcp_servers.keep]
+command = "keep"
+[mcp_servers.ekubo_wallet]
+command = "bridge"
+[mcp_servers.ekubo]
+url = "https://mcp.ekubo.org/mcp"
+"#;
+    let removed = remove_codex(codex).unwrap();
+    let parsed = parse_codex_document(&removed).unwrap();
+    let servers = parsed["mcp_servers"].as_table().unwrap();
+    assert!(servers.contains_key("keep"));
+    assert!(!servers.contains_key(LOCAL_SERVER_NAME));
+    assert!(!servers.contains_key(COMPANION_SERVER_NAME));
+
+    for root in ["mcpServers", "mcp"] {
+        let before = format!(
+            r#"{{"keep":7,"{root}":{{"keep":{{"command":"keep"}},"ekubo_wallet":{{"command":"bridge"}},"ekubo":{{"url":"https://mcp.ekubo.org/mcp"}}}}}}"#
+        );
+        let removed = remove_json(&before, root).unwrap();
+        let parsed: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(parsed["keep"], 7);
+        assert_eq!(parsed[root]["keep"]["command"], "keep");
+        assert!(parsed[root].get(LOCAL_SERVER_NAME).is_none());
+        assert!(parsed[root].get(COMPANION_SERVER_NAME).is_none());
+    }
 }

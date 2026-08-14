@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use directories::BaseDirs;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 use std::{
     fs,
     io::Write as _,
@@ -27,6 +28,7 @@ pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
 /// The credential-free hosted companion installed beside the wallet server.
 pub const COMPANION_SERVER_NAME: &str = "ekubo";
 pub const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
+const BRIDGE_SHA256: &str = env!("EKUBO_COMPILED_MCP_BRIDGE_SHA256");
 
 fn installed_bridge_path() -> Result<PathBuf> {
     let data_dir = ekubo_wallet_core::config::default_data_dir()?;
@@ -53,7 +55,7 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
     let packaged = executable.with_file_name(filename);
     #[cfg(debug_assertions)]
     let source = if packaged.is_file() {
-        packaged
+        packaged.clone()
     } else {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target/debug")
@@ -64,11 +66,25 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
     ensure!(source.is_file(), "the packaged MCP bridge is missing");
     let bytes = fs::read(&source).context("failed to read the packaged MCP bridge")?;
     ensure!(!bytes.is_empty(), "the packaged MCP bridge is empty");
+    let digest = hex::encode(Sha256::digest(&bytes));
+    #[cfg(debug_assertions)]
+    let unsigned_build_tree = source != packaged && BRIDGE_SHA256.is_empty();
+    #[cfg(not(debug_assertions))]
+    let unsigned_build_tree = false;
+    ensure!(
+        unsigned_build_tree || digest == BRIDGE_SHA256,
+        "the packaged MCP bridge failed its embedded digest verification"
+    );
     if installed.is_file() && fs::read(&installed)? == bytes {
         return Ok(installed);
     }
     let parent = installed.parent().context("helper path has no parent")?;
     fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
@@ -100,6 +116,8 @@ fn harness_argument(kind: AgentKind) -> Result<&'static str> {
 }
 
 fn claude_desktop_config(home: &Path, base: &BaseDirs) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let _ = base;
     #[cfg(target_os = "macos")]
     return home.join("Library/Application Support/Claude/claude_desktop_config.json");
     #[cfg(target_os = "windows")]
@@ -198,6 +216,7 @@ impl Drop for ConfigBatchInstall {
 #[derive(Clone, Copy)]
 enum ConfigValidation {
     Installed { kind: AgentKind },
+    Removed { kind: AgentKind },
 }
 
 impl ConfigPreview {
@@ -206,8 +225,8 @@ impl ConfigPreview {
         self.before != self.after
     }
 
-    /// Verify that an unchanged file still contains the credential-free OAuth
-    /// Streamable HTTP server shape.
+    /// Verify that an unchanged file still contains the exact credential-free
+    /// bridge command and hosted companion shape.
     pub fn validate_current(&self) -> Result<()> {
         let installed = fs::read_to_string(&self.path)
             .context("failed to read installed agent configuration")?;
@@ -321,7 +340,7 @@ impl AgentAdapter {
                 merge_json(&before, "mcpServers", JsonShape::Stdio, &command, client)?
             }
             AgentKind::GeminiCli => {
-                merge_json(&before, "mcpServers", JsonShape::Stdio, &command, client)?
+                merge_json(&before, "mcpServers", JsonShape::Gemini, &command, client)?
             }
             AgentKind::Opencode => merge_json(&before, "mcp", JsonShape::Local, &command, client)?,
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
@@ -333,6 +352,31 @@ impl AgentAdapter {
             after,
             diff,
             validation: ConfigValidation::Installed { kind: self.kind },
+        })
+    }
+
+    pub fn preview_remove(&self) -> Result<ConfigPreview> {
+        let before = match fs::read_to_string(&self.config_path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let after = match self.kind {
+            AgentKind::Codex => remove_codex(&before)?,
+            AgentKind::ClaudeCode
+            | AgentKind::ClaudeDesktop
+            | AgentKind::GeminiCli
+            | AgentKind::Cursor => remove_json(&before, "mcpServers")?,
+            AgentKind::Opencode => remove_json(&before, "mcp")?,
+            AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
+        };
+        let diff = managed_config_diff(self.kind, &before, &after)?;
+        Ok(ConfigPreview {
+            path: self.config_path.clone(),
+            before,
+            after,
+            diff,
+            validation: ConfigValidation::Removed { kind: self.kind },
         })
     }
 }
@@ -374,9 +418,19 @@ fn merge_codex(before: &str, command: &str, client: &str) -> Result<String> {
     Ok(document.to_string())
 }
 
+fn remove_codex(before: &str) -> Result<String> {
+    let mut document = parse_codex_document(before)?;
+    if let Some(servers) = document.get_mut("mcp_servers").and_then(Item::as_table_mut) {
+        servers.remove(LOCAL_SERVER_NAME);
+        servers.remove(COMPANION_SERVER_NAME);
+    }
+    Ok(document.to_string())
+}
+
 #[derive(Clone, Copy)]
 enum JsonShape {
     Stdio,
+    Gemini,
     Local,
 }
 
@@ -411,9 +465,20 @@ fn merge_json(
     Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
 }
 
+fn remove_json(before: &str, root: &str) -> Result<String> {
+    let mut document = parse_json_document(before)?;
+    if let Some(servers) = document.get_mut(root).and_then(Value::as_object_mut) {
+        servers.remove(LOCAL_SERVER_NAME);
+        servers.remove(COMPANION_SERVER_NAME);
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
+}
+
 fn json_server(shape: JsonShape, command: &str, client: &str) -> Value {
     match shape {
-        JsonShape::Stdio => json!({"command": command, "args": ["--client", client]}),
+        JsonShape::Stdio | JsonShape::Gemini => {
+            json!({"command": command, "args": ["--client", client]})
+        }
         JsonShape::Local => json!({"type": "local", "command": [command, "--client", client]}),
     }
 }
@@ -421,6 +486,7 @@ fn json_server(shape: JsonShape, command: &str, client: &str) -> Value {
 fn remote_json_server(shape: JsonShape, url: &str) -> Value {
     match shape {
         JsonShape::Stdio => json!({"type": "http", "url": url}),
+        JsonShape::Gemini => json!({"httpUrl": url}),
         JsonShape::Local => json!({"type": "remote", "url": url}),
     }
 }
@@ -598,16 +664,56 @@ fn validate_document(path: &Path, contents: &str) -> Result<()> {
 }
 
 fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result<()> {
-    let ConfigValidation::Installed { kind } = validation;
+    match validation {
+        ConfigValidation::Installed { kind } => match kind {
+            AgentKind::Codex => validate_codex_shape(contents),
+            AgentKind::ClaudeCode
+            | AgentKind::ClaudeDesktop
+            | AgentKind::GeminiCli
+            | AgentKind::Cursor
+            | AgentKind::Opencode => validate_json_shape(contents, kind),
+            AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
+        },
+        ConfigValidation::Removed { kind } => validate_removed_shape(contents, kind),
+    }
+}
+
+fn validate_removed_shape(contents: &str, kind: AgentKind) -> Result<()> {
     match kind {
-        AgentKind::Codex => validate_codex_shape(contents),
+        AgentKind::Codex => {
+            let document = parse_codex_document(contents)?;
+            let servers = document.get("mcp_servers").and_then(Item::as_table);
+            ensure!(
+                servers.is_none_or(|servers| {
+                    !servers.contains_key(LOCAL_SERVER_NAME)
+                        && !servers.contains_key(COMPANION_SERVER_NAME)
+                }),
+                "wallet-managed MCP servers remain in Codex configuration"
+            );
+        }
         AgentKind::ClaudeCode
         | AgentKind::ClaudeDesktop
         | AgentKind::GeminiCli
         | AgentKind::Cursor
-        | AgentKind::Opencode => validate_json_shape(contents, kind),
+        | AgentKind::Opencode => {
+            let document = parse_json_document(contents)?;
+            let root = if kind == AgentKind::Opencode {
+                "mcp"
+            } else {
+                "mcpServers"
+            };
+            let servers = document.get(root).and_then(Value::as_object);
+            ensure!(
+                servers.is_none_or(|servers| {
+                    !servers.contains_key(LOCAL_SERVER_NAME)
+                        && !servers.contains_key(COMPANION_SERVER_NAME)
+                }),
+                "wallet-managed MCP servers remain in agent configuration"
+            );
+        }
         AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
     }
+    Ok(())
 }
 
 fn validate_codex_shape(contents: &str) -> Result<()> {
@@ -665,10 +771,8 @@ fn validate_json_shape(contents: &str, kind: AgentKind) -> Result<()> {
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
     let local = local.context("local MCP server is missing")?;
     let shape = match kind {
-        AgentKind::ClaudeCode
-        | AgentKind::ClaudeDesktop
-        | AgentKind::Cursor
-        | AgentKind::GeminiCli => JsonShape::Stdio,
+        AgentKind::ClaudeCode | AgentKind::ClaudeDesktop | AgentKind::Cursor => JsonShape::Stdio,
+        AgentKind::GeminiCli => JsonShape::Gemini,
         AgentKind::Opencode => JsonShape::Local,
         AgentKind::Codex | AgentKind::Other => unreachable!("validated above"),
     };

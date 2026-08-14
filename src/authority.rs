@@ -15,14 +15,11 @@ use ekubo_wallet_core::{
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
-    desktop_store::{
-        AgentKind, AppearancePreference, DesktopStore, McpClient, OAuthAuthorizationCode,
-        OAuthSessionPreset, OAuthTokenPair, authorize_oauth_client_management,
-    },
+    desktop_store::{AgentKind, AppearancePreference, DesktopStore},
     execution::BroadcastResult,
     human_presence::{
-        AgentManagementOperation, DappAuthorization, OwnerAuthorizationScope,
-        PlatformHumanPresence, authorize_dapp_access, authorize_oauth_client, authorize_owner,
+        DappAuthorization, OwnerAuthorizationScope, PlatformHumanPresence, authorize_dapp_access,
+        authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -746,34 +743,6 @@ impl OwnerApi {
         .await?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
-    }
-
-    pub async fn revoke_client(&self, client_id: Uuid) -> Result<()> {
-        let review = self
-            .desktop()?
-            .client_management_review(client_id, AgentManagementOperation::Revoke)?;
-        let authorization = authorize_oauth_client_management(review).await?;
-        let mut desktop = self.desktop()?;
-        desktop.apply_client_management(authorization)?;
-        self.events
-            .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        Ok(())
-    }
-
-    pub async fn remove_client(&self, client_id: Uuid) -> Result<()> {
-        let review = self
-            .desktop()?
-            .client_management_review(client_id, AgentManagementOperation::Remove)?;
-        let authorization = authorize_oauth_client_management(review).await?;
-        let mut desktop = self.desktop()?;
-        desktop.apply_client_management(authorization)?;
-        self.events
-            .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        Ok(())
-    }
-
-    pub fn clients(&self) -> Result<Vec<McpClient>> {
-        self.desktop()?.clients()
     }
 
     pub fn detailed_notification_previews(&self) -> Result<bool> {

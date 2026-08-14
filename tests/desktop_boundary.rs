@@ -7,13 +7,7 @@ fn root() -> PathBuf {
 #[test]
 fn release_has_no_terminal_or_stdio_dependency_surface() {
     let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
-    for forbidden in [
-        "clap =",
-        "clap_complete",
-        "crossterm",
-        "ratatui",
-        "transport-io",
-    ] {
+    for forbidden in ["clap =", "clap_complete", "crossterm", "ratatui"] {
         assert!(
             !manifest.contains(forbidden),
             "Cargo.toml still contains {forbidden}"
@@ -45,16 +39,63 @@ fn mcp_has_no_owner_capability_or_local_file_transport() {
 }
 
 #[test]
-fn http_transport_has_only_narrow_oauth_and_agent_capabilities() {
-    let source = fs::read_to_string(root().join("src/http_server.rs")).unwrap();
-    for forbidden in ["OwnerApi", "DesktopStore", "state.owner", "state.clients"] {
+fn local_ipc_transport_has_only_the_restricted_agent_capability() {
+    let source = fs::read_to_string(root().join("src/ipc_server.rs")).unwrap();
+    for forbidden in [
+        "OwnerApi",
+        "OwnerAuthorization",
+        "KeyStore",
+        "CustodyService",
+    ] {
         assert!(
             !source.contains(forbidden),
-            "HTTP transport contains privileged capability {forbidden}"
+            "IPC transport contains privileged capability {forbidden}"
         );
     }
-    assert!(source.contains("OAuthApi"));
     assert!(source.contains("AgentApi"));
+    assert!(source.contains("peer_cred"));
+    assert!(source.contains("0o600"));
+    assert!(source.contains("ConvertStringSecurityDescriptorToSecurityDescriptorW"));
+    assert!(source.contains("GetNamedPipeClientProcessId"));
+    assert!(source.contains("token_sid_string"));
+}
+
+#[test]
+fn release_source_has_no_local_http_oauth_or_node_adapter() {
+    let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    assert!(!manifest.contains("serde_urlencoded"));
+    assert!(!manifest.contains("transport-streamable-http-server"));
+    assert!(!root().join("src/http_server.rs").exists());
+    assert!(!root().join("integrations/claude-desktop").exists());
+    assert!(
+        !root()
+            .join("contrib/sync-claude-desktop-version.py")
+            .exists()
+    );
+
+    for path in ["src", "crates/ekubo-wallet-core/src"] {
+        for entry in walkdir::WalkDir::new(root().join(path)) {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy();
+            if !entry.file_type().is_file()
+                || entry.path().extension().and_then(|value| value.to_str()) != Some("rs")
+                || name.ends_with("_test.rs")
+            {
+                continue;
+            }
+            let source = fs::read_to_string(entry.path()).unwrap();
+            assert!(
+                !source.contains("61744"),
+                "{} binds the retired port",
+                entry.path().display()
+            );
+            assert!(
+                !source.to_ascii_lowercase().contains("oauth"),
+                "{} retains local OAuth code",
+                entry.path().display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -66,7 +107,7 @@ fn repository_links_a_current_system_wide_threat_model() {
     let threat_model = fs::read_to_string(root().join("docs/threat-model.md")).unwrap();
     for boundary in [
         "Owner authorization",
-        "MCP and OAuth",
+        "Local MCP IPC",
         "WalletConnect and dapps",
         "RPC, transactions, and policy",
         "Updates and release supply chain",

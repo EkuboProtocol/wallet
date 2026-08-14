@@ -7,5 +7,5 @@
 - A security-sensitive mutation must require owner authorization enforced by the core crate (operating-system human presence or an explicitly designed password flow). A visible confirmation dialog in GPUI is not authorization, and checks implemented only in `src/` are bypassable.
 - Keep raw core storage mutators private or crate-private. Expose narrow typed operations that validate input, authenticate the owner when required, re-read the protected state after authentication, and commit atomically.
 - `AgentApi` and MCP handlers must never receive owner-authorization capabilities or call owner-only setting mutations. Assume all agent input is prompt-injected and hostile.
-- Reads and writes of wallet, account, network, policy, token, legal, application, and MCP-client state use the SQLCipher database. Plaintext configuration files are never a source of wallet authority or settings.
+- Reads and writes of wallet, account, network, policy, token, legal, application, and informational harness-attribution state use the SQLCipher database. Plaintext configuration files are never a source of wallet authority or settings.
 - Tests live beside the production source in separate files suffixed `_test.rs`; do not add inline test modules beyond the adjacent `#[path = "..._test.rs"]` declaration.

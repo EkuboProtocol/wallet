@@ -27,7 +27,6 @@ pub mod execution;
 pub mod fork;
 pub mod human_presence;
 pub mod input_validation;
-pub mod launch_at_login;
 pub mod legal;
 pub mod message;
 pub mod networks;

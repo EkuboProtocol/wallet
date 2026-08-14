@@ -48,130 +48,35 @@ fn recognized_balance_effects_separate_the_symbol_from_the_exact_address() {
 }
 
 #[test]
-fn agent_session_expiry_labels_active_expired_and_missing_sessions() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-08-11T14:30:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let future = now + chrono::Duration::days(1);
-    let past = now - chrono::Duration::minutes(1);
-
-    assert_eq!(
-        agent_session_expiry_label(Some(future), now),
-        ("Expires Aug 12, 2026 at 14:30 UTC".into(), false)
-    );
-    assert_eq!(
-        agent_session_expiry_label(Some(past), now),
-        ("Expired Aug 11, 2026 at 14:29 UTC".into(), true)
-    );
-    assert_eq!(
-        agent_session_expiry_label(None, now),
-        ("No active session (expired or not completed)".into(), true)
-    );
-}
-
-#[test]
-fn revoked_and_optimistically_hidden_agent_sessions_are_not_rendered() {
-    let active_id = uuid::Uuid::new_v4();
-    let hidden_id = uuid::Uuid::new_v4();
-    let revoked_id = uuid::Uuid::new_v4();
-    let client = |id, revoked_at| McpClient {
-        id,
-        display_name: "Agent".into(),
-        agent_kind: AgentKind::Codex,
-        redirect_uris: vec!["http://127.0.0.1/callback".into()],
-        registration: None,
-        created_at: chrono::Utc::now(),
-        authorized_at: Some(chrono::Utc::now()),
-        last_used_at: None,
-        session_expires_at: None,
-        revoked_at,
-    };
-    let clients = vec![
-        client(active_id, None),
-        client(hidden_id, None),
-        client(revoked_id, Some(chrono::Utc::now())),
-    ];
-    let hidden = BTreeSet::from([hidden_id]);
-
-    let visible = visible_agent_sessions(&clients, &hidden);
-    assert_eq!(visible.len(), 1);
-    assert_eq!(visible[0].id, active_id);
-}
-
-#[test]
-fn every_supported_agent_has_a_copy_ready_oauth_login_instruction() {
-    let expected = [
-        (AgentKind::Codex, "codex mcp login ekubo_wallet"),
-        (AgentKind::ClaudeCode, "claude mcp login ekubo_wallet"),
-        (AgentKind::GeminiCli, "/mcp auth ekubo_wallet"),
-        (AgentKind::Cursor, "cursor-agent mcp login ekubo_wallet"),
-        (AgentKind::Opencode, "opencode mcp auth ekubo_wallet"),
-    ];
-    for (kind, command) in expected {
-        assert_eq!(agent_login_instruction(kind).unwrap().command, command);
-    }
-    assert_eq!(agent_login_instruction(AgentKind::Other), None);
-}
-
-#[test]
-fn login_instructions_only_include_installed_detected_agents() {
-    let detected = AgentDetectionState::Ready(vec![
-        DetectedAgent {
-            kind: AgentKind::Codex,
-            display_name: "Codex",
-            config_path: "codex.toml".into(),
-            installed: Ok(true),
-        },
-        DetectedAgent {
-            kind: AgentKind::ClaudeCode,
-            display_name: "Claude Code",
-            config_path: "claude.json".into(),
-            installed: Ok(false),
-        },
-        DetectedAgent {
-            kind: AgentKind::Cursor,
-            display_name: "Cursor",
-            config_path: "cursor.json".into(),
-            installed: Err("cannot inspect".into()),
-        },
-    ]);
-    assert_eq!(
-        installed_agent_login_instructions(&detected),
-        vec![agent_login_instruction(AgentKind::Codex).unwrap()]
-    );
-}
-
-#[test]
 fn the_install_button_reflects_what_is_left_to_install() {
-    let agent = |kind, installed| DetectedAgent {
-        kind,
+    let agent = |installed| DetectedAgent {
         display_name: "Agent",
         config_path: "agent.json".into(),
         installed,
     };
 
-    let mixed = AgentDetectionState::Ready(vec![
-        agent(AgentKind::Codex, Ok(true)),
-        agent(AgentKind::ClaudeCode, Ok(false)),
-    ]);
+    let mixed = AgentDetectionState::Ready(vec![agent(Ok(true)), agent(Ok(false))]);
     assert!(agents_need_install(&mixed));
     assert!(!agents_all_installed(&mixed));
+    assert!(agents_any_installed(&mixed));
 
-    let done = AgentDetectionState::Ready(vec![agent(AgentKind::Codex, Ok(true))]);
+    let done = AgentDetectionState::Ready(vec![agent(Ok(true))]);
     assert!(!agents_need_install(&done));
     assert!(agents_all_installed(&done));
+    assert!(agents_any_installed(&done));
 
     // An unreadable configuration is not an installed one, so the button
     // stays live and the reassurance stays off.
-    let broken =
-        AgentDetectionState::Ready(vec![agent(AgentKind::Cursor, Err("unreadable".into()))]);
+    let broken = AgentDetectionState::Ready(vec![agent(Err("unreadable".into()))]);
     assert!(agents_need_install(&broken));
     assert!(!agents_all_installed(&broken));
+    assert!(!agents_any_installed(&broken));
 
     // Nothing detected: nothing to install, and nothing to claim either.
     let none = AgentDetectionState::Ready(Vec::new());
     assert!(!agents_need_install(&none));
     assert!(!agents_all_installed(&none));
+    assert!(!agents_any_installed(&none));
 
     // Still looking, or unable to look: offer the button, promise nothing.
     for unknown in [
@@ -789,8 +694,8 @@ fn selectable_plain_text_escapes_markup_without_changing_visible_content() {
     // a name, the parentheses around a token symbol — reaches the screen as
     // the caller wrote it.
     assert_eq!(
-        html_escaped_plain_text("http://127.0.0.1:61744/mcp").as_ref(),
-        "http://127.0.0.1:61744/mcp"
+        html_escaped_plain_text("https://example.com/path").as_ref(),
+        "https://example.com/path"
     );
     assert_eq!(
         html_escaped_plain_text("Account_#1 [0xabc]. 1.25 USDC (native) — a-b").as_ref(),
