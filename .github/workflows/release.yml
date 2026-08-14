@@ -417,6 +417,10 @@ jobs:
           asset_url() {
             local filename encoded
             filename="$(basename "$1")"
+            # GitHub normalizes spaces in uploaded release asset names to
+            # periods. Generate the URL for the name that the release API
+            # actually publishes, not the local cargo-packager filename.
+            filename="${filename// /.}"
             encoded="$(printf '%s' "$filename" | jq -sRr @uri)"
             printf 'https://github.com/%s/releases/download/%s/%s' \
               "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$encoded"
@@ -481,6 +485,14 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: dist/**
+      - name: Verify every published updater URL resolves
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -r '.platforms[].url' dist/latest.json | while IFS= read -r url; do
+            curl --fail --location --silent --show-error \
+              --retry 5 --retry-all-errors --output /dev/null "$url"
+          done
 
   attest:
     needs: publish
