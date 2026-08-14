@@ -2425,6 +2425,9 @@ impl WalletMcpServer {
             desktop.attribute_policy_proposal(&wallet.id, client_id)
         })
         .map_err(|error| tool_error(&error))?;
+        self.events.publish(DomainEventKind::PolicyProposalChanged {
+            wallet_id: wallet.id.clone(),
+        });
         let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
         Ok(Json(ProposePolicyOutput {
             wallet_id: proposal.wallet_id.clone(),

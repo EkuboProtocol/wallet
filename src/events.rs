@@ -29,6 +29,9 @@ pub enum DomainEventKind {
     ReviewChanged {
         request_id: Uuid,
     },
+    PolicyProposalChanged {
+        wallet_id: String,
+    },
     McpStatusChanged {
         online: bool,
     },

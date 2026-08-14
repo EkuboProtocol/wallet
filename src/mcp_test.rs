@@ -1687,6 +1687,7 @@ fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
 fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     let (_directory, server) = server();
     accept_legal(&server);
+    let mut events = server.events.subscribe();
     let proposed = serde_json::to_value(WalletPolicy::require_approval_for_everything()).unwrap();
 
     // The wrong source revision is rejected with re-read guidance.
@@ -1714,6 +1715,11 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     assert!(!output.diff.is_empty());
     assert!(output.diff.iter().any(|line| line.starts_with('-')));
     assert!(output.instruction.contains("open policy proposal primary"));
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        DomainEventKind::PolicyProposalChanged { wallet_id }
+            if wallet_id == "primary"
+    ));
 
     // A newer proposal replaces the pending one; the tool never touches
     // the active policy.
@@ -1726,6 +1732,11 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
         }))
         .unwrap();
     assert!(second.replaced_previous_proposal);
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        DomainEventKind::PolicyProposalChanged { wallet_id }
+            if wallet_id == "primary"
+    ));
     let policies = server.policies.lock().unwrap();
     assert_eq!(policies.get("primary").unwrap().unwrap().revision, 1);
     assert_eq!(

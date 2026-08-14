@@ -339,6 +339,17 @@ fn policy_selected_account_index(
         .unwrap_or_default()
 }
 
+/// The pending proposal, if any, belonging to the account whose policy tab is
+/// open. Proposals for other accounts stay with their own tabs.
+fn policy_proposal_for_account<'a>(
+    proposals: &'a [PolicyProposal],
+    editor_wallet_id: &str,
+) -> Option<&'a PolicyProposal> {
+    proposals
+        .iter()
+        .find(|proposal| proposal.wallet_id == editor_wallet_id)
+}
+
 /// Balance rows that have not arrived yet, drawn in the card and at the row
 /// pitch the real ones use. A spinner says only that the app is busy; these
 /// say a list of tokens is what is coming, and where it will be.
@@ -7695,6 +7706,11 @@ impl WalletWindow {
         } else {
             self.sidebar_logo_light.clone()
         };
+        let inbox_badge_color = if cx.theme().is_dark() {
+            gpui::rgb(0x9f_22_1d).into()
+        } else {
+            cx.theme().red
+        };
         let mut menu = div()
             .id("wallet-sidebar")
             .w(NAVIGATION_RAIL_WIDTH)
@@ -7759,28 +7775,39 @@ impl WalletWindow {
                 } else {
                     pending_reviews.to_string()
                 };
-                menu = menu.child(div().relative().child(button).when(
-                    pending_reviews > 0,
-                    |badge| {
-                        badge.child(
-                            div()
-                                .absolute()
-                                .top(px(-2.0))
-                                .right(px(-5.0))
-                                .w(px(26.0))
-                                .h(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(cx.theme().red)
-                                .text_color(gpui_component::white())
-                                .text_xs()
-                                .font_semibold()
-                                .child(count),
-                        )
-                    },
-                ));
+                let badge_width = if pending_reviews > 99 {
+                    px(30.0)
+                } else {
+                    px(22.0)
+                };
+                menu = menu.child(
+                    div()
+                        .id("inbox-sidebar-button")
+                        .relative()
+                        .child(button)
+                        .when(pending_reviews > 0, |badge| {
+                            badge.child(
+                                div()
+                                    .id("inbox-review-badge")
+                                    .absolute()
+                                    .bottom(px(-3.0))
+                                    .right(px(-4.0))
+                                    .w(badge_width)
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(cx.theme().sidebar)
+                                    .bg(inbox_badge_color)
+                                    .text_color(gpui_component::white())
+                                    .text_xs()
+                                    .font_semibold()
+                                    .child(count),
+                            )
+                        }),
+                );
             } else {
                 menu = menu.child(button);
             }
@@ -7955,6 +7982,7 @@ impl WalletWindow {
                 }
                 for proposal in &queues.policy_proposals {
                     let wallet_id = proposal.wallet_id.clone();
+                    let proposal_wallet_id = wallet_id.clone();
                     content = content.child(Self::render_review_card(
                         &SharedString::from(format!("review-policy-{wallet_id}")),
                         &format!("Proposed policy change for {wallet_id}"),
@@ -7967,8 +7995,9 @@ impl WalletWindow {
                         )))
                         .label("Open Policies")
                         .primary()
-                        .on_click(cx.listener(|view, _, _, cx| {
+                        .on_click(cx.listener(move |view, _, window, cx| {
                             view.set_route(Route::Policies);
+                            view.open_policy_editor(&proposal_wallet_id, window, cx);
                             cx.notify();
                         })),
                         cx,
@@ -9590,155 +9619,6 @@ impl WalletWindow {
                 ));
             }
         };
-        match self
-            .cached_reviews()
-            .map(|reviews| reviews.policy_proposals.as_slice())
-        {
-            Ok(proposals) if !proposals.is_empty() => {
-                let mut proposal_list = div().flex().flex_col().gap_3();
-                for proposal in proposals {
-                    let current_result = self.cached_policy(&proposal.wallet_id);
-                    let current_error = current_result
-                        .as_ref()
-                        .err()
-                        .map(|error| format!("Could not read active policy: {error:#}"));
-                    let current = current_result.ok().flatten();
-                    let current_revision = current.as_ref().map(|policy| policy.revision);
-                    let current_policy = current
-                        .as_ref()
-                        .map_or_else(WalletPolicy::require_approval_for_everything, |policy| {
-                            policy.policy.clone()
-                        });
-                    let applicable = current_revision == Some(proposal.source_revision);
-                    let mut changes = div().flex().flex_col().gap_1();
-                    for (index, line) in diff_policies(&current_policy, &proposal.policy)
-                        .into_iter()
-                        .enumerate()
-                    {
-                        changes =
-                            changes.child(div().font_family(MONO_FONT_FAMILY).text_sm().child(
-                                selectable_text(
-                                    format!("policy-proposal-diff-{}-{index}", proposal.wallet_id),
-                                    &line,
-                                ),
-                            ));
-                    }
-                    let review_proposal = proposal.clone();
-                    let reject_proposal = proposal.clone();
-                    proposal_list =
-                        proposal_list.child(
-                            div()
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(div().font_semibold().child(selectable_text(
-                                            format!("policy-proposal-title-{}", proposal.wallet_id),
-                                            &format!(
-                                                "{} · based on revision {}",
-                                                proposal.wallet_id, proposal.source_revision
-                                            ),
-                                        )))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(if applicable {
-                                                    cx.theme().primary
-                                                } else {
-                                                    cx.theme().danger
-                                                })
-                                                .child(selectable_text(
-                                                    format!(
-                                                        "policy-proposal-status-{}",
-                                                        proposal.wallet_id
-                                                    ),
-                                                    if applicable {
-                                                        "Ready for review"
-                                                    } else {
-                                                        "Superseded by a policy change"
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(div().text_sm().child(selectable_text(
-                                    format!("policy-proposal-rationale-{}", proposal.wallet_id),
-                                    &ekubo_wallet_core::sanitize::terminal_safe_multiline(
-                                        &proposal.rationale,
-                                    ),
-                                )))
-                                .when_some(current_error, |card, error| {
-                                    card.child(div().text_sm().text_color(cx.theme().danger).child(
-                                        selectable_text(
-                                            format!(
-                                                "policy-proposal-current-error-{}",
-                                                proposal.wallet_id
-                                            ),
-                                            &error,
-                                        ),
-                                    ))
-                                })
-                                .child(changes)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "review-policy-proposal-{}",
-                                                proposal.wallet_id
-                                            )))
-                                            .label("Review in editor")
-                                            .primary()
-                                            .disabled(!applicable)
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.open_policy_proposal(
-                                                    review_proposal.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                        )
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "reject-policy-proposal-{}",
-                                                proposal.wallet_id
-                                            )))
-                                            .label("Reject proposal")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.reject_policy_proposal(&reject_proposal, cx);
-                                            })),
-                                        ),
-                                ),
-                        );
-                }
-                content = content.child(
-                    GroupBox::new()
-                        .id("policy-proposals")
-                        .title("Agent proposals")
-                        .child(proposal_list),
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                content = content.child(selectable_error_alert(
-                    "policy-proposal-error",
-                    format!("Policy proposals unavailable: {error:#}"),
-                ));
-            }
-        }
         if accounts.is_empty() {
             return content.child(account_required_panel(
                 "policy-empty",
@@ -9765,6 +9645,97 @@ impl WalletWindow {
                     )),
             );
         };
+
+        match self.cached_reviews().map(|reviews| {
+            policy_proposal_for_account(&reviews.policy_proposals, &editor.wallet_id)
+        }) {
+            Ok(Some(proposal)) => {
+                let current_result = self.cached_policy(&editor.wallet_id);
+                let current_error = current_result
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("Could not read active policy: {error:#}"));
+                let applicable = current_result
+                    .ok()
+                    .flatten()
+                    .is_some_and(|policy| policy.revision == proposal.source_revision);
+                let review_proposal = proposal.clone();
+                let reject_proposal = proposal.clone();
+                let proposal_card =
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(div().text_sm().child(selectable_text(
+                            format!("policy-proposal-rationale-{}", proposal.wallet_id),
+                            &ekubo_wallet_core::sanitize::terminal_safe_multiline(
+                                &proposal.rationale,
+                            ),
+                        )))
+                        .when(!applicable && current_error.is_none(), |card| {
+                            card.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(selectable_label("Superseded by a policy change")),
+                            )
+                        })
+                        .when_some(current_error, |card, error| {
+                            card.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(selectable_label(error)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    app_button(SharedString::from(format!(
+                                        "review-policy-proposal-{}",
+                                        proposal.wallet_id
+                                    )))
+                                    .label("Review in editor")
+                                    .primary()
+                                    .disabled(!applicable)
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.open_policy_proposal(
+                                            review_proposal.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                                )
+                                .child(
+                                    app_button(SharedString::from(format!(
+                                        "reject-policy-proposal-{}",
+                                        proposal.wallet_id
+                                    )))
+                                    .label("Reject proposal")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.reject_policy_proposal(&reject_proposal, cx);
+                                    })),
+                                ),
+                        );
+                content = content.child(
+                    GroupBox::new()
+                        .id("policy-proposal")
+                        .title("Agent proposal")
+                        .child(proposal_card),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                content = content.child(selectable_error_alert(
+                    "policy-proposal-error",
+                    format!("Policy proposal unavailable: {error:#}"),
+                ));
+            }
+        }
 
         let current_document = input.read(cx).value();
         let allow_anything_draft = serde_json::from_str(current_document.as_ref())
@@ -13406,6 +13377,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 crate::events::DomainEventKind::ConfigurationChanged
                                     | crate::events::DomainEventKind::AgentConnectionChanged { .. }
                                     | crate::events::DomainEventKind::ReviewChanged { .. }
+                                    | crate::events::DomainEventKind::PolicyProposalChanged { .. }
                                     | crate::events::DomainEventKind::Transaction { .. }
                             );
                             if portfolio_changed || configuration_changed || snapshot_changed {

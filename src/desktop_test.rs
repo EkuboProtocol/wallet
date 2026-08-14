@@ -607,6 +607,26 @@ fn policy_account_tab_follows_the_open_editor() {
     assert_eq!(policy_selected_account_index(&[], Some("alpha")), 0);
 }
 
+#[test]
+fn policy_proposals_stay_with_their_account_tab() {
+    let proposal = |wallet_id: &str| PolicyProposal {
+        wallet_instance_id: uuid::Uuid::new_v4(),
+        wallet_id: wallet_id.to_owned(),
+        wallet_address: alloy::primitives::Address::ZERO,
+        source_revision: 1,
+        policy: WalletPolicy::require_approval_for_everything(),
+        rationale: format!("rationale for {wallet_id}"),
+        created_at: chrono::Utc::now(),
+    };
+    let proposals = vec![proposal("alpha"), proposal("beta")];
+
+    assert_eq!(
+        policy_proposal_for_account(&proposals, "beta").map(|proposal| proposal.wallet_id.as_str()),
+        Some("beta")
+    );
+    assert!(policy_proposal_for_account(&proposals, "gamma").is_none());
+}
+
 fn relative_luminance(rgb: u32) -> f64 {
     let channel = |shift: u32| {
         let value = f64::from(u8::try_from((rgb >> shift) & 0xff_u32).unwrap()) / 255.0;
