@@ -67,6 +67,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -87,6 +88,7 @@ const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
 const BUTTON_HEIGHT: gpui::Pixels = px(44.0);
+const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
@@ -1467,6 +1469,7 @@ pub struct WalletWindow {
     network_proposal_busy: bool,
     release_state: ReleaseDisplayState,
     pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
+    update_data_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -3739,6 +3742,7 @@ impl WalletWindow {
         walletconnect_presenter: ProposalPresenter,
         tray: Rc<RefCell<Option<PlatformTray>>>,
         pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
+        data_dir: &Path,
         cx: &mut Context<Self>,
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
@@ -3859,6 +3863,7 @@ impl WalletWindow {
             network_proposal_busy: false,
             release_state: ReleaseDisplayState::Idle,
             pending_update,
+            update_data_dir: data_dir.to_path_buf(),
         };
         window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
@@ -7019,6 +7024,10 @@ impl WalletWindow {
                 Ok(prepared) => {
                     if let Ok(mut slot) = view.pending_update.lock() {
                         *slot = Some(prepared);
+                        let _ = crate::release_check::record_update_diagnostic(
+                            &view.update_data_dir,
+                            "verified update downloaded and authorized; requesting application shutdown",
+                        );
                         cx.quit();
                     } else {
                         view.release_state = ReleaseDisplayState::Failed(
@@ -11550,6 +11559,15 @@ impl WalletWindow {
                         "Stable releases are downloaded and cryptographically verified before installation."
                     })),
             );
+        panel = panel.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(selectable_label(format!(
+                    "Local update diagnostics: {}",
+                    crate::release_check::update_diagnostics_path(&self.update_data_dir).display()
+                ))),
+        );
         panel = match &self.release_state {
             ReleaseDisplayState::Idle => panel.child(
                 app_button("check-latest-release")
@@ -13127,6 +13145,59 @@ pub fn run_desktop_hidden() -> Result<()> {
     run_desktop_with_visibility(true)
 }
 
+fn release_single_instance(instance_slot: &Arc<Mutex<Option<SingleInstance>>>) -> Result<()> {
+    let instance = instance_slot
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the single-instance lock state is unavailable"))?
+        .take()
+        .context("the running wallet no longer owns its single-instance lock")?;
+    drop(instance);
+    Ok(())
+}
+
+fn perform_desktop_shutdown(
+    server: Option<McpIpcServer>,
+    tokio: &tokio::runtime::Handle,
+    prepared: Option<PreparedUpdate>,
+    instance_slot: Arc<Mutex<Option<SingleInstance>>>,
+    data_dir: &Path,
+) -> Result<bool> {
+    if let Some(server) = server {
+        let stopped = tokio.block_on(tokio::time::timeout(
+            DESKTOP_SERVER_SHUTDOWN_TIMEOUT,
+            server.stop(),
+        ));
+        let failure = match stopped {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("local MCP server shutdown failed: {error:#}")),
+            Err(_) => Some(format!(
+                "local MCP server shutdown exceeded {} seconds",
+                DESKTOP_SERVER_SHUTDOWN_TIMEOUT.as_secs()
+            )),
+        };
+        if let Some(failure) = failure {
+            let _ = crate::release_check::record_update_diagnostic(data_dir, &failure);
+        }
+    }
+    let Some(prepared) = prepared else {
+        return Ok(false);
+    };
+
+    let handoff_data_dir = data_dir.to_path_buf();
+    crate::release_check::install_and_relaunch(
+        prepared.prepared,
+        prepared.authorization,
+        move || {
+            let _ = crate::release_check::record_update_diagnostic(
+                &handoff_data_dir,
+                "releasing the single-instance lock before relaunch",
+            );
+            release_single_instance(&instance_slot)
+        },
+    )?;
+    Ok(true)
+}
+
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
     crate::agent_config::install_bridge_helper()?;
@@ -13137,6 +13208,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         InstanceOutcome::ActivatedExisting => return Ok(()),
     };
     let data_dir = config.data_dir().to_path_buf();
+    let _ = crate::release_check::record_update_diagnostic(&data_dir, "wallet process started");
     let authority = ApplicationAuthority::open(config)?;
     let owner = authority.owner_api();
     let agent = authority.agent_api();
@@ -13229,8 +13301,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let shutdown_server = server_slot.clone();
             let shutdown_walletconnect = walletconnect.clone();
             let shutdown_update = pending_update.clone();
+            let shutdown_instance = instance_slot.clone();
+            let update_data_dir = data_dir.clone();
             let tokio = gpui_tokio::Tokio::handle(cx);
             cx.on_app_quit(move |_| {
+                let update_data_dir = update_data_dir.clone();
+                let shutdown_instance = shutdown_instance.clone();
                 if let Ok(mut sessions) = shutdown_walletconnect.lock() {
                     sessions.disconnect_all();
                 }
@@ -13239,26 +13315,66 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     .ok()
                     .and_then(|mut server| server.take());
                 let tokio = tokio.clone();
-                let shutdown_update = shutdown_update.clone();
+                let prepared = shutdown_update
+                    .lock()
+                    .ok()
+                    .and_then(|mut update| update.take());
+                let update_requested = prepared.is_some();
+                if update_requested {
+                    let _ = crate::release_check::record_update_diagnostic(
+                        &update_data_dir,
+                        "authorized update installation started",
+                    );
+                }
+                let worker_data_dir = update_data_dir.clone();
+                // GPUI gives ordinary quit futures only 200 ms. Create the
+                // update worker before returning the future, then join it on
+                // the first poll so the process cannot exit mid-replacement.
+                let worker = std::thread::Builder::new()
+                    .name("ekubo-desktop-shutdown".into())
+                    .spawn(move || {
+                        perform_desktop_shutdown(
+                            server,
+                            &tokio,
+                            prepared,
+                            shutdown_instance,
+                            &worker_data_dir,
+                        )
+                    });
                 async move {
-                    if let Some(server) = server {
-                        let _ = tokio.spawn(server.stop()).await;
-                    }
-                    let prepared = shutdown_update
-                        .lock()
-                        .ok()
-                        .and_then(|mut update| update.take());
-                    if let Some(prepared) = prepared {
-                        let result = tokio
-                            .spawn_blocking(move || {
-                                crate::release_check::install_and_relaunch(
-                                    prepared.prepared,
-                                    prepared.authorization,
-                                )
-                            })
-                            .await;
-                        if let Ok(Err(error)) = result {
+                    let result = match worker {
+                        Ok(worker) => worker.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("the desktop shutdown thread panicked"))
+                        }),
+                        Err(error) => Err(error.into()),
+                    };
+                    match result {
+                        Ok(true) => {
+                            let _ = crate::release_check::record_update_diagnostic(
+                                &update_data_dir,
+                                "updated wallet relaunch command completed",
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) if update_requested => {
+                            let message =
+                                format!("authorized update installation failed: {error:#}");
+                            let _ = crate::release_check::record_update_diagnostic(
+                                &update_data_dir,
+                                &message,
+                            );
                             tracing::error!(%error, "authorized update installation failed");
+                            let _ = notify_rust::Notification::new()
+                                .summary("Ekubo Wallet update failed")
+                                .body(&format!(
+                                    "{message}. Details: {}",
+                                    crate::release_check::update_diagnostics_path(&update_data_dir)
+                                        .display()
+                                ))
+                                .show();
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "desktop shutdown failed");
                         }
                     }
                 }
@@ -13273,6 +13389,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     walletconnect_presenter.clone(),
                     tray.clone(),
                     pending_update.clone(),
+                    &data_dir,
                     cx,
                 )
             });

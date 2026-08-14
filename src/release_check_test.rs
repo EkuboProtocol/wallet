@@ -7,6 +7,43 @@ use super::*;
 
 const REPOSITORY: &str = "EkuboProtocol/wallet";
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_relaunch_forces_a_new_instance() {
+    let application = Path::new("/Applications/Ekubo Wallet.app");
+    let command = macos_relaunch_command(application);
+
+    assert_eq!(command.get_program(), "/usr/bin/open");
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        vec![std::ffi::OsStr::new("-n"), application.as_os_str()]
+    );
+}
+
+#[test]
+fn update_diagnostics_are_private_durable_and_single_line() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    record_update_diagnostic(
+        directory.path(),
+        "failed\nwith\ra control\u{0007} character",
+    )
+    .expect("the diagnostic is written");
+
+    let path = update_diagnostics_path(directory.path());
+    let text = std::fs::read_to_string(&path).expect("the diagnostic remains readable");
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains("wallet="));
+    assert!(text.contains("failed with a control  character"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
 #[test]
 fn core_and_desktop_package_versions_cannot_drift() {
     assert_eq!(

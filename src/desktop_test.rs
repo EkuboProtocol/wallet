@@ -1,4 +1,26 @@
 use super::*;
+
+#[test]
+fn update_handoff_releases_the_instance_before_relaunch() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    let InstanceOutcome::Primary(instance) =
+        SingleInstance::acquire(directory.path(), sender.clone()).unwrap()
+    else {
+        panic!("the first wallet must own the instance lock");
+    };
+    let slot = Arc::new(Mutex::new(Some(instance)));
+
+    assert!(matches!(
+        SingleInstance::acquire(directory.path(), sender.clone()).unwrap(),
+        InstanceOutcome::ActivatedExisting
+    ));
+    release_single_instance(&slot).expect("the updater releases the old process lock");
+    assert!(matches!(
+        SingleInstance::acquire(directory.path(), sender).unwrap(),
+        InstanceOutcome::Primary(_)
+    ));
+}
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 use ekubo_wallet_core::core::policy::Effect;
 
