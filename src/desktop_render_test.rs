@@ -52,6 +52,7 @@ fn wallet(
             walletconnect_presenter,
             Rc::new(RefCell::new(None)),
             Arc::new(Mutex::new(None)),
+            directory.path(),
             cx,
         )
     });
@@ -499,6 +500,7 @@ fn screenshots() {
                     walletconnect_presenter,
                     Rc::new(RefCell::new(None)),
                     Arc::new(Mutex::new(None)),
+                    temp.path(),
                     cx,
                 )
             })

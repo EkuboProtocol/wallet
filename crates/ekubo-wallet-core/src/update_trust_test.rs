@@ -221,6 +221,30 @@ fn fully_signed_metadata_cannot_claim_an_old_macos_package_is_new() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_updater_replaces_a_disposable_application_bundle() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"old\0EKUBO-WALLET-PACKAGE-VERSION:1.0.4\0").unwrap();
+
+    let mut candidate = update("2.0.0", "https://example.test/wallet.app.tar.gz");
+    candidate.extract_path = app;
+    candidate.format = UpdateFormat::App;
+    candidate
+        .install(macos_archive("2.0.0"))
+        .expect("cargo-packager replaces the disposable bundle");
+
+    let installed = std::fs::read(binary).expect("the replacement binary exists");
+    assert!(
+        installed
+            .windows(b"EKUBO-WALLET-PACKAGE-VERSION:2.0.0".len())
+            .any(|bytes| { bytes == b"EKUBO-WALLET-PACKAGE-VERSION:2.0.0" })
+    );
+}
+
 #[test]
 fn untrusted_downloads_are_bounded_even_without_a_content_length() {
     assert_eq!(

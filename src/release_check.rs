@@ -12,8 +12,15 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::time::Duration;
+use std::{
+    fs::OpenOptions,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 
 pub use ekubo_wallet_core::update_trust::InstallableUpdate;
 
@@ -27,6 +34,7 @@ pub fn check_installable() -> anyhow::Result<Option<InstallableUpdate>> {
 pub fn install_and_relaunch(
     prepared: ekubo_wallet_core::update_trust::PreparedUpdate,
     authorization: ekubo_wallet_core::update_trust::UpdateAuthorization,
+    before_relaunch: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let relaunch_path = match ekubo_wallet_core::update_trust::install_update(
         prepared,
@@ -34,6 +42,7 @@ pub fn install_and_relaunch(
     ) {
         Ok(path) => path,
         Err(install_error) => {
+            before_relaunch().context("could not release the current wallet before recovery")?;
             relaunch_current_application().with_context(|| {
                 format!(
                     "update installation failed ({install_error:#}) and the current application could not be restarted"
@@ -42,6 +51,7 @@ pub fn install_and_relaunch(
             return Err(install_error);
         }
     };
+    before_relaunch().context("could not release the current wallet before update relaunch")?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let executable = relaunch_path.context("the updater did not return a relaunch path")?;
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -55,6 +65,45 @@ pub fn install_and_relaunch(
     std::process::Command::new(executable)
         .spawn()
         .context("could not relaunch updated application")?;
+    Ok(())
+}
+
+const UPDATE_DIAGNOSTICS_FILE: &str = "update-install.log";
+
+#[must_use]
+pub fn update_diagnostics_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(UPDATE_DIAGNOSTICS_FILE)
+}
+
+/// Append one durable, local-only updater lifecycle event. The updater runs
+/// after the window has closed, so this file remains inspectable even when a
+/// replacement or relaunch fails before any UI can report it.
+pub fn record_update_diagnostic(data_dir: &Path, message: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = update_diagnostics_path(data_dir);
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
+    let message = message
+        .chars()
+        .take(8 * 1024)
+        .map(|character| {
+            if character == '\n' || character == '\r' || character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    writeln!(
+        file,
+        "{} wallet={} {message}",
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        crate::VERSION
+    )?;
+    file.sync_data()?;
     Ok(())
 }
 
