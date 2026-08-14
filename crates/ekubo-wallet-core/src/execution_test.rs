@@ -23,17 +23,18 @@ const ALREADY_KNOWN: &[&str] = &[
 #[test]
 fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
     // A quiet market: the incumbent's bumped fees decide both fields.
-    let (max_fee, priority) = cancellation_fees(&[(800, 80)], 100, 10).unwrap();
+    let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 100, 10, None).unwrap();
     assert_eq!(max_fee, 900);
     assert_eq!(priority, 90);
 
     // A hot market: current estimates already clear the floor.
-    let (max_fee, priority) = cancellation_fees(&[(800, 80)], 2_000, 200).unwrap();
+    let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 2_000, 200, None).unwrap();
     assert_eq!(max_fee, 2_000);
     assert_eq!(priority, 200);
 
-    // Repricing outbids the highest incumbent, not the first.
-    let (max_fee, priority) = cancellation_fees(&[(800, 80), (1_600, 160)], 100, 10).unwrap();
+    // Repricing outbids the newest incumbent but keeps the original as the
+    // immutable cap anchor.
+    let (max_fee, priority) = cancellation_fees((800, 80), (1_600, 160), 100, 10, None).unwrap();
     assert_eq!(max_fee, 1_800);
     assert_eq!(priority, 180);
 
@@ -43,19 +44,17 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
 
     // The pair stays EIP-1559-consistent when the priority floor passes
     // the market maximum fee.
-    let (max_fee, priority) = cancellation_fees(&[(100, 100)], 50, 5).unwrap();
+    let (max_fee, priority) = cancellation_fees((100, 100), (100, 100), 50, 5, None).unwrap();
     assert_eq!(priority, 113);
     assert!(max_fee >= priority);
-
-    // No incumbent means nothing to cancel.
-    assert!(cancellation_fees(&[], 100, 10).is_err());
 
     // An endpoint naming an enormous market fee no longer names the ceiling
     // as well. The cap used to include `market_max_fee` in the maximum it was
     // capping, so a reported fee of M was checked against at least 2M and
     // every M it could name passed -- the one signing path with no policy and
     // no approval screen behind it, taking a builder tip from a stranger.
-    let (max_fee, priority) = cancellation_fees(&[(800, 80)], 10_000_000, 9_000_000).unwrap();
+    let (max_fee, priority) =
+        cancellation_fees((800, 80), (800, 80), 10_000_000, 9_000_000, None).unwrap();
     assert_eq!(max_fee, 3_200, "four times the fee the owner committed to");
     assert_eq!(priority, 3_200);
 
@@ -63,6 +62,49 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
     // is cancelling. Refusing would let the same endpoint deny cancellation
     // by reporting a large enough number.
     assert!(max_fee >= 900 && priority >= 90);
+}
+
+#[test]
+fn cancellation_retries_never_ratchet_the_original_or_configured_cap() {
+    let original = (800, 80);
+    let mut incumbent = original;
+    let absolute_cap = 2_000;
+
+    // Feed every selected cancellation back as the newest incumbent, exactly
+    // as all eight agent-callable retries do. The first replacement reaches
+    // the owner's configured cap. The next needs 12.5% more, so the core says
+    // to rebroadcast instead of treating its own unauthenticated signature as
+    // a new, wider authorization.
+    let first = cancellation_fees(
+        original,
+        incumbent,
+        u128::MAX,
+        u128::MAX,
+        Some(absolute_cap),
+    )
+    .expect("the first bounded cancellation exists");
+    assert_eq!(first, (absolute_cap, absolute_cap));
+    incumbent = first;
+
+    for _ in 1..crate::pending::MAX_CANCELLATION_ATTEMPTS {
+        assert!(
+            cancellation_fees(
+                original,
+                incumbent,
+                u128::MAX,
+                u128::MAX,
+                Some(absolute_cap),
+            )
+            .is_none(),
+            "a retry above the immutable cap must rebroadcast, not sign"
+        );
+    }
+
+    // Without a configured ceiling, the original's fourfold bound is still
+    // immutable across retries.
+    let first = cancellation_fees(original, original, u128::MAX, u128::MAX, None).unwrap();
+    assert_eq!(first.0, 3_200);
+    assert!(cancellation_fees(original, first, u128::MAX, u128::MAX, None).is_none());
 }
 
 #[test]
@@ -469,6 +511,108 @@ fn signed_envelope_is_revalidated_against_the_current_fee_ceiling() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("maximum fee per gas"), "{error}");
+}
+
+#[test]
+fn cancellation_is_revalidated_against_live_fee_and_gas_ceilings() {
+    let signer = PrivateKeySigner::from_slice(&[13; 32]).unwrap();
+    let wallet = wallet(&signer);
+    let original = sign_prepared(
+        &signer,
+        1,
+        9,
+        100_000,
+        30,
+        3,
+        &crate::simulation::PlannedCall {
+            mode: ExecutionMode::Direct,
+            to: Address::repeat_byte(0x44),
+            data: alloy::primitives::Bytes::new(),
+            value: U256::ZERO,
+        },
+        false,
+    )
+    .unwrap();
+    let cancellation = sign_prepared(
+        &signer,
+        1,
+        9,
+        100_000,
+        101,
+        10,
+        &crate::simulation::PlannedCall {
+            mode: ExecutionMode::Direct,
+            to: wallet.address,
+            data: alloy::primitives::Bytes::new(),
+            value: U256::ZERO,
+        },
+        false,
+    )
+    .unwrap();
+
+    let above_original_bound = sign_prepared(
+        &signer,
+        1,
+        9,
+        100_000,
+        121,
+        10,
+        &crate::simulation::PlannedCall {
+            mode: ExecutionMode::Direct,
+            to: wallet.address,
+            data: alloy::primitives::Bytes::new(),
+            value: U256::ZERO,
+        },
+        false,
+    )
+    .unwrap();
+
+    let mut network = network();
+    network.max_fee_per_gas = None;
+    let error = validate_signed_cancellation(
+        &above_original_bound,
+        &wallet,
+        &network,
+        &original.serialized_transaction,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("original transaction's fee bound"),
+        "{error}"
+    );
+
+    network.max_fee_per_gas = Some("100".into());
+    let error = validate_signed_cancellation(
+        &cancellation,
+        &wallet,
+        &network,
+        &original.serialized_transaction,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("maximum fee per gas"), "{error}");
+
+    network.max_fee_per_gas = Some("101".into());
+    network.max_gas_limit = Some("99999".into());
+    let error = validate_signed_cancellation(
+        &cancellation,
+        &wallet,
+        &network,
+        &original.serialized_transaction,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("maximum gas limit"), "{error}");
+
+    network.max_gas_limit = Some("100000".into());
+    validate_signed_cancellation(
+        &cancellation,
+        &wallet,
+        &network,
+        &original.serialized_transaction,
+    )
+    .unwrap();
 }
 
 /// The window between recording a simulation and sending it. Nothing in

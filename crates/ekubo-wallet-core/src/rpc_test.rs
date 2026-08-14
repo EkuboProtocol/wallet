@@ -22,17 +22,34 @@ fn parses_only_eip7702_delegation_designators() {
     assert_eq!(delegated_implementation(&Bytes::from(vec![0xef, 1])), None);
 }
 
-/// The RPC URL is configuration, not a secret: a provider credential embedded
-/// in it is read-only and easy to rotate, so errors name the exact endpoint
-/// that failed rather than redacting it.
+/// Provider credentials commonly live in RPC URL paths or queries. Errors
+/// keep the endpoint host for diagnosis but never repeat those credentials.
 #[test]
-fn rpc_errors_repeat_the_endpoint_verbatim() {
-    let url = "https://user:secret@example.invalid/v3/PROJECTKEY";
-    let message = rpc_error(&format_args!("request to {url} failed")).to_string();
+fn rpc_errors_redact_endpoint_credentials() {
+    let endpoint: Url =
+        "https://user:password@example.invalid:8443/v3/PATH_CANARY?key=QUERY_CANARY"
+            .parse()
+            .unwrap();
+    let message = rpc_error(&endpoint, &format_args!("request to {endpoint} failed")).to_string();
     assert_eq!(
         message,
-        format!("RPC request failed: request to {url} failed")
+        "RPC request failed: request to https://example.invalid:8443/ failed"
     );
+    for secret in ["user", "password", "PATH_CANARY", "QUERY_CANARY"] {
+        assert!(!message.contains(secret), "{secret} survived in {message}");
+    }
+
+    let split_message = rpc_error(
+        &endpoint,
+        &format_args!(
+            "path {} failed with query {}",
+            endpoint.path(),
+            endpoint.query().unwrap()
+        ),
+    )
+    .to_string();
+    assert!(!split_message.contains("PATH_CANARY"), "{split_message}");
+    assert!(!split_message.contains("QUERY_CANARY"), "{split_message}");
 }
 
 #[test]
@@ -197,8 +214,12 @@ async fn an_endpoint_on_the_wrong_chain_is_skipped() {
 /// answer it.
 #[tokio::test]
 async fn the_failure_names_every_endpoint_it_tried() {
-    let (impostor, _wrong) = stub_endpoint(999, 1);
-    let dead = dead_endpoint();
+    let (mut impostor, _wrong) = stub_endpoint(999, 1);
+    impostor.set_path("/v2/IMPOSTOR_PATH_CANARY");
+    impostor.set_query(Some("key=IMPOSTOR_QUERY_CANARY"));
+    let mut dead = dead_endpoint();
+    dead.set_path("/v2/DEAD_PATH_CANARY");
+    dead.set_query(Some("key=DEAD_QUERY_CANARY"));
     let network = network_with(7, vec![dead.clone(), impostor.clone()]);
     let error = format!(
         "{:#}",
@@ -207,8 +228,22 @@ async fn the_failure_names_every_endpoint_it_tried() {
             .expect_err("no endpoint could answer")
     );
     assert!(error.contains("all 2 RPC endpoints"), "unexpected: {error}");
-    assert!(error.contains(dead.as_str()), "unexpected: {error}");
-    assert!(error.contains(impostor.as_str()), "unexpected: {error}");
+    assert!(
+        error.contains(&rpc_endpoint_label(&dead)),
+        "unexpected: {error}"
+    );
+    assert!(
+        error.contains(&rpc_endpoint_label(&impostor)),
+        "unexpected: {error}"
+    );
+    for secret in [
+        "DEAD_PATH_CANARY",
+        "DEAD_QUERY_CANARY",
+        "IMPOSTOR_PATH_CANARY",
+        "IMPOSTOR_QUERY_CANARY",
+    ] {
+        assert!(!error.contains(secret), "{secret} survived in {error}");
+    }
     // The reason each one failed, not merely its name: a wrong chain and a
     // refused connection call for different fixes.
     assert!(

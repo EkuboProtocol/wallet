@@ -149,6 +149,22 @@ fn wallet_and_network_inventories_are_separate_and_hide_disabled_networks() {
         .filter(|network| network.disabled)
         .map(|network| network.chain_id.to_string())
         .collect::<std::collections::BTreeSet<_>>();
+    server
+        .config
+        .update_for_test(|state| {
+            let network = state
+                .networks
+                .iter_mut()
+                .find(|network| !network.disabled)
+                .expect("an enabled network");
+            network.rpc_urls = vec![
+                "https://rpc.example.invalid:8443/v2/PATH_CANARY?key=QUERY_CANARY"
+                    .parse()
+                    .unwrap(),
+            ];
+            Ok(())
+        })
+        .unwrap();
     let Json(inventory) = server.list_networks().unwrap();
     assert!(
         inventory
@@ -156,6 +172,10 @@ fn wallet_and_network_inventories_are_separate_and_hide_disabled_networks() {
             .iter()
             .all(|network| network.rpc_urls.iter().all(|url| url.starts_with("http")))
     );
+    let inventory_json = serde_json::to_string(&inventory).unwrap();
+    assert!(inventory_json.contains("https://rpc.example.invalid:8443/"));
+    assert!(!inventory_json.contains("PATH_CANARY"), "{inventory_json}");
+    assert!(!inventory_json.contains("QUERY_CANARY"), "{inventory_json}");
     assert!(
         inventory
             .networks

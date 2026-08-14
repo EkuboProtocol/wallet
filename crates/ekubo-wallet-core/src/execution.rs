@@ -40,6 +40,17 @@ pub struct SignedExecution {
     pub transaction_hash: String,
 }
 
+/// What the bounded cancellation preparer decided to submit.
+///
+/// A replacement whose required fee floor has reached the immutable cap must
+/// not be signed at a still higher price. Exact-byte rebroadcast is safe for
+/// the same reason an ordinary submission retry is: it cannot create a new
+/// authorization, signature, hash, or fee liability.
+pub(crate) enum CancellationPreparation {
+    New(SignedExecution),
+    Rebroadcast(SignedExecution),
+}
+
 /// Exact transaction fields prepared without loading the signing key. An
 /// exceptional approval reviews this object, and signing consumes it without
 /// another fee or nonce lookup.
@@ -860,16 +871,13 @@ pub fn signed_transaction_nonce(serialized_transaction: &str) -> Result<u64> {
 const REPLACEMENT_FEE_BUMP_NUMERATOR: u128 = 9;
 const REPLACEMENT_FEE_BUMP_DENOMINATOR: u128 = 8;
 /// Defense-in-depth ceiling for the one signing path that consults no policy:
-/// a cancellation's fee never exceeds this multiple of the highest fee the
-/// owner already committed to for this nonce.
+/// a cancellation's fee never exceeds this multiple of the *original*
+/// transaction fee the owner committed to for this nonce.
 ///
-/// Anchored to the incumbent envelopes and to nothing else. It used to include
-/// the endpoint's own market estimate in the maximum it was capping, which
-/// made the cap a function of the value it was bounding: an endpoint reporting
-/// a market fee of `M` produced a selected fee of at least `M` against a cap
-/// of at least `2M`, so the check passed for every `M` it could name. That is
-/// not a ceiling, it is an assertion that two multiples of the same number are
-/// ordered.
+/// The distinction is load-bearing. A cancellation is produced without owner
+/// authorization, so treating it as the anchor for the next cancellation
+/// compounds this multiplier on every retry. Only the original reviewed or
+/// policy-authorized envelope may define the absolute loss bound.
 ///
 /// Four rather than two because the anchor is now strictly tighter, and gas
 /// markets do move between the moment a transaction was signed and the moment
@@ -883,50 +891,48 @@ fn bumped_fee(fee: u128) -> u128 {
 }
 
 /// Fee selection for a cancellation, split from the RPC calls so the one
-/// policy-free pricing decision is directly testable: outbid every incumbent
-/// at the replacement floor, never price under the current market, never above
-/// the cap the incumbents set, and keep the pair EIP-1559-consistent.
+/// policy-free pricing decision is directly testable: outbid the newest
+/// envelope at the replacement floor, never price under the current market,
+/// never above the cap set by the original envelope and current owner
+/// configuration, and keep the pair EIP-1559-consistent.
 ///
 /// Nothing reviews this. There is no policy question a cancellation asks and
 /// no approval screen it draws, so `market_max_fee` and `market_priority_fee`
 /// — two numbers one endpoint chose — would otherwise reach a signature
-/// unbounded. The incumbents are the other half of the input and are not:
-/// they are envelopes this wallet signed for this nonce, so the fee the owner
-/// already committed to is the anchor everything here is measured against.
+/// unbounded. The original envelope is the other half of the input and is not:
+/// it is the envelope whose authorization began this nonce. A newer
+/// cancellation is useful only as the replacement floor and never as a new
+/// authorization to widen the cap.
 ///
 /// Above the cap the market estimate is clamped rather than refused. The
-/// replacement floor is 9/8 of an incumbent and the cap is four times one, so
-/// a clamped fee still outbids what it is replacing — the envelope is always a
-/// valid replacement, just possibly an underpriced one in a market that has
-/// moved more than fourfold since. Refusing instead would let an endpoint deny
-/// cancellation outright by reporting a large enough number, which is the
-/// other half of the same attack.
+/// replacement floor is 9/8 of the newest envelope. When that floor itself is
+/// above the immutable cap, `None` tells the caller to rebroadcast the newest
+/// exact bytes rather than sign a more expensive envelope. A market estimate
+/// above the cap is merely clamped, so an endpoint still cannot deny a valid
+/// replacement by reporting a large number.
 fn cancellation_fees(
-    incumbents: &[(u128, u128)],
+    original: (u128, u128),
+    incumbent: (u128, u128),
     market_max_fee: u128,
     market_priority_fee: u128,
-) -> Result<(u128, u128)> {
-    let floor_max = incumbents.iter().map(|fees| bumped_fee(fees.0)).max();
-    let floor_priority = incumbents.iter().map(|fees| bumped_fee(fees.1)).max();
-    let incumbent_max = incumbents.iter().map(|fees| fees.0).max();
-    let (floor_max, floor_priority, incumbent_max) = (
-        floor_max.context("cancellation has no incumbent envelope to outbid")?,
-        floor_priority.context("cancellation has no incumbent envelope to outbid")?,
-        incumbent_max.context("cancellation has no incumbent envelope to outbid")?,
-    );
-    let cap = incumbent_max
-        .saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER)
-        .max(floor_max);
+    configured_cap: Option<u128>,
+) -> Option<(u128, u128)> {
+    let floor_max = bumped_fee(incumbent.0);
+    let floor_priority = bumped_fee(incumbent.1);
+    let mut cap = original.0.saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER);
+    if let Some(configured_cap) = configured_cap {
+        cap = cap.min(configured_cap);
+    }
+    if floor_max > cap || floor_priority > cap {
+        return None;
+    }
     let max_priority_fee_per_gas = market_priority_fee.max(floor_priority).min(cap);
     let max_fee_per_gas = market_max_fee
         .max(floor_max)
         .max(max_priority_fee_per_gas)
         .min(cap);
-    ensure!(
-        max_fee_per_gas >= floor_max && max_priority_fee_per_gas >= floor_priority,
-        "cancellation cannot be priced above the envelope it replaces"
-    );
-    Ok((max_fee_per_gas, max_priority_fee_per_gas))
+    (max_fee_per_gas >= floor_max && max_priority_fee_per_gas >= floor_priority)
+        .then_some((max_fee_per_gas, max_priority_fee_per_gas))
 }
 
 /// Prepare and sign a cancellation for an exact stored envelope: a 0-value
@@ -940,18 +946,25 @@ fn cancellation_fees(
 /// authorization to nothing at the cost of gas. Gas is estimated rather than
 /// hardcoded because a wallet with an active EIP-7702 delegation executes its
 /// implementation's code even on a plain self-send.
-pub async fn sign_cancellation<K: KeyStore + ?Sized>(
+pub(crate) async fn sign_cancellation<K: KeyStore + ?Sized>(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     original_serialized_transaction: &str,
     newest_cancellation: Option<&str>,
     keys: &K,
-) -> Result<SignedExecution> {
-    let original = decode_envelope(&decode_serialized(original_serialized_transaction)?)?;
+) -> Result<CancellationPreparation> {
+    let original_bytes = decode_serialized(original_serialized_transaction)?;
+    let original = decode_envelope(&original_bytes)?;
     let nonce = original.nonce();
-    let mut incumbents = Vec::with_capacity(2);
-    for serialized in std::iter::once(original_serialized_transaction).chain(newest_cancellation) {
-        let envelope = decode_envelope(&decode_serialized(serialized)?)?;
+    let mut original_fees = None;
+    let mut incumbent_fees = None;
+    let mut newest_signed = None;
+    for (index, serialized) in std::iter::once(original_serialized_transaction)
+        .chain(newest_cancellation)
+        .enumerate()
+    {
+        let bytes = decode_serialized(serialized)?;
+        let envelope = decode_envelope(&bytes)?;
         ensure!(
             envelope
                 .recover_signer()
@@ -967,10 +980,35 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
             envelope.nonce() == nonce,
             "cancellation envelopes disagree on the nonce"
         );
-        incumbents.push((
+        let fees = (
             envelope.max_fee_per_gas(),
             envelope.max_priority_fee_per_gas().unwrap_or(0),
-        ));
+        );
+        if index == 0 {
+            original_fees = Some(fees);
+        } else {
+            newest_signed = Some(SignedExecution {
+                digest: String::new(),
+                serialized_transaction: serialized.to_owned(),
+                transaction_hash: format!("{:#x}", keccak256(&bytes)),
+            });
+        }
+        incumbent_fees = Some(fees);
+    }
+    let original_fees = original_fees.expect("the original envelope is always visited");
+    let incumbent_fees = incumbent_fees.expect("the original envelope is always visited");
+    let configured_cap = network
+        .max_fee_per_gas
+        .as_deref()
+        .map(str::parse::<u128>)
+        .transpose()
+        .context("configured maximum fee per gas does not fit uint128")?;
+    if cancellation_fees(original_fees, incumbent_fees, 0, 0, configured_cap).is_none() {
+        return newest_signed
+            .map(CancellationPreparation::Rebroadcast)
+            .context(
+                "the replacement fee floor is above the original transaction's cancellation fee cap or the configured max_fee_per_gas; no bounded cancellation exists",
+            );
     }
 
     let planned = crate::simulation::PlannedCall {
@@ -1037,10 +1075,13 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
     })
     .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
-        &incumbents,
+        original_fees,
+        incumbent_fees,
         market.max_fee_per_gas,
         market.max_priority_fee_per_gas,
-    )?;
+        configured_cap,
+    )
+    .expect("the replacement floor was checked against the same immutable cap before RPC");
 
     // All RPC preparation completed before this function loads key material.
     let local_signer = load_matching_signer(keys, wallet)?;
@@ -1054,6 +1095,7 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
         &planned,
         false,
     )
+    .map(CancellationPreparation::New)
 }
 
 pub async fn broadcast_signed_execution(
@@ -1069,12 +1111,27 @@ pub async fn broadcast_signed_execution(
 /// Validate that exact signed bytes are a well-formed cancellation for this
 /// wallet — a 0-value self-send with empty calldata and no authorization
 /// list — then broadcast them. Cancellations have no execution plan to
-/// validate against, so the shape check here is the whole admission rule.
-pub async fn broadcast_signed_cancellation(
+/// validate against, so the original envelope and the live network ceilings
+/// supply the loss bounds that accompany the shape check.
+pub(crate) async fn broadcast_signed_cancellation(
     signed: &SignedExecution,
     wallet: &WalletMetadata,
     network: &NetworkConfig,
+    original_serialized_transaction: &str,
 ) -> Result<BroadcastResult> {
+    validate_signed_cancellation(signed, wallet, network, original_serialized_transaction)?;
+    send_exact_bytes(signed, network).await
+}
+
+/// Revalidate a cancellation against the live security-sensitive network
+/// ceilings immediately before every broadcast, including exact-byte retries
+/// created under an older configuration.
+fn validate_signed_cancellation(
+    signed: &SignedExecution,
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    original_serialized_transaction: &str,
+) -> Result<()> {
     let expected_hash =
         B256::from_str(&signed.transaction_hash).context("signed transaction hash is invalid")?;
     let bytes = decode_serialized(&signed.serialized_transaction)?;
@@ -1104,7 +1161,47 @@ pub async fn broadcast_signed_cancellation(
             && envelope.input().is_empty(),
         "cancellation must be a 0-value self-send with empty calldata"
     );
-    send_exact_bytes(signed, network).await
+    let original = decode_envelope(&decode_serialized(original_serialized_transaction)?)?;
+    ensure!(
+        original
+            .recover_signer()
+            .context("failed to recover original transaction sender")?
+            == wallet.address,
+        "original transaction sender does not match wallet"
+    );
+    ensure!(
+        original.chain_id() == Some(network.chain_id),
+        "original transaction chain does not match configured network"
+    );
+    ensure!(
+        envelope.nonce() == original.nonce(),
+        "cancellation nonce does not match original transaction"
+    );
+    let immutable_cap = original
+        .max_fee_per_gas()
+        .saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER);
+    ensure!(
+        envelope.max_fee_per_gas() <= immutable_cap,
+        "cancellation exceeds the original transaction's fee bound"
+    );
+    if let Some(maximum) = network.max_gas_limit.as_deref() {
+        ensure!(
+            envelope.gas_limit() <= maximum.parse::<u64>()?,
+            "cancellation exceeds configured maximum gas limit"
+        );
+    }
+    if let Some(maximum) = network.max_fee_per_gas.as_deref() {
+        ensure!(
+            envelope.max_fee_per_gas() <= maximum.parse::<u128>()?,
+            "cancellation exceeds configured maximum fee per gas"
+        );
+    }
+    ensure!(
+        envelope.gas_limit() >= INTRINSIC_TRANSACTION_GAS,
+        "cancellation carries {} gas, below the {INTRINSIC_TRANSACTION_GAS} every transaction costs before it does anything",
+        envelope.gas_limit()
+    );
+    Ok(())
 }
 
 /// Submit already-signed bytes, trying each configured endpoint until one
