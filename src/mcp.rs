@@ -3106,7 +3106,7 @@ impl ServerHandler for WalletMcpServer {
     /// Hand-written so every tool call passes the legal-acceptance gate. The
     /// privacy policy governs RPC requests and agent data exposure, so even
     /// read-only tools stay disabled until acceptance; only `wallet_get_legal`
-    /// is exempt so the documents and status remain readable.
+    /// and `wallet_check_for_updates` are exempt.
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,

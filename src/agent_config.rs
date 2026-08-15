@@ -41,6 +41,12 @@ fn installed_bridge_path() -> Result<PathBuf> {
 /// Atomically install the versioned helper in the wallet's private per-user
 /// directory. Release builds use the helper shipped beside the wallet
 /// executable; debug builds may use the workspace build-tree binary.
+///
+/// Harnesses execute this copy, never the binary inside the installed
+/// application. A long-lived bridge therefore holds no executable or file
+/// handle in the app bundle while the updater swaps that bundle. The versioned
+/// destination also means a Windows bridge can keep its own image open without
+/// blocking installation of the next release's differently named helper.
 pub fn install_bridge_helper() -> Result<PathBuf> {
     let installed = installed_bridge_path()?;
     let executable = std::env::current_exe().context("could not locate the wallet executable")?;

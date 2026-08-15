@@ -259,6 +259,8 @@ fn policy_tool_reads_encrypted_policy_revision() {
 #[test]
 fn advertised_version_matches_crate() {
     assert_eq!(crate::VERSION, env!("CARGO_PKG_VERSION"));
+    let (_directory, server) = server();
+    assert_eq!(server.get_info().server_info.version, crate::BUILD_VERSION);
 }
 
 #[test]

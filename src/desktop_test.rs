@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn window_title_uses_the_exact_compiled_build_version() {
+    assert_eq!(
+        wallet_window_title(),
+        format!("Ekubo Wallet {}", env!("EKUBO_WALLET_BUILD_VERSION"))
+    );
+}
+
+#[test]
 fn shutdown_timeout_is_created_inside_the_tokio_runtime() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

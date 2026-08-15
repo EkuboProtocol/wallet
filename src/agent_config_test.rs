@@ -4,6 +4,16 @@ use serde_json::json;
 const HELPER: &str = "/private/ekubo-wallet-mcp-bridge-1.1.1";
 
 #[test]
+fn bridge_helper_is_versioned_outside_the_application_bundle() {
+    let data_dir = ekubo_wallet_core::config::default_data_dir().unwrap();
+    let helper = installed_bridge_path().unwrap();
+    assert_eq!(helper.parent(), Some(data_dir.join("helpers").as_path()));
+    let filename = helper.file_name().unwrap().to_string_lossy();
+    assert!(filename.starts_with("ekubo-wallet-mcp-bridge-"));
+    assert!(filename.contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn codex_uses_exact_stdio_shape_and_removes_http_oauth_credentials() {
     let before = r#"
 [unrelated]

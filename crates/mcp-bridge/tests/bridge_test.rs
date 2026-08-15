@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
+
 fn send(stdin: &mut std::process::ChildStdin, value: &Value) {
     serde_json::to_writer(&mut *stdin, &value).unwrap();
     stdin.write_all(b"\n").unwrap();
@@ -37,6 +39,10 @@ fn initializes_and_stays_useful_before_wallet_startup() {
     );
     let initialized = receive(&mut stdout);
     assert_eq!(initialized["id"], 1);
+    assert_eq!(
+        initialized["result"]["serverInfo"]["version"],
+        BUILD_VERSION
+    );
     assert_eq!(
         initialized["result"]["capabilities"]["tools"]["listChanged"],
         true
@@ -167,11 +173,12 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     fn handshake(stream: UnixStream, catalog: &Value) -> (BufReader<UnixStream>, UnixStream) {
         let mut writer = stream.try_clone().unwrap();
         let mut reader = BufReader::new(stream);
-        assert_eq!(read(&mut reader)["client"], "codex");
+        let hello = read(&mut reader);
+        assert_eq!(hello["client"], "codex");
         let initialize = read(&mut reader);
         write(
             &mut writer,
-            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fake-wallet","version":"1"}}}),
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fake-wallet","version":BUILD_VERSION}}}),
         );
         assert_eq!(read(&mut reader)["method"], "notifications/initialized");
         let list = read(&mut reader);
@@ -300,6 +307,96 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     assert_eq!(resumed_b["result"]["content"][0]["text"], "second");
     assert_eq!(resumed_a["id"], "resumed-a");
     assert_eq!(resumed_a["result"]["content"][0]["text"], "first");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    wallet.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn standard_server_version_mismatch_blocks_upstream_messages() {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt as _,
+        os::unix::net::{UnixListener, UnixStream},
+        thread,
+    };
+
+    fn read(stream: &mut BufReader<UnixStream>) -> Value {
+        let mut line = String::new();
+        stream.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    fn write(stream: &mut UnixStream, value: &Value) {
+        serde_json::to_writer(&mut *stream, value).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(home.path().join("mcp.sock")).unwrap();
+    let wallet = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let hello = read(&mut reader);
+        assert_eq!(hello["client"], "codex");
+        let initialize = read(&mut reader);
+        write(
+            &mut writer,
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "serverInfo":{"name":"newer-wallet","version":"999.0.0"}
+            }}),
+        );
+        // Return immediately: after reading the standard serverInfo.version,
+        // the bridge must not forward initialized, tools/list, or tool calls.
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        .args(["--client", "codex"])
+        .env("EKUBO_WALLET_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+    );
+    assert_eq!(receive(&mut stdout)["id"], 1);
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    assert_eq!(
+        receive(&mut stdout)["method"],
+        "notifications/tools/list_changed"
+    );
+
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    );
+    let tools = receive(&mut stdout);
+    assert!(tools["result"]["tools"].as_array().unwrap().is_empty());
+
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wallet_list","arguments":{}}}),
+    );
+    let rejected = receive(&mut stdout);
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Start a new agent session")
+    );
+
     drop(stdin);
     assert!(child.wait().unwrap().success());
     wallet.join().unwrap();

@@ -6,11 +6,52 @@ use directories::BaseDirs;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::path::PathBuf;
-use std::{collections::BTreeSet, env, time::Duration};
+use std::{collections::BTreeSet, env, fmt, time::Duration};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
 const OFFLINE_CODE: i64 = -32_001;
+const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
+
+#[derive(Clone, Debug)]
+struct VersionMismatch {
+    wallet_version: String,
+}
+
+impl VersionMismatch {
+    fn message(&self) -> String {
+        format!(
+            "Ekubo Wallet {} is running, but this agent session is using MCP bridge {BUILD_VERSION}. Start a new agent session so the harness launches the matching bridge.",
+            self.wallet_version
+        )
+    }
+}
+
+impl fmt::Display for VersionMismatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
+
+fn safe_reported_version(version: Option<&Value>) -> String {
+    version
+        .and_then(Value::as_str)
+        .filter(|version| {
+            !version.is_empty()
+                && version.len() <= 64
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+        })
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn reported_wallet_version(initialize_response: &Value) -> String {
+    safe_reported_version(initialize_response.pointer("/result/serverInfo/version"))
+}
 
 #[derive(Clone, Copy)]
 enum ClientKind {
@@ -240,7 +281,7 @@ async fn run() -> Result<()> {
     emit(&mut stdout, &response(&initialize_id, &json!({
         "protocolVersion": protocol,
         "capabilities": {"tools":{"listChanged":true}},
-        "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":env!("CARGO_PKG_VERSION")},
+        "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":BUILD_VERSION},
         "instructions":"Ekubo Wallet tools appear automatically whenever the wallet application is running."
     }))).await?;
 
@@ -249,6 +290,7 @@ async fn run() -> Result<()> {
     let mut last_tools = json!({"tools":[]});
     let mut in_flight = BTreeSet::<String>::new();
     let mut catalog_refresh_pending = false;
+    let mut version_mismatch: Option<VersionMismatch> = None;
     let mut backoff = Duration::from_millis(250);
 
     loop {
@@ -262,10 +304,14 @@ async fn run() -> Result<()> {
                         write.write_all(&initialize_frame).await?;
                         let initialize_response = read_frame(&mut read)
                             .await?
-                            .context("wallet closed during initialization")?;
+                            .context("wallet closed during MCP initialization")?;
                         let initialize_response: Value = serde_json::from_slice(&initialize_response)
                             .context("invalid wallet initialize response")?;
                         ensure!(initialize_response.get("result").is_some(), "wallet rejected MCP initialization");
+                        let wallet_version = reported_wallet_version(&initialize_response);
+                        if wallet_version != BUILD_VERSION {
+                            return Err(VersionMismatch { wallet_version }.into());
+                        }
                         if let Some(frame) = &initialized {
                             write.write_all(frame).await?;
                         }
@@ -280,18 +326,36 @@ async fn run() -> Result<()> {
                         Ok((read, write, refreshed))
                     }
                     .await;
-            if let Ok((read, write, refreshed)) = connected {
-                if refreshed != last_tools {
-                    last_tools = refreshed;
-                    emit(
-                        &mut stdout,
-                        br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
-                    )
-                    .await?;
+            match connected {
+                Ok((read, write, refreshed)) => {
+                    if refreshed != last_tools {
+                        last_tools = refreshed;
+                        emit(
+                            &mut stdout,
+                            br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+                        )
+                        .await?;
+                    }
+                    upstream = Some((read, write));
+                    catalog_refresh_pending = false;
+                    version_mismatch = None;
+                    backoff = Duration::from_millis(250);
                 }
-                upstream = Some((read, write));
-                catalog_refresh_pending = false;
-                backoff = Duration::from_millis(250);
+                Err(error) => {
+                    if let Some(mismatch) = error.downcast_ref::<VersionMismatch>() {
+                        let mismatch = mismatch.clone();
+                        let no_tools = json!({"tools":[]});
+                        if version_mismatch.is_none() || no_tools != last_tools {
+                            last_tools = no_tools;
+                            emit(
+                                &mut stdout,
+                                br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+                            )
+                            .await?;
+                        }
+                        version_mismatch = Some(mismatch);
+                    }
+                }
             }
             // The offline branch below waits for either harness input or
             // the backoff when this connection attempt fails, so requests
@@ -375,7 +439,11 @@ async fn run() -> Result<()> {
                 }
                 Some("tools/call") => {
                     if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &error(&id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
+                        if let Some(mismatch) = version_mismatch.as_ref() {
+                            emit(&mut stdout, &error(&id, &mismatch.message())).await?;
+                        } else {
+                            emit(&mut stdout, &error(&id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
+                        }
                     }
                 }
                 _ => {
