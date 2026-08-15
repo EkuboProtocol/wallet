@@ -38,12 +38,13 @@ use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
-    AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity, FocusHandle,
-    HitboxBehavior, Interactivity, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    PathBuilder, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions,
-    canvas, div, fill, img, point, prelude::*, px, size, uniform_list,
+    Anchor, AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity,
+    FocusHandle, HitboxBehavior, Interactivity, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, PathBuilder, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
+    WindowOptions, actions, anchored, canvas, deferred, div, fill, img, point, prelude::*, px,
+    size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -66,7 +67,7 @@ use gpui_component::{
 };
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
@@ -74,7 +75,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -116,106 +117,214 @@ fn next_overflow_indicator_offset(
     (current - viewport_height * 0.72).max(-maximum)
 }
 
+fn overflow_indicator_opacity(hovered: bool, elapsed: Duration) -> f32 {
+    if hovered {
+        return 1.0;
+    }
+    let seconds = elapsed.as_secs_f32();
+    let pulse = ((seconds / 1.4) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+    0.70 + pulse * 0.20
+}
+
 /// A bottom-edge affordance that exists only while more vertical content is
 /// below the viewport. It paints directly from the live scroll handle, so it
 /// neither contributes layout space nor needs a persistent scrollbar track.
-fn scroll_overflow_indicator<H>(scroll_handle: &H, accent: gpui::Hsla) -> impl IntoElement
-where
-    H: ScrollbarHandle + Clone,
-{
-    let prepaint_handle = scroll_handle.clone();
-    let paint_handle = scroll_handle.clone();
-    canvas(
-        move |bounds, window, _| {
-            let remaining = (prepaint_handle.content_size().height - bounds.size.height)
-                + prepaint_handle.offset().y;
-            if remaining <= px(1.0) {
-                return None;
-            }
-            let hitbox_size = size(px(80.0), px(36.0));
-            let hitbox_bounds = gpui::Bounds::new(
-                point(
-                    bounds.origin.x + (bounds.size.width - hitbox_size.width) / 2.0,
-                    bounds.origin.y + bounds.size.height - hitbox_size.height - px(6.0),
-                ),
-                hitbox_size,
-            );
-            Some((
-                window.insert_hitbox(hitbox_bounds, HitboxBehavior::Normal),
-                bounds.size.height,
-            ))
-        },
-        move |_bounds, indicator, window, _cx| {
-            let Some((hitbox, viewport_height)) = indicator else {
-                return;
-            };
-            let hovered = hitbox.is_hovered(window);
-            let opacity = if hovered { 0.90 } else { 0.70 };
-            window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
-            window.paint_quad(
-                fill(hitbox.bounds, accent.opacity(opacity * 0.28)).corner_radii(px(18.0)),
-            );
+#[derive(Clone)]
+enum OverflowScrollHandle {
+    Continuous(ScrollHandle),
+    Uniform(UniformListScrollHandle),
+}
 
-            let center_x = hitbox.origin.x + hitbox.size.width / 2.0;
-            let center_y = hitbox.origin.y + hitbox.size.height / 2.0;
-            let mut chevron = PathBuilder::stroke(px(2.5));
-            chevron.move_to(point(center_x - px(13.0), center_y - px(5.0)));
-            chevron.line_to(point(center_x, center_y + px(5.0)));
-            chevron.line_to(point(center_x + px(13.0), center_y - px(5.0)));
-            if let Ok(path) = chevron.build() {
-                window.paint_path(path, accent.opacity(opacity));
-            }
+impl ScrollbarHandle for OverflowScrollHandle {
+    fn offset(&self) -> gpui::Point<gpui::Pixels> {
+        match self {
+            Self::Continuous(handle) => handle.offset(),
+            Self::Uniform(handle) => handle.offset(),
+        }
+    }
 
-            let view_id = window.current_view();
-            window.on_mouse_event({
-                let hitbox = hitbox.clone();
-                move |_: &MouseMoveEvent, phase, window, cx| {
-                    if phase.bubble() && hitbox.is_hovered(window) != hovered {
-                        // This listener is rebuilt after the transition, so it
-                        // repaints exactly once on pointer entry and exit.
-                        cx.notify(view_id);
-                    }
+    fn set_offset(&self, offset: gpui::Point<gpui::Pixels>) {
+        match self {
+            Self::Continuous(handle) => handle.set_offset(offset),
+            Self::Uniform(handle) => handle.set_offset(offset),
+        }
+    }
+
+    fn content_size(&self) -> gpui::Size<gpui::Pixels> {
+        match self {
+            Self::Continuous(handle) => handle.content_size(),
+            Self::Uniform(handle) => handle.content_size(),
+        }
+    }
+}
+
+impl From<ScrollHandle> for OverflowScrollHandle {
+    fn from(handle: ScrollHandle) -> Self {
+        Self::Continuous(handle)
+    }
+}
+
+impl From<UniformListScrollHandle> for OverflowScrollHandle {
+    fn from(handle: UniformListScrollHandle) -> Self {
+        Self::Uniform(handle)
+    }
+}
+
+struct ScrollOverflowIndicatorView {
+    scroll_handle: Rc<RefCell<OverflowScrollHandle>>,
+    animation_started_at: Instant,
+    animation_frame_pending: Rc<Cell<bool>>,
+}
+
+impl Render for ScrollOverflowIndicatorView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let prepaint_handle = self.scroll_handle.clone();
+        let paint_handle = self.scroll_handle.clone();
+        let animation_started_at = self.animation_started_at;
+        let animation_frame_pending = self.animation_frame_pending.clone();
+        let accent = cx.theme().primary;
+        canvas(
+            move |bounds, window, _| {
+                let handle = prepaint_handle.borrow();
+                let remaining =
+                    (handle.content_size().height - bounds.size.height) + handle.offset().y;
+                if remaining <= px(1.0) {
+                    return None;
                 }
-            });
-            window.on_mouse_event({
-                let hitbox = hitbox.clone();
-                let scroll_handle = paint_handle.clone();
-                move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.bubble()
-                        || event.button != MouseButton::Left
-                        || !hitbox.is_hovered(window)
-                    {
-                        return;
-                    }
-                    let max = (scroll_handle.content_size().height - viewport_height).max(px(0.0));
-                    let offset = scroll_handle.offset();
-                    let target_y = next_overflow_indicator_offset(offset.y, max, viewport_height);
-                    let animated_handle = scroll_handle.clone();
+                let hitbox_size = size(px(80.0), px(36.0));
+                let hitbox_bounds = gpui::Bounds::new(
+                    point(
+                        bounds.origin.x + (bounds.size.width - hitbox_size.width) / 2.0,
+                        bounds.origin.y + bounds.size.height - hitbox_size.height - px(6.0),
+                    ),
+                    hitbox_size,
+                );
+                Some((
+                    window.insert_hitbox(hitbox_bounds, HitboxBehavior::Normal),
+                    bounds.size.height,
+                ))
+            },
+            move |_bounds, indicator, window, cx| {
+                let Some((hitbox, viewport_height)) = indicator else {
+                    return;
+                };
+                let hovered = hitbox.is_hovered(window);
+                let opacity = overflow_indicator_opacity(hovered, animation_started_at.elapsed());
+                let view_id = window.current_view();
+                if !hovered && !animation_frame_pending.replace(true) {
+                    let animation_frame_pending = animation_frame_pending.clone();
                     window
                         .spawn(cx, async move |cx| {
-                            const FRAMES: u16 = 20;
-                            for frame in 1..=FRAMES {
-                                cx.background_executor()
-                                    .timer(Duration::from_millis(8))
-                                    .await;
-                                let progress = f32::from(frame) / f32::from(FRAMES);
-                                let eased = 1.0 - (1.0 - progress).powi(3);
-                                let y = offset.y + (target_y - offset.y) * eased;
-                                let frame_handle = animated_handle.clone();
-                                let _ = cx.update(move |_, cx| {
-                                    frame_handle.set_offset(point(offset.x, y));
-                                    cx.notify(view_id);
-                                });
-                            }
+                            // A slow opacity breath does not need to consume
+                            // every display refresh. Interactive scrolling can
+                            // still redraw at 120 Hz while this decorative
+                            // pulse contributes at most about 30 frames/sec.
+                            cx.background_executor()
+                                .timer(Duration::from_millis(33))
+                                .await;
+                            animation_frame_pending.set(false);
+                            let _ = cx.update(move |_, cx| cx.notify(view_id));
                         })
                         .detach();
-                    cx.stop_propagation();
                 }
-            });
-        },
-    )
-    .absolute()
-    .inset_0()
+                window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+                window.paint_quad(
+                    fill(hitbox.bounds, accent.opacity(opacity * 0.28)).corner_radii(px(18.0)),
+                );
+
+                let center_x = hitbox.origin.x + hitbox.size.width / 2.0;
+                let center_y = hitbox.origin.y + hitbox.size.height / 2.0;
+                let mut chevron = PathBuilder::stroke(px(2.5));
+                chevron.move_to(point(center_x - px(13.0), center_y - px(5.0)));
+                chevron.line_to(point(center_x, center_y + px(5.0)));
+                chevron.line_to(point(center_x + px(13.0), center_y - px(5.0)));
+                if let Ok(path) = chevron.build() {
+                    window.paint_path(path, accent.opacity(opacity));
+                }
+
+                window.on_mouse_event({
+                    let hitbox = hitbox.clone();
+                    move |_: &MouseMoveEvent, phase, window, cx| {
+                        if phase.bubble() && hitbox.is_hovered(window) != hovered {
+                            cx.notify(view_id);
+                        }
+                    }
+                });
+                window.on_mouse_event({
+                    let hitbox = hitbox.clone();
+                    let scroll_handle = paint_handle.clone();
+                    move |event: &MouseDownEvent, phase, window, cx| {
+                        if !phase.bubble()
+                            || event.button != MouseButton::Left
+                            || !hitbox.is_hovered(window)
+                        {
+                            return;
+                        }
+                        let scroll_handle = scroll_handle.borrow().clone();
+                        let max =
+                            (scroll_handle.content_size().height - viewport_height).max(px(0.0));
+                        let offset = scroll_handle.offset();
+                        let target_y =
+                            next_overflow_indicator_offset(offset.y, max, viewport_height);
+                        let animated_handle = scroll_handle.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                const FRAMES: u16 = 20;
+                                for frame in 1..=FRAMES {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(8))
+                                        .await;
+                                    let progress = f32::from(frame) / f32::from(FRAMES);
+                                    let eased = 1.0 - (1.0 - progress).powi(3);
+                                    let y = offset.y + (target_y - offset.y) * eased;
+                                    let frame_handle = animated_handle.clone();
+                                    let _ = cx.update(move |_, cx| {
+                                        frame_handle.set_offset(point(offset.x, y));
+                                        cx.notify(view_id);
+                                    });
+                                }
+                            })
+                            .detach();
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+}
+
+struct ScrollOverflowIndicator {
+    scroll_handle: Rc<RefCell<OverflowScrollHandle>>,
+    view: Entity<ScrollOverflowIndicatorView>,
+}
+
+impl ScrollOverflowIndicator {
+    fn new(
+        scroll_handle: impl Into<OverflowScrollHandle>,
+        cx: &mut App,
+    ) -> ScrollOverflowIndicator {
+        let scroll_handle = Rc::new(RefCell::new(scroll_handle.into()));
+        let view_handle = scroll_handle.clone();
+        let view = cx.new(|_| ScrollOverflowIndicatorView {
+            scroll_handle: view_handle,
+            animation_started_at: Instant::now(),
+            animation_frame_pending: Rc::new(Cell::new(false)),
+        });
+        Self {
+            scroll_handle,
+            view,
+        }
+    }
+
+    fn set_scroll_handle(&self, scroll_handle: impl Into<OverflowScrollHandle>) {
+        *self.scroll_handle.borrow_mut() = scroll_handle.into();
+    }
+
+    fn element(&self) -> AnyView {
+        self.view.clone().into()
+    }
 }
 
 /// A conventional bordered section with its heading inside the content flow.
@@ -1498,6 +1607,7 @@ pub struct WalletWindow {
     appearance_subscription: Option<Subscription>,
     review_presenter: GuiReviewPresenter,
     route: Route,
+    sidebar_hovered_route: Option<Route>,
     command_palette: bool,
     command_palette_list: Option<Entity<ListState<RouteListDelegate>>>,
     command_palette_subscription: Option<Subscription>,
@@ -1574,6 +1684,7 @@ pub struct WalletWindow {
     portfolio_generation: u64,
     portfolio_account_index: usize,
     route_scroll_handle: ScrollHandle,
+    route_overflow_indicator: ScrollOverflowIndicator,
     policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
@@ -1582,6 +1693,7 @@ pub struct WalletWindow {
     walletconnect_uri_input: Option<Entity<InputState>>,
     network_editor_open: bool,
     network_editor_scroll_handle: ScrollHandle,
+    network_editor_overflow_indicator: ScrollOverflowIndicator,
     network_editor_original: Option<NetworkConfig>,
     network_editor_disabled: bool,
     network_editor_testnet: bool,
@@ -1607,6 +1719,11 @@ pub struct WalletWindow {
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
     network_proposal_error: Option<SharedString>,
+    review_overflow_indicator: ScrollOverflowIndicator,
+    legal_overflow_indicator: ScrollOverflowIndicator,
+    activity_detail_scroll_handle: ScrollHandle,
+    activity_detail_overflow_indicator: ScrollOverflowIndicator,
+    activity_detail_record: Cell<Option<uuid::Uuid>>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
     policy_installing: bool,
@@ -3886,6 +4003,17 @@ impl WalletWindow {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
         let testnet_mode = owner.testnet_mode().unwrap_or(false);
         let route_scroll_handle = ScrollHandle::new();
+        let route_overflow_indicator =
+            ScrollOverflowIndicator::new(route_scroll_handle.clone(), cx);
+        let network_editor_scroll_handle = ScrollHandle::new();
+        let network_editor_overflow_indicator =
+            ScrollOverflowIndicator::new(network_editor_scroll_handle.clone(), cx);
+        let review_overflow_indicator = ScrollOverflowIndicator::new(ScrollHandle::new(), cx);
+        let legal_overflow_indicator =
+            ScrollOverflowIndicator::new(UniformListScrollHandle::new(), cx);
+        let activity_detail_scroll_handle = ScrollHandle::new();
+        let activity_detail_overflow_indicator =
+            ScrollOverflowIndicator::new(activity_detail_scroll_handle.clone(), cx);
         let sidebar_logo_light =
             render_embedded_png(include_bytes!("../assets/tray/light_mode_tray_icon.png"))
                 .expect("embedded light tray icon must be valid");
@@ -3905,6 +4033,7 @@ impl WalletWindow {
             appearance_subscription: None,
             review_presenter,
             route: Route::DEFAULT,
+            sidebar_hovered_route: None,
             command_palette: false,
             command_palette_list: None,
             command_palette_subscription: None,
@@ -3969,13 +4098,15 @@ impl WalletWindow {
             portfolio_account_index: 0,
             policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             route_scroll_handle,
+            route_overflow_indicator,
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_sessions: Vec::new(),
             walletconnect_presenter,
             walletconnect_uri_input: None,
             network_editor_open: false,
-            network_editor_scroll_handle: ScrollHandle::new(),
+            network_editor_scroll_handle,
+            network_editor_overflow_indicator,
             network_editor_original: None,
             network_editor_disabled: false,
             network_editor_testnet: false,
@@ -3998,6 +4129,11 @@ impl WalletWindow {
             network_action_busy: BTreeSet::new(),
             network_action_errors: BTreeMap::new(),
             network_proposal_error: None,
+            review_overflow_indicator,
+            legal_overflow_indicator,
+            activity_detail_scroll_handle,
+            activity_detail_overflow_indicator,
+            activity_detail_record: Cell::new(None),
             policy_json_input: None,
             policy_editor: None,
             policy_installing: false,
@@ -6197,6 +6333,8 @@ impl WalletWindow {
         }
         self.network_editor_open = true;
         self.network_editor_scroll_handle = ScrollHandle::new();
+        self.network_editor_overflow_indicator
+            .set_scroll_handle(self.network_editor_scroll_handle.clone());
         self.network_editor_original = None;
         self.network_editor_disabled = false;
         self.network_editor_testnet = false;
@@ -6254,7 +6392,7 @@ impl WalletWindow {
                 // form scrolls within it.
                 let dialog_height = (viewport.height - vertical_inset * 2.0).max(px(120.0));
                 let form_height = (dialog_height - px(180.0)).max(px(100.0));
-                let (busy, editing, form, footer, scroll_handle) = {
+                let (busy, editing, form, footer, scroll_handle, overflow_indicator) = {
                     let wallet = entity.read(cx);
                     (
                         wallet.network_editor_busy,
@@ -6262,6 +6400,7 @@ impl WalletWindow {
                         wallet.render_network_editor_form(&view, cx),
                         wallet.render_network_editor_footer(&view),
                         wallet.network_editor_scroll_handle.clone(),
+                        wallet.network_editor_overflow_indicator.element(),
                     )
                 };
                 let on_close_view = view.clone();
@@ -6310,10 +6449,7 @@ impl WalletWindow {
                                     .overflow_y_scroll()
                                     .child(form),
                             )
-                            .child(scroll_overflow_indicator(
-                                &scroll_handle,
-                                cx.theme().primary,
-                            )),
+                            .child(overflow_indicator),
                     )
                     .footer(footer)
             });
@@ -6429,6 +6565,8 @@ impl WalletWindow {
         );
         self.network_editor_open = true;
         self.network_editor_scroll_handle = ScrollHandle::new();
+        self.network_editor_overflow_indicator
+            .set_scroll_handle(self.network_editor_scroll_handle.clone());
         self.network_editor_original = Some(network.clone());
         self.network_editor_disabled = network.disabled;
         self.network_editor_testnet = network.testnet;
@@ -7986,6 +8124,10 @@ impl WalletWindow {
             // waiting in it.
             let waiting = (route == Route::Activity && pending_reviews > 0)
                 .then(|| format!("{} waiting", pluralize(pending_reviews, "request")));
+            let tooltip = match &waiting {
+                Some(waiting) => format!("{} — {waiting}  {}", route.label(), route.shortcut()),
+                None => format!("{}  {}", route.label(), route.shortcut()),
+            };
             let button = app_button(SharedString::from(format!(
                 "sidebar-route-{}",
                 route.label()
@@ -7996,10 +8138,6 @@ impl WalletWindow {
             .selected(route == self.route)
             .toggled(route == self.route)
             .disabled(self.legal_gate || self.network_editor_open)
-            .tooltip(match &waiting {
-                Some(waiting) => format!("{} — {waiting}  {}", route.label(), route.shortcut()),
-                None => format!("{}  {}", route.label(), route.shortcut()),
-            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
             }))
@@ -8011,48 +8149,82 @@ impl WalletWindow {
                     None => route.label().to_owned(),
                 },
             );
-            if route == Route::Activity {
-                let count = if pending_reviews > 99 {
-                    "99+".to_owned()
-                } else {
-                    pending_reviews.to_string()
-                };
-                let badge_width = if pending_reviews > 99 {
-                    px(30.0)
-                } else {
-                    px(22.0)
-                };
-                menu = menu.child(
-                    div()
-                        .id("inbox-sidebar-button")
-                        .relative()
-                        .child(button)
-                        .when(pending_reviews > 0, |badge| {
-                            badge.child(
-                                div()
-                                    .id("inbox-review-badge")
-                                    .absolute()
-                                    .bottom(px(-3.0))
-                                    .right(px(-4.0))
-                                    .w(badge_width)
-                                    .h(px(22.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .border_2()
-                                    .border_color(cx.theme().sidebar)
-                                    .bg(inbox_badge_color)
-                                    .text_color(gpui_component::white())
-                                    .text_xs()
-                                    .font_semibold()
-                                    .child(count),
-                            )
-                        }),
-                );
+            let count = if pending_reviews > 99 {
+                "99+".to_owned()
             } else {
-                menu = menu.child(button);
-            }
+                pending_reviews.to_string()
+            };
+            let badge_width = if pending_reviews > 99 {
+                px(30.0)
+            } else {
+                px(22.0)
+            };
+            let show_tooltip = self.sidebar_hovered_route == Some(route);
+            menu = menu.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "sidebar-route-wrapper-{}",
+                        route.label()
+                    )))
+                    .relative()
+                    .on_hover(cx.listener(move |view, hovered, _, cx| {
+                        if *hovered {
+                            view.sidebar_hovered_route = Some(route);
+                        } else if view.sidebar_hovered_route == Some(route) {
+                            view.sidebar_hovered_route = None;
+                        }
+                        cx.notify();
+                    }))
+                    .child(button)
+                    .when(route == Route::Activity && pending_reviews > 0, |badge| {
+                        badge.child(
+                            div()
+                                .id("inbox-review-badge")
+                                .absolute()
+                                .bottom(px(-3.0))
+                                .right(px(-4.0))
+                                .w(badge_width)
+                                .h(px(22.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .border_2()
+                                .border_color(cx.theme().sidebar)
+                                .bg(inbox_badge_color)
+                                .text_color(gpui_component::white())
+                                .text_xs()
+                                .font_semibold()
+                                .child(count),
+                        )
+                    })
+                    .when(show_tooltip, |wrapper| {
+                        wrapper.child(
+                            deferred(
+                                anchored()
+                                    .anchor(Anchor::TopLeft)
+                                    .snap_to_window_with_margin(px(8.0))
+                                    .offset(point(NAVIGATION_BUTTON_SIZE + px(10.0), px(5.0)))
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded(cx.theme().radius)
+                                            .border_1()
+                                            .border_color(cx.theme().primary.opacity(0.90))
+                                            .bg(cx.theme().primary)
+                                            .text_color(cx.theme().primary_foreground)
+                                            .text_sm()
+                                            .font_medium()
+                                            .shadow_lg()
+                                            .child(tooltip),
+                                    ),
+                            )
+                            .with_priority(10),
+                        )
+                    }),
+            );
         }
         menu
     }
@@ -8801,6 +8973,11 @@ impl WalletWindow {
             // record that leaves mid-frame draws nothing rather than panicking.
             return div().into_any_element();
         };
+        if self.activity_detail_record.get() != Some(request_id) {
+            self.activity_detail_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+            self.activity_detail_record.set(Some(request_id));
+        }
         let detail = self.render_activity_detail(record, cx);
         div()
             .absolute()
@@ -8837,14 +9014,21 @@ impl WalletWindow {
                     .flex_col()
                     .child(
                         div()
-                            .id(SharedString::from(format!(
-                                "activity-detail-scroll-{request_id}"
-                            )))
+                            .relative()
                             .flex_1()
                             .min_h_0()
-                            .pr_2()
-                            .overflow_y_scroll()
-                            .child(detail),
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "activity-detail-scroll-{request_id}"
+                                    )))
+                                    .size_full()
+                                    .track_scroll(&self.activity_detail_scroll_handle)
+                                    .pr_2()
+                                    .overflow_y_scroll()
+                                    .child(detail),
+                            )
+                            .child(self.activity_detail_overflow_indicator.element()),
                     )
                     // Fixed chrome, the way the security review's decision row
                     // is: the way out of a modal must not depend on how far
@@ -12501,10 +12685,11 @@ impl WalletWindow {
                             .pr_2()
                             .child(div().w_full().flex().justify_center().child(review_body)),
                     )
-                    .child(scroll_overflow_indicator(
-                        &active.scroll_handle,
-                        cx.theme().primary,
-                    )),
+                    .child({
+                        self.review_overflow_indicator
+                            .set_scroll_handle(active.scroll_handle.clone());
+                        self.review_overflow_indicator.element()
+                    }),
             )
             .child(
                 div()
@@ -12674,10 +12859,11 @@ impl WalletWindow {
                             }))
                             .child(document),
                     )
-                    .child(scroll_overflow_indicator(
-                        &review.scroll_handle,
-                        cx.theme().primary,
-                    )),
+                    .child({
+                        self.legal_overflow_indicator
+                            .set_scroll_handle(review.scroll_handle.clone());
+                        self.legal_overflow_indicator.element()
+                    }),
             )
             .when_some(review.error.clone(), |panel, error| {
                 panel.child(
@@ -13130,10 +13316,7 @@ impl WalletWindow {
                             .overflow_y_scroll()
                             .child(scroll_content),
                     )
-                    .child(scroll_overflow_indicator(
-                        &self.route_scroll_handle,
-                        cx.theme().primary,
-                    )),
+                    .child(self.route_overflow_indicator.element()),
             )
     }
 

@@ -1337,18 +1337,51 @@ fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
 }
 
 #[test]
-fn overflow_indicator_does_not_schedule_perpetual_idle_frames() {
+fn overflow_indicator_breathes_and_reaches_full_opacity_on_hover() {
+    assert!((overflow_indicator_opacity(false, Duration::from_millis(350)) - 0.90).abs() < 0.001);
+    assert!((overflow_indicator_opacity(false, Duration::from_millis(1_050)) - 0.70).abs() < 0.001);
+    assert!((overflow_indicator_opacity(true, Duration::ZERO) - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn overflow_indicator_animation_is_isolated_in_a_child_view() {
     let source = include_str!("desktop.rs");
-    let indicator = source
-        .split_once("fn scroll_overflow_indicator")
-        .expect("overflow indicator function exists")
+    assert!(source.contains("struct ScrollOverflowIndicatorView"));
+    assert!(source.contains("impl Render for ScrollOverflowIndicatorView"));
+    assert!(!source.contains("fn scroll_overflow_indicator<"));
+    assert!(!source.contains("window.request_animation_frame()"));
+}
+
+#[test]
+fn activity_detail_scroll_uses_the_overflow_indicator() {
+    let source = include_str!("desktop.rs");
+    let detail_overlay = source
+        .split_once("fn render_activity_detail_overlay")
+        .expect("activity detail overlay exists")
         .1
-        .split_once("/// A conventional bordered section")
-        .expect("overflow indicator function has an end marker")
+        .split_once("/// A labelled key/value block")
+        .expect("activity detail overlay has an end marker")
         .0;
 
-    assert!(!indicator.contains("request_animation_frame"));
-    assert!(!indicator.contains("SystemTime::now"));
+    assert!(detail_overlay.contains("track_scroll(&self.activity_detail_scroll_handle)"));
+    assert!(detail_overlay.contains("self.activity_detail_overflow_indicator.element()"));
+}
+
+#[test]
+fn sidebar_tooltips_are_immediate_right_side_theme_elements() {
+    let source = include_str!("desktop.rs");
+    let sidebar = source
+        .split_once("fn render_sidebar")
+        .expect("sidebar renderer exists")
+        .1
+        .split_once("/// One waiting request")
+        .expect("sidebar renderer has an end marker")
+        .0;
+
+    assert!(sidebar.contains(".on_hover("));
+    assert!(sidebar.contains("NAVIGATION_BUTTON_SIZE + px(10.0)"));
+    assert!(sidebar.contains(".bg(cx.theme().primary)"));
+    assert!(!sidebar.contains(".tooltip("));
 }
 
 #[test]
