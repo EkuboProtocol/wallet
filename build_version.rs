@@ -3,7 +3,10 @@
 use std::process::Command;
 
 pub fn build_version(version: &str) -> String {
-    if git(&["describe", "--exact-match", "--tags", "HEAD"]).is_some() {
+    let release_tag = format!("v{version}");
+    if git(&["tag", "--points-at", "HEAD"])
+        .is_some_and(|tags| tags.lines().any(|tag| tag == release_tag))
+    {
         return version.to_owned();
     }
     let Some(commit) = git(&["rev-parse", "--short=7", "HEAD"]) else {

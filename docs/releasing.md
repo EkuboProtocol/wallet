@@ -4,23 +4,27 @@ The normal `main` workflow owns formatting, tests, Clippy, dependency notices,
 and target-filtered OSV-Scanner gates for both known vulnerabilities and the
 SPDX license allowlist on every shipped platform. Explicit informational
 advisory exceptions live in `osv-scanner.toml` with reasons and expiry dates.
-Release packaging is a deliberate two-stage process; neither stage executes a
-release tag.
+Release packaging is a deliberate two-stage process; neither stage executes
+code with signing credentials.
 
-First, manually run **Build unsigned release artifacts** with a release tag and
-the exact 40-character commit SHA that passed CI. Its macOS, Windows, and Linux
-jobs have only repository read permission, receive no secret or OIDC token,
-and build that SHA. Each artifact set includes a manifest binding the tag,
+First, manually run **Build unsigned release artifacts** with any branch, tag,
+or exact commit SHA. The workflow resolves that reference and computes the
+build identity itself: an exact `v<package-version>` tag produces that package
+version, while any other reference produces `<package-version>+<short-sha>`.
+Its macOS, Windows, and Linux jobs have only repository read permission,
+receive no secret or OIDC token, and build the resolved commit. Each artifact
+set includes a manifest binding the requested reference, computed version,
 commit, platform, filename, byte count, and SHA-256 digest. The embedded updater
 verification key is a public repository variable.
 
 Second, manually run **Sign and publish release** with that exact build run ID
-and tag. The protected release environment verifies the run came from the
-unsigned-build workflow, succeeded, and produced three mutually consistent
-manifests whose bytes still hash exactly. Only after that check do isolated
-trusted jobs receive Apple, Azure, or Minisign credentials. The publishing job
-creates the release at the verified commit SHA and uploads only the strict
-native-asset allowlist. No trusted job checks out or executes build-run source.
+and the existing `v<computed-version>` tag. The protected release environment
+verifies the run used the trusted workflow on `main`, succeeded, produced three
+mutually consistent manifests whose bytes still hash exactly, and resolved the
+tag to the manifested commit. Only after that check do isolated trusted jobs
+receive Apple, Azure, or Minisign credentials. The publishing job creates the
+release at the verified commit SHA and uploads only the strict native-asset
+allowlist. No trusted job checks out or executes build-run source.
 
 `cargo-packager` produces the unsigned macOS app, per-user NSIS installer,
 AppImage, and DEB on native runners. The trusted stage signs the macOS app,
@@ -31,10 +35,10 @@ before its final updater signature is created. Missing Apple, Azure, or update
 signing configuration fails the protected stage.
 
 Packaging verifies that every native package contains a runnable
-`ekubo-wallet-mcp-bridge` that initializes over stdio, reports the tagged
-version, advertises dynamic tool refresh, and returns the deterministic offline
-tool catalog. The helper itself is not an authorization boundary. The retired
-Claude Desktop plugin archive is not built or published.
+`ekubo-wallet-mcp-bridge` that initializes over stdio, reports the computed
+build version, advertises dynamic tool refresh, and returns the deterministic
+offline tool catalog. The helper itself is not an authorization boundary. The
+retired Claude Desktop plugin archive is not built or published.
 
 Before release, smoke-test a bridge launched by each supported harness (Codex,
 Claude Code, Claude Desktop, Gemini CLI, Cursor, OpenCode, and Grok Build). Start the

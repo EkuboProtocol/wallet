@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       tag:
-        description: Release tag recorded by that build, such as v1.2.3
+        description: Release tag matching the computed build version, such as v1.2.3
         required: true
         type: string
 
@@ -45,20 +45,32 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
           test "$(jq -r .conclusion <<<"$run")" = success
           test "$(jq -r .event <<<"$run")" = workflow_dispatch
           test "$(jq -r .path <<<"$run")" = '.github/workflows/build-release-artifacts.yml'
-          run_sha="$(jq -r .head_sha <<<"$run")"
-          test "${#run_sha}" -eq 40
+          test "$(jq -r .head_branch <<<"$run")" = main
+          workflow_sha="$(jq -r .head_sha <<<"$run")"
+          [[ "$workflow_sha" =~ ^[0-9a-f]{40}$ ]]
+          comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$workflow_sha...main" --jq .status)"
+          [[ "$comparison" == ahead || "$comparison" == identical ]]
           manifests=(unsigned/*/manifest.json)
           test "${#manifests[@]}" -eq 3
           platforms="$(jq -r .platform "${manifests[@]}" | sort | paste -sd, -)"
           test "$platforms" = 'linux-x86_64,macos-aarch64,windows-x86_64'
+          build_version="$(jq -r .version "${manifests[0]}")"
+          build_sha="$(jq -r .commit_sha "${manifests[0]}")"
+          source_ref="$(jq -r .source_ref "${manifests[0]}")"
+          [[ "$build_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+          [[ "$build_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$source_ref" =~ ^[0-9A-Za-z][0-9A-Za-z._/+@-]{0,254}$ ]]
+          test "$RELEASE_TAG" = "v$build_version"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$build_sha" --jq .sha)" = "$build_sha"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$build_sha"
           for manifest in "${manifests[@]}"; do
-            jq -e --arg tag "$RELEASE_TAG" --arg sha "$run_sha" \
-              '.schema == 1 and .tag == $tag and .commit_sha == $sha and (.files | length > 0)' \
+            jq -e --arg version "$build_version" --arg sha "$build_sha" --arg source_ref "$source_ref" \
+              '.schema == 2 and .version == $version and .commit_sha == $sha and .source_ref == $source_ref and (.files | length > 0)' \
               "$manifest" >/dev/null
             directory="$(dirname "$manifest")"
             diff -u \
@@ -75,7 +87,7 @@ jobs:
               test "$(sha256sum "$file" | cut -d ' ' -f 1)" = "$expected_sha"
             done
           done
-          printf 'commit_sha=%s\n' "$run_sha" >> "$GITHUB_OUTPUT"
+          printf 'commit_sha=%s\n' "$build_sha" >> "$GITHUB_OUTPUT"
       - name: Re-upload verified inputs for isolated signing jobs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
