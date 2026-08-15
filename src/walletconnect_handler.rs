@@ -41,6 +41,12 @@ use walletconnect_session::{
 };
 
 const WALLETCONNECT_PROJECT_ID: &str = "1b68f6037b9d5d9558dc5aa3f67c2dc3";
+const PUBLIC_REQUEST_FAILURE: &str =
+    "The wallet could not complete this request. Review the wallet activity for details.";
+
+fn internal_request_failure() -> RequestOutcome {
+    RequestOutcome::failed(PUBLIC_REQUEST_FAILURE)
+}
 
 pub const SUPPORTED_METHODS: &[&str] = &[
     "eth_accounts",
@@ -624,7 +630,10 @@ impl DesktopSession {
     ) -> Result<std::result::Result<PendingTransaction, RequestOutcome>> {
         let config = self.owner.config_store();
         let network = config.network_by_chain_id(&chain_id.to_string())?;
-        let stored_policy = PolicyStore::production(config.data_dir())?
+        let policies = Mutex::new(PolicyStore::production(config.data_dir())?);
+        let stored_policy = policies
+            .lock()
+            .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
             .get_for_wallet(
                 &self.wallet().id,
                 self.wallet().instance_id,
@@ -652,10 +661,10 @@ impl DesktopSession {
         let disposition = ekubo_wallet_core::orchestrator::execute_automatic(
             config,
             &pending,
+            &policies,
             &OsKeyStore,
             self.wallet(),
             &network,
-            &stored_policy,
             plan,
             Some(plan_source),
             &simulation,
@@ -902,7 +911,7 @@ impl SessionHandler for DesktopSession {
         self.update(SessionStatus::Connected, None, 0, None);
         Ok(match result {
             Ok(outcome) => outcome,
-            Err(error) => RequestOutcome::failed(format!("{error:#}")),
+            Err(_) => internal_request_failure(),
         })
     }
 

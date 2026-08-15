@@ -44,6 +44,36 @@ http_headers = { Authorization = "Bearer secret" }
 }
 
 #[test]
+fn grok_build_uses_its_native_toml_shape_and_exact_bridge_identity() {
+    let before = r#"
+[models]
+default = "grok-4.5"
+[mcp_servers.ekubo_wallet]
+url = "http://127.0.0.1:61744/mcp"
+headers = { Authorization = "secret" }
+"#;
+    let output = merge_codex(before, HELPER, "grok-build").unwrap();
+    let parsed = output.parse::<DocumentMut>().unwrap();
+    assert_eq!(parsed["models"]["default"].as_str(), Some("grok-4.5"));
+    let local = parsed["mcp_servers"][LOCAL_SERVER_NAME].as_table().unwrap();
+    assert_eq!(local.len(), 2);
+    assert_eq!(local["command"].as_str(), Some(HELPER));
+    assert_eq!(
+        local["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(toml_edit::Value::as_str)
+            .collect::<Vec<_>>(),
+        ["--client", "grok-build"]
+    );
+    assert_eq!(
+        parsed["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str(),
+        Some(COMPANION_SERVER_URL)
+    );
+}
+
+#[test]
 fn every_json_harness_gets_exact_credential_free_stdio_shape() {
     let cases = [
         (
@@ -205,4 +235,46 @@ url = "https://mcp.ekubo.org/mcp"
         assert!(parsed[root].get(LOCAL_SERVER_NAME).is_none());
         assert!(parsed[root].get(COMPANION_SERVER_NAME).is_none());
     }
+}
+
+#[test]
+fn install_rejects_a_config_changed_after_its_preview() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp.json");
+    std::fs::write(
+        &path,
+        r#"{"mcpServers":{"ekubo_wallet":{"command":"old"}}}"#,
+    )
+    .unwrap();
+    let adapter = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: path.clone(),
+    };
+    let preview = adapter.preview_remove().unwrap();
+    std::fs::write(&path, r#"{"mcpServers":{"keep":{"command":"new"}}}"#).unwrap();
+
+    assert!(ConfigBatchInstall::install(vec![preview]).is_err());
+    assert!(std::fs::read_to_string(path).unwrap().contains("new"));
+}
+
+#[test]
+fn batch_rollback_does_not_overwrite_a_later_external_edit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp.json");
+    std::fs::write(
+        &path,
+        r#"{"mcpServers":{"ekubo_wallet":{"command":"old"}}}"#,
+    )
+    .unwrap();
+    let adapter = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: path.clone(),
+    };
+    let batch = ConfigBatchInstall::install(vec![adapter.preview_remove().unwrap()]).unwrap();
+    std::fs::write(&path, r#"{"mcpServers":{"keep":{"command":"external"}}}"#).unwrap();
+
+    drop(batch);
+    assert!(std::fs::read_to_string(path).unwrap().contains("external"));
 }

@@ -220,7 +220,13 @@ where
     ensure!(
         matches!(
             hello.client.as_str(),
-            "codex" | "claude_code" | "claude_desktop" | "gemini_cli" | "cursor" | "opencode"
+            "codex"
+                | "claude_code"
+                | "claude_desktop"
+                | "gemini_cli"
+                | "cursor"
+                | "opencode"
+                | "grok_build"
         ),
         "unsupported bridge harness"
     );
@@ -231,6 +237,7 @@ where
         "gemini_cli" => AgentKind::GeminiCli,
         "cursor" => AgentKind::Cursor,
         "opencode" => AgentKind::Opencode,
+        "grok_build" => AgentKind::GrokBuild,
         _ => unreachable!("validated harness"),
     };
     let session_id = uuid::Uuid::new_v4();

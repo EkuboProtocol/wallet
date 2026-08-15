@@ -663,7 +663,7 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
         record,
         &ApproveEverything,
         &TestHumanPresence { allow: true },
-        &*server.keys,
+        server.execution_authority.key_store_for_test(),
     )
     .await
     .unwrap();
@@ -856,7 +856,7 @@ async fn a_reviewer_can_re_simulate_before_approving() {
         record,
         &presenter,
         &TestHumanPresence { allow: true },
-        &*server.keys,
+        server.execution_authority.key_store_for_test(),
     )
     .await
     .unwrap();
@@ -960,7 +960,7 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
         record,
         &presenter,
         &TestHumanPresence { allow: true },
-        &*server.keys,
+        server.execution_authority.key_store_for_test(),
     )
     .await;
     let Err(error) = outcome else {

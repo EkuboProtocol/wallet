@@ -86,17 +86,17 @@ fn plan(chain_id: &str, to: Address, data: &str, value: &str) -> ExecutionPlan {
 }
 
 fn allows(policy: &WalletPolicy, plan: &ExecutionPlan) -> bool {
-    policy_allows(&evaluate_policy(plan, policy, &context()))
+    policy_allows(&evaluate_policy(plan, None, policy, &context()))
 }
 
 fn outcome(policy: &WalletPolicy, plan: &ExecutionPlan) -> PolicyOutcome {
-    policy_outcome(&evaluate_policy(plan, policy, &context()))
+    policy_outcome(&evaluate_policy(plan, None, policy, &context()))
 }
 
 /// Assert a verdict and say which example and which call produced it.
 #[track_caller]
 fn check(name: &str, policy: &WalletPolicy, plan: &ExecutionPlan, expected: bool, case: &str) {
-    let findings = evaluate_policy(plan, policy, &context());
+    let findings = evaluate_policy(plan, None, policy, &context());
     let actual = policy_allows(&findings);
     assert_eq!(
         actual,
@@ -524,7 +524,12 @@ fn an_unmatched_call_requires_approval_and_says_why() {
     // The property every example above rests on: silence never signs
     // automatically, but it remains available for owner review.
     let policy = example("transfers-to-named-addresses.json");
-    let findings = evaluate_policy(&plan("1", STRANGER, "0xdeadbeef", "0"), &policy, &context());
+    let findings = evaluate_policy(
+        &plan("1", STRANGER, "0xdeadbeef", "0"),
+        None,
+        &policy,
+        &context(),
+    );
     assert_eq!(
         findings
             .iter()

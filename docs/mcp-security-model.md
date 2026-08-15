@@ -17,10 +17,11 @@ IPC access. Same-user local code execution is the authorization boundary.
 Every bridge connection receives a new MCP session UUID and a freshly
 restricted `WalletMcpServer`. The IPC layer receives `AgentApi`, not `OwnerApi`.
 `AgentApi` is a server factory; the server it constructs intentionally opens
-typed SQLCipher-backed stores and an OS credential-store signer. Those
+typed SQLCipher-backed stores and a narrow core execution authority. Those
 capabilities let MCP tools read agent-visible wallet state, persist proposals
-and transaction lifecycle records, and ask core to sign a transaction when the
-active policy permits automatic execution.
+and transaction lifecycle records, and ask core only to run the guarded
+automatic-transaction or exact-cancellation path. MCP never receives a
+`KeyStore`, raw-key load, or arbitrary-signature operation.
 
 The server receives no owner-authorization capability and no operation that
 exports raw key material, decides a native review, installs a signing policy,
@@ -44,12 +45,15 @@ remote MCP in the same file also receive the credential-free companion
 JSON file contains only local stdio servers, so the user adds the companion as
 an account-level custom connector through Customize → Connectors. Installing
 or repairing managed file entries creates no credential and requires no owner
-authentication.
+authentication. Grok Build uses its native `~/.grok/config.toml`
+`[mcp_servers]` table with the same exact two managed entries.
 The local transport has no HTTP listener, OAuth routes, bearer credentials, or
 login flow. The hosted companion is an independent HTTPS service.
 
 Execution simulation uses the configured RPC's `eth_simulateV1`; fork results
 remain hypothetical and submission re-simulates against real chain state.
+Recorded simulation IDs are short-lived plan handles only: consuming one runs
+fresh simulation, exact envelope preparation, and current-policy evaluation.
 There is no local EVM or `eth_getProof` reconstruction; no simulated state is stored or reconstructed locally.
 In particular, a simulation fork cannot create a pending request.
 Token symbols and decimals are owner-confirmed display metadata and are never read from the contract.

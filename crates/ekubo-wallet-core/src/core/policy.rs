@@ -1,10 +1,12 @@
-//! The signing policy: an ordered list of rules over the calls a plan makes.
+//! The signing policy: an ordered list of rules over the calls a plan makes
+//! and the exact transaction envelope prepared to carry them.
 //!
 //! A rule is a handful of optional [`Predicate`] slots — `chain_id`, `to`, `native_value`,
 //! `calldata` — and an effect. A slot left out constrains nothing; the slots
 //! present are `AND`ed. Rules are scanned from top to bottom:
 //!
 //! * the first matching `deny` rejects the call outright,
+//! * the first matching `review` sends it to the owner,
 //! * the first matching `allow` signs it automatically,
 //! * reaching the end queues the plan for a human.
 //!
@@ -53,6 +55,26 @@ pub enum Effect {
     /// no approval can override it. Use it to foreclose something, not to gate
     /// it — a call no rule covers already queues for human approval.
     Deny,
+    /// A matching call cannot sign automatically, but the owner may approve
+    /// the complete transaction in the native wallet review.
+    Review,
+}
+
+/// Exact, already-prepared transaction fields policy rules may constrain.
+///
+/// These are values core is ready to sign, not RPC-authored observations or
+/// caller-supplied preview fields. The policy engine remains pure: preparation
+/// performs every RPC read and hands this immutable value to evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedTransactionFacts {
+    pub transaction_type: &'static str,
+    pub nonce: u64,
+    pub gas_limit: u64,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub delegation: Option<alloy::primitives::Address>,
+    pub envelope_to: alloy::primitives::Address,
+    pub envelope_native_value: U256,
 }
 
 /// One rule: a conjunction of predicate slots and the effect of matching them.
@@ -86,6 +108,32 @@ pub struct Rule {
     /// `selector` predicate decodes it and constrains its arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calldata: Option<Predicate>,
+    /// Exact signed-envelope type: `eip1559` or `eip7702`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_type: Option<Predicate>,
+    /// Exact transaction nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<Predicate>,
+    /// Exact transaction gas limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gas_limit: Option<Predicate>,
+    /// Exact EIP-1559 maximum fee per gas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fee_per_gas: Option<Predicate>,
+    /// Exact EIP-1559 maximum priority fee per gas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_priority_fee_per_gas: Option<Predicate>,
+    /// Target of the signed EIP-7702 authorization. A rule constraining this
+    /// slot cannot match an EIP-1559 envelope or an EIP-7702 envelope without
+    /// an authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Predicate>,
+    /// Recipient of the outer signed transaction envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_to: Option<Predicate>,
+    /// Native value on the outer signed transaction envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_native_value: Option<Predicate>,
 }
 
 impl Rule {
@@ -94,8 +142,13 @@ impl Rule {
     /// Three-valued so a selector that cannot safely decode this calldata does
     /// not consume the call: `Unreadable` falls through to later rules just as
     /// `No` does. An omitted slot constrains nothing and contributes `Yes`.
-    fn evaluate(&self, call: &Call, context: &PolicyContext) -> Match {
-        [
+    fn evaluate(
+        &self,
+        call: &Call,
+        prepared: Option<&PreparedTransactionFacts>,
+        context: &PolicyContext,
+    ) -> Match {
+        let call_match = [
             (self.chain_id.as_ref(), &call.chain_id),
             (self.to.as_ref(), &call.to),
             (self.native_value.as_ref(), &call.native_value),
@@ -106,7 +159,60 @@ impl Rule {
             predicate.map_or(answer, |predicate| {
                 answer.and(predicate.evaluate(value, context))
             })
-        })
+        });
+        let Some(prepared) = prepared else {
+            return if self.has_prepared_matcher() {
+                Match::No
+            } else {
+                call_match
+            };
+        };
+        let transaction_type = DynSolValue::String(prepared.transaction_type.to_owned());
+        let nonce = DynSolValue::Uint(U256::from(prepared.nonce), 256);
+        let gas_limit = DynSolValue::Uint(U256::from(prepared.gas_limit), 256);
+        let max_fee_per_gas = DynSolValue::Uint(U256::from(prepared.max_fee_per_gas), 256);
+        let max_priority_fee_per_gas =
+            DynSolValue::Uint(U256::from(prepared.max_priority_fee_per_gas), 256);
+        let envelope_to = DynSolValue::Address(prepared.envelope_to);
+        let envelope_native_value = DynSolValue::Uint(prepared.envelope_native_value, 256);
+        let prepared_match = [
+            (self.transaction_type.as_ref(), Some(&transaction_type)),
+            (self.nonce.as_ref(), Some(&nonce)),
+            (self.gas_limit.as_ref(), Some(&gas_limit)),
+            (self.max_fee_per_gas.as_ref(), Some(&max_fee_per_gas)),
+            (
+                self.max_priority_fee_per_gas.as_ref(),
+                Some(&max_priority_fee_per_gas),
+            ),
+            (self.envelope_to.as_ref(), Some(&envelope_to)),
+            (
+                self.envelope_native_value.as_ref(),
+                Some(&envelope_native_value),
+            ),
+        ]
+        .into_iter()
+        .fold(Match::Yes, |answer, (predicate, value)| {
+            predicate.map_or(answer, |predicate| {
+                answer.and(predicate.evaluate(value.expect("prepared value"), context))
+            })
+        });
+        let delegation_match = self.delegation.as_ref().map_or(Match::Yes, |predicate| {
+            prepared.delegation.map_or(Match::No, |delegation| {
+                predicate.evaluate(&DynSolValue::Address(delegation), context)
+            })
+        });
+        call_match.and(prepared_match).and(delegation_match)
+    }
+
+    fn has_prepared_matcher(&self) -> bool {
+        self.transaction_type.is_some()
+            || self.nonce.is_some()
+            || self.gas_limit.is_some()
+            || self.max_fee_per_gas.is_some()
+            || self.max_priority_fee_per_gas.is_some()
+            || self.delegation.is_some()
+            || self.envelope_to.is_some()
+            || self.envelope_native_value.is_some()
     }
 
     fn validate(&self) -> Result<()> {
@@ -132,6 +238,30 @@ impl Rule {
         }
         if let Some(predicate) = &self.calldata {
             slots.push(("calldata", predicate, DynSolType::Bytes));
+        }
+        if let Some(predicate) = &self.transaction_type {
+            slots.push(("transaction_type", predicate, DynSolType::String));
+        }
+        if let Some(predicate) = &self.nonce {
+            slots.push(("nonce", predicate, DynSolType::Uint(256)));
+        }
+        if let Some(predicate) = &self.gas_limit {
+            slots.push(("gas_limit", predicate, DynSolType::Uint(256)));
+        }
+        if let Some(predicate) = &self.max_fee_per_gas {
+            slots.push(("max_fee_per_gas", predicate, DynSolType::Uint(256)));
+        }
+        if let Some(predicate) = &self.max_priority_fee_per_gas {
+            slots.push(("max_priority_fee_per_gas", predicate, DynSolType::Uint(256)));
+        }
+        if let Some(predicate) = &self.delegation {
+            slots.push(("delegation", predicate, DynSolType::Address));
+        }
+        if let Some(predicate) = &self.envelope_to {
+            slots.push(("envelope_to", predicate, DynSolType::Address));
+        }
+        if let Some(predicate) = &self.envelope_native_value {
+            slots.push(("envelope_native_value", predicate, DynSolType::Uint(256)));
         }
         slots
     }
@@ -168,6 +298,46 @@ impl Rule {
                 other.calldata.as_ref(),
                 &DynSolType::Bytes,
             )
+            && slot_narrower(
+                self.transaction_type.as_ref(),
+                other.transaction_type.as_ref(),
+                &DynSolType::String,
+            )
+            && slot_narrower(
+                self.nonce.as_ref(),
+                other.nonce.as_ref(),
+                &DynSolType::Uint(256),
+            )
+            && slot_narrower(
+                self.gas_limit.as_ref(),
+                other.gas_limit.as_ref(),
+                &DynSolType::Uint(256),
+            )
+            && slot_narrower(
+                self.max_fee_per_gas.as_ref(),
+                other.max_fee_per_gas.as_ref(),
+                &DynSolType::Uint(256),
+            )
+            && slot_narrower(
+                self.max_priority_fee_per_gas.as_ref(),
+                other.max_priority_fee_per_gas.as_ref(),
+                &DynSolType::Uint(256),
+            )
+            && slot_narrower(
+                self.delegation.as_ref(),
+                other.delegation.as_ref(),
+                &DynSolType::Address,
+            )
+            && slot_narrower(
+                self.envelope_to.as_ref(),
+                other.envelope_to.as_ref(),
+                &DynSolType::Address,
+            )
+            && slot_narrower(
+                self.envelope_native_value.as_ref(),
+                other.envelope_native_value.as_ref(),
+                &DynSolType::Uint(256),
+            )
     }
 
     /// One reviewable line describing the authority this rule grants or takes
@@ -180,6 +350,7 @@ impl Rule {
         let effect = match self.effect {
             Effect::Allow => "allow",
             Effect::Deny => "deny",
+            Effect::Review => "review",
         };
         format!(
             "{effect}{}: {}",
@@ -207,6 +378,33 @@ impl Rule {
         if let Some(predicate) = &self.native_value {
             parts.push(format!("native value {}", predicate.describe()));
         }
+        if let Some(predicate) = &self.transaction_type {
+            parts.push(format!("transaction type {}", predicate.describe()));
+        }
+        if let Some(predicate) = &self.nonce {
+            parts.push(format!("nonce {}", predicate.describe()));
+        }
+        if let Some(predicate) = &self.gas_limit {
+            parts.push(format!("gas limit {}", predicate.describe()));
+        }
+        if let Some(predicate) = &self.max_fee_per_gas {
+            parts.push(format!("maximum fee per gas {}", predicate.describe()));
+        }
+        if let Some(predicate) = &self.max_priority_fee_per_gas {
+            parts.push(format!(
+                "maximum priority fee per gas {}",
+                predicate.describe()
+            ));
+        }
+        if let Some(predicate) = &self.delegation {
+            parts.push(format!("delegation target {}", predicate.describe()));
+        }
+        if let Some(predicate) = &self.envelope_to {
+            parts.push(format!("envelope to {}", predicate.describe()));
+        }
+        if let Some(predicate) = &self.envelope_native_value {
+            parts.push(format!("envelope native value {}", predicate.describe()));
+        }
         parts.join("; ")
     }
 
@@ -232,6 +430,8 @@ impl Rule {
             (Effect::Allow, false) => ('-', "stops allowing"),
             (Effect::Deny, true) => ('-', "starts denying"),
             (Effect::Deny, false) => ('+', "stops denying"),
+            (Effect::Review, true) => ('~', "starts requiring review"),
+            (Effect::Review, false) => ('~', "stops requiring review"),
         };
         format!(
             "{marker} rule {position}: {verb}{}: {}",
@@ -325,6 +525,14 @@ impl WalletPolicy {
                 to: None,
                 native_value: None,
                 calldata: None,
+                transaction_type: None,
+                nonce: None,
+                gas_limit: None,
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: None,
+                delegation: None,
+                envelope_to: None,
+                envelope_native_value: None,
             }],
         }
     }
@@ -354,6 +562,14 @@ impl WalletPolicy {
                 to: None,
                 native_value: None,
                 calldata: None,
+                transaction_type: None,
+                nonce: None,
+                gas_limit: None,
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: None,
+                delegation: None,
+                envelope_to: None,
+                envelope_native_value: None,
             }],
         }
     }
@@ -462,6 +678,7 @@ mod admission {
 #[must_use]
 pub fn evaluate_policy(
     plan: &ExecutionPlan,
+    prepared: Option<&PreparedTransactionFacts>,
     policy: &WalletPolicy,
     context: &PolicyContext,
 ) -> Vec<PolicyFinding> {
@@ -470,7 +687,7 @@ pub fn evaluate_policy(
         let call = Call::of(plan, step);
         let mut decision = None;
         for (index, rule) in policy.rules.iter().enumerate() {
-            let answer = rule.evaluate(&call, context);
+            let answer = rule.evaluate(&call, prepared, context);
             if answer.is_match() {
                 decision = Some((index, rule));
                 break;
@@ -481,6 +698,17 @@ pub fn evaluate_policy(
                 CALL_DENIED_CODE,
                 format!(
                     "step {} to {} is denied by first matching rule {}: {}",
+                    step.step,
+                    step.transaction.to,
+                    index + 1,
+                    rule.describe()
+                ),
+                Some(step.step),
+            )),
+            Some((index, rule)) if rule.effect == Effect::Review => findings.push(error(
+                CALL_REVIEW_REQUIRED_CODE,
+                format!(
+                    "step {} to {} requires owner review under first matching rule {}: {}",
                     step.step,
                     step.transaction.to,
                     index + 1,
@@ -522,39 +750,8 @@ pub const CALL_DENIED_CODE: &str = "call_denied";
 /// No rule matched this call at all.
 pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
 
-/// This plan's EIP-7702 authorization would replace a delegation the account
-/// already has to some other implementation.
-///
-/// Not a rule the owner wrote, and not a rule they can write: the policy
-/// language speaks about calls, and this is the one thing a plan does that is
-/// not one of its calls. A batch carries an authorization as a property of the
-/// transaction envelope, so an allowlist covering every call in the batch says
-/// nothing about it, and the account's code is what a batch changes most
-/// durably — it outlives the batch whether or not the batch succeeds.
-///
-/// So it is an error finding, which makes the outcome `RequiresApproval` and
-/// sends the plan to the person with the replacement named in the review. It
-/// is deliberately not `CALL_DENIED_CODE`: replacing a delegation is a
-/// legitimate thing to want, it is just not a thing that happens because two
-/// transfers were allowlisted.
-pub const DELEGATION_REPLACED_CODE: &str = "delegation_replaced";
-
-/// This plan's EIP-7702 authorization would give the account a delegation it
-/// does not currently have.
-///
-/// A warning rather than an error, because a first delegation is what every
-/// account's first batch legitimately does and blocking it would mean no
-/// unattended batch could ever run. It exists because the *only* disclosure
-/// of a delegation used to be [`DELEGATION_REPLACED_CODE`], and whether that
-/// fired was decided by one `get_code_at` answer from one endpoint. An
-/// endpoint that reports empty code for an account that is in fact delegated
-/// elsewhere turns a reviewed replacement into a silent one: the wallet still
-/// signs the authorization, and the replacement still happens on chain, but
-/// nothing in the document said a delegation was involved at all.
-///
-/// The document always states that an authorization is being signed, so a
-/// reader can notice one they did not expect.
-pub const DELEGATION_AUTHORIZED_CODE: &str = "delegation_authorized";
+/// A `review` rule matched this call and deliberately stopped rule scanning.
+pub const CALL_REVIEW_REQUIRED_CODE: &str = "call_review_required";
 
 /// What the policy decided, and therefore what happens next.
 ///
@@ -623,10 +820,12 @@ pub fn json_schema() -> Value {
             "description".into(),
             Value::String(
                 "Ordered stateless per-call signing policy. The first matching rule decides each \
-                 call: allow signs automatically, deny rejects without queuing, and reaching the \
-                 end requires explicit owner approval. Omitted matchers mean anything and present \
-                 matchers are ANDed. Native-value comparisons are per-call conditions, not \
-                 cumulative spending budgets."
+                 call: allow signs automatically, review requires explicit owner approval, deny \
+                 rejects without queuing, and reaching the end also requires review. Every call \
+                 is evaluated before the transaction takes the least-permissive result \
+                 (deny < review < allow). Omitted matchers mean anything and present matchers are \
+                 ANDed. Per-call native value and outer envelope native value are distinct; \
+                 neither is a cumulative spending budget."
                     .into(),
             ),
         );
@@ -677,7 +876,7 @@ pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<Str
 }
 
 /// Whether `proposed` can be obtained solely through operations that never
-/// increase the outcome of any call (`deny < human approval < automatic`).
+/// increase the outcome of any call (`deny < review < automatic`).
 ///
 /// The proof is deliberately structural. Inserting a deny, deleting an allow,
 /// narrowing an allow, widening a deny, or replacing an allow with a deny can
@@ -715,10 +914,17 @@ pub fn is_tightening(current: &WalletPolicy, proposed: &WalletPolicy) -> bool {
 
 fn rule_transition_is_tightening(current: &Rule, proposed: &Rule) -> bool {
     match (current.effect, proposed.effect) {
-        (Effect::Allow, Effect::Allow) => proposed.is_narrower_than(current),
-        (Effect::Deny, Effect::Deny) => current.is_narrower_than(proposed),
+        (Effect::Allow, Effect::Allow | Effect::Review) => proposed.is_narrower_than(current),
+        (Effect::Deny | Effect::Review, Effect::Deny) => current.is_narrower_than(proposed),
+        (Effect::Review, Effect::Review) => {
+            let mut current = current.clone();
+            let mut proposed = proposed.clone();
+            current.label = None;
+            proposed.label = None;
+            current == proposed
+        }
         (Effect::Allow, Effect::Deny) => true,
-        (Effect::Deny, Effect::Allow) => false,
+        (Effect::Deny, Effect::Allow | Effect::Review) | (Effect::Review, Effect::Allow) => false,
     }
 }
 

@@ -43,7 +43,32 @@ fn policy(value: serde_json::Value) -> WalletPolicy {
 }
 
 fn findings(subject: &WalletPolicy, plan: &ExecutionPlan) -> Vec<PolicyFinding> {
-    evaluate_policy(plan, subject, &context())
+    evaluate_policy(plan, None, subject, &context())
+}
+
+fn prepared(delegation: Option<Address>) -> PreparedTransactionFacts {
+    PreparedTransactionFacts {
+        transaction_type: if delegation.is_some() {
+            "eip7702"
+        } else {
+            "eip1559"
+        },
+        nonce: 7,
+        gas_limit: 125_000,
+        max_fee_per_gas: 30_000_000_000,
+        max_priority_fee_per_gas: 2_000_000_000,
+        delegation,
+        envelope_to: WALLET,
+        envelope_native_value: U256::from(42),
+    }
+}
+
+fn prepared_findings(
+    subject: &WalletPolicy,
+    plan: &ExecutionPlan,
+    prepared: &PreparedTransactionFacts,
+) -> Vec<PolicyFinding> {
+    evaluate_policy(plan, Some(prepared), subject, &context())
 }
 
 fn outcome(subject: &WalletPolicy, plan: &ExecutionPlan) -> PolicyOutcome {
@@ -65,6 +90,98 @@ fn empty_policy_is_the_safe_default_and_requests_approval() {
     assert_eq!(
         findings(&subject, &one_call(ROUTER, "0x", "0"))[0].code,
         CALL_NOT_ALLOWED_CODE
+    );
+}
+
+#[test]
+fn review_short_circuits_one_call_and_deny_on_another_rejects_the_plan() {
+    let subject = policy(json!({"version": 1, "rules": [
+        {"effect": "review", "to": {"eq": format!("{ROUTER:#x}")}},
+        {"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}},
+        {"effect": "allow"}
+    ]}));
+    let candidate = plan(1, &[(ROUTER, "0x", "0"), (TOKEN, "0x", "0")]);
+    let findings = findings(&subject, &candidate);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code == CALL_REVIEW_REQUIRED_CODE)
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.code == CALL_DENIED_CODE)
+    );
+    assert_eq!(policy_outcome(&findings), PolicyOutcome::Rejected);
+}
+
+#[test]
+fn review_before_allow_requires_owner_review() {
+    let subject = policy(json!({"version": 1, "rules": [
+        {"effect": "review", "native_value": {"gt": "100"}},
+        {"effect": "allow"}
+    ]}));
+    assert_eq!(
+        outcome(&subject, &one_call(ROUTER, "0x", "101")),
+        PolicyOutcome::RequiresApproval
+    );
+    assert_eq!(
+        outcome(&subject, &one_call(ROUTER, "0x", "100")),
+        PolicyOutcome::Allowed
+    );
+}
+
+#[test]
+fn prepared_envelope_matchers_use_exact_typed_fields() {
+    let delegation = address!("000000005c84F8Fd50b21CAC312528A64437030e");
+    let subject = policy(json!({"version": 1, "rules": [
+        {
+            "effect": "allow",
+            "transaction_type": {"eq": "eip7702"},
+            "nonce": {"eq": "7"},
+            "gas_limit": {"eq": "125000"},
+            "max_fee_per_gas": {"eq": "30000000000"},
+            "max_priority_fee_per_gas": {"eq": "2000000000"},
+            "delegation": {"eq": format!("{delegation:#x}")},
+            "envelope_to": {"eq": format!("{WALLET:#x}")},
+            "envelope_native_value": {"eq": "42"}
+        }
+    ]}));
+    let candidate = one_call(ROUTER, "0x", "0");
+    assert_eq!(
+        policy_outcome(&prepared_findings(
+            &subject,
+            &candidate,
+            &prepared(Some(delegation))
+        )),
+        PolicyOutcome::Allowed
+    );
+    let mut changed = prepared(Some(delegation));
+    changed.max_fee_per_gas += 1;
+    assert_eq!(
+        policy_outcome(&prepared_findings(&subject, &candidate, &changed)),
+        PolicyOutcome::RequiresApproval
+    );
+}
+
+#[test]
+fn delegation_matcher_never_matches_an_absent_authorization() {
+    let subject = policy(json!({"version": 1, "rules": [
+        {"effect": "review", "delegation": "any_value"},
+        {"effect": "allow"}
+    ]}));
+    let candidate = one_call(ROUTER, "0x", "0");
+    assert_eq!(
+        policy_outcome(&prepared_findings(&subject, &candidate, &prepared(None))),
+        PolicyOutcome::Allowed
+    );
+    assert_eq!(
+        policy_outcome(&prepared_findings(
+            &subject,
+            &candidate,
+            &prepared(Some(address!("000000005c84F8Fd50b21CAC312528A64437030e")))
+        )),
+        PolicyOutcome::RequiresApproval
     );
 }
 
@@ -108,6 +225,17 @@ fn tightening_classifier_accepts_only_structurally_proven_reductions() {
     }]}));
     assert!(is_tightening(&broad_allow, &narrow_allow));
     assert!(!is_tightening(&narrow_allow, &broad_allow));
+
+    let review_chain = policy(json!({"version": 1, "rules": [{
+        "effect": "review", "chain_id": {"eq": "1"}
+    }]}));
+    assert!(is_tightening(&broad_allow, &review_chain));
+    assert!(!is_tightening(&review_chain, &broad_allow));
+    let deny_chain = policy(json!({"version": 1, "rules": [{
+        "effect": "deny", "chain_id": {"eq": "1"}
+    }]}));
+    assert!(is_tightening(&review_chain, &deny_chain));
+    assert!(!is_tightening(&deny_chain, &review_chain));
 }
 
 #[test]
@@ -384,8 +512,44 @@ fn schema_describes_the_ordered_v1_surface() {
     let schema = json_schema().to_string();
     assert!(schema.contains("First matching rule wins"));
     assert!(schema.contains("native_value"));
+    assert!(schema.contains("envelope_native_value"));
+    assert!(schema.contains("max_priority_fee_per_gas"));
+    assert!(schema.contains("delegation"));
+    assert!(schema.contains("review"));
     assert!(schema.contains("chain_id"));
     assert!(schema.contains("tuple"));
     assert!(!schema.contains("max_calls_per_batch"));
     assert!(!schema.contains("ChainPolicy"));
+}
+
+#[test]
+fn published_policy_schema_carries_every_enforced_rule_field() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../schemas/policy.schema.json")).unwrap();
+    let properties = schema["$defs"]["Rule"]["properties"].as_object().unwrap();
+    for field in [
+        "effect",
+        "label",
+        "chain_id",
+        "to",
+        "native_value",
+        "calldata",
+        "transaction_type",
+        "nonce",
+        "gas_limit",
+        "max_fee_per_gas",
+        "max_priority_fee_per_gas",
+        "delegation",
+        "envelope_to",
+        "envelope_native_value",
+    ] {
+        assert!(
+            properties.contains_key(field),
+            "static schema omits {field}"
+        );
+    }
+    let effects = schema["$defs"]["Effect"].to_string();
+    for effect in ["allow", "review", "deny"] {
+        assert!(effects.contains(effect), "static schema omits {effect}");
+    }
 }

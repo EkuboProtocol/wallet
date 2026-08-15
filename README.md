@@ -13,6 +13,8 @@ documentation.
 
 ## Development
 
+The workspace requires Rust 1.94.1 or newer.
+
 ```text
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -27,7 +29,9 @@ Apache-2.0 GPUI infrastructure, not Zed's GPL workspace/UI crates.
 See [architecture](docs/architecture.md), the system-wide
 [threat model](docs/threat-model.md), the code-oriented
 [security boundary](docs/security-boundary.md), and the
-[release process](docs/releasing.md).
+[release process](docs/releasing.md). The enforced policy vocabulary—including
+flat prepared-envelope matchers and the `review` effect—is documented in
+[policy authoring](docs/policy-authoring.md).
 
 ## License
 

@@ -13,4 +13,5 @@ companion URL. Claude Desktop's hosted companion is an account-level custom
 connector and is never written to its local stdio configuration. These files
 are not sources of wallet authority and contain no wallet-managed credential.
 
-Desktop private keys use `org.ekubo.wallet.private-key`.
+Desktop private keys use `org.ekubo.wallet.private-key.instance`, keyed by the
+wallet instance UUID rather than the reusable display ID.

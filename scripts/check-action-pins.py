@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject mutable GitHub Actions references in privileged workflows."""
+"""Reject mutable GitHub Actions references in CI and release workflows."""
 
 import pathlib
 import re
@@ -10,6 +10,8 @@ USES = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)")
 
 failures = []
 for workflow in [
+    pathlib.Path(".github/workflows/ci.yml"),
+    pathlib.Path(".github/workflows/build-release-artifacts.yml"),
     pathlib.Path(".github/workflows/release.yml"),
     pathlib.Path(".github/workflows/release-policy.yml"),
 ]:

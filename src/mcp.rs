@@ -1,10 +1,11 @@
 use crate::events::{DomainEventKind, EventBus, TransactionStage};
 use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
+    agent_authority::AgentExecutionAuthority,
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
     config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
-    custody::{KeyStore, OsKeyStore},
+    custody::KeyStore,
     execution::ReceiptStatus,
     fork::{ForkSession, ForkStore, MAX_FORKS, MAX_PLANS_PER_FORK, pin_parent_block},
     input_validation::{parse_chain_id, validate_timeout_seconds},
@@ -152,9 +153,9 @@ pub(crate) struct WalletMcpServer {
     client_namespace: uuid::Uuid,
     global_quota: Arc<Mutex<GlobalAgentQuota>>,
     events: EventBus,
-    /// Where private keys live. Production uses the OS credential store;
-    /// tests substitute an in-memory store so no real keychain is touched.
-    keys: Arc<dyn KeyStore>,
+    /// The only signing capability exposed to this hostile-input adapter.
+    /// It has no raw-key or arbitrary-signature operation.
+    execution_authority: AgentExecutionAuthority,
     requesting_client: Option<(AgentKind, Arc<Mutex<DesktopStore>>)>,
 }
 
@@ -198,7 +199,7 @@ impl WalletMcpServer {
             messages,
             legal,
             tokens,
-            Arc::new(OsKeyStore),
+            Arc::new(ekubo_wallet_core::custody::OsKeyStore),
         )?;
         server.requesting_client = Some((harness, desktop));
         server.client_namespace = client_id;
@@ -227,9 +228,11 @@ impl WalletMcpServer {
                 wallet.id
             );
         }
+        let policies = Arc::new(Mutex::new(policies));
+        let execution_authority = AgentExecutionAuthority::over(keys, Arc::clone(&policies));
         Ok(Self {
             config,
-            policies: Arc::new(Mutex::new(policies)),
+            policies,
             pending: Arc::new(Mutex::new(pending)),
             typed_data: Arc::new(Mutex::new(typed_data)),
             messages: Arc::new(Mutex::new(messages)),
@@ -240,7 +243,7 @@ impl WalletMcpServer {
             client_namespace: uuid::Uuid::nil(),
             global_quota: Arc::new(Mutex::new(GlobalAgentQuota::default())),
             events: EventBus::default(),
-            keys,
+            execution_authority,
             requesting_client: None,
         })
     }
@@ -407,12 +410,11 @@ struct SendExecutionPlanInput {
     #[serde(default)]
     #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
     reference: Option<ArtifactReference>,
-    /// The `simulation_id` of a plan already simulated against real chain
-    /// state by `wallet_simulate_execution_plan`, which is sent without
-    /// simulating it a second time. The plan comes from that recorded
-    /// simulation, so it cannot disagree with what was simulated. Usable once,
-    /// briefly, and only while the policy revision it was evaluated under is
-    /// still the active one.
+    /// The `simulation_id` of a plan previously simulated against real chain
+    /// state by `wallet_simulate_execution_plan`. This is a one-use,
+    /// short-lived plan handle only. Send repeats simulation, exact envelope
+    /// preparation, and current-policy evaluation; the preview grants no
+    /// signing authority.
     #[serde(default)]
     simulation_id: Option<uuid::Uuid>,
     /// The `request_id` of a request the user already approved and signed,
@@ -1209,7 +1211,7 @@ impl WalletMcpServer {
     // Not annotated read-only, though it signs nothing and broadcasts
     // nothing. A simulation against real chain state is recorded and returns
     // a `simulation_id` that `wallet_send_execution_plan` will later accept
-    // in place of simulating again, and a simulation on a fork appends the
+    // as a short-lived plan handle, and a simulation on a fork appends the
     // plan to that fork, changing what every later call on it sees. Both are
     // modifications of this server's state, and `wallet_create_fork` is
     // already annotated for creating the same kind of state. Nothing here is
@@ -1278,11 +1280,11 @@ impl WalletMcpServer {
         )
         .await
         .map_err(|error| tool_error(&error))?;
-        // A result against real chain state can be sent as it stands, so it is
-        // recorded under an identifier the caller can hand to
-        // wallet_send_execution_plan instead of paying for the identical
-        // eth_simulateV1 request twice. A fork result never is: it describes a
-        // world that does not exist.
+        // A result against real chain state is recorded under an identifier
+        // the caller can hand back as an exact plan handle. Sending still
+        // repeats real-chain simulation, preparation, and policy evaluation.
+        // A fork result is never recorded: it describes a world that does not
+        // exist.
         if session.is_none() {
             let mut simulations = self.simulations.lock().map_err(|_| {
                 ErrorData::internal_error("simulation registry lock was poisoned", None)
@@ -1943,7 +1945,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2036,16 +2038,11 @@ impl WalletMcpServer {
         let record = self
             .pending_record(&input.wallet_id, &input.chain_id, input.request_id)
             .map_err(|error| tool_error(&error))?;
-        let (record, broadcast) = crate::reconcile::attempt_cancellation(
-            &self.pending,
-            &self.config,
-            &wallet,
-            &network,
-            record,
-            &*self.keys,
-        )
-        .await
-        .map_err(|error| tool_error(&error))?;
+        let (record, broadcast) = self
+            .execution_authority
+            .cancel(&self.pending, &self.config, &wallet, &network, record)
+            .await
+            .map_err(|error| tool_error(&error))?;
         let mut output = execution_status_output(record);
         output.broadcast_error = broadcast.broadcast_error;
         self.publish_execution_status(&output);
@@ -2760,27 +2757,20 @@ impl WalletMcpServer {
             None,
         )
         .await?;
-        self.send_simulated_plan(
+        Box::pin(self.send_simulated_plan(
             wallet,
             network,
             plan,
             plan_source,
             simulation,
-            stored_policy,
             on_simulation_failure,
-        )
+        ))
         .await
     }
 
-    /// Send a plan whose simulation this process already performed and
-    /// recorded, without simulating it again.
-    ///
-    /// The recorded entry supplies the plan as well as the result, so there is
-    /// no caller-supplied second copy that could differ from what was
-    /// simulated, and taking it consumes it, so one simulation authorizes at
-    /// most one send. What is re-checked here is everything that could have
-    /// changed since: the wallet and chain being sent to, and the policy
-    /// revision the result was evaluated under.
+    /// Consume a recorded preview as a handle to its exact plan, then run the
+    /// complete simulation, preparation, and policy pipeline again. Preview
+    /// results are display state, never signing authority.
     async fn send_recorded_simulation(
         &self,
         wallet: WalletMetadata,
@@ -2789,7 +2779,6 @@ impl WalletMcpServer {
         on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
-        let stored_policy = self.active_policy(&wallet)?;
         let recorded = self
             .simulations
             .lock()
@@ -2808,27 +2797,19 @@ impl WalletMcpServer {
             recorded.chain_id,
             network.chain_id
         );
-        ensure!(
-            recorded.result.policy_revision == stored_policy.revision,
-            "the active policy moved to revision {} after simulation {simulation_id} was evaluated \
-             under revision {}. Simulate the plan again and send the new simulation_id.",
-            stored_policy.revision,
-            recorded.result.policy_revision
-        );
-        self.send_simulated_plan(
+        Box::pin(self.send_new_plan(
             wallet,
             network,
             recorded.plan,
             recorded.plan_source,
-            recorded.result,
-            stored_policy,
             on_simulation_failure,
-        )
+        ))
         .await
     }
 
-    /// Everything a send does once its plan has been simulated exactly once,
-    /// whether that happened in this call or in an earlier recorded one.
+    /// Finish a freshly simulated send. Core re-reads the active policy before
+    /// any key use; this result supplies preview and prepared-envelope state,
+    /// not authority.
     #[allow(clippy::too_many_arguments)]
     async fn send_simulated_plan(
         &self,
@@ -2837,7 +2818,6 @@ impl WalletMcpServer {
         plan: ExecutionPlan,
         plan_source: Option<String>,
         mut simulation: SimulationResult,
-        stored_policy: crate::policy_store::StoredPolicy,
         on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
         crate::orchestrator::validate_send(&wallet, &network, &plan, &simulation)?;
@@ -2873,18 +2853,18 @@ impl WalletMcpServer {
             );
         }
 
-        let disposition = crate::orchestrator::execute_automatic(
-            &self.config,
-            &self.pending,
-            &*self.keys,
-            &wallet,
-            &network,
-            &stored_policy,
-            &plan,
-            plan_source.as_deref(),
-            &simulation,
-        )
-        .await?;
+        let disposition = self
+            .execution_authority
+            .execute(
+                &self.config,
+                &self.pending,
+                &wallet,
+                &network,
+                &plan,
+                plan_source.as_deref(),
+                &simulation,
+            )
+            .await?;
         if let crate::orchestrator::SendDisposition::Queued(request) = disposition {
             self.with_attribution(|desktop, client_id| {
                 desktop.attribute_transaction(request.request_id, client_id)
@@ -3362,7 +3342,8 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
 /// outcome rather than assuming. Telling an agent to queue a plan the policy
 /// rejects wastes the user's attention on a prompt that cannot help; telling it
 /// to demand a policy change for a plan that merely matched no rule trains the
-/// user to widen their policy for routine work.
+/// user to widen their policy for routine work. A deliberate review rule and
+/// an unmatched call share the reviewable outcome.
 fn policy_denial_next_step(
     outcome: crate::core::policy::PolicyOutcome,
     simulation_id: uuid::Uuid,
@@ -3376,9 +3357,10 @@ fn policy_denial_next_step(
                 .to_string()
         }
         _ => format!(
-            "No policy rule covers this plan, which is the ordinary route to human approval, not \
-             a dead end. Call wallet_send_execution_plan with simulation_id {simulation_id} to \
-             queue this exact result for the user's review, then follow the returned instruction \
+            "This plan requires human review because a review rule matched or no policy rule \
+             covered a call; it is not a dead end. Call wallet_send_execution_plan with simulation_id {simulation_id}; \
+             the wallet will freshly simulate, prepare, and evaluate policy before queuing the \
+             resulting exact transaction, then follow the returned instruction \
              through wallet_wait_for_approval. Do not stop to report the findings as a blocker, \
              and do not ask the user to change their policy before this action can proceed."
         ),

@@ -1057,21 +1057,8 @@ impl OwnerApi {
         ekubo_wallet_core::config::validate_network(proposal)?;
         ekubo_wallet_core::rpc::verify_chain_id(proposal).await?;
         let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
-        let current = PolicyStore::production(self.config.data_dir())?
-            .network_proposal(proposal.chain_id)?
-            .context("the network proposal no longer exists")?;
-        ensure!(
-            current == *proposal,
-            "the network proposal changed during confirmation; review it again"
-        );
         self.config
-            .install_network(proposal.clone(), &authorization)?;
-        let removed =
-            PolicyStore::production(self.config.data_dir())?.discard_network_proposal(proposal)?;
-        ensure!(
-            removed,
-            "the installed network proposal could not be consumed"
-        );
+            .install_network_proposal(proposal, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }

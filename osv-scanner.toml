@@ -1,0 +1,66 @@
+# These are RustSec informational maintenance notices, not reported security
+# defects. Keep every exception explicit and expiring so OSV-Scanner remains
+# fail-closed for new advisories and forces a periodic dependency migration
+# review.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0388"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive derivative; replace through its upstream dependency before this exception expires."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive instant; replace through its upstream dependency before this exception expires."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive paste; replace through its upstream dependency before this exception expires."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive proc-macro-error2; replace through its upstream dependency before this exception expires."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0206"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive rustybuzz; migrate the font stack before this exception expires."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive ttf-parser; migrate the font stack before this exception expires."
+
+# deps.dev cannot resolve license metadata for these pinned Git packages, but
+# their exact Cargo manifests declare Apache-2.0. Keep that evidence explicit
+# and expiring instead of allowing every package with UNKNOWN metadata.
+[[PackageOverrides]]
+name = "collections|derive_refineable|gpui-component(-assets|-macros)?|gpui_(linux|macos|macros|platform|tokio|web|wgpu|windows)|http_client|perf|refineable|sum_tree|util_macros"
+nameIsRegex = true
+license.override = ["Apache-2.0"]
+effectiveUntil = 2027-02-15
+reason = "The exact pinned Git package manifest declares Apache-2.0; deps.dev has no matching package-version record."
+
+# These two tiny GPUI support crates omit a package-level SPDX declaration in
+# the pinned upstream tree. They are used only by the Apache-2.0-declared GPUI
+# graph, but the repository root is mixed-license, so do not invent a license.
+# This narrow, expiring exception keeps UNKNOWN fail-closed for every other
+# dependency while upstream clarification is pursued.
+[[PackageOverrides]]
+name = "gpui_shared_string|gpui_util"
+nameIsRegex = true
+license.ignore = true
+effectiveUntil = 2027-02-15
+reason = "Pinned GPUI support manifest omits license metadata; review upstream clarification before this exception expires."
+
+# OSV-Scanner's allowlist accepts SPDX license identifiers but not standalone
+# exception identifiers. LLVM-exception only relaxes Apache-2.0's conditions,
+# so normalize this one exact package to its underlying allowed license.
+[[PackageOverrides]]
+name = "ar_archive_writer"
+version = "0.5.3"
+license.override = ["Apache-2.0"]
+effectiveUntil = 2027-02-15
+reason = "Declared Apache-2.0 WITH LLVM-exception; OSV's allowlist parser does not accept exception identifiers."

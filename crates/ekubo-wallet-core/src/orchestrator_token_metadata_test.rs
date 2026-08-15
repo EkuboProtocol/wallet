@@ -32,6 +32,8 @@ async fn review_metadata_includes_tokens_discovered_by_simulation() {
         implementation: None,
         will_authorize_delegation: false,
         replaces_delegated_implementation: None,
+        prepared_transaction: None,
+        prepared_execution: None,
         simulation: SimulationExecution {
             success: true,
             gas_used: None,

@@ -2,7 +2,7 @@
 name = "ztracing"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.94.1"
 publish = false
 description = "Apache-2.0 tracing facade used by the wallet's pinned GPUI build"
 repository = "https://github.com/EkuboProtocol/wallet"

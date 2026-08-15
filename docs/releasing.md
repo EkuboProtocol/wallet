@@ -1,51 +1,54 @@
 # Releasing
 
 The normal `main` workflow owns formatting, tests, Clippy, dependency notices,
-and the RustSec audit. A release tag starts the separate packaging workflow; it
-does not repeat those checks. `cargo-packager` produces DMG, per-user NSIS,
-AppImage, and DEB artifacts on their native runners.
+and target-filtered OSV-Scanner gates for both known vulnerabilities and the
+SPDX license allowlist on every shipped platform. Explicit informational
+advisory exceptions live in `osv-scanner.toml` with reasons and expiry dates.
+Release packaging is a deliberate two-stage process; neither stage executes a
+release tag.
 
-The protected release environment requires the update-signing key on every
-platform and Apple signing/notarization credentials on macOS. The macOS runner
-signs the app and DMG, submits the exact DMG that the release distributes to
-Apple's notary service, records the submission ID in the job summary, and exits
-as soon as the upload succeeds. It does not spend runner time waiting for
-Apple's verdict. Consequently, a successful release job means that the upload
-completed and Apple returned a submission ID, not that notarization was
-accepted. Once Apple accepts the DMG, it publishes tickets for the disk image
-and its nested app. Gatekeeper can retrieve those tickets online, including for
-a copy downloaded while notarization was still pending; because the release
-artifacts are not stapled, their first launch requires network access.
+First, manually run **Build unsigned release artifacts** with a release tag and
+the exact 40-character commit SHA that passed CI. Its macOS, Windows, and Linux
+jobs have only repository read permission, receive no secret or OIDC token,
+and build that SHA. Each artifact set includes a manifest binding the tag,
+commit, platform, filename, byte count, and SHA-256 digest. The embedded updater
+verification key is a public repository variable.
 
-Developer ID signing on macOS protects the distributed application package.
-Windows Authenticode publisher signing is enabled only when the protected
-release environment variable `AZURE_TRUSTED_SIGNING_ENABLED` is `true`; an
-unsigned Windows installer may otherwise be published and will show the normal
-Windows unknown-publisher warning. The release's mandatory Minisign chain
-protects native update artifacts on every platform. Packaging fails unless
-every native package
-contains a runnable `ekubo-wallet-mcp-bridge` that initializes over stdio,
-reports the tagged version, advertises dynamic tool refresh, and returns the
-deterministic offline tool catalog. The helper itself is not an authorization
-boundary. The retired Claude Desktop plugin archive is not built or published.
+Second, manually run **Sign and publish release** with that exact build run ID
+and tag. The protected release environment verifies the run came from the
+unsigned-build workflow, succeeded, and produced three mutually consistent
+manifests whose bytes still hash exactly. Only after that check do isolated
+trusted jobs receive Apple, Azure, or Minisign credentials. The publishing job
+creates the release at the verified commit SHA and uploads only the strict
+native-asset allowlist. No trusted job checks out or executes build-run source.
 
-Before tagging, smoke-test a bridge launched by each supported harness (Codex,
-Claude Code, Claude Desktop, Gemini CLI, Cursor, and OpenCode). Start the
+`cargo-packager` produces the unsigned macOS app, per-user NSIS installer,
+AppImage, and DEB on native runners. The trusted stage signs the macOS app,
+creates the distributed DMG and updater tar, applies mandatory Authenticode to
+Windows, and Minisign-signs final updater artifacts and `latest.json`. The
+macOS job waits for notarization acceptance and staples the distributed DMG
+before its final updater signature is created. Missing Apple, Azure, or update
+signing configuration fails the protected stage.
+
+Packaging verifies that every native package contains a runnable
+`ekubo-wallet-mcp-bridge` that initializes over stdio, reports the tagged
+version, advertises dynamic tool refresh, and returns the deterministic offline
+tool catalog. The helper itself is not an authorization boundary. The retired
+Claude Desktop plugin archive is not built or published.
+
+Before release, smoke-test a bridge launched by each supported harness (Codex,
+Claude Code, Claude Desktop, Gemini CLI, Cursor, OpenCode, and Grok Build). Start the
 harness while the wallet is closed, then open, close, and reopen the wallet.
 The harness must observe `notifications/tools/list_changed` and resume tool
 calls after both connections without restarting its own process. A harness
 release that no longer supports dynamic tool refresh blocks the wallet release.
 
 Native update artifacts are signed by a dedicated Minisign key held only in the
-protected release environment. CI compiles the public key into the app,
-publishes a signed `latest.json` binding version, target, format, canonical
-artifact URL, SHA-256 digest, and detached artifact signature, verifies the
-final artifacts, and attaches GitHub Sigstore provenance when the protected
-release environment variable `BUILD_PROVENANCE_ENABLED` is `true` and the
-repository plan supports attestations. The updater also reads the package
-version back from the bundled application binary (or the NSIS ProductVersion)
-and requires it to equal the authenticated manifest version before
-installation.
+protected release environment. The trusted workflow publishes a signed
+`latest.json` binding version, target, format, canonical artifact URL, SHA-256
+digest, and detached artifact signature. The updater also reads the package
+version back from the bundled application binary (or NSIS ProductVersion) and
+requires it to equal the authenticated manifest version before installation.
 
 Updates require explicit confirmation after the stable version is shown.
 Download completes and verifies before shutdown. The packaged macOS app,

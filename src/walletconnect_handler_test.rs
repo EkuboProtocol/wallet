@@ -68,3 +68,15 @@ fn batch_statuses_match_eip_5792_terminal_states() {
     assert_eq!(calls_status_code(PendingStatus::Rejected), 400);
     assert_eq!(calls_status_code(PendingStatus::Reverted), 500);
 }
+
+#[test]
+fn internal_failures_never_publish_cause_chains_to_dapps() {
+    let RequestOutcome::Error { code, message } = internal_request_failure() else {
+        panic!("an internal failure must become a protocol error");
+    };
+    assert_eq!(code, error_code::INVALID_METHOD);
+    assert_eq!(message, PUBLIC_REQUEST_FAILURE);
+    for private_detail in ["wallet.db", "SQLCipher", "keychain", "RPC URL", "caused by"] {
+        assert!(!message.contains(private_detail));
+    }
+}

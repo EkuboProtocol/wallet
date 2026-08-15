@@ -2,7 +2,7 @@
 name = "ekubo-wallet-core"
 version.workspace = true
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.94.1"
 description = "The security kernel of the ekubo-wallet binary: policy, custody, signing, storage"
 repository = "https://github.com/EkuboProtocol/wallet"
 license = "FSL-1.1-MIT"
@@ -18,7 +18,7 @@ test-hooks = []
 
 [dependencies]
 cargo-packager-updater = "0.2.3"
-alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
+alloy = { version = "=2.3.0", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"

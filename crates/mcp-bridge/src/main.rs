@@ -61,6 +61,7 @@ enum ClientKind {
     GeminiCli,
     Cursor,
     Opencode,
+    GrokBuild,
 }
 
 impl ClientKind {
@@ -72,6 +73,7 @@ impl ClientKind {
             "gemini-cli" => Ok(Self::GeminiCli),
             "cursor" => Ok(Self::Cursor),
             "opencode" => Ok(Self::Opencode),
+            "grok-build" => Ok(Self::GrokBuild),
             _ => anyhow::bail!("unsupported --client value"),
         }
     }
@@ -84,6 +86,7 @@ impl ClientKind {
             Self::GeminiCli => "gemini_cli",
             Self::Cursor => "cursor",
             Self::Opencode => "opencode",
+            Self::GrokBuild => "grok_build",
         }
     }
 }

@@ -51,10 +51,11 @@ package signatures establish distribution integrity and do not authorize IPC.
 
 Each bridge connection creates a fresh restricted MCP server and session UUID.
 Only `AgentApi`, not `OwnerApi`, crosses the IPC boundary. It constructs a
-server with typed SQLCipher-backed stores and an OS credential-store signer so
-tools can persist requests and core can sign transactions that current policy
-allows automatically. No MCP path receives owner authorization, raw key
-export, native-review decisions, unrestricted storage, or owner-only mutation
+server with typed SQLCipher-backed stores and a narrow core execution authority
+so tools can persist requests and request only guarded automatic execution or
+exact cancellation. The MCP server never receives a `KeyStore`, arbitrary
+signature operation, owner authorization, raw key export, native-review
+decisions, unrestricted storage, or owner-only mutation
 capabilities. Harness kind is informational activity attribution only. The
 local stack has no HTTP or OAuth surface.
 Managed configurations contain only the installed helper command with a fixed
@@ -75,8 +76,13 @@ seven-day deadline; incoming extension requests cannot move it.
 RPC responses, simulations, fee data, receipts, and broadcasts are untrusted.
 Signing uses a server-authored review identity which changes with displayed
 content. Account replacement, digests, policy, simulation, nonce, and fee
-assumptions are revalidated at signing. Policy can authorize matching
-transactions to use the OS-held key without a prompt; it cannot reveal raw key
+assumptions are revalidated at signing. Policy resolves each call by its first
+matching allow, review, or deny rule and can authorize an all-allow prepared
+transaction to use the OS-held key without a prompt. Deny dominates the
+transaction, followed by review or an unmatched call. Prepared-envelope fields
+come from the wallet's exact transaction preparation. A simulation ID grants
+nothing: send always freshly simulates, prepares, and evaluates current policy.
+Policy cannot reveal raw key
 material or grant exports, settings mutation, review decisions, owner
 authorization, or other owner capabilities.
 

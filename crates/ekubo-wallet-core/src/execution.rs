@@ -3,7 +3,7 @@ use crate::{
     config::{NetworkConfig, WalletMetadata},
     core::{
         execution_plan::ExecutionPlan,
-        policy::{PolicyOutcome, denial_reasons, policy_outcome},
+        policy::{PolicyOutcome, PreparedTransactionFacts, denial_reasons, policy_outcome},
     },
     custody::{KeyStore, load_matching_signer},
     rpc::transaction_receipt_through,
@@ -66,6 +66,22 @@ pub struct PreparedExecution {
     plan_digest: String,
 }
 
+/// Display-only copy of the exact prepared envelope fields. Authorization
+/// always uses the typed [`PreparedExecution`] retained inside core.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct PreparedTransactionSummary {
+    pub transaction_type: String,
+    pub chain_id: String,
+    pub nonce: String,
+    pub gas_limit: String,
+    pub max_fee_per_gas: String,
+    pub max_priority_fee_per_gas: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<String>,
+    pub to: String,
+    pub native_value: String,
+}
+
 impl PreparedExecution {
     #[must_use]
     pub const fn nonce(&self) -> u64 {
@@ -95,9 +111,40 @@ impl PreparedExecution {
     #[must_use]
     pub const fn transaction_type(&self) -> &'static str {
         if self.authorize_delegation {
-            "eip_7702"
+            "eip7702"
         } else {
-            "eip_1559"
+            "eip1559"
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn policy_facts(&self) -> PreparedTransactionFacts {
+        PreparedTransactionFacts {
+            transaction_type: self.transaction_type(),
+            nonce: self.nonce,
+            gas_limit: self.gas_limit,
+            max_fee_per_gas: self.max_fee_per_gas,
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas,
+            delegation: self.authorize_delegation.then_some(CANONICAL_CALIBUR),
+            envelope_to: self.planned.to,
+            envelope_native_value: self.planned.value,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn summary(&self) -> PreparedTransactionSummary {
+        PreparedTransactionSummary {
+            transaction_type: self.transaction_type().to_owned(),
+            chain_id: self.chain_id.to_string(),
+            nonce: self.nonce.to_string(),
+            gas_limit: self.gas_limit.to_string(),
+            max_fee_per_gas: self.max_fee_per_gas.to_string(),
+            max_priority_fee_per_gas: self.max_priority_fee_per_gas.to_string(),
+            delegation: self
+                .authorize_delegation
+                .then(|| format!("{CANONICAL_CALIBUR:#x}")),
+            to: format!("{:#x}", self.planned.to),
+            native_value: self.planned.value.to_string(),
         }
     }
 
@@ -236,10 +283,11 @@ pub(crate) async fn sign_execution<K: KeyStore + ?Sized>(
     keys: &K,
     overrides: SigningOverrides,
 ) -> Result<SignedExecution> {
-    let prepared = prepare_execution(wallet, network, plan, simulation, overrides).await?;
-    sign_prepared_execution(
-        wallet, network, plan, simulation, &prepared, keys, overrides,
-    )
+    let prepared = simulation
+        .prepared_execution
+        .as_ref()
+        .context("simulation has no freshly prepared transaction envelope")?;
+    sign_prepared_execution(wallet, network, plan, simulation, prepared, keys, overrides)
 }
 
 /// Resolve the exact nonce, gas limit, and EIP-1559 fee fields without loading
@@ -252,6 +300,19 @@ pub async fn prepare_execution(
     overrides: SigningOverrides,
 ) -> Result<PreparedExecution> {
     validate_preflight(wallet, network, plan, simulation, overrides)?;
+    prepare_execution_for_policy(wallet, network, plan, simulation).await
+}
+
+/// Prepare the exact envelope before policy evaluation. This performs no
+/// authority decision: callers must evaluate the returned facts and may not
+/// sign until [`validate_preflight`] accepts that result.
+pub(crate) async fn prepare_execution_for_policy(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    plan: &ExecutionPlan,
+    simulation: &SimulationResult,
+) -> Result<PreparedExecution> {
+    validate_preparation_binding(wallet, network, plan, simulation)?;
     let planned = planned_call(plan, wallet.address);
     let gas_limit = signing_gas_limit(network, simulation)?;
     let prepared = crate::rpc::try_clients(network, |client| async move {
@@ -316,6 +377,32 @@ pub async fn prepare_execution(
         authorize_delegation,
         plan_digest: simulation.digest.clone(),
     })
+}
+
+fn validate_preparation_binding(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    plan: &ExecutionPlan,
+    simulation: &SimulationResult,
+) -> Result<()> {
+    plan.validate()?;
+    ensure!(
+        plan.sender == wallet.address,
+        "execution plan sender mismatch"
+    );
+    ensure!(
+        plan.chain_id.as_str() == network.chain_id.to_string(),
+        "execution plan chain mismatch"
+    );
+    ensure!(
+        simulation.digest == format!("{:#x}", plan.digest()),
+        "simulation digest does not match execution plan"
+    );
+    ensure!(
+        simulation.fork.is_none(),
+        "a fork simulation is hypothetical and cannot prepare a transaction"
+    );
+    Ok(())
 }
 
 /// Whether this send should carry an EIP-7702 authorization, decided against

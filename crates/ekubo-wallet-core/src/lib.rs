@@ -11,6 +11,7 @@
 compile_error!("the test-hooks feature must never be enabled in a release build");
 
 pub mod abi_decoder;
+pub mod agent_authority;
 pub mod approval;
 pub mod approval_summary;
 pub mod chain_client;

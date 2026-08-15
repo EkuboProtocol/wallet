@@ -3,9 +3,11 @@
 use anyhow::{Context, Result, ensure};
 use directories::BaseDirs;
 use ekubo_wallet_core::desktop_store::AgentKind;
+use fs2::FileExt as _;
 use serde_json::{Map, Value, json};
 use std::{
     fs,
+    fs::{File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
 };
@@ -105,6 +107,7 @@ fn harness_argument(kind: AgentKind) -> Result<&'static str> {
         AgentKind::GeminiCli => Ok("gemini-cli"),
         AgentKind::Cursor => Ok("cursor"),
         AgentKind::Opencode => Ok("opencode"),
+        AgentKind::GrokBuild => Ok("grok-build"),
         AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
     }
 }
@@ -143,6 +146,8 @@ struct InstalledConfig {
     path: PathBuf,
     existed: bool,
     before: zeroize::Zeroizing<String>,
+    installed: zeroize::Zeroizing<String>,
+    _lock: File,
 }
 
 /// A set of managed configuration writes that either all remain installed or
@@ -156,24 +161,18 @@ pub struct ConfigBatchInstall {
 }
 
 impl ConfigBatchInstall {
-    pub fn install(previews: Vec<ConfigPreview>) -> Result<Self> {
+    pub fn install(mut previews: Vec<ConfigPreview>) -> Result<Self> {
+        // A stable global order prevents two wallet processes installing the
+        // same batch in a different UI order from deadlocking on sidecars.
+        previews.sort_by(|left, right| left.path.cmp(&right.path));
         let mut batch = Self {
             installed: Vec::new(),
             committed: false,
         };
         for preview in previews {
-            if !preview.has_changes() {
-                preview.validate_current()?;
-                continue;
-            }
-            let path = preview.path.clone();
-            let existed = path.is_file();
             match preview.install() {
-                Ok(before) => batch.installed.push(InstalledConfig {
-                    path,
-                    existed,
-                    before,
-                }),
+                Ok(Some(installed)) => batch.installed.push(installed),
+                Ok(None) => {}
                 Err(error) => {
                     batch.rollback_best_effort();
                     batch.committed = true;
@@ -192,6 +191,14 @@ impl ConfigBatchInstall {
 
     fn rollback_best_effort(&self) {
         for installed in self.installed.iter().rev() {
+            let Ok(current) = fs::read_to_string(&installed.path) else {
+                continue;
+            };
+            // A non-cooperating editor can ignore the sidecar. Never erase
+            // bytes written after ours unless they are still exactly ours.
+            if current != installed.installed.as_str() {
+                continue;
+            }
             if installed.existed {
                 let _ = write_atomic(&installed.path, installed.before.as_bytes());
             } else if installed.path.is_file() {
@@ -223,7 +230,7 @@ impl ConfigPreview {
 
     /// Verify that an unchanged file still contains the exact credential-free
     /// bridge command and, where supported, hosted companion shape.
-    pub fn validate_current(&self) -> Result<()> {
+    fn validate_current(&self) -> Result<()> {
         let installed = fs::read_to_string(&self.path)
             .context("failed to read installed agent configuration")?;
         ensure!(
@@ -234,9 +241,32 @@ impl ConfigPreview {
         validate_server_shape(&installed, self.validation)
     }
 
-    pub fn install(mut self) -> Result<zeroize::Zeroizing<String>> {
+    fn install(mut self) -> Result<Option<InstalledConfig>> {
         let parent = self.path.parent().context("agent config has no parent")?;
         fs::create_dir_all(parent)?;
+        let lock_path = config_lock_path(&self.path)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open {}", lock_path.display()))?;
+        lock.lock_exclusive()
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+        let current = match fs::read_to_string(&self.path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            current == self.before,
+            "agent configuration changed after review; generate a fresh preview"
+        );
+        if !self.has_changes() {
+            self.validate_current()?;
+            return Ok(None);
+        }
         let existed = self.path.is_file();
 
         write_atomic(&self.path, self.after.as_bytes())?;
@@ -260,10 +290,24 @@ impl ConfigPreview {
                 .context("agent configuration validation failed; prior bytes restored");
         }
         let before = zeroize::Zeroizing::new(std::mem::take(&mut self.before));
-        self.after.zeroize();
+        let installed = zeroize::Zeroizing::new(std::mem::take(&mut self.after));
         self.diff.zeroize();
-        Ok(before)
+        Ok(Some(InstalledConfig {
+            path: self.path.clone(),
+            existed,
+            before,
+            installed,
+            _lock: lock,
+        }))
     }
+}
+
+fn config_lock_path(path: &Path) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("agent config filename is not valid UTF-8")?;
+    Ok(path.with_file_name(format!(".{name}.ekubo-wallet.lock")))
 }
 
 impl AgentAdapter {
@@ -301,6 +345,11 @@ impl AgentAdapter {
                 display_name: "opencode",
                 config_path: base.config_dir().join("opencode/opencode.json"),
             },
+            Self {
+                kind: AgentKind::GrokBuild,
+                display_name: "Grok Build",
+                config_path: home.join(".grok/config.toml"),
+            },
         ])
     }
 
@@ -317,6 +366,7 @@ impl AgentAdapter {
                     .parent()
                     .is_some_and(std::path::Path::exists),
                 AgentKind::Opencode => binary_on_path("opencode"),
+                AgentKind::GrokBuild => binary_on_path("grok"),
                 AgentKind::Other => false,
             }
     }
@@ -331,7 +381,7 @@ impl AgentAdapter {
         let command = command.to_string_lossy();
         let client = harness_argument(self.kind)?;
         let after = match self.kind {
-            AgentKind::Codex => merge_codex(&before, &command, client)?,
+            AgentKind::Codex | AgentKind::GrokBuild => merge_codex(&before, &command, client)?,
             AgentKind::ClaudeCode | AgentKind::Cursor => merge_json(
                 &before,
                 "mcpServers",
@@ -378,7 +428,7 @@ impl AgentAdapter {
             Err(error) => return Err(error.into()),
         };
         let after = match self.kind {
-            AgentKind::Codex => remove_codex(&before)?,
+            AgentKind::Codex | AgentKind::GrokBuild => remove_codex(&before)?,
             AgentKind::ClaudeCode
             | AgentKind::ClaudeDesktop
             | AgentKind::GeminiCli
@@ -518,7 +568,7 @@ fn remote_json_server(shape: JsonShape, url: &str) -> Value {
 fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<String> {
     let mut changes = Vec::new();
     match kind {
-        AgentKind::Codex => {
+        AgentKind::Codex | AgentKind::GrokBuild => {
             let before = parse_codex_document(before)?;
             let after = parse_codex_document(after)?;
             for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
@@ -690,7 +740,7 @@ fn validate_document(path: &Path, contents: &str) -> Result<()> {
 fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result<()> {
     match validation {
         ConfigValidation::Installed { kind } => match kind {
-            AgentKind::Codex => validate_codex_shape(contents),
+            AgentKind::Codex | AgentKind::GrokBuild => validate_toml_shape(contents, kind),
             AgentKind::ClaudeCode
             | AgentKind::ClaudeDesktop
             | AgentKind::GeminiCli
@@ -704,7 +754,7 @@ fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result
 
 fn validate_removed_shape(contents: &str, kind: AgentKind) -> Result<()> {
     match kind {
-        AgentKind::Codex => {
+        AgentKind::Codex | AgentKind::GrokBuild => {
             let document = parse_codex_document(contents)?;
             let servers = document.get("mcp_servers").and_then(Item::as_table);
             ensure!(
@@ -740,7 +790,7 @@ fn validate_removed_shape(contents: &str, kind: AgentKind) -> Result<()> {
     Ok(())
 }
 
-fn validate_codex_shape(contents: &str) -> Result<()> {
+fn validate_toml_shape(contents: &str, kind: AgentKind) -> Result<()> {
     let document = contents
         .parse::<DocumentMut>()
         .context("Codex config is not valid TOML")?;
@@ -762,7 +812,7 @@ fn validate_codex_shape(contents: &str) -> Result<()> {
     ensure!(
         args.len() == 2
             && args.get(0).and_then(toml_edit::Value::as_str) == Some("--client")
-            && args.get(1).and_then(toml_edit::Value::as_str) == Some("codex"),
+            && args.get(1).and_then(toml_edit::Value::as_str) == Some(harness_argument(kind)?),
         "local MCP helper arguments are incorrect"
     );
     ensure!(
@@ -798,7 +848,9 @@ fn validate_json_shape(contents: &str, kind: AgentKind) -> Result<()> {
         AgentKind::ClaudeCode | AgentKind::ClaudeDesktop | AgentKind::Cursor => JsonShape::Stdio,
         AgentKind::GeminiCli => JsonShape::Gemini,
         AgentKind::Opencode => JsonShape::Local,
-        AgentKind::Codex | AgentKind::Other => unreachable!("validated above"),
+        AgentKind::Codex | AgentKind::GrokBuild | AgentKind::Other => {
+            unreachable!("validated above")
+        }
     };
     let command = installed_bridge_path()?;
     let client = harness_argument(kind)?;

@@ -132,6 +132,21 @@ fn accept_legal(server: &WalletMcpServer) {
         .unwrap();
 }
 
+fn use_closed_local_rpc(server: &WalletMcpServer) {
+    server
+        .config
+        .update_for_test(|state| {
+            state
+                .networks
+                .iter_mut()
+                .find(|network| network.chain_id == 1)
+                .expect("default Ethereum network")
+                .rpc_urls = vec!["http://127.0.0.1:1/".parse().unwrap()];
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn wallet_and_network_inventories_are_separate_and_hide_disabled_networks() {
     let (_directory, server) = server();
@@ -1114,10 +1129,9 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
     // An agent that reads allowed=false as a blocker reports findings back
     // and asks the user to widen their policy, which is the one thing the
     // user is not being asked to do: the send is what queues the review.
-    assert!(
-        SERVER_INSTRUCTIONS
-            .contains("matching no policy rule is the ordinary route to a human approval")
-    );
+    assert!(SERVER_INSTRUCTIONS.contains(
+        "matching no policy rule or a `review` rule is the ordinary route to a human approval"
+    ));
     assert!(SERVER_INSTRUCTIONS.contains("never a prerequisite for the one in hand"));
 
     // The opposite half of the same fact: a deny rule is not a route to
@@ -1210,6 +1224,8 @@ fn the_authoring_surfaces_explain_order_and_the_two_negative_outcomes() {
         "omitted matcher means any value",
         "integer comparisons",
         "There is no `from` matcher",
+        "envelope_native_value",
+        "deny < review < allow",
         "The only policy variable is `$self`",
     ] {
         assert!(
@@ -1261,6 +1277,8 @@ fn recorded_failure(plan: &ExecutionPlan, policy_revision: u64) -> SimulationRes
         implementation: None,
         will_authorize_delegation: false,
         replaces_delegated_implementation: None,
+        prepared_transaction: None,
+        prepared_execution: None,
         simulation: SimulationExecution {
             success: false,
             gas_used: None,
@@ -1290,9 +1308,10 @@ fn recorded_failure(plan: &ExecutionPlan, policy_revision: u64) -> SimulationRes
 }
 
 #[tokio::test]
-async fn a_recorded_simulation_is_sent_without_simulating_again_and_only_once() {
+async fn a_recorded_simulation_is_only_a_one_use_handle_for_a_fresh_simulation() {
     let (_directory, server) = server();
     accept_legal(&server);
+    use_closed_local_rpc(&server);
     let plan = sendable_plan();
     let wallet = server.config.wallet("primary").unwrap();
     let recorded = server.simulations.lock().unwrap().record_for_instance(
@@ -1312,13 +1331,9 @@ async fn a_recorded_simulation_is_sent_without_simulating_again_and_only_once() 
         OnSimulationFailure::Fail,
     ))
     .await
-    .expect_err("the recorded failure is reported, not re-simulated");
-    // The recorded result's own guidance comes back, so nothing asked the
-    // RPC to execute this plan a second time.
-    assert!(
-        error.to_string().contains("GUIDANCE FROM THE RECORDED"),
-        "{error}"
-    );
+    .expect_err("the send must freshly contact the configured RPC");
+    assert!(error.to_string().contains("eth_simulateV1"), "{error}");
+    assert!(!error.to_string().contains("GUIDANCE FROM THE RECORDED"));
 
     // And the record is spent, so one simulation can authorize at most one
     // send however many times the identifier is replayed.
@@ -1335,9 +1350,10 @@ async fn a_recorded_simulation_is_sent_without_simulating_again_and_only_once() 
 }
 
 #[tokio::test]
-async fn a_simulation_evaluated_under_a_superseded_policy_is_refused() {
+async fn a_preview_policy_revision_never_substitutes_for_fresh_policy_evaluation() {
     let (_directory, server) = server();
     accept_legal(&server);
+    use_closed_local_rpc(&server);
     let plan = sendable_plan();
     let wallet = server.config.wallet("primary").unwrap();
     let recorded = server.simulations.lock().unwrap().record_for_instance(
@@ -1367,14 +1383,19 @@ async fn a_simulation_evaluated_under_a_superseded_policy_is_refused() {
         OnSimulationFailure::Fail,
     ))
     .await
-    .expect_err("findings from a policy that is no longer active must not be sent");
-    assert!(error.to_string().contains("moved to revision 2"), "{error}");
+    .expect_err("the old preview must lead into a fresh simulation");
+    assert!(error.to_string().contains("eth_simulateV1"), "{error}");
+    assert!(
+        !error.to_string().contains("moved to revision 2"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
 async fn a_fork_result_can_never_be_sent_even_if_one_reaches_the_registry() {
     let (_directory, server) = server();
     accept_legal(&server);
+    use_closed_local_rpc(&server);
     let plan = sendable_plan();
     let mut hypothetical = recorded_failure(&plan, 1);
     hypothetical.fork = Some(crate::fork::ForkContext {
@@ -1405,8 +1426,8 @@ async fn a_fork_result_can_never_be_sent_even_if_one_reaches_the_registry() {
         OnSimulationFailure::Fail,
     ))
     .await
-    .expect_err("a hypothetical result must not authorize a send");
-    assert!(error.to_string().contains("hypothetical"), "{error}");
+    .expect_err("a hypothetical preview must grant no signing authority");
+    assert!(error.to_string().contains("eth_simulateV1"), "{error}");
 }
 
 #[test]
@@ -1898,13 +1919,12 @@ fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
     // opposite — that MCP tools add tokens after verifying them on chain.
     assert!(SECURITY_MODEL.contains("never read from the contract"));
     assert!(!SECURITY_MODEL.contains("on-chain Multicall3 verification"));
-    // Restricted is an operation boundary, not a claim that the constructed
-    // server has no persistence or signer. It needs both to keep lifecycle
-    // state and execute transactions that the current policy allows without a
-    // native review.
+    // Restricted is an operation boundary: persistence remains available,
+    // while key custody is reachable only through a narrow core execution
+    // capability.
     assert!(SECURITY_MODEL.contains("typed SQLCipher-backed stores"));
-    assert!(SECURITY_MODEL.contains("OS credential-store signer"));
-    assert!(SECURITY_MODEL.contains("active policy permits automatic execution"));
+    assert!(SECURITY_MODEL.contains("narrow core execution authority"));
+    assert!(SECURITY_MODEL.contains("MCP never receives a\n`KeyStore`"));
     assert!(SECURITY_MODEL.contains("no owner-authorization capability"));
     assert!(!SECURITY_MODEL.contains("no owner authorization, database, Keychain, custody"));
 }

@@ -91,6 +91,27 @@ fn rejects_unknown_harness_without_writing_protocol_to_stdout() {
 }
 
 #[test]
+fn accepts_grok_build_as_a_supported_harness() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        .args(["--client", "grok-build"])
+        .env("EKUBO_WALLET_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+    );
+    assert_eq!(receive(&mut stdout)["id"], 1);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn malformed_json_returns_a_protocol_error_without_stopping() {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))

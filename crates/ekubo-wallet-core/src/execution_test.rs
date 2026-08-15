@@ -748,6 +748,8 @@ mod automatic_gas_floor_tests {
             implementation: None,
             will_authorize_delegation: delegating,
             replaces_delegated_implementation: None,
+            prepared_transaction: None,
+            prepared_execution: None,
             simulation: crate::simulation::SimulationExecution {
                 success: true,
                 gas_used: Some(gas_used.into()),

@@ -1,5 +1,6 @@
 use crate::desktop::Route;
 use anyhow::{Context, Result};
+#[cfg(any(target_os = "macos", windows))]
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -33,18 +34,20 @@ pub trait TrayService {
     fn drain_commands(&mut self) -> Vec<TrayCommand>;
 }
 
-/// Native status-item adapter. `tray-icon` confines the platform FFI to its
-/// Apache-2.0/MIT implementation: `NSStatusItem` on macOS, `Shell_NotifyIcon` on
-/// Windows, and AppIndicator/StatusNotifierItem on Linux.
+/// Native status-item adapter for `AppKit` and Windows Explorer. Linux uses the
+/// credential-free `StatusNotifierItem` service in `tray_linux.rs` and does not
+/// link GTK or `AppIndicator`.
+#[cfg(any(target_os = "macos", windows))]
 pub struct PlatformTray {
     tray: TrayIcon,
     reviews: MenuItem,
     agents: MenuItem,
     snapshot: TraySnapshot,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     dark_mode: bool,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 impl PlatformTray {
     /// Two commands that did the same thing used to sit in this menu: the
     /// agent-status line and `Settings…` both opened Settings, so one of them
@@ -104,7 +107,7 @@ impl PlatformTray {
                 connected_agents: 0,
                 walletconnect_sessions: 0,
             },
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(windows)]
             dark_mode,
         })
     }
@@ -117,7 +120,7 @@ impl PlatformTray {
             // The template already adapts itself, so theme updates are a no-op.
             let _ = dark_mode;
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
             if self.dark_mode == dark_mode {
                 return;
@@ -150,6 +153,7 @@ impl PlatformTray {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
 impl TrayService for PlatformTray {
     fn available(&self) -> bool {
         true
@@ -311,7 +315,7 @@ fn scaled_tray_artwork(image: &image::RgbaImage) -> image::RgbaImage {
     canvas
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn wallet_icon(_dark_mode: bool) -> Result<Icon> {
     const SIDE: u32 = 32;
     let image = image::load_from_memory_with_format(
@@ -323,6 +327,13 @@ fn wallet_icon(_dark_mode: bool) -> Result<Icon> {
     let image = image::imageops::resize(&image, SIDE, SIDE, image::imageops::FilterType::Lanczos3);
     Icon::from_rgba(image.into_raw(), SIDE, SIDE).context("failed to construct tray icon pixels")
 }
+
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(all(test, not(target_os = "linux")), allow(dead_code))]
+#[path = "tray_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::PlatformTray;
 
 #[cfg(test)]
 #[path = "tray_test.rs"]

@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Shipped attribution document for third-party dependencies. Regenerate with
-/// `contrib/generate-third-party-licenses.py`; CI fails when it is stale or a
-/// resolved dependency only offers a forbidden strong-copyleft license.
+/// `contrib/generate-third-party-licenses.py`; CI fails when it is stale.
+/// OSV-Scanner separately enforces the dependency license allowlist.
 pub const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD_PARTY_LICENSES.md");
 /// Exact application license bundled with this build. Keeping it beside the
 /// other legal documents makes every viewer work offline and avoids an

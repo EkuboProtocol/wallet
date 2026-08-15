@@ -448,7 +448,7 @@ file follows in the appendix. Regenerate this document with
 - libxdo 0.6.0 — Mika Attila <radiantstatue@gmail.com> — https://github.com/crumblingstatue/rust-libxdo
 - libxdo-sys 0.11.0 — Mika Attila <radiantstatue@gmail.com> — https://github.com/crumblingstatue/rust-libxdo-sys
 - loop9 0.1.5 — Kornel <kornel@geekhood.net> — https://gitlab.com/kornelski/loop9.git
-- lru 0.16.4 — Jerome Froelich <jeromefroelic@hotmail.com> — https://github.com/jeromefroe/lru-rs.git
+- lru 0.18.2 — Jerome Froelich <jeromefroelic@hotmail.com> — https://github.com/jeromefroe/lru-rs.git
 - lsp-types 0.97.0 — Markus Westerlind <marwes91@gmail.com>, Bruno Medeiros <bruno.do.medeiros@gmail.com> — https://github.com/gluon-lang/lsp-types
 - malloc_buf 0.0.6 — Steven Sheldon — https://github.com/SSheldon/malloc_buf
 - markdown 1.0.0 — Titus Wormer <tituswormer@gmail.com> — https://github.com/wooorm/markdown-rs
@@ -556,6 +556,9 @@ file follows in the appendix. Regenerate this document with
 - tracing-core 0.1.36 — Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tracing
 - tracing-log 0.2.0 — Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tracing
 - tracing-subscriber 0.3.23 — Eliza Weisman <eliza@buoyant.io>, David Barsky <me@davidbarsky.com>, Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tracing
+- tree-sitter 0.26.12 — Max Brunsfeld <maxbrunsfeld@gmail.com>, Amaan Qureshi <amaanq12@gmail.com> — https://github.com/tree-sitter/tree-sitter
+- tree-sitter-json 0.24.8 — Max Brunsfeld <maxbrunsfeld@gmail.com>, Amaan Qureshi <amaanq12@gmail.com> — https://github.com/tree-sitter/tree-sitter-json
+- tree-sitter-language 0.1.7 — Max Brunsfeld <maxbrunsfeld@gmail.com>, Amaan Qureshi <amaanq12@gmail.com> — https://github.com/tree-sitter/tree-sitter
 - try-lock 0.2.5 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/try-lock
 - uds_windows 1.2.1 — Azure IoT Edge Devs, Harald Hoyer <harald@redhat.com> — https://github.com/haraldh/rust_uds_windows
 - valuable 0.1.1 — https://github.com/tokio-rs/valuable
@@ -621,44 +624,44 @@ file follows in the appendix. Regenerate this document with
 - ahash 0.8.12 — Tom Kaitchuck <Tom.Kaitchuck@gmail.com> — https://github.com/tkaitchuck/ahash
 - aligned 0.4.3 — https://github.com/rust-embedded-community/aligned
 - allocator-api2 0.2.21 — Zakarum <zaq.dev@icloud.com> — https://github.com/zakarumych/allocator-api2
-- alloy 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy 2.3.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-chains 0.2.36 — Alloy Contributors — https://github.com/alloy-rs/chains
-- alloy-consensus 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-consensus-any 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-contract 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-consensus 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-consensus-any 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-contract 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-core 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-dyn-abi 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-eip2124 0.2.0 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip2930 0.2.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7702 0.6.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7928 0.4.5 — Ishika Choudhury <ishikac720@gmail.com>, Soubhik Singha Mahapatra <soubhiksinghamahapatra@gmail.com> — https://github.com/alloy-rs/eips
-- alloy-eips 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-ens 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-genesis 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-eips 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-ens 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-genesis 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-json-abi 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-json-rpc 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-network 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-network-primitives 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-json-rpc 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-network 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-network-primitives 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-primitives 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-provider 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-provider 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-rlp 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
 - alloy-rlp-derive 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
-- alloy-rpc-client 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-rpc-types 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-rpc-types-any 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-rpc-types-eth 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-serde 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-signer 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-signer-local 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-client 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-types 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-types-any 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-types-eth 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-serde 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-signer 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-signer-local 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-sol-macro 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-sol-macro-expander 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-sol-macro-input 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-sol-type-parser 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-sol-types 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-transport 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-transport-http 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-transport 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-transport-http 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-trie 0.9.5 — rkrasiuk <rokrassyuk@gmail.com>, gakonst <me@gakonst.com>, DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/alloy-rs/trie
-- alloy-tx-macros 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-tx-macros 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - android_system_properties 0.1.5 — Nicolas Silva <nical@fastmail.com> — https://github.com/nical/android_system_properties
 - annotate-snippets 0.12.16 — https://github.com/rust-lang/annotate-snippets-rs
 - anstyle 1.0.14 — https://github.com/rust-cli/anstyle.git
@@ -1050,6 +1053,7 @@ file follows in the appendix. Regenerate this document with
 - stacker 0.1.25 — Alex Crichton <alex@alexcrichton.com>, Simonas Kazlauskas <stacker@kazlauskas.me> — https://github.com/rust-lang/stacker
 - static_assertions 1.1.0 — Nikolai Vazquez — https://github.com/nvzqz/static-assertions-rs
 - str_indices 0.4.4 — Nathan Vegdahl <cessen@cessen.com> — https://github.com/cessen/str_indices
+- streaming-iterator 0.1.9 — Steven Fackler <sfackler@gmail.com> — https://github.com/sfackler/streaming-iterator
 - string_cache 0.8.9 — The Servo Project Developers — https://github.com/servo/string-cache
 - string_cache_codegen 0.5.4 — The Servo Project Developers — https://github.com/servo/string-cache
 - svg_fmt 0.4.5 — Nicolas Silva <nical@fastmail.com> — https://github.com/nical/rust_debug
@@ -1328,42 +1332,42 @@ file follows in the appendix. Regenerate this document with
 - accesskit_unix 0.21.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - accesskit_windows 0.33.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloc-stdlib 0.2.2: BSD-3-Clause — BSD 3-Clause License: https://opensource.org/license/bsd-3-clause
-- alloy 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-consensus 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-consensus-any 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-contract 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy 2.3.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-consensus 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-consensus-any 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-contract 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-core 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-dyn-abi 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2124 0.2.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2930 0.2.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7702 0.6.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7928 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-eips 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-ens 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-genesis 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-eips 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-ens 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-genesis 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-abi 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-json-rpc 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-network 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-network-primitives 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-json-rpc 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-network 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-network-primitives 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-primitives 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-provider 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-provider 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp-derive 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-client 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-types 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-types-any 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-types-eth 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-serde 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-signer 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-signer-local 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-client 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-types 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-types-any 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-types-eth 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-serde 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-signer 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-signer-local 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-sol-macro 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-sol-macro-expander 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-sol-macro-input 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-sol-type-parser 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-sol-types 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-transport 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-transport-http 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-tx-macros 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-transport 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-transport-http 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-tx-macros 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - backhand 0.25.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - bitcoin-consensus-encoding 1.1.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-internals 0.6.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
@@ -1462,6 +1466,7 @@ file follows in the appendix. Regenerate this document with
 - svg_fmt 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - syn-solidity 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - taffy 0.12.2: MIT — MIT License: https://opensource.org/license/mit
+- tree-sitter-json 0.24.8: MIT — MIT License: https://opensource.org/license/mit
 - uint 0.9.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - valuable 0.1.1: MIT — MIT License: https://opensource.org/license/mit
 - winapi-i686-pc-windows-gnu 0.4.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -10329,7 +10334,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: lru 0.16.4
+## License text for: lru 0.18.2
 
 ```text
 MIT License
@@ -14179,6 +14184,30 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## License text for: streaming-iterator 0.1.9
+
+```text
+Copyright (c) 2016 Steven Fackler
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## License text for: strict-num 0.1.1
 
 ```text
@@ -15123,6 +15152,32 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: tree-sitter 0.26.12, tree-sitter-language 0.1.7
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2018 Max Brunsfeld
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## License text for: try-lock 0.2.5

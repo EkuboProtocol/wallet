@@ -9,12 +9,24 @@ OS owner authentication; a transition that core proves only tightens authority
 can be installed from the owner UI without an additional OS challenge.
 
 Policy version 1 is intentionally small. It contains one ordered `rules` list.
-Every rule must have an `effect` of `allow` or `deny` and may constrain
-`chain_id`, `to`, `native_value`, and `calldata`. Present matchers are ANDed;
+Every rule must have an `effect` of `allow`, `review`, or `deny`. Matchers are
+flat fields on the rule: `chain_id`, `to`, `native_value`, and `calldata`
+describe one planned call, while `transaction_type`, `nonce`, `gas_limit`,
+`max_fee_per_gas`, `max_priority_fee_per_gas`, `delegation`, `envelope_to`, and
+`envelope_native_value` describe the prepared transaction envelope outside
+that call. Present matchers are ANDed;
 an omitted matcher means any value. Rules are evaluated from top to bottom and
 the first matching rule decides each call. A call reaching the end needs owner
-approval. A matching deny rejects the complete transaction without offering an
-approval override. Every call in a batch must match an allow rule.
+review, as does a matching `review` rule. A matching deny rejects without queuing
+or offering an approval override. Calls are evaluated
+independently, then the transaction takes the least-privileged result: any
+deny rejects it, otherwise any review or unmatched call queues it, and only a
+batch whose every call resolves to allow can sign automatically.
+
+Prepared-envelope matchers are evaluated only after simulation and exact
+transaction preparation. A rule containing one cannot match a context with no
+prepared envelope. `delegation` matches only the signed EIP-7702 authorization
+target; a transaction with no authorization does not match it.
 Documents are limited to 256 rules.
 
 The empty policy is the default and asks the owner about every transaction. A
@@ -61,14 +73,21 @@ shapes as `{ "each": { "tuple": [...] } }`. Use the same exact-arity rule at
 every tuple level. The explicit `"any_value"` predicate remains valid, but
 `null` is the canonical spelling for an unconstrained tuple position.
 
-Prefer the narrowest rule that expresses the operation. Put exceptions before
+Prefer the narrowest rule that expresses the operation. For example, put a
+matcherless `review` rule first to review every transaction, or constrain
+`envelope_native_value` with `gt` to review any prepared transaction moving
+more than a threshold from the wallet. Put exceptions before
 broad rules: order is authority, and installation rejects a later rule that is
 provably shadowed by an earlier one. There is no `from` matcher, chain map,
-batch-count limit, cumulative budget, or delegation matcher. `native_value` is
-a per-call condition. EIP-7702 delegation safety remains a separate core
-preflight check and cannot be weakened by policy JSON.
+batch-count limit, or cumulative budget. `native_value` is per call;
+`envelope_native_value` is the value on the prepared outer transaction.
 
-Never rely on display labels, token symbols, RPC simulation output, or other
-network-provided facts for authorization. They are review context, not policy
-inputs. The only policy variable is `$self`, usable where an address literal is
-expected and resolved to the signing wallet.
+For tightening comparisons, authority is ordered `deny < review < allow`.
+Core permits a challenge-free owner-UI installation only when it can prove the
+whole transition moves downward in that order without broadening a matcher.
+
+Never rely on display labels, token symbols, or decoded RPC effects for
+authorization. They are review context, not policy inputs. Prepared envelope
+facts come from the wallet's own exact transaction preparation. The only policy variable is `$self`,
+usable where an address literal is expected and
+resolved to the signing wallet.

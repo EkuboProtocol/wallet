@@ -25,6 +25,8 @@ fn simulation() -> SimulationResult {
         implementation: None,
         will_authorize_delegation: false,
         replaces_delegated_implementation: None,
+        prepared_transaction: None,
+        prepared_execution: None,
         simulation: SimulationExecution {
             success: true,
             gas_used: Some("21000".into()),

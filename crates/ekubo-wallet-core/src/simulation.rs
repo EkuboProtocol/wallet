@@ -22,8 +22,8 @@ use crate::{
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
-            DELEGATION_AUTHORIZED_CODE, DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding,
-            PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
+            FindingSeverity, PolicyFinding, PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy,
+            policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -200,11 +200,10 @@ pub struct BalanceChanges {
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct SimulationResult {
-    /// Identifies this exact result so it can be sent without simulating
-    /// again. Usable once, for a short time, and only for the wallet and chain
-    /// it was produced for. Absent on a fork, whose results are hypothetical
-    /// and can never be sent, and on a result that has just been consumed by a
-    /// send.
+    /// A short-lived, one-use handle to this result's exact plan. Sending
+    /// through it freshly simulates, prepares the transaction envelope, and
+    /// evaluates current policy; the identifier itself grants no authority.
+    /// Absent on a fork, whose results are hypothetical, and after consumption.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulation_id: Option<uuid::Uuid>,
     pub digest: String,
@@ -224,6 +223,14 @@ pub struct SimulationResult {
     pub will_authorize_delegation: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces_delegated_implementation: Option<String>,
+    /// Display-only summary of the exact envelope policy evaluated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_transaction: Option<crate::execution::PreparedTransactionSummary>,
+    /// Typed authority-bearing preparation retained only inside core. This is
+    /// never serialized and cannot be reconstructed from the display summary.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub prepared_execution: Option<crate::execution::PreparedExecution>,
     pub simulation: SimulationExecution,
     pub token_spends: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -326,7 +333,8 @@ pub async fn simulate_execution(
             .as_ref()
             .is_some_and(|failure| failure.category == SimulationFailureCategory::RpcError);
         if !retryable || remaining == 0 {
-            return Ok(result);
+            return finalize_policy(wallet, network, plan, stored_policy, context, fork, result)
+                .await;
         }
         last = Some(result);
     }
@@ -334,6 +342,50 @@ pub async fn simulate_execution(
     // configuration is a file: an empty list must not silently report a
     // successful simulation of nothing.
     last.context("network has no RPC endpoints to simulate against")
+}
+
+async fn finalize_policy(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    plan: &ExecutionPlan,
+    stored_policy: &StoredPolicy,
+    context: &PolicyContext,
+    fork: Option<&ForkPreface>,
+    mut result: SimulationResult,
+) -> Result<SimulationResult> {
+    let prepared = if fork.is_none()
+        && result.simulation.gas_used.is_some()
+        && result.simulation.block_gas_limit.is_some()
+    {
+        Some(crate::execution::prepare_execution_for_policy(wallet, network, plan, &result).await?)
+    } else {
+        None
+    };
+    let mut findings = evaluate_policy(
+        plan,
+        prepared
+            .as_ref()
+            .map(crate::execution::PreparedExecution::policy_facts)
+            .as_ref(),
+        &stored_policy.policy,
+        context,
+    );
+    if !result.simulation.success {
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Error,
+            code: SIMULATION_FAILED_CODE.into(),
+            message: "eth_simulateV1 simulation did not succeed".into(),
+            step: None,
+        });
+    }
+    result.allowed = result.simulation.success && policy_allows(&findings);
+    result.policy_outcome = policy_outcome(&findings);
+    result.policy_findings = findings;
+    result.prepared_transaction = prepared
+        .as_ref()
+        .map(crate::execution::PreparedExecution::summary);
+    result.prepared_execution = prepared;
+    Ok(result)
 }
 
 /// Simulate work initiated by an MCP client or dapp while reserving one
@@ -724,7 +776,7 @@ async fn simulate_execution_through(
         tokens: token_balance_changes(&all_tokens, &balances_before, &balances_after, &activity),
     };
 
-    let mut findings = evaluate_policy(plan, &stored_policy.policy, context);
+    let mut findings = evaluate_policy(plan, None, &stored_policy.policy, context);
     let simulation = execution_output(plan, main, simulated_header.gas_limit());
     // A plan that does not execute is never allowed, whatever the policy says
     // about its calls: there is no policy setting that turns a revert into an
@@ -734,46 +786,6 @@ async fn simulate_execution_through(
             severity: FindingSeverity::Error,
             code: SIMULATION_FAILED_CODE.into(),
             message: "eth_simulateV1 execution did not succeed".into(),
-            step: None,
-        });
-    }
-    // Replacing the account's delegation is not one of the plan's calls, so no
-    // allowlist covering those calls has anything to say about it. Without
-    // this the replacement was a sentence in the review document only, and the
-    // automatic path never draws a review document.
-    if let Some(replaced) = &replaces {
-        findings.push(PolicyFinding {
-            severity: FindingSeverity::Error,
-            code: DELEGATION_REPLACED_CODE.into(),
-            message: format!(
-                "this batch would replace the account's EIP-7702 delegation to {replaced} with \
-                 {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds and \
-                 may leave the previous implementation's storage under one that reads it \
-                 differently"
-            ),
-            step: None,
-        });
-    } else if will_authorize {
-        // Whether the finding above fires is decided by one `get_code_at`
-        // answer. An endpoint that reports empty code for an account that is
-        // actually delegated elsewhere takes the `None if is_empty` branch:
-        // the authorization is still signed and the replacement still happens
-        // on chain, but `replaces` is None, so nothing above says so and the
-        // automatic path never draws a document to say it in.
-        //
-        // Disclosing the authorization itself does not depend on that answer
-        // being honest. A warning rather than an error because a first
-        // delegation is what every account's first batch does, and refusing it
-        // would mean no unattended batch could ever run.
-        findings.push(PolicyFinding {
-            severity: FindingSeverity::Warning,
-            code: DELEGATION_AUTHORIZED_CODE.into(),
-            message: format!(
-                "this batch would sign an EIP-7702 authorization delegating the account to \
-                 {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds; the \
-                 account was observed to have no delegation, and if that observation is wrong \
-                 this authorization replaces whatever is actually there"
-            ),
             step: None,
         });
     }
@@ -790,6 +802,8 @@ async fn simulate_execution_through(
             .then(|| format!("{CANONICAL_CALIBUR:#x}")),
         will_authorize_delegation: will_authorize,
         replaces_delegated_implementation: replaces,
+        prepared_transaction: None,
+        prepared_execution: None,
         simulation,
         token_spends: token_spends_public,
         balance_changes: Some(balance_changes),
@@ -1446,37 +1460,13 @@ fn base_failure_result(
     failure: SimulationFailure,
     block_number: u64,
 ) -> SimulationResult {
-    let mut findings = evaluate_policy(plan, &stored_policy.policy, context);
+    let mut findings = evaluate_policy(plan, None, &stored_policy.policy, context);
     findings.push(PolicyFinding {
         severity: FindingSeverity::Error,
         code: SIMULATION_FAILED_CODE.into(),
         message: "eth_simulateV1 simulation did not succeed".into(),
         step: None,
     });
-    // A failure can happen before the wallet's code was ever read, so this
-    // result knows nothing about the account's delegation — and it says so
-    // rather than letting `replaces_delegated_implementation: None` be read as
-    // "there is nothing to replace". It is not: the field is empty because
-    // nobody looked.
-    //
-    // The distinction matters because a failed simulation is exactly the case
-    // a human is asked to override, and the review document draws its
-    // replacement warning from that same empty field. Overriding the failure
-    // would then sign an authorization that silently replaces a delegation the
-    // document never mentioned.
-    if mode == ExecutionMode::CaliburBatch {
-        findings.push(PolicyFinding {
-            severity: FindingSeverity::Warning,
-            code: DELEGATION_AUTHORIZED_CODE.into(),
-            message: format!(
-                "this batch would sign an EIP-7702 authorization delegating the account to \
-                 {CANONICAL_CALIBUR:#x}, and the simulation failed before the account's current \
-                 delegation could be observed; if it is already delegated elsewhere, this \
-                 replaces that, and the replacement persists whether or not the batch succeeds"
-            ),
-            step: None,
-        });
-    }
     SimulationResult {
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
@@ -1489,6 +1479,8 @@ fn base_failure_result(
             .then(|| format!("{CANONICAL_CALIBUR:#x}")),
         will_authorize_delegation: mode == ExecutionMode::CaliburBatch,
         replaces_delegated_implementation: None,
+        prepared_transaction: None,
+        prepared_execution: None,
         simulation: SimulationExecution {
             success: false,
             gas_used: None,

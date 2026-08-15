@@ -7,7 +7,9 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 RUST_MIN_STACK=67108864 cargo test --locked --workspace --all-features
 python3 contrib/generate-third-party-licenses.py --check
-cargo audit
+python3 scripts/generate-osv-lockfiles.py .osv-lockfiles
+osv-scanner scan source --config=osv-scanner.toml --lockfile=Cargo.lock:.osv-lockfiles/Cargo.aarch64-apple-darwin.lock --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-pc-windows-msvc.lock --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-unknown-linux-gnu.lock
+osv-scanner scan source --config=osv-scanner.toml --licenses=0BSD,Apache-2.0,BSD-1-Clause,BSD-2-Clause,BSD-3-Clause,BSL-1.0,CC0-1.0,CDLA-Permissive-2.0,ISC,MIT,MIT-0,MPL-2.0,NCSA,Unicode-3.0,Unlicense,Zlib,bzip2-1.0.6 --lockfile=Cargo.lock:.osv-lockfiles/Cargo.aarch64-apple-darwin.lock --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-pc-windows-msvc.lock --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-unknown-linux-gnu.lock
 ```
 
 `--workspace` is load-bearing: this manifest is a package *and* the
@@ -19,7 +21,9 @@ been deleted and the gate still reported success.
 The `main` workflow repeats these checks across its platform matrix. The Python
 scripts require Python 3.11 or newer. Regenerate `THIRD_PARTY_LICENSES.md` with
 `contrib/generate-third-party-licenses.py` whenever dependencies change; the
-gate fails if it is stale.
+gate fails if it is stale. CI pins OSV-Scanner and uses it as the sole
+vulnerability and dependency-license policy engine; local runs should use the
+same scanner version named in `.github/workflows/ci.yml`.
 
 ## Every test lives in a `_test.rs` file
 

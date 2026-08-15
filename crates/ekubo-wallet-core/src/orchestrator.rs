@@ -27,12 +27,14 @@ use crate::{
         TokenMetadataMap, interpret_steps, plan_token_targets, render_balance_changes, token_label,
     },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
-    core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
-    custody::{KeyStore, load_matching_signer},
-    execution::{
-        PreparedExecution, SigningOverrides, prepare_execution, sign_execution,
-        sign_prepared_execution,
+    core::{
+        execution_plan::ExecutionPlan,
+        policy::{
+            FindingSeverity, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
+        },
     },
+    custody::{KeyStore, load_matching_signer},
+    execution::{PreparedExecution, SigningOverrides, sign_execution, sign_prepared_execution},
     human_presence::{HumanPresence, PresenceRequest},
     legal::{LegalStore, require_status_allows_use},
     message::{MessageStatus, MessageStore, PendingMessage},
@@ -183,21 +185,55 @@ pub fn validate_send(
 pub async fn execute_automatic(
     config: &ConfigStore,
     pending: &Mutex<PendingStore>,
+    policies: &Mutex<PolicyStore>,
     keys: &dyn KeyStore,
     wallet: &WalletMetadata,
     network: &NetworkConfig,
-    stored_policy: &StoredPolicy,
     plan: &ExecutionPlan,
     plan_source: Option<&str>,
     simulation: &SimulationResult,
 ) -> Result<SendDisposition> {
     validate_send(wallet, network, plan, simulation)?;
+    let stored_policy = policies
+        .lock()
+        .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
+        .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+        .context("wallet has no active policy")?;
     ensure!(
         stored_policy.wallet_instance_id == wallet.instance_id
             && stored_policy.wallet_id == wallet.id
             && stored_policy.wallet_address == wallet.address,
         "the policy used for this decision belongs to a different wallet identity"
     );
+    let policy_context = crate::core::predicate::PolicyContext {
+        wallet: wallet.address,
+    };
+    let prepared_facts = simulation
+        .prepared_execution
+        .as_ref()
+        .map(crate::execution::PreparedExecution::policy_facts);
+    let mut findings = evaluate_policy(
+        plan,
+        prepared_facts.as_ref(),
+        &stored_policy.policy,
+        &policy_context,
+    );
+    if !simulation.simulation.success {
+        findings.push(crate::core::policy::PolicyFinding {
+            severity: FindingSeverity::Error,
+            code: SIMULATION_FAILED_CODE.into(),
+            message: "eth_simulateV1 simulation did not succeed".into(),
+            step: None,
+        });
+    }
+    let mut authoritative_simulation = simulation.clone();
+    authoritative_simulation.policy_findings = findings;
+    authoritative_simulation.policy_outcome =
+        policy_outcome(&authoritative_simulation.policy_findings);
+    authoritative_simulation.allowed = authoritative_simulation.simulation.success
+        && policy_allows(&authoritative_simulation.policy_findings);
+    authoritative_simulation.policy_revision = stored_policy.revision;
+    let simulation = &authoritative_simulation;
 
     // Rejected outright: nothing signs and nothing queues. Creating a pending
     // row here would offer the user an approval prompt for something their own
@@ -362,7 +398,6 @@ pub async fn approve_transaction(
         stored_policy: &stored_policy,
         policy_context: &policy_context,
         tokens: Mutex::new(tokens),
-        overrides,
         generation: AtomicU64::new(0),
         latest: Mutex::new(None),
     };
@@ -500,7 +535,6 @@ struct TransactionReview<'a> {
     /// while a refresh author must be shareable with the presenter. The lock
     /// is held only for local indexed reads after simulation has completed.
     tokens: Mutex<crate::token_store::TokenStore>,
-    overrides: SigningOverrides,
     /// The newest authoring attempt, successful or not. A failed refresh has
     /// to supersede the document before it, and concurrent refreshes must not
     /// let an older success publish after a newer failure.
@@ -547,14 +581,10 @@ impl TransactionReview<'_> {
             None,
         )
         .await?;
-        let prepared = prepare_execution(
-            self.wallet,
-            self.network,
-            &self.request.execution_plan,
-            &simulation,
-            self.overrides,
-        )
-        .await?;
+        let prepared = simulation
+            .prepared_execution
+            .clone()
+            .context("fresh simulation did not produce a prepared transaction envelope")?;
         // A swap's output token may appear only in the simulation's observed
         // balance changes, not as the target of a standard token call in the
         // plan. Resolve names after every fresh simulation so all displayed

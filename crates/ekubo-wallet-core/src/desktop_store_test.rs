@@ -39,6 +39,7 @@ fn every_supported_harness_has_a_stable_database_value_and_label() {
         (AgentKind::GeminiCli, "gemini_cli", "Gemini CLI"),
         (AgentKind::Cursor, "cursor", "Cursor"),
         (AgentKind::Opencode, "opencode", "opencode"),
+        (AgentKind::GrokBuild, "grok_build", "Grok Build"),
     ];
     for (kind, value, label) in cases {
         assert_eq!(kind.as_str(), value);

@@ -37,6 +37,76 @@ fn configuration_is_encrypted_with_the_wallet_database_key() {
 }
 
 #[test]
+fn installing_a_network_proposal_updates_config_and_consumes_one_exact_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    store.load().unwrap();
+    let mut proposal = default_networks()
+        .into_iter()
+        .find(|network| network.chain_id == 1)
+        .unwrap();
+    proposal.name = "reviewed-ethereum".into();
+    proposal.aliases.clear();
+    store
+        .policy_store()
+        .unwrap()
+        .put_network_proposal(&proposal)
+        .unwrap();
+
+    let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    store
+        .install_network_proposal(&proposal, &authorization)
+        .unwrap();
+
+    assert_eq!(
+        store.network_by_chain_id("1").unwrap().name,
+        "reviewed-ethereum"
+    );
+    assert!(
+        store
+            .policy_store()
+            .unwrap()
+            .network_proposal(1)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_replaced_network_proposal_cannot_install_the_reviewed_predecessor() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let original = store.network_by_chain_id("1").unwrap();
+    let mut reviewed = original.clone();
+    reviewed.name = "reviewed-ethereum".into();
+    reviewed.aliases.clear();
+    let mut replacement = reviewed.clone();
+    replacement.name = "replacement-ethereum".into();
+    store
+        .policy_store()
+        .unwrap()
+        .put_network_proposal(&reviewed)
+        .unwrap();
+    store
+        .policy_store()
+        .unwrap()
+        .put_network_proposal(&replacement)
+        .unwrap();
+
+    let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    assert!(
+        store
+            .install_network_proposal(&reviewed, &authorization)
+            .is_err()
+    );
+    assert_eq!(store.network_by_chain_id("1").unwrap(), original);
+    assert_eq!(
+        store.policy_store().unwrap().network_proposal(1).unwrap(),
+        Some(replacement)
+    );
+}
+
+#[test]
 fn default_networks_have_unique_chain_ids_and_identifiers() {
     validate_config(&WalletConfig {
         version: 3,

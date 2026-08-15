@@ -34,6 +34,7 @@ pub enum AgentKind {
     GeminiCli,
     Cursor,
     Opencode,
+    GrokBuild,
     Other,
 }
 
@@ -47,6 +48,7 @@ impl AgentKind {
             Self::GeminiCli => "Gemini CLI",
             Self::Cursor => "Cursor",
             Self::Opencode => "opencode",
+            Self::GrokBuild => "Grok Build",
             Self::Other => "an unrecognized harness",
         }
     }
@@ -59,6 +61,7 @@ impl AgentKind {
             Self::GeminiCli => "gemini_cli",
             Self::Cursor => "cursor",
             Self::Opencode => "opencode",
+            Self::GrokBuild => "grok_build",
             Self::Other => "other",
         }
     }
@@ -71,6 +74,7 @@ impl AgentKind {
             "gemini_cli" => Ok(Self::GeminiCli),
             "cursor" => Ok(Self::Cursor),
             "opencode" => Ok(Self::Opencode),
+            "grok_build" => Ok(Self::GrokBuild),
             "other" => Ok(Self::Other),
             _ => anyhow::bail!("invalid MCP harness kind in encrypted database"),
         }

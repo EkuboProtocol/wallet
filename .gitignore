@@ -3,6 +3,7 @@
 /.idea
 /.vscode
 /.claude/worktrees
+/.osv-lockfiles
 *.profraw
 *.profdata
 .DS_Store

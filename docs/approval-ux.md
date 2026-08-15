@@ -15,6 +15,14 @@ the authority reloads the request and policy, verifies the review identity and
 digest, and only then signs. Cancelling authentication leaves the request
 pending. Notifications and tray menus never contain approval actions.
 
+A policy `review` effect and an unmatched call both enter this same native
+flow. In a batch, calls are checked independently and any review result makes
+the whole prepared transaction reviewable; any deny result rejects the whole
+transaction. A simulation ID is a short-lived plan handle, not approval or a
+prepared transaction. Sending through one runs fresh real-chain simulation,
+exact envelope preparation, and current-policy evaluation before signing or
+queuing.
+
 Private-key export uses the same owner-authentication boundary. The revealed
 value is held for 30 seconds, copying requires a separate click, and clipboard
 cleanup occurs only when the clipboard still contains that exact value.

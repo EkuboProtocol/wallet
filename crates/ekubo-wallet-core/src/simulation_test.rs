@@ -362,6 +362,14 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
             to: Some(Predicate::Eq(format!("{weth:#x}"))),
             native_value: None,
             calldata: None,
+            transaction_type: None,
+            nonce: None,
+            gas_limit: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            delegation: None,
+            envelope_to: None,
+            envelope_native_value: None,
         },
     );
     let policy = StoredPolicy {
@@ -393,18 +401,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
 }
 
 #[test]
-fn a_failed_batch_says_the_delegation_was_never_observed() {
-    // A setup failure can happen before `get_code_at(wallet)` is ever read, so
-    // a failure result knows nothing about the account's delegation. It still
-    // reported `will_authorize_delegation: true` from the execution mode alone
-    // and left `replaces_delegated_implementation` empty -- and the review
-    // document draws its replacement warning from exactly that empty field.
-    //
-    // A failed simulation is the case a human is asked to override, so the
-    // combination signed an authorization that could silently replace a
-    // delegation the document never mentioned. Empty because nobody looked is
-    // not the same as empty because there is nothing there, and the result now
-    // says which one it is.
+fn a_failed_batch_does_not_invent_prepared_delegation_facts() {
     let wallet = WalletMetadata {
         instance_id: Uuid::new_v4(),
         id: "failed-batch".into(),
@@ -432,16 +429,8 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
 
     assert!(result.will_authorize_delegation);
     assert!(result.replaces_delegated_implementation.is_none());
-    let disclosure = result
-        .policy_findings
-        .iter()
-        .find(|finding| finding.code == DELEGATION_AUTHORIZED_CODE)
-        .expect("a batch that would sign an authorization has to say so");
-    assert!(
-        disclosure.message.contains("could be observed"),
-        "the message must say the delegation was not observed: {}",
-        disclosure.message
-    );
+    assert!(result.prepared_transaction.is_none());
+    assert!(result.prepared_execution.is_none());
 
     // A direct call signs no authorization, so it must not carry the warning.
     let direct = setup_failure_result_at_block(
@@ -453,12 +442,7 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
         100,
     );
     assert!(!direct.will_authorize_delegation);
-    assert!(
-        !direct
-            .policy_findings
-            .iter()
-            .any(|finding| finding.code == DELEGATION_AUTHORIZED_CODE)
-    );
+    assert!(direct.prepared_transaction.is_none());
 }
 
 mod bounded_rpc_message_tests {

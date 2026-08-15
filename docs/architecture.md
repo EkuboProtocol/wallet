@@ -10,9 +10,10 @@ and WalletConnect. It issues two compile-time capabilities:
 
 Restricted describes the operations a session can perform, not an absence of
 storage or signing dependencies. A constructed MCP server owns typed
-SQLCipher-backed stores and an OS credential-store signer so it can persist
-agent requests and ask core to sign transactions that the active policy allows
-automatically. It receives no owner-authorization capability, raw key export,
+SQLCipher-backed stores and a narrow core `AgentExecutionAuthority` so it can
+persist agent requests and ask core to execute only a fresh policy-authorized
+transaction or exact cancellation. The MCP server never owns a `KeyStore` or
+an arbitrary signing operation. It receives no owner-authorization capability, raw key export,
 unrestricted database access, native-review decision, or owner-only settings
 mutation.
 
@@ -29,3 +30,7 @@ IPC, disconnects in-memory dapp sessions, flushes state, and exits.
 
 GPUI and `gpui-component` revisions are recorded in `Cargo.toml`. No Zed
 workspace or UI crate is linked.
+
+On Linux the tray is a direct StatusNotifierItem/DBusMenu service over zbus;
+GTK and AppIndicator are not linked. macOS and Windows continue to use the
+native `tray-icon` backend.

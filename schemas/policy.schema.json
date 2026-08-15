@@ -18,7 +18,15 @@
         "chain_id": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
         "to": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
         "native_value": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
-        "calldata": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] }
+        "calldata": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "transaction_type": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "nonce": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "gas_limit": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "max_fee_per_gas": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "max_priority_fee_per_gas": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "delegation": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "envelope_to": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "envelope_native_value": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] }
       },
       "additionalProperties": false,
       "required": ["effect"]
@@ -26,7 +34,8 @@
     "Effect": {
       "oneOf": [
         { "type": "string", "const": "allow" },
-        { "type": "string", "const": "deny" }
+        { "type": "string", "const": "deny" },
+        { "type": "string", "const": "review" }
       ]
     },
     "Predicate": {
@@ -70,5 +79,5 @@
     "Not": { "type": "object", "properties": { "not": { "$ref": "#/$defs/Predicate" } }, "required": ["not"], "additionalProperties": false },
     "Length": { "type": "object", "properties": { "length": { "$ref": "#/$defs/Predicate" } }, "required": ["length"], "additionalProperties": false }
   },
-  "description": "Ordered stateless per-call signing policy. The first matching rule decides each call: allow signs automatically, deny rejects without queuing, and reaching the end requires explicit owner approval. Omitted matchers mean anything and present matchers are ANDed. Native-value comparisons are per-call conditions, not cumulative spending budgets."
+  "description": "Ordered stateless signing policy over each call and the exact prepared transaction envelope. The first matching rule decides each call: allow signs automatically, review requires explicit owner approval, deny rejects without queuing, and reaching the end also requires review. Every call is evaluated before the transaction takes the least-permissive result (deny < review < allow). Omitted matchers mean anything and present matchers are ANDed. Per-call native value and outer envelope native value are distinct; neither is a cumulative spending budget."
 }

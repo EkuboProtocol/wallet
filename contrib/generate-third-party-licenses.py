@@ -12,8 +12,8 @@ license file fall back to a single canonical text per license family.
 Usage: contrib/generate-third-party-licenses.py [--check]
 
 --check exits nonzero when THIRD_PARTY_LICENSES.md is stale instead of
-rewriting it. Both modes also reject a resolved dependency whose only offered
-license branches are GPL-family or other strong reciprocal licenses.
+rewriting it. License policy is enforced separately by OSV-Scanner in CI; this
+script only maintains the complete attribution document bundled with the app.
 """
 
 import json
@@ -48,20 +48,6 @@ CANONICAL_FALLBACKS = {
     "0BSD": "Zero-Clause BSD: https://opensource.org/license/0bsd",
     "BSL-1.0": "Boost Software License 1.0: https://www.boost.org/LICENSE_1_0.txt",
 }
-
-# A distributed FSL application must not silently acquire a strong-copyleft
-# obligation through a linked Rust dependency. An SPDX `OR` expression is
-# acceptable when at least one offered branch is non-copyleft: the project
-# deliberately selects that branch. MPL-2.0 is handled separately as weak,
-# file-level copyleft and remains allowed.
-FORBIDDEN_LICENSE_MARKERS = (
-    "AGPL-",
-    "GPL-",
-    "LGPL-",
-    "SSPL-",
-    "BUSL-",
-)
-
 
 def metadata():
     result = subprocess.run(
@@ -151,36 +137,6 @@ def reachable_packages(data):
     ]
 
 
-def forbidden_license(package):
-    expression = normalized_expression(package).upper()
-    if expression == "(LICENSE FILE ONLY)":
-        files = license_files_for(package)
-        texts = []
-        for path in files:
-            try:
-                texts.append(path.read_text(encoding="utf-8", errors="replace").upper())
-            except OSError:
-                continue
-        combined = "\n".join(texts)
-        if (
-            "APACHE LICENSE" in combined
-            or "MIT LICENSE" in combined
-            or "BSD LICENSE" in combined
-        ):
-            return None
-        return "LICENSE FILE ONLY (UNRECOGNIZED BY AUDIT)"
-    # Choosing any one branch satisfies an SPDX OR expression. Within a branch,
-    # an AND expression carries every obligation, so one forbidden marker makes
-    # that branch unsuitable.
-    alternatives = re.split(r"\s+OR\s+", expression)
-    if any(
-        not any(marker in alternative for marker in FORBIDDEN_LICENSE_MARKERS)
-        for alternative in alternatives
-    ):
-        return None
-    return expression
-
-
 def main():
     check = "--check" in sys.argv[1:]
     data = metadata()
@@ -189,20 +145,6 @@ def main():
         package for package in reachable_packages(data) if package["id"] not in workspace
     ]
     packages.sort(key=lambda package: (package["name"], package["version"]))
-
-    forbidden = [
-        (package, expression)
-        for package in packages
-        if (expression := forbidden_license(package)) is not None
-    ]
-    if forbidden:
-        for package, expression in forbidden:
-            print(
-                f"forbidden dependency license: {package['name']} "
-                f"{package['version']} ({expression})",
-                file=sys.stderr,
-            )
-        return 2
 
     by_license = defaultdict(list)
     for package in packages:

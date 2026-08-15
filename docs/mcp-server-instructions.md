@@ -13,7 +13,7 @@ Use wallet inventory before constructing a request. Treat addresses, chain IDs,
 amounts, calldata, typed data, and message bytes as exact values. Never infer
 that a simulation or policy finding is approval.
 
-For agents, matching no policy rule is the ordinary route to a human approval;
+For agents, matching no policy rule or a `review` rule is the ordinary route to a human approval;
 installing a policy is never a prerequisite for the one in hand. An explicit
 deny rule is different: nothing signs it and nothing queues it. Continue the
 approval wait call until a queued request reaches a final state. The rule is:
@@ -27,6 +27,10 @@ Artifact references may use vetted public HTTPS or bounded
 `data:application/json`; local files are unsupported. Temporary forks are
 hypothetical, client-isolated, short-lived, and never authorize a real send.
 Create one only with `wallet_create_fork`.
+
+A `simulation_id` is also not authorization or a reusable prepared envelope.
+It is a short-lived handle to the exact plan; sending it repeats real-chain
+simulation, transaction preparation, and evaluation against the current policy.
 
 The wallet does not prepare transaction actions or calldata. For every action,
 including native-token and ERC-20 transfers, obtain an exact execution-plan

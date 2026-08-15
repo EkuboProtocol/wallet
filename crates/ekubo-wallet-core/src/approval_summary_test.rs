@@ -128,6 +128,8 @@ fn simulation_with_native_delta(delta: &str) -> SimulationResult {
         implementation: None,
         will_authorize_delegation: false,
         replaces_delegated_implementation: None,
+        prepared_transaction: None,
+        prepared_execution: None,
         simulation: SimulationExecution {
             success: true,
             gas_used: None,

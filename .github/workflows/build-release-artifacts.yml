@@ -1,0 +1,172 @@
+name: Build unsigned release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, such as v1.2.3
+        required: true
+        type: string
+      commit_sha:
+        description: Exact 40-character commit SHA to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-release-${{ inputs.commit_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate immutable build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ '${{ inputs.tag }}' =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          [[ '${{ inputs.commit_sha }}' =~ ^[0-9a-f]{40}$ ]]
+
+  package:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-aarch64
+            formats: app
+          - os: windows-2025
+            platform: windows-x86_64
+            formats: nsis
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            formats: appimage,deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the exact requested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+      - name: Verify source identity and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '${{ inputs.commit_sha }}'
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "v$version" = '${{ inputs.tag }}'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.94.1
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev libfuse2
+      - name: Install cargo-packager
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        with:
+          tool: cargo-packager@0.11.8
+      - name: Build release workspace
+        env:
+          # Public verification material is a repository variable, never a
+          # signing credential. The trusted stage verifies final signatures.
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ vars.EKUBO_UPDATER_PUBLIC_KEY }}
+        run: cargo build --locked --release --workspace
+      - name: Stage versioned MCP bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          source=target/release/ekubo-wallet-mcp-bridge
+          suffix=
+          if [ "$RUNNER_OS" = Windows ]; then source="$source.exe"; suffix=.exe; fi
+          cp "$source" "target/release/ekubo-wallet-mcp-bridge-${host}${suffix}"
+      - name: Build unsigned native packages
+        shell: bash
+        env:
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ vars.EKUBO_UPDATER_PUBLIC_KEY }}
+        run: cargo packager --release --formats '${{ matrix.formats }}'
+      - name: Verify packaged MCP bridge
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          case "$RUNNER_OS" in
+            macOS)
+              bridge='target/release/Ekubo Wallet.app/Contents/MacOS/ekubo-wallet-mcp-bridge'
+              test -x "$bridge"
+              python3 contrib/verify-mcp-bridge.py "$bridge" "$version"
+              ;;
+            Windows)
+              installers=(target/release/*setup.exe)
+              test "${#installers[@]}" -eq 1
+              mkdir "$RUNNER_TEMP/nsis"
+              7z x "-o$RUNNER_TEMP/nsis" "${installers[0]}" >/dev/null
+              bridge="$(find "$RUNNER_TEMP/nsis" -name ekubo-wallet-mcp-bridge.exe -print -quit)"
+              test -n "$bridge"
+              python contrib/verify-mcp-bridge.py "$bridge" "$version"
+              ;;
+            Linux)
+              debs=(target/release/*.deb); appimages=(target/release/*.AppImage)
+              test "${#debs[@]}" -eq 1; test "${#appimages[@]}" -eq 1
+              mkdir "$RUNNER_TEMP/deb" "$RUNNER_TEMP/appimage"
+              dpkg-deb -x "${debs[0]}" "$RUNNER_TEMP/deb"
+              bridge="$(find "$RUNNER_TEMP/deb" -name ekubo-wallet-mcp-bridge -print -quit)"
+              test -x "$bridge"
+              python3 contrib/verify-mcp-bridge.py "$bridge" "$version"
+              (cd "$RUNNER_TEMP/appimage" && "$GITHUB_WORKSPACE/${appimages[0]}" --appimage-extract >/dev/null)
+              bridge="$(find "$RUNNER_TEMP/appimage/squashfs-root" -name ekubo-wallet-mcp-bridge -print -quit)"
+              test -x "$bridge"
+              python3 contrib/verify-mcp-bridge.py "$bridge" "$version"
+              ;;
+          esac
+      - name: Stage strict artifact allowlist and manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SHA: ${{ inputs.commit_sha }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          case "$RUNNER_OS" in
+            macOS)
+              test -d 'target/release/Ekubo Wallet.app'
+              tar -C target/release -czf dist/unsigned-macos-app.tar.gz 'Ekubo Wallet.app'
+              ;;
+            Windows)
+              installers=(target/release/*setup.exe)
+              test "${#installers[@]}" -eq 1
+              cp "${installers[0]}" dist/
+              ;;
+            Linux)
+              appimages=(target/release/*.AppImage)
+              debs=(target/release/*.deb)
+              test "${#appimages[@]}" -eq 1
+              test "${#debs[@]}" -eq 1
+              cp "${appimages[0]}" "${debs[0]}" dist/
+              ;;
+          esac
+          node <<'NODE'
+          const fs = require('fs'), crypto = require('crypto'), path = require('path');
+          const files = fs.readdirSync('dist').sort().map(name => {
+            const bytes = fs.readFileSync(path.join('dist', name));
+            return {name, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex')};
+          });
+          fs.writeFileSync('dist/manifest.json', JSON.stringify({
+            schema: 1, tag: process.env.RELEASE_TAG, commit_sha: process.env.RELEASE_SHA,
+            platform: process.env.RELEASE_PLATFORM, files
+          }, null, 2) + '\n');
+          NODE
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-${{ matrix.platform }}
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 7

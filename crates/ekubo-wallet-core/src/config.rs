@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use directories::BaseDirs;
 use fs2::FileExt;
+use rusqlite::{OptionalExtension as _, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "test-hooks"))]
@@ -414,6 +415,99 @@ impl ConfigStore {
     ) -> Result<()> {
         authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
         self.update(|config| replace_configured_network(&mut config.networks, network))
+    }
+
+    /// Install and consume the exact network proposal the owner reviewed.
+    ///
+    /// The active configuration and proposal queue share one `SQLCipher`
+    /// database. Keeping both mutations in this transaction prevents a
+    /// replacement proposal from being consumed after the reviewed profile
+    /// has already been installed, and prevents an installed profile from
+    /// leaving its stale proposal behind.
+    pub fn install_network_proposal(
+        &self,
+        reviewed: &NetworkConfig,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        validate_network(reviewed)?;
+
+        create_private_dir(&self.data_dir)?;
+        let lock_path = self.data_dir.join("config.lock");
+        let lock = open_private_file(&lock_path)
+            .with_context(|| format!("failed to open {}", lock_path.display()))?;
+        lock.lock_exclusive()
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+
+        let result = (|| {
+            let mut database = self.database()?;
+            let transaction = database.connection.transaction()?;
+            let reviewed_json = serde_json::to_string(reviewed)?;
+            let stored_proposal: Option<String> = transaction
+                .query_row(
+                    "SELECT profile_json FROM network_proposals WHERE chain_id = ?1",
+                    [i64::try_from(reviewed.chain_id).context("chain ID out of range")?],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                stored_proposal.as_deref() == Some(reviewed_json.as_str()),
+                "the network proposal changed during confirmation; review it again"
+            );
+
+            let encoded: Option<String> = transaction
+                .query_row(
+                    "SELECT value_json FROM application_settings WHERE key = ?1",
+                    [WALLET_CONFIGURATION_SETTING],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut config = encoded.map_or_else(
+                || {
+                    Ok::<_, anyhow::Error>(WalletConfig {
+                        version: 3,
+                        wallets: Vec::new(),
+                        networks: default_networks(),
+                    })
+                },
+                |value| serde_json::from_str(&value).context("invalid encrypted app setting"),
+            )?;
+            validate_config(&config)?;
+            replace_configured_network(&mut config.networks, reviewed.clone())?;
+            validate_config(&config)?;
+            let encoded = serde_json::to_string(&config)?;
+            ensure!(
+                encoded.len() <= MAX_CONFIG_BYTES,
+                "wallet configuration exceeds {MAX_CONFIG_BYTES} bytes"
+            );
+            transaction.execute(
+                "INSERT INTO application_settings(key, value_json, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET
+                     value_json = excluded.value_json,
+                     updated_at = excluded.updated_at",
+                params![
+                    WALLET_CONFIGURATION_SETTING,
+                    encoded,
+                    crate::sql::Millis(Utc::now())
+                ],
+            )?;
+            let removed = transaction.execute(
+                "DELETE FROM network_proposals WHERE chain_id = ?1 AND profile_json = ?2",
+                params![
+                    i64::try_from(reviewed.chain_id).context("chain ID out of range")?,
+                    reviewed_json
+                ],
+            )?;
+            ensure!(
+                removed == 1,
+                "the network proposal changed during installation; nothing was installed"
+            );
+            transaction.commit()?;
+            Ok(())
+        })();
+        let _ = FileExt::unlock(&lock);
+        result
     }
 
     /// Add a genuinely new network after core-verified owner authorization.

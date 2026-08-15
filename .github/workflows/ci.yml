@@ -11,6 +11,7 @@ on:
       - ".github/apple/**"
       - ".github/dependabot.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/build-release-artifacts.yml"
       - ".gitignore"
       - "AGENTS.md"
       - "CLAUDE.md"
@@ -28,7 +29,6 @@ on:
       - "examples/abi-decoding.json"
       - "examples/policy.json"
       - "schemas/**"
-      - "scripts/**"
   push:
     branches: [main]
     paths-ignore:
@@ -37,6 +37,7 @@ on:
       - ".github/apple/**"
       - ".github/dependabot.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/build-release-artifacts.yml"
       - ".gitignore"
       - "AGENTS.md"
       - "CLAUDE.md"
@@ -54,7 +55,6 @@ on:
       - "examples/abi-decoding.json"
       - "examples/policy.json"
       - "schemas/**"
-      - "scripts/**"
   workflow_dispatch:
 
 permissions:
@@ -103,7 +103,10 @@ jobs:
 
       - name: Install GPUI and tray dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev
+
+      - name: Refuse GTK tray dependencies on Linux
+        run: test -z "$(cargo tree --locked --target x86_64-unknown-linux-gnu -i glib 2>/dev/null)"
 
       # The Windows job spends most of its time compiling vendored SQLCipher
       # and OpenSSL; caching cuts that to minutes on unchanged dependencies.
@@ -153,7 +156,7 @@ jobs:
         run: rustup update stable --no-self-update
 
       - name: Install GPUI and tray dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev
 
       # Clippy compiles the entire dependency graph before it lints a line of
       # this workspace, which was nine of this job's fifteen minutes on every
@@ -171,16 +174,27 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Verify dependency licenses and notices
+      - name: Verify bundled third-party notices are current
         run: contrib/generate-third-party-licenses.py --check
 
-      # Building the client from source cost five minutes to run a six-second
-      # scan. This fetches the upstream release binary for the same pinned
-      # version instead.
-      - name: Install RustSec audit client
-        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
-        with:
-          tool: cargo-audit@0.22.2
+      - name: Generate release-target dependency inputs
+        run: python3 scripts/generate-osv-lockfiles.py .osv-lockfiles
 
-      - name: Audit dependency advisories
-        run: cargo audit
+      - name: Scan dependencies for vulnerabilities with OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        with:
+          scan-args: |-
+            --config=osv-scanner.toml
+            --lockfile=Cargo.lock:.osv-lockfiles/Cargo.aarch64-apple-darwin.lock
+            --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-pc-windows-msvc.lock
+            --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-unknown-linux-gnu.lock
+
+      - name: Enforce dependency licenses with OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        with:
+          scan-args: |-
+            --config=osv-scanner.toml
+            --licenses=0BSD,Apache-2.0,BSD-1-Clause,BSD-2-Clause,BSD-3-Clause,BSL-1.0,CC0-1.0,CDLA-Permissive-2.0,ISC,MIT,MIT-0,MPL-2.0,NCSA,Unicode-3.0,Unlicense,Zlib,bzip2-1.0.6
+            --lockfile=Cargo.lock:.osv-lockfiles/Cargo.aarch64-apple-darwin.lock
+            --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-pc-windows-msvc.lock
+            --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-unknown-linux-gnu.lock
