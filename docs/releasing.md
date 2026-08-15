@@ -15,7 +15,8 @@ Its macOS, Windows, and Linux jobs have only repository read permission,
 receive no secret or OIDC token, and build the resolved commit. Each artifact
 set includes a manifest binding the requested reference, computed version,
 commit, platform, filename, byte count, and SHA-256 digest. The embedded updater
-verification key is a public repository variable.
+verification key is a public repository variable. Each platform restores and
+saves its own release-mode Rust cache; failed builds never populate it.
 
 Second, manually run **Sign and publish release** with that exact build run ID
 and the existing `v<computed-version>` tag. The protected release environment
