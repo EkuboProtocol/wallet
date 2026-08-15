@@ -97,6 +97,17 @@ use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 use ekubo_wallet_core::core::policy::Effect;
 
 #[test]
+fn json_editor_build_includes_a_real_syntax_grammar() {
+    let json = gpui_component::highlighter::LanguageRegistry::singleton()
+        .language("json")
+        .expect("the packaged wallet must register JSON highlighting");
+    assert!(
+        json.has_grammar(),
+        "JSON editor mode must not silently fall back to plain text"
+    );
+}
+
+#[test]
 fn command_palette_matches_route_labels_as_ordered_subsequences() {
     assert_eq!(fuzzy_route_score("WalletConnect", "wc"), Some(5));
     assert!(fuzzy_route_score("Networks", "net").is_some());
