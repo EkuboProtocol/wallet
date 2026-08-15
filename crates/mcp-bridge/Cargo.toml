@@ -3,6 +3,7 @@ name = "mcp-bridge"
 version = "1.1.4"
 edition = "2024"
 rust-version = "1.91"
+build = "build.rs"
 license = "FSL-1.1-MIT"
 description = "Resilient stdio bridge for Ekubo Wallet MCP"
 

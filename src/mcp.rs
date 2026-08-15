@@ -156,6 +156,15 @@ pub(crate) struct WalletMcpServer {
     /// tests substitute an in-memory store so no real keychain is touched.
     keys: Arc<dyn KeyStore>,
     requesting_client: Option<(AgentKind, Arc<Mutex<DesktopStore>>)>,
+    /// Exact build reported by the local stdio bridge. Production sessions
+    /// require it to match the wallet before any tool can run; direct test
+    /// servers have no bridge and remain compatible by construction.
+    bridge_version: Option<String>,
+    bridge_compatible: bool,
+}
+
+fn bridge_version_compatible(version: Option<&str>) -> bool {
+    version == Some(crate::BUILD_VERSION)
 }
 
 impl WalletMcpServer {
@@ -179,6 +188,7 @@ impl WalletMcpServer {
         desktop: Arc<Mutex<DesktopStore>>,
         global_quota: Arc<Mutex<GlobalAgentQuota>>,
         events: EventBus,
+        bridge_version: Option<String>,
     ) -> Result<Self> {
         // Loading first initializes the encrypted wallet configuration in the
         // same database that the stores below open. No plaintext configuration
@@ -204,6 +214,9 @@ impl WalletMcpServer {
         server.client_namespace = client_id;
         server.global_quota = global_quota;
         server.events = events;
+        server.bridge_compatible = bridge_version_compatible(bridge_version.as_deref());
+        server.bridge_version =
+            bridge_version.filter(|version| version.as_str() == crate::BUILD_VERSION);
         Ok(server)
     }
 
@@ -242,6 +255,8 @@ impl WalletMcpServer {
             events: EventBus::default(),
             keys,
             requesting_client: None,
+            bridge_version: None,
+            bridge_compatible: true,
         })
     }
 
@@ -343,6 +358,22 @@ struct WalletInventory {
 #[derive(Debug, Serialize, JsonSchema)]
 struct NetworkInventory {
     networks: Vec<PublicNetwork>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct WalletVersionOutput {
+    /// The exact build shown by the desktop application.
+    wallet_version: String,
+    /// The exact version advertised in this MCP server's initialize response.
+    mcp_server_version: String,
+    /// The exact local stdio bridge build, when this session uses one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bridge_version: Option<String>,
+    /// True when every version-bearing process in this session agrees.
+    compatible: bool,
+    /// What to do if the caller needs to know whether this is the latest
+    /// published release rather than merely which build is running.
+    instruction: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1079,6 +1110,27 @@ struct SimulateOutput {
 
 #[tool_router]
 impl WalletMcpServer {
+    #[tool(
+        name = "wallet_get_version",
+        description = "Return the exact Ekubo Wallet desktop build, MCP server build, and local stdio bridge build running in this session without contacting the network. Use wallet_check_for_updates separately when the user asks whether this is the latest published release.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_get_version(&self) -> Json<WalletVersionOutput> {
+        Json(WalletVersionOutput {
+            wallet_version: crate::BUILD_VERSION.to_string(),
+            mcp_server_version: crate::BUILD_VERSION.to_string(),
+            bridge_version: self.bridge_version.clone(),
+            compatible: self.bridge_compatible,
+            instruction: "These are the exact builds running in this session. To determine whether a newer signed release is published, call wallet_check_for_updates once."
+                .to_string(),
+        })
+    }
+
     #[tool(
         name = "wallet_list",
         description = "Discover all local wallets: ID, address, source, and creation time. Never returns private keys. Use list_networks separately to discover configured chains and redacted RPC endpoint hosts.",
@@ -3105,8 +3157,8 @@ fn wallet_resources() -> Vec<Resource> {
 impl ServerHandler for WalletMcpServer {
     /// Hand-written so every tool call passes the legal-acceptance gate. The
     /// privacy policy governs RPC requests and agent data exposure, so even
-    /// read-only tools stay disabled until acceptance; only `wallet_get_legal`
-    /// is exempt so the documents and status remain readable.
+    /// read-only tools stay disabled until acceptance. The exact build report,
+    /// release check, and legal reader are the only informational exemptions.
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
@@ -3472,27 +3524,44 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
 }
 
 impl WalletMcpServer {
-    /// The per-call legal gate: every tool except the two below requires
+    /// The per-call session and legal gate. A bridge from another wallet build
+    /// can have a different protocol surface, so it is stopped before any
+    /// store or wallet capability is touched and told how to obtain a matching
+    /// process. Every tool except the three informational tools below then
+    /// requires
     /// current acceptance of the terms of service and privacy policy. Before
     /// either, every tool re-checks the database schema version, so a database
     /// replaced underneath this process refuses all requests with a restart
     /// instruction instead of being written through a stale understanding of
     /// its shape.
     ///
-    /// `wallet_get_legal` is exempt because it is how the documents are read
-    /// in order to be accepted. `wallet_check_for_updates` is exempt because
+    /// `wallet_get_version` is exempt because it reports only compile-time
+    /// process identity. `wallet_get_legal` is exempt because it is how the
+    /// documents are read in order to be accepted. `wallet_check_for_updates` is exempt because
     /// it reads a release listing and touches no wallet, key, or policy, and
     /// because the moment it is most worth hearing from is exactly this one: a
     /// release that revises the documents un-accepts everyone, so gating it
     /// would tell a user their wallet is disabled without letting the agent
     /// mention that a newer build is what they are being asked to accept.
     fn tool_gate(&self, tool_name: &str) -> Result<(), ErrorData> {
+        if !self.bridge_compatible {
+            return Err(ErrorData::invalid_request(
+                format!(
+                    "This agent session is using an MCP bridge from another Ekubo Wallet build and cannot safely call Ekubo Wallet {}. Start a new agent session so the harness launches the matching bridge.",
+                    crate::BUILD_VERSION
+                ),
+                None,
+            ));
+        }
         self.policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy store lock was poisoned"))
             .and_then(|store| store.assert_schema_current())
             .map_err(|error| tool_error(&error))?;
-        if matches!(tool_name, "wallet_get_legal" | "wallet_check_for_updates") {
+        if matches!(
+            tool_name,
+            "wallet_get_version" | "wallet_get_legal" | "wallet_check_for_updates"
+        ) {
             return Ok(());
         }
         self.require_legal_acceptance()

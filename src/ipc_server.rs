@@ -28,6 +28,11 @@ const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
 #[derive(Deserialize)]
 struct BridgeHello {
     client: String,
+    /// Absent only for bridges installed before versioned handshakes shipped.
+    /// Those sessions may finish MCP initialization so their next tool call
+    /// receives an explicit restart instruction instead of looking offline.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 struct ActiveConnection {
@@ -234,7 +239,7 @@ where
         _ => unreachable!("validated harness"),
     };
     let session_id = uuid::Uuid::new_v4();
-    let server = agent.server(session_id, harness)?;
+    let server = agent.server(session_id, harness, hello.version)?;
     let _active = ActiveConnection::begin(active, events);
     let result = server
         .serve((read, write))
