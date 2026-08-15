@@ -76,7 +76,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -124,13 +124,12 @@ fn next_overflow_indicator_offset(
     (current - viewport_height * 0.72).max(-maximum)
 }
 
-fn overflow_indicator_opacity(hovered: bool, elapsed: Duration) -> f32 {
+const fn overflow_indicator_opacity(hovered: bool) -> f32 {
     if hovered {
-        return 1.0;
+        1.0
+    } else {
+        0.82
     }
-    let seconds = elapsed.as_secs_f32();
-    let pulse = ((seconds / 1.4) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-    0.70 + pulse * 0.20
 }
 
 fn sidebar_tooltip_position(
@@ -187,16 +186,12 @@ impl From<UniformListScrollHandle> for OverflowScrollHandle {
 
 struct ScrollOverflowIndicatorView {
     scroll_handle: Rc<RefCell<OverflowScrollHandle>>,
-    animation_started_at: Instant,
-    animation_frame_pending: Rc<Cell<bool>>,
 }
 
 impl Render for ScrollOverflowIndicatorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prepaint_handle = self.scroll_handle.clone();
         let paint_handle = self.scroll_handle.clone();
-        let animation_started_at = self.animation_started_at;
-        let animation_frame_pending = self.animation_frame_pending.clone();
         let accent = cx.theme().primary;
         canvas(
             move |bounds, window, _| {
@@ -219,29 +214,13 @@ impl Render for ScrollOverflowIndicatorView {
                     bounds.size.height,
                 ))
             },
-            move |_bounds, indicator, window, cx| {
+            move |_bounds, indicator, window, _cx| {
                 let Some((hitbox, viewport_height)) = indicator else {
                     return;
                 };
                 let hovered = hitbox.is_hovered(window);
-                let opacity = overflow_indicator_opacity(hovered, animation_started_at.elapsed());
+                let opacity = overflow_indicator_opacity(hovered);
                 let view_id = window.current_view();
-                if !hovered && !animation_frame_pending.replace(true) {
-                    let animation_frame_pending = animation_frame_pending.clone();
-                    window
-                        .spawn(cx, async move |cx| {
-                            // A slow opacity breath does not need to consume
-                            // every display refresh. Interactive scrolling can
-                            // still redraw at 120 Hz while this decorative
-                            // pulse contributes at most about 30 frames/sec.
-                            cx.background_executor()
-                                .timer(Duration::from_millis(33))
-                                .await;
-                            animation_frame_pending.set(false);
-                            let _ = cx.update(move |_, cx| cx.notify(view_id));
-                        })
-                        .detach();
-                }
                 window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
                 window.paint_quad(
                     fill(hitbox.bounds, accent.opacity(opacity * 0.28)).corner_radii(px(18.0)),
@@ -324,8 +303,6 @@ impl ScrollOverflowIndicator {
         let view_handle = scroll_handle.clone();
         let view = cx.new(|_| ScrollOverflowIndicatorView {
             scroll_handle: view_handle,
-            animation_started_at: Instant::now(),
-            animation_frame_pending: Rc::new(Cell::new(false)),
         });
         Self {
             scroll_handle,

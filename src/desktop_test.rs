@@ -1401,19 +1401,27 @@ fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
 }
 
 #[test]
-fn overflow_indicator_breathes_and_reaches_full_opacity_on_hover() {
-    assert!((overflow_indicator_opacity(false, Duration::from_millis(350)) - 0.90).abs() < 0.001);
-    assert!((overflow_indicator_opacity(false, Duration::from_millis(1_050)) - 0.70).abs() < 0.001);
-    assert!((overflow_indicator_opacity(true, Duration::ZERO) - 1.0).abs() < f32::EPSILON);
+fn overflow_indicator_is_static_and_reaches_full_opacity_on_hover() {
+    assert!((overflow_indicator_opacity(false) - 0.82).abs() < f32::EPSILON);
+    assert!((overflow_indicator_opacity(true) - 1.0).abs() < f32::EPSILON);
 }
 
 #[test]
-fn overflow_indicator_animation_is_isolated_in_a_child_view() {
+fn overflow_indicator_does_not_schedule_a_continuous_redraw_loop() {
     let source = include_str!("desktop.rs");
-    assert!(source.contains("struct ScrollOverflowIndicatorView"));
-    assert!(source.contains("impl Render for ScrollOverflowIndicatorView"));
-    assert!(!source.contains("fn scroll_overflow_indicator<"));
-    assert!(!source.contains("window.request_animation_frame()"));
+    let indicator = source
+        .split_once("impl Render for ScrollOverflowIndicatorView")
+        .expect("overflow indicator view exists")
+        .1
+        .split_once("struct ScrollOverflowIndicator")
+        .expect("overflow indicator view has an end marker")
+        .0;
+    // The one remaining task is the finite, user-triggered click animation.
+    // Merely showing the affordance must not start a self-scheduling task.
+    assert_eq!(indicator.matches(".spawn(").count(), 1);
+    assert!(!indicator.contains("animation_frame_pending"));
+    assert!(!indicator.contains("animation_started_at"));
+    assert!(!indicator.contains("request_animation_frame"));
 }
 
 #[test]
