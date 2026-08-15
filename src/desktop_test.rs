@@ -108,6 +108,50 @@ fn json_editor_build_includes_a_real_syntax_grammar() {
 }
 
 #[test]
+fn previous_policy_revision_stops_at_the_oldest_revision() {
+    assert_eq!(latest_policy_revision(0), None);
+    assert_eq!(latest_policy_revision(1), Some(0));
+    assert_eq!(latest_policy_revision(6), Some(5));
+    assert_eq!(previous_policy_revision(Some(0), 1), None);
+    assert_eq!(previous_policy_revision(Some(1), 3), Some(0));
+    assert_eq!(previous_policy_revision(Some(2), 3), Some(1));
+    assert_eq!(previous_policy_revision(None, 3), Some(2));
+}
+
+#[test]
+fn reopening_policies_keeps_the_selected_account_when_it_still_exists() {
+    let account = |id: &str| WalletMetadata {
+        instance_id: uuid::Uuid::new_v4(),
+        id: id.to_owned(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    };
+    let accounts = vec![account("primary"), account("company")];
+
+    assert_eq!(
+        policy_account_to_open(&accounts, Some("company")),
+        Some("company")
+    );
+    assert_eq!(
+        policy_account_to_open(&accounts, Some("removed")),
+        Some("primary")
+    );
+    assert_eq!(policy_account_to_open(&[], Some("company")), None);
+}
+
+#[test]
+fn policy_editor_header_explains_purpose_without_repeating_picker_context() {
+    assert_eq!(
+        POLICY_EDITOR_DESCRIPTION,
+        "Requests are automatically signed or refused, or require review."
+    );
+    assert!(!POLICY_EDITOR_DESCRIPTION.contains("Account"));
+    assert!(!POLICY_EDITOR_DESCRIPTION.contains("revision"));
+}
+
+#[test]
 fn command_palette_matches_route_labels_as_ordered_subsequences() {
     assert_eq!(fuzzy_route_score("WalletConnect", "wc"), Some(5));
     assert!(fuzzy_route_score("Networks", "net").is_some());

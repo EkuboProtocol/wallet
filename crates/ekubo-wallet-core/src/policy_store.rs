@@ -496,6 +496,60 @@ impl PolicyStore {
         .transpose()
     }
 
+    /// Read the immutable policy revisions belonging to the active wallet
+    /// identity, oldest first. A retired wallet that once used the same name
+    /// is deliberately excluded.
+    pub fn history_for_wallet(
+        &self,
+        wallet_id: &str,
+        wallet_instance_id: Uuid,
+        wallet_address: Address,
+    ) -> Result<Vec<StoredPolicy>> {
+        validate_wallet_id(wallet_id)?;
+        let active: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM wallet_instances
+                 WHERE instance_id = ?1 AND wallet_id = ?2 AND wallet_address = ?3
+                   AND retired_at IS NULL",
+                params![
+                    wallet_instance_id.to_string(),
+                    wallet_id,
+                    format!("{wallet_address:#x}")
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        ensure!(
+            active.is_some(),
+            "wallet {wallet_id} instance {wallet_instance_id} is not active"
+        );
+        let mut statement = self.connection.prepare(
+            "SELECT policy_json, revision, updated_at FROM wallet_policies
+             WHERE wallet_instance_id = ?1 ORDER BY revision ASC",
+        )?;
+        let rows = statement.query_map([wallet_instance_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.time(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (json, revision, updated_at) = row?;
+            let value = serde_json::from_str(&json).context("stored policy is invalid JSON")?;
+            Ok(StoredPolicy {
+                wallet_instance_id,
+                wallet_id: wallet_id.into(),
+                wallet_address,
+                policy: WalletPolicy::parse(value).context("stored policy is invalid")?,
+                revision: u64::try_from(revision).context("stored policy revision is invalid")?,
+                updated_at,
+            })
+        })
+        .collect()
+    }
+
     /// Test-only raw policy insertion. Production callers must use
     /// [`Self::install_policy`], which enforces the authorization direction in
     /// this crate immediately before committing.

@@ -797,6 +797,15 @@ impl OwnerApi {
         )
     }
 
+    pub fn policy_history(&self, wallet_id: &str) -> Result<Vec<StoredPolicy>> {
+        let wallet = self.account(wallet_id)?;
+        PolicyStore::production(self.config.data_dir())?.history_for_wallet(
+            wallet_id,
+            wallet.instance_id,
+            wallet.address,
+        )
+    }
+
     pub async fn install_policy(
         &self,
         wallet_id: &str,

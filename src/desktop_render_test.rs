@@ -741,61 +741,39 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
             .read(cx)
             .value()
             .to_string();
+        let first_policy = WalletPolicy::deny_all();
+        let policy = WalletPolicy::require_approval_for_everything();
         wallet.policy_editor = Some(PolicyEditor {
             wallet_id: "primary".into(),
             source_revision: Some(2),
-            current_policy: Some(WalletPolicy::require_approval_for_everything()),
+            current_policy: Some(policy.clone()),
+            history: vec![
+                StoredPolicy {
+                    wallet_instance_id: uuid::Uuid::nil(),
+                    wallet_id: "primary".into(),
+                    wallet_address: alloy::primitives::Address::ZERO,
+                    policy: first_policy,
+                    revision: 1,
+                    updated_at: chrono::Utc::now(),
+                },
+                StoredPolicy {
+                    wallet_instance_id: uuid::Uuid::nil(),
+                    wallet_id: "primary".into(),
+                    wallet_address: alloy::primitives::Address::ZERO,
+                    policy,
+                    revision: 2,
+                    updated_at: chrono::Utc::now(),
+                },
+            ],
+            history_selection: Some(0),
             proposal: None,
             validation: None,
         });
         assert!(document.is_empty());
     });
 
-    let before = measure(
-        cx,
-        window,
-        &view,
-        &[
-            "policy-agent-tip",
-            "policy-json-editor",
-            "policy-json-editor-input",
-            "policy-json-control",
-            "policy-preview-workflow",
-            "policy-editor-status",
-        ],
-    );
-    let tip = before[0].expect("the compact agent-policy tip must be laid out");
-    assert!(
-        tip.size.height <= px(64.0),
-        "the agent-policy tip must remain a compact single row: {tip:?}"
-    );
-    assert!(
-        before[5].is_none(),
-        "an installed policy must not spend editor space on its revision number"
-    );
-    let panel = before[1].expect("policy panel must be laid out");
-    let editor = before[2].expect("policy JSON editor must be laid out");
-    let control = before[3].expect("policy JSON control must be laid out");
-    let workflow = before[4].expect("policy review workflow must be laid out");
-    assert!(
-        editor.size.height >= px(320.0),
-        "the initial editor must honor its usable minimum height"
-    );
-    assert!(
-        control.origin.x + control.size.width <= panel.origin.x + panel.size.width,
-        "the JSON control must stay inside the policy panel horizontally: \
-         panel {panel:?}, control {control:?}"
-    );
-    assert!(
-        control.origin.y + control.size.height <= panel.origin.y + panel.size.height,
-        "the JSON control must stay inside the policy panel vertically: \
-         panel {panel:?}, control {control:?}"
-    );
-    assert!(
-        workflow.origin.y + workflow.size.height <= panel.origin.y + panel.size.height,
-        "the complete workflow must stay inside the policy panel: \
-         panel {panel:?}, workflow {workflow:?}"
-    );
+    let before = measure(cx, window, &view, &["policy-full-screen-json-control"])[0]
+        .expect("policy JSON control must be laid out");
 
     cx.update_entity(&view, |wallet, _| {
         wallet.policy_editor.as_mut().unwrap().validation = Some(Ok(PolicyDraftReview {
@@ -808,61 +786,204 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
                 .collect(),
         }));
     });
-    let after = measure(cx, window, &view, &["policy-json-editor-input"])[0]
-        .expect("policy JSON editor must remain laid out after review");
-    assert!(
-        after.size.height >= editor.size.height,
-        "reviewing must extend the scrollable page instead of shrinking the editor: \
-         before {:?}, after {:?}",
-        editor.size.height,
-        after.size.height
-    );
-
-    let max_offset = cx.read_entity(&view, |wallet, _| wallet.route_scroll_handle.max_offset());
-    cx.read_entity(&view, |wallet, _| {
-        wallet
-            .route_scroll_handle
-            .set_offset(gpui::point(px(0.0), -max_offset.y));
-    });
-    let bottom = measure(
+    let after = measure(
         cx,
         window,
         &view,
         &[
-            "route-content-scroll",
-            "route-content-inner",
-            "policies-content",
-            "policy-json-editor",
-            "policy-preview-workflow",
-            "policy-permission-diff",
-            "install-policy-draft",
+            "policy-full-screen-json-control",
+            "install-policy-draft-full-screen",
         ],
     );
-    let scroll = bottom[0].expect("policy scroll viewport must be laid out");
-    let route_content = bottom[1].expect("route content must be laid out");
-    let policies = bottom[2].expect("policy content must be laid out");
-    let editor = bottom[3].expect("policy editor must be laid out");
-    let workflow = bottom[4].expect("policy workflow must be laid out");
-    let diff = bottom[5].expect("computed permission changes must be laid out");
-    let install = bottom[6].expect("policy install action must be laid out");
-    let scroll_state = cx.read_entity(&view, |wallet, _| {
-        (
-            wallet.route_scroll_handle.offset(),
-            wallet.route_scroll_handle.max_offset(),
-            wallet.route_scroll_handle.bounds(),
-        )
+    let after_control = after[0].expect("policy JSON editor must remain laid out after review");
+    assert!(
+        after_control.size.height >= before.size.height,
+        "the independently scrolling review sidebar must not shrink the JSON editor: \
+         before {before:?}, after {after_control:?}"
+    );
+    assert!(
+        after[1].is_some(),
+        "an exact preview must expose the install action in the review sidebar"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn policy_editor_is_the_only_policy_layout_and_sits_flush_with_navigation(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, _| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        let first_policy = WalletPolicy::deny_all();
+        let policy = WalletPolicy::require_approval_for_everything();
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            current_policy: Some(policy.clone()),
+            history: vec![
+                StoredPolicy {
+                    wallet_instance_id: uuid::Uuid::nil(),
+                    wallet_id: "primary".into(),
+                    wallet_address: alloy::primitives::Address::ZERO,
+                    policy: first_policy,
+                    revision: 1,
+                    updated_at: chrono::Utc::now(),
+                },
+                StoredPolicy {
+                    wallet_instance_id: uuid::Uuid::nil(),
+                    wallet_id: "primary".into(),
+                    wallet_address: alloy::primitives::Address::ZERO,
+                    policy,
+                    revision: 2,
+                    updated_at: chrono::Utc::now(),
+                },
+            ],
+            history_selection: Some(1),
+            proposal: None,
+            validation: None,
+        });
     });
+    cx.update(|cx| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |wallet, cx| {
+                wallet
+                    .policy_json_input
+                    .as_ref()
+                    .expect("policy input is initialized")
+                    .update(cx, |input, cx| {
+                        input.set_value("{\n  \"default\": \"ask\"\n}".to_owned(), window, cx);
+                    });
+            });
+        })
+        .expect("wallet window remains available");
+    });
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "wallet-sidebar",
+            "policy-editor-layout",
+            "policy-full-screen-editor",
+            "policy-full-screen-json-control",
+            "policy-full-screen-sidebar",
+            "route-content-scroll",
+            "open-policy-editor-full-screen",
+            "close-policy-editor-full-screen",
+            "policy-json-heading",
+            "policy-json-guidance",
+            "previous-policy-revision",
+            "next-policy-revision",
+            "policy-revision-restore",
+            "restore-policy-revision",
+            "policy-revision-position",
+        ],
+    );
+    let navigation = bounds[0].expect("navigation rail must remain laid out");
+    let layout = bounds[1].expect("dedicated policy editor layout must be laid out");
+    let editor = bounds[2].expect("policy JSON panel must be laid out");
+    let control = bounds[3].expect("policy JSON control must be laid out");
+    let sidebar = bounds[4].expect("policy review sidebar must be laid out");
+    let heading = bounds[8].expect("Policy JSON heading must be laid out");
+    let guidance = bounds[9].expect("policy JSON guidance must be laid out");
+    assert!(bounds[10].is_some(), "Previous revision must be laid out");
     assert!(
-        install.origin.y + install.size.height <= diff.origin.y + diff.size.height,
-        "the install action must remain inside the permission-diff border: \
-         diff {diff:?}, install {install:?}"
+        bounds[11..].iter().all(Option::is_none),
+        "no revision selector, label, next action, or restore action may remain"
+    );
+    assert_eq!(
+        navigation.origin.x + navigation.size.width,
+        layout.origin.x,
+        "the editor layout must sit flush against the navigation rail"
+    );
+    assert_eq!(layout.origin.y, px(0.0));
+    assert_eq!(layout.size.height, navigation.size.height);
+    assert!(
+        control.size.height >= px(600.0),
+        "the JSON control must use the available policy-page height: {control:?}"
     );
     assert!(
-        diff.origin.y + diff.size.height + px(16.0) <= scroll.origin.y + scroll.size.height,
-        "the bottom of the policy must retain visible scroll padding: \
-         viewport {scroll:?}, route content {route_content:?}, policies {policies:?}, \
-         editor {editor:?}, workflow {workflow:?}, diff {diff:?}, scroll state {scroll_state:?}"
+        editor.origin.x + editor.size.width <= sidebar.origin.x,
+        "the editor and review sidebar must not overlap: editor {editor:?}, sidebar {sidebar:?}"
     );
+    assert!(
+        sidebar.size.width <= px(306.0),
+        "the narrower review sidebar must leave room for JSON at minimum widths: {sidebar:?}"
+    );
+    assert!(
+        bounds[5].is_none(),
+        "the old scrolling Policies page must not render behind the editor"
+    );
+    assert!(
+        bounds[6].is_none() && bounds[7].is_none(),
+        "there must be no enter or exit full-screen mode buttons"
+    );
+    assert!(
+        guidance.origin.y >= heading.origin.y + heading.size.height,
+        "the guidance must sit below the Policy JSON heading: heading {heading:?}, guidance {guidance:?}"
+    );
+    assert!(
+        guidance.origin.x + guidance.size.width <= editor.origin.x + editor.size.width,
+        "the wrapping guidance must remain inside the editor panel: editor {editor:?}, guidance {guidance:?}"
+    );
+
+    cx.read_entity(&view, |wallet, cx| {
+        assert_eq!(
+            wallet
+                .policy_json_input
+                .as_ref()
+                .expect("draft must remain mounted")
+                .read(cx)
+                .value()
+                .as_ref(),
+            "{\n  \"default\": \"ask\"\n}"
+        );
+    });
+    let first_revision = serde_json::to_string_pretty(&WalletPolicy::deny_all()).unwrap();
+    cx.update(|cx| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |wallet, cx| {
+                wallet.view_previous_policy_revision(window, cx);
+            });
+        })
+        .unwrap();
+    });
+    cx.read_entity(&view, |wallet, cx| {
+        let editor = wallet.policy_editor.as_ref().unwrap();
+        assert_eq!(editor.history_selection, Some(0));
+        assert_eq!(
+            wallet.policy_json_input.as_ref().unwrap().read(cx).value(),
+            first_revision
+        );
+    });
+    cx.update_entity(&view, |wallet, _| {
+        wallet.policy_account_id = Some("primary".into());
+        wallet.set_route(Route::Accounts);
+        assert!(
+            wallet.policy_editor.is_none(),
+            "leaving Policies must discard the historical editor view"
+        );
+        wallet.set_route(Route::Policies);
+        assert!(
+            wallet.policy_editor.is_none(),
+            "re-entry must reload through core instead of reviving the old draft"
+        );
+    });
 
     release(cx, &view);
 }
@@ -1128,6 +1249,8 @@ fn screenshots() {
                         wallet_id: "primary".into(),
                         source_revision: Some(1),
                         current_policy: Some(WalletPolicy::require_approval_for_everything()),
+                        history: Vec::new(),
+                        history_selection: None,
                         proposal: None,
                         validation: Some(Ok(PolicyDraftReview {
                             wallet_id: "primary".into(),

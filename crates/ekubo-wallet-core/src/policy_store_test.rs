@@ -472,6 +472,12 @@ fn stores_only_current_policy_with_optimistic_revision() {
         .unwrap();
     assert_eq!(second.revision, 2);
     assert_eq!(store.get("primary").unwrap().unwrap(), second);
+    assert_eq!(
+        store
+            .history_for_wallet("primary", second.wallet_instance_id, second.wallet_address)
+            .unwrap(),
+        vec![first, second]
+    );
 }
 
 #[test]
@@ -905,6 +911,17 @@ mod first_policy_clears_residue_tests {
             )
             .unwrap();
         assert_eq!(policy_rows, 2, "both lifecycle policies remain auditable");
+        assert_eq!(
+            database
+                .history_for_wallet(
+                    "primary",
+                    replacement.wallet_instance_id,
+                    replacement.wallet_address,
+                )
+                .unwrap(),
+            vec![replacement],
+            "the replacement wallet must not browse its predecessor's policies"
+        );
     }
 
     /// And an ordinary policy update leaves everything alone. Clearing on
