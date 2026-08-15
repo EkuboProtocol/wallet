@@ -126,6 +126,14 @@ fn overflow_indicator_opacity(hovered: bool, elapsed: Duration) -> f32 {
     0.70 + pulse * 0.20
 }
 
+fn sidebar_tooltip_position(
+    button_bounds: gpui::Bounds<gpui::Pixels>,
+) -> gpui::Point<gpui::Pixels> {
+    let mut position = button_bounds.right_center();
+    position.x += px(10.0);
+    position
+}
+
 /// A bottom-edge affordance that exists only while more vertical content is
 /// below the viewport. It paints directly from the live scroll handle, so it
 /// neither contributes layout space nor needs a persistent scrollbar track.
@@ -1608,6 +1616,7 @@ pub struct WalletWindow {
     review_presenter: GuiReviewPresenter,
     route: Route,
     sidebar_hovered_route: Option<Route>,
+    sidebar_route_bounds: BTreeMap<Route, Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>>,
     command_palette: bool,
     command_palette_list: Option<Entity<ListState<RouteListDelegate>>>,
     command_palette_subscription: Option<Subscription>,
@@ -4014,6 +4023,10 @@ impl WalletWindow {
         let activity_detail_scroll_handle = ScrollHandle::new();
         let activity_detail_overflow_indicator =
             ScrollOverflowIndicator::new(activity_detail_scroll_handle.clone(), cx);
+        let sidebar_route_bounds = Route::ALL
+            .into_iter()
+            .map(|route| (route, Rc::new(Cell::new(None))))
+            .collect();
         let sidebar_logo_light =
             render_embedded_png(include_bytes!("../assets/tray/light_mode_tray_icon.png"))
                 .expect("embedded light tray icon must be valid");
@@ -4034,6 +4047,7 @@ impl WalletWindow {
             review_presenter,
             route: Route::DEFAULT,
             sidebar_hovered_route: None,
+            sidebar_route_bounds,
             command_palette: false,
             command_palette_list: None,
             command_palette_subscription: None,
@@ -8160,6 +8174,12 @@ impl WalletWindow {
                 px(22.0)
             };
             let show_tooltip = self.sidebar_hovered_route == Some(route);
+            let route_bounds = self
+                .sidebar_route_bounds
+                .get(&route)
+                .expect("every sidebar route has a bounds cell")
+                .clone();
+            let tooltip_position = route_bounds.get().map(sidebar_tooltip_position);
             menu = menu.child(
                 div()
                     .id(SharedString::from(format!(
@@ -8176,6 +8196,14 @@ impl WalletWindow {
                         cx.notify();
                     }))
                     .child(button)
+                    .child(
+                        canvas(
+                            move |bounds, _, _| route_bounds.set(Some(bounds)),
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                     .when(route == Route::Activity && pending_reviews > 0, |badge| {
                         badge.child(
                             div()
@@ -8198,35 +8226,35 @@ impl WalletWindow {
                                 .child(count),
                         )
                     })
-                    .when(show_tooltip, |wrapper| {
-                        wrapper.child(
-                            deferred(
-                                anchored()
-                                    .anchor(Anchor::LeftCenter)
-                                    .snap_to_window_with_margin(px(8.0))
-                                    .offset(point(
-                                        NAVIGATION_BUTTON_SIZE + px(10.0),
-                                        NAVIGATION_BUTTON_SIZE / 2.0,
-                                    ))
-                                    .child(
-                                        div()
-                                            .whitespace_nowrap()
-                                            .px_3()
-                                            .py_1()
-                                            .rounded(cx.theme().radius)
-                                            .border_1()
-                                            .border_color(cx.theme().primary.opacity(0.90))
-                                            .bg(cx.theme().primary)
-                                            .text_color(cx.theme().primary_foreground)
-                                            .text_sm()
-                                            .font_medium()
-                                            .shadow_lg()
-                                            .child(tooltip),
-                                    ),
+                    .when_some(
+                        show_tooltip.then_some(tooltip_position).flatten(),
+                        |wrapper, tooltip_position| {
+                            wrapper.child(
+                                deferred(
+                                    anchored()
+                                        .anchor(Anchor::LeftCenter)
+                                        .snap_to_window_with_margin(px(8.0))
+                                        .position(tooltip_position)
+                                        .child(
+                                            div()
+                                                .whitespace_nowrap()
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(cx.theme().radius)
+                                                .border_1()
+                                                .border_color(cx.theme().primary.opacity(0.90))
+                                                .bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                                .text_sm()
+                                                .font_medium()
+                                                .shadow_lg()
+                                                .child(tooltip),
+                                        ),
+                                )
+                                .with_priority(10),
                             )
-                            .with_priority(10),
-                        )
-                    }),
+                        },
+                    ),
             );
         }
         menu

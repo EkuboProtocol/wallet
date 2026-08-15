@@ -1380,10 +1380,16 @@ fn sidebar_tooltips_are_immediate_right_side_theme_elements() {
 
     assert!(sidebar.contains(".on_hover("));
     assert!(sidebar.contains(".anchor(Anchor::LeftCenter)"));
-    assert!(sidebar.contains("NAVIGATION_BUTTON_SIZE + px(10.0)"));
-    assert!(sidebar.contains("NAVIGATION_BUTTON_SIZE / 2.0"));
+    assert!(sidebar.contains(".position(tooltip_position)"));
     assert!(sidebar.contains(".bg(cx.theme().primary)"));
     assert!(!sidebar.contains(".tooltip("));
+}
+
+#[test]
+fn sidebar_tooltip_uses_the_measured_button_right_center() {
+    let bounds = gpui::Bounds::new(point(px(12.0), px(100.0)), size(px(48.0), px(48.0)));
+
+    assert_eq!(sidebar_tooltip_position(bounds), point(px(70.0), px(124.0)));
 }
 
 #[test]
