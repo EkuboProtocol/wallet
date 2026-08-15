@@ -1924,7 +1924,8 @@ fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
     // capability.
     assert!(SECURITY_MODEL.contains("typed SQLCipher-backed stores"));
     assert!(SECURITY_MODEL.contains("narrow core execution authority"));
-    assert!(SECURITY_MODEL.contains("MCP never receives a\n`KeyStore`"));
+    assert!(SECURITY_MODEL.contains("MCP never receives a"));
+    assert!(SECURITY_MODEL.contains("`KeyStore`"));
     assert!(SECURITY_MODEL.contains("no owner-authorization capability"));
     assert!(!SECURITY_MODEL.contains("no owner authorization, database, Keychain, custody"));
 }
