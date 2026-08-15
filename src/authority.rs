@@ -573,12 +573,7 @@ pub struct AgentApi {
 }
 
 impl AgentApi {
-    pub(crate) fn server(
-        &self,
-        client_id: Uuid,
-        harness: AgentKind,
-        bridge_version: String,
-    ) -> Result<WalletMcpServer> {
+    pub(crate) fn server(&self, client_id: Uuid, harness: AgentKind) -> Result<WalletMcpServer> {
         WalletMcpServer::production(
             self.config.clone(),
             client_id,
@@ -586,7 +581,6 @@ impl AgentApi {
             self.desktop.clone(),
             self.global_quota.clone(),
             self.events.clone(),
-            bridge_version,
         )
     }
 }

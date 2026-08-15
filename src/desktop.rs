@@ -13749,6 +13749,10 @@ fn apply_appearance_preference(
     apply_interface_palette(cx);
 }
 
+fn wallet_window_title() -> String {
+    format!("Ekubo Wallet {BUILD_VERSION}")
+}
+
 fn show_wallet_window(
     cx: &mut App,
     wallet_view: &Entity<WalletWindow>,
@@ -13773,7 +13777,7 @@ fn show_wallet_window(
             ..Default::default()
         },
         |window, cx| {
-            window.set_window_title(&format!("Ekubo Wallet {BUILD_VERSION}"));
+            window.set_window_title(&wallet_window_title());
             let layer_host = cx.new(|_| ComponentLayerHost::new(wallet_content));
             cx.new(|cx| Root::new(layer_host, window, cx))
         },

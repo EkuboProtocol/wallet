@@ -18,52 +18,12 @@ struct VersionMismatch {
     wallet_version: String,
 }
 
-enum WalletHandshake {
-    Accepted { wallet_version: String },
-    VersionMismatch { wallet_version: String },
-}
-
 impl VersionMismatch {
     fn message(&self) -> String {
         format!(
             "Ekubo Wallet {} is running, but this agent session is using MCP bridge {BUILD_VERSION}. Start a new agent session so the harness launches the matching bridge.",
             self.wallet_version
         )
-    }
-
-    fn tool_catalog() -> Value {
-        json!({"tools":[{
-            "name":"wallet_get_version",
-            "description":"Report the incompatible Ekubo Wallet and MCP bridge builds in this session and how to reconnect safely.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false},
-            "outputSchema":{
-                "type":"object",
-                "properties":{
-                    "wallet_version":{"type":"string"},
-                    "mcp_server_version":{"type":"string"},
-                    "bridge_version":{"type":"string"},
-                    "compatible":{"type":"boolean"},
-                    "instruction":{"type":"string"}
-                },
-                "required":["wallet_version","mcp_server_version","bridge_version","compatible","instruction"]
-            }
-        }]})
-    }
-
-    fn tool_result(&self) -> Value {
-        let instruction = self.message();
-        let output = json!({
-            "wallet_version":self.wallet_version,
-            "mcp_server_version":self.wallet_version,
-            "bridge_version":BUILD_VERSION,
-            "compatible":false,
-            "instruction":instruction,
-        });
-        json!({
-            "content":[{"type":"text","text":serde_json::to_string_pretty(&output).expect("version output")}],
-            "structuredContent":output,
-            "isError":false
-        })
     }
 }
 
@@ -91,22 +51,6 @@ fn safe_reported_version(version: Option<&Value>) -> String {
 
 fn reported_wallet_version(initialize_response: &Value) -> String {
     safe_reported_version(initialize_response.pointer("/result/serverInfo/version"))
-}
-
-fn wallet_handshake(message: &Value) -> Result<WalletHandshake> {
-    let handshake = message
-        .get("ekubo_wallet_bridge")
-        .context("wallet did not acknowledge the versioned bridge handshake")?;
-    let status = handshake
-        .get("status")
-        .and_then(Value::as_str)
-        .context("wallet bridge handshake has no status")?;
-    let wallet_version = safe_reported_version(handshake.get("wallet_version"));
-    match status {
-        "accepted" => Ok(WalletHandshake::Accepted { wallet_version }),
-        "version_mismatch" => Ok(WalletHandshake::VersionMismatch { wallet_version }),
-        _ => anyhow::bail!("wallet bridge handshake has an unsupported status"),
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -234,7 +178,7 @@ async fn emit(stdout: &mut tokio::io::Stdout, bytes: &[u8]) -> Result<()> {
 #[cfg(unix)]
 async fn connect(client: ClientKind) -> Result<tokio::net::UnixStream> {
     let mut stream = tokio::net::UnixStream::connect(data_dir()?.join("mcp.sock")).await?;
-    let hello = serde_json::to_vec(&json!({"client":client.wire_name(),"version":BUILD_VERSION}))?;
+    let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
     stream.write_all(&hello).await?;
     stream.write_all(b"\n").await?;
     Ok(stream)
@@ -245,7 +189,7 @@ async fn connect(client: ClientKind) -> Result<tokio::net::windows::named_pipe::
     use tokio::net::windows::named_pipe::ClientOptions;
 
     let mut stream = ClientOptions::new().open(windows_pipe_name()?)?;
-    let hello = serde_json::to_vec(&json!({"client":client.wire_name(),"version":BUILD_VERSION}))?;
+    let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
     stream.write_all(&hello).await?;
     stream.write_all(b"\n").await?;
     Ok(stream)
@@ -357,33 +301,6 @@ async fn run() -> Result<()> {
             let connected: Result<_> = async {
                         let (read, mut write) = tokio::io::split(stream);
                         let mut read = BufReader::new(read);
-                        let handshake_frame = match tokio::time::timeout(
-                            Duration::from_secs(2),
-                            read_frame(&mut read),
-                        )
-                        .await
-                        {
-                            Ok(frame) => frame?
-                                .context("wallet closed during the versioned bridge handshake")?,
-                            Err(_) => {
-                                return Err(VersionMismatch {
-                                    wallet_version: "unknown".to_string(),
-                                }
-                                .into());
-                            }
-                        };
-                        let handshake_response: Value = serde_json::from_slice(&handshake_frame)
-                            .context("invalid wallet bridge handshake response")?;
-                        match wallet_handshake(&handshake_response)? {
-                            WalletHandshake::Accepted { wallet_version } => {
-                                if wallet_version != BUILD_VERSION {
-                                    return Err(VersionMismatch { wallet_version }.into());
-                                }
-                            }
-                            WalletHandshake::VersionMismatch { wallet_version } => {
-                                return Err(VersionMismatch { wallet_version }.into());
-                            }
-                        }
                         write.write_all(&initialize_frame).await?;
                         let initialize_response = read_frame(&mut read)
                             .await?
@@ -427,9 +344,9 @@ async fn run() -> Result<()> {
                 Err(error) => {
                     if let Some(mismatch) = error.downcast_ref::<VersionMismatch>() {
                         let mismatch = mismatch.clone();
-                        let diagnostic_tools = VersionMismatch::tool_catalog();
-                        if diagnostic_tools != last_tools {
-                            last_tools = diagnostic_tools;
+                        let no_tools = json!({"tools":[]});
+                        if version_mismatch.is_none() || no_tools != last_tools {
+                            last_tools = no_tools;
                             emit(
                                 &mut stdout,
                                 br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
@@ -523,13 +440,7 @@ async fn run() -> Result<()> {
                 Some("tools/call") => {
                     if let Some(id) = request_id(&message) {
                         if let Some(mismatch) = version_mismatch.as_ref() {
-                            if message.pointer("/params/name").and_then(Value::as_str)
-                                == Some("wallet_get_version")
-                            {
-                                emit(&mut stdout, &response(&id, &mismatch.tool_result())).await?;
-                            } else {
-                                emit(&mut stdout, &error(&id, &mismatch.message())).await?;
-                            }
+                            emit(&mut stdout, &error(&id, &mismatch.message())).await?;
                         } else {
                             emit(&mut stdout, &error(&id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
                         }

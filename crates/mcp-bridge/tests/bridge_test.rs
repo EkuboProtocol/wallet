@@ -175,11 +175,6 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         let mut reader = BufReader::new(stream);
         let hello = read(&mut reader);
         assert_eq!(hello["client"], "codex");
-        assert_eq!(hello["version"], BUILD_VERSION);
-        write(
-            &mut writer,
-            &json!({"ekubo_wallet_bridge":{"status":"accepted","wallet_version":BUILD_VERSION}}),
-        );
         let initialize = read(&mut reader);
         write(
             &mut writer,
@@ -319,7 +314,7 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
 
 #[cfg(unix)]
 #[test]
-fn pre_mcp_version_rejection_replaces_tools_with_restart_diagnostics() {
+fn standard_server_version_mismatch_blocks_upstream_messages() {
     use std::{
         fs,
         os::unix::fs::PermissionsExt as _,
@@ -346,17 +341,18 @@ fn pre_mcp_version_rejection_replaces_tools_with_restart_diagnostics() {
         let mut writer = stream.try_clone().unwrap();
         let mut reader = BufReader::new(stream);
         let hello = read(&mut reader);
-        assert_eq!(hello["version"], BUILD_VERSION);
+        assert_eq!(hello["client"], "codex");
+        let initialize = read(&mut reader);
         write(
             &mut writer,
-            &json!({"ekubo_wallet_bridge":{
-                "status":"version_mismatch",
-                "wallet_version":"999.0.0",
-                "instruction":"Start a new agent session"
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "serverInfo":{"name":"newer-wallet","version":"999.0.0"}
             }}),
         );
-        // Deliberately return without reading the queued initialize request:
-        // a rejecting wallet processes only the private bridge hello.
+        // Return immediately: after reading the standard serverInfo.version,
+        // the bridge must not forward initialized, tools/list, or tool calls.
     });
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
@@ -387,33 +383,11 @@ fn pre_mcp_version_rejection_replaces_tools_with_restart_diagnostics() {
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
     );
     let tools = receive(&mut stdout);
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 1);
-    assert_eq!(tools["result"]["tools"][0]["name"], "wallet_get_version");
+    assert!(tools["result"]["tools"].as_array().unwrap().is_empty());
 
     send(
         &mut stdin,
-        &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wallet_get_version","arguments":{}}}),
-    );
-    let version = receive(&mut stdout);
-    assert_eq!(
-        version["result"]["structuredContent"]["wallet_version"],
-        "999.0.0"
-    );
-    assert_eq!(
-        version["result"]["structuredContent"]["bridge_version"],
-        BUILD_VERSION
-    );
-    assert_eq!(version["result"]["structuredContent"]["compatible"], false);
-    assert!(
-        version["result"]["structuredContent"]["instruction"]
-            .as_str()
-            .unwrap()
-            .contains("Start a new agent session")
-    );
-
-    send(
-        &mut stdin,
-        &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"wallet_list","arguments":{}}}),
+        &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wallet_list","arguments":{}}}),
     );
     let rejected = receive(&mut stdout);
     assert!(

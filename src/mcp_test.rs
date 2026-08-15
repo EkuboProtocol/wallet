@@ -264,18 +264,6 @@ fn advertised_version_matches_crate() {
 }
 
 #[test]
-fn version_tool_reports_the_exact_running_processes_without_the_network() {
-    let (_directory, mut server) = server();
-    server.bridge_version = Some(crate::BUILD_VERSION.to_string());
-    let Json(output) = server.wallet_get_version();
-    assert_eq!(output.wallet_version, crate::BUILD_VERSION);
-    assert_eq!(output.mcp_server_version, crate::BUILD_VERSION);
-    assert_eq!(output.bridge_version.as_deref(), Some(crate::BUILD_VERSION));
-    assert!(output.compatible);
-    assert!(output.instruction.contains("wallet_check_for_updates"));
-}
-
-#[test]
 fn tool_schemas_contain_no_boolean_schemas() {
     // Schemars renders serde_json::Value as the boolean schema `true`,
     // which Claude Code's MCP client rejects when it validates tools/list
@@ -617,7 +605,6 @@ fn tool_inventory_exposes_implemented_parity_surface() {
         [
             "list_networks",
             "wallet_check_for_updates",
-            "wallet_get_version",
             "wallet_propose_network",
             "wallet_attempt_cancel",
             "wallet_batch_eth_call",
@@ -1062,19 +1049,14 @@ fn permit_payload() -> serde_json::Value {
     })
 }
 
-/// The exemptions, by name. `wallet_get_version` reports only compile-time
-/// process identity, `wallet_get_legal` is how the documents are read in order
-/// to be accepted, and `wallet_check_for_updates` reads a release listing.
-/// Enumerated over the whole router, so a new tool is gated unless someone
-/// adds it here on purpose.
-const UNGATED_TOOLS: [&str; 3] = [
-    "wallet_get_legal",
-    "wallet_get_version",
-    "wallet_check_for_updates",
-];
+/// The exemptions, by name. `wallet_get_legal` is how the documents are read
+/// in order to be accepted; `wallet_check_for_updates` reads a release listing
+/// and touches no wallet, key, or policy. Enumerated over the whole router, so
+/// a new tool is gated unless someone adds it here on purpose.
+const UNGATED_TOOLS: [&str; 2] = ["wallet_get_legal", "wallet_check_for_updates"];
 
 #[test]
-fn every_noninformational_tool_is_gated_on_acceptance() {
+fn every_tool_except_legal_and_the_release_check_is_gated_on_acceptance() {
     let (_directory, server) = server();
     for tool in WalletMcpServer::sanitized_tool_router().list_all() {
         let gated = server.tool_gate(&tool.name).is_err();
