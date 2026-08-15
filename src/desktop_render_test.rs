@@ -622,6 +622,7 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
         window,
         &view,
         &[
+            "policy-agent-tip",
             "policy-json-editor",
             "policy-json-editor-input",
             "policy-json-control",
@@ -629,14 +630,19 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
             "policy-editor-status",
         ],
     );
+    let tip = before[0].expect("the compact agent-policy tip must be laid out");
     assert!(
-        before[4].is_none(),
+        tip.size.height <= px(64.0),
+        "the agent-policy tip must remain a compact single row: {tip:?}"
+    );
+    assert!(
+        before[5].is_none(),
         "an installed policy must not spend editor space on its revision number"
     );
-    let panel = before[0].expect("policy panel must be laid out");
-    let editor = before[1].expect("policy JSON editor must be laid out");
-    let control = before[2].expect("policy JSON control must be laid out");
-    let workflow = before[3].expect("policy review workflow must be laid out");
+    let panel = before[1].expect("policy panel must be laid out");
+    let editor = before[2].expect("policy JSON editor must be laid out");
+    let control = before[3].expect("policy JSON control must be laid out");
+    let workflow = before[4].expect("policy review workflow must be laid out");
     assert!(
         editor.size.height >= px(320.0),
         "the initial editor must honor its usable minimum height"

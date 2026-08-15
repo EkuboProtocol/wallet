@@ -9934,12 +9934,25 @@ impl WalletWindow {
         };
 
         content = content.child(
-            GroupBox::new().id("policy-agent-tip").title("Did you know?").child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("Ask a connected agent to craft a policy from what you want to do. Its suggestion opens here for you to inspect as exact JSON and computed permission changes before anything can be installed.")),
-            ),
+            h_flex()
+                .id("policy-agent-tip")
+                .debug_selector(|| "policy-agent-tip".to_owned())
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .gap_3()
+                .p_3()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().info.opacity(0.35))
+                .bg(cx.theme().info.opacity(0.10))
+                .text_sm()
+                .font_medium()
+                .text_color(cx.theme().info)
+                .child(Icon::new(IconName::Info).flex_none())
+                .child(div().min_w_0().child(selectable_label(
+                    "Try asking your connected agent to construct a policy for you",
+                ))),
         );
 
         match self.cached_reviews().map(|reviews| {
