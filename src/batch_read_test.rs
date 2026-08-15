@@ -144,6 +144,12 @@ fn reference_for(url: impl Into<String>, body: Option<&str>) -> ArtifactReferenc
 fn validates_batch_bounds_before_rpc() {
     let input = inline_input();
     assert!(validate_input(&input).is_ok());
+    let mut at_limit = input.clone();
+    at_limit.calls = vec![call(); MAX_BATCH_CALLS];
+    assert!(validate_input(&at_limit).is_ok());
+    at_limit.calls.push(call());
+    assert!(validate_input(&at_limit).is_err());
+
     let mut empty = input;
     empty.calls.clear();
     assert!(validate_input(&empty).is_err());

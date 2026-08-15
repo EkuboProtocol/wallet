@@ -125,11 +125,7 @@ fn next_overflow_indicator_offset(
 }
 
 const fn overflow_indicator_opacity(hovered: bool) -> f32 {
-    if hovered {
-        1.0
-    } else {
-        0.82
-    }
+    if hovered { 1.0 } else { 0.82 }
 }
 
 fn sidebar_tooltip_position(

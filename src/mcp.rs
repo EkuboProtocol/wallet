@@ -1467,7 +1467,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_batch_eth_call",
-        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the bounded HTTPS or data:application/json call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
+        description = "Execute 1-4096 read-only eth_call requests against one exact resolved block. Count is only one bound: calldata, response size, timeout, RPC gas, and decoder-work limits still apply. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches, decompresses when HTTP content encoding is used, and integrity-verifies the bounded HTTPS or data:application/json call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_batch_eth_call(

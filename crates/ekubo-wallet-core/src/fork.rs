@@ -76,8 +76,10 @@ pub const MAX_FORKS: usize = 16;
 /// still be servable by the configured RPC for replay to work at all.
 pub const FORK_TTL_SECONDS: i64 = 300;
 /// Read calls one fork request may carry. The whole set shares the pinned
-/// block's gas limit, so this is deliberately below the non-fork batch cap.
-pub const MAX_FORK_READ_CALLS: usize = 64;
+/// block's gas limit, so fitting this count is not a promise that the RPC can
+/// execute every possible set: gas, calldata, response, and timeout bounds
+/// still fail closed independently.
+pub const MAX_FORK_READ_CALLS: usize = 4_096;
 
 const FORK_RPC_TIMEOUT: Duration = Duration::from_mins(1);
 

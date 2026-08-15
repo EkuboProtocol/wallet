@@ -262,6 +262,8 @@ file follows in the appendix. Regenerate this document with
 
 ## BSD-3-Clause
 
+- alloc-no-stdlib 2.0.4 — Daniel Reiter Horn <danielrh@dropbox.com> — https://github.com/dropbox/rust-alloc-no-stdlib
+- alloc-stdlib 0.2.2 — Daniel Reiter Horn <danielrh@dropbox.com> — https://github.com/dropbox/rust-alloc-no-stdlib
 - avif-serialize 0.8.9 — Kornel Lesiński <kornel@geekhood.net> — https://github.com/kornelski/avif-serialize
 - bindgen 0.71.1 — Jyun-Yan You <jyyou.tw@gmail.com>, Emilio Cobos Álvarez <emilio@crisal.io>, Nick Fitzgerald <fitzgen@gmail.com>, The Servo project developers — https://github.com/rust-lang/rust-bindgen
 - curve25519-dalek 5.0.0 — Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> — https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek
@@ -278,10 +280,18 @@ file follows in the appendix. Regenerate this document with
 - tiny-skia-path 0.11.4 — Yevhenii Reizner <razrfalcon@gmail.com> — https://github.com/RazrFalcon/tiny-skia/tree/master/path
 - x25519-dalek 3.0.0 — Isis Lovecruft <isis@patternsinthevoid.net>, DebugSteven <debugsteven@gmail.com>, Henry de Valence <hdevalence@hdevalence.ca> — https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek
 
+## BSD-3-Clause AND MIT
+
+- brotli 8.0.2 — Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors — https://github.com/dropbox/rust-brotli
+
 ## BSD-3-Clause OR Apache-2.0
 
 - moxcms 0.8.1 — Radzivon Bartoshyk — https://github.com/awxkee/moxcms.git
 - pxfm 0.1.30 — Radzivon Bartoshyk — https://github.com/awxkee/pxfm
+
+## BSD-3-Clause OR MIT
+
+- brotli-decompressor 5.0.0 — Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors — https://github.com/dropbox/rust-brotli-decompressor
 
 ## BSD-3-Clause OR MIT OR Apache-2.0
 
@@ -1317,6 +1327,7 @@ file follows in the appendix. Regenerate this document with
 - accesskit_macos 0.26.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - accesskit_unix 0.21.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - accesskit_windows 0.33.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloc-stdlib 0.2.2: BSD-3-Clause — BSD 3-Clause License: https://opensource.org/license/bsd-3-clause
 - alloy 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus-any 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1673,6 +1684,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## License text for: alloc-no-stdlib 2.0.4, brotli-decompressor 5.0.0
+
+```text
+Copyright (c) 2016 Dropbox, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ## License text for: android_system_properties 0.1.5
@@ -3564,6 +3592,30 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: brotli 8.0.2
+
+```text
+Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ## License text for: bs58 0.5.1

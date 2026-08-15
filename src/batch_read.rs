@@ -28,7 +28,7 @@ use std::{
     time::Duration,
 };
 
-const MAX_BATCH_CALLS: usize = 128;
+const MAX_BATCH_CALLS: usize = 4_096;
 const MAX_CONCURRENT_REFERENCE_RESOLUTIONS: usize = 4;
 static REFERENCE_RESOLUTION_SLOTS: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
     Arc::new(tokio::sync::Semaphore::new(
@@ -112,7 +112,8 @@ pub struct BatchEthCallInput {
     /// Read the hypothetical state of this temporary simulation fork instead
     /// of real chain state. A fork pins its own parent block, so
     /// `block_parameter` must be left at `latest`, and at most
-    /// 64 calls may be sent because they share the pinned block's gas limit.
+    /// 4096 calls may be sent. They share the pinned block's gas limit, so the
+    /// RPC may reject a large or expensive set even when it fits this count.
     #[serde(default)]
     pub fork_id: Option<uuid::Uuid>,
 }
@@ -421,7 +422,7 @@ async fn batch_eth_call_through(
     // This path is taken whenever Multicall3 is unavailable *or* the caller
     // named a `from` address — the second is not an error condition, so the
     // fan-out is reachable on demand rather than only when something fails.
-    // Throttled rather than refused: a legitimate 128-call batch on a chain
+    // Throttled rather than refused: a legitimate large batch on a chain
     // without Multicall3 still completes, in a handful of round trips instead
     // of one burst the configured endpoint never agreed to.
     let mut results = Vec::with_capacity(calls.len());
@@ -803,8 +804,8 @@ pub(crate) fn validate_input(input: &BatchEthCallInput) -> Result<()> {
     }
     // Bytes as well as count. `MAX_BATCH_CALLS` bounds how many calls arrive
     // and says nothing about their size, and `MAX_TOTAL_CALLDATA_BYTES` guards
-    // execution plans rather than this path — so 128 calls of a megabyte each
-    // were admitted, hex-decoded, and sent. Checked on the encoded length,
+    // execution plans rather than this path — so thousands of individually
+    // large calls would otherwise be admitted, hex-decoded, and sent. Checked on the encoded length,
     // before `normalize_call` decodes anything, since hex only ever shrinks.
     let mut total = 0_usize;
     for call in &input.calls {

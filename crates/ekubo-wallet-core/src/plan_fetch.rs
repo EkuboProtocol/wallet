@@ -10,8 +10,9 @@
 //! kinds travel this way: execution plans, read-call bundles (exact
 //! `wallet_batch_eth_call` argument bodies), and curated token lists. This
 //! wallet fetches the body
-//! itself, verifies the digest and byte count, and then parses and validates
-//! it exactly as it would an inline one; a fetched body earns no extra trust
+//! itself, transparently decompresses standard HTTP content encodings,
+//! verifies the digest and byte count over the resulting canonical JSON, and
+//! then parses and validates it exactly as it would an inline one; a fetched body earns no extra trust
 //! from having a URL, and an inline body is still expressible as a `data:`
 //! URI that never touches the network — there the bytes are the reference,
 //! so integrity is verified only when supplied.
@@ -361,8 +362,10 @@ pub async fn fetch_token_list_url(
 
 /// Fetch one referenced body — remote `https` or local `data:` URI — and
 /// verify it against the digest and byte count its producer published,
-/// without interpreting the bytes. Callers parse and validate the result
-/// exactly as they would an inline body.
+/// without interpreting the bytes. HTTP content encoding is a transport
+/// detail: reqwest decompresses it first, the body cap is enforced on those
+/// decompressed bytes, and both integrity fields describe those same bytes.
+/// Callers parse and validate the result exactly as they would an inline body.
 pub async fn fetch_reference(
     reference: &ArtifactReference,
     expected_type: ArtifactType,
@@ -637,6 +640,13 @@ fn pinned_client(key: PinnedKey) -> Result<reqwest::Client> {
         return Ok(entries[position].1.clone());
     }
     let client = reqwest::Client::builder()
+        // Reference integrity is over canonical JSON, not its wire encoding.
+        // Advertising and decoding the standard encodings here means every
+        // downstream size and digest check sees that canonical representation.
+        .gzip(true)
+        .brotli(true)
+        .zstd(true)
+        .deflate(true)
         .redirect(reqwest::redirect::Policy::none())
         // A proxy resolves the hostname itself and connects on this process's
         // behalf, so the override below would pin nothing and the addresses

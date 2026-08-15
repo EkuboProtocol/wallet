@@ -30,14 +30,20 @@ pub const MAX_ABI_ENTRIES: usize = 128;
 pub const MAX_ABI_BYTES: usize = 65_536;
 pub const MAX_RETURN_DATA_BYTES: usize = 1_048_576;
 pub const MAX_RECURSION_DEPTH: usize = 16;
-pub const MAX_COLLECTION_ITEMS: usize = 2_048;
-pub const MAX_MULTICALL_CHILDREN: usize = 128;
+pub const MAX_COLLECTION_ITEMS: usize = 4_096;
+pub const MAX_MULTICALL_CHILDREN: usize = 4_096;
+/// Scalar decoded values one request may materialize across every plan.
+///
+/// Kept separate from `MAX_COLLECTION_ITEMS`: accepting one 4096-entry
+/// multicall consumes that many values for the outer `bytes[]` before any of
+/// its required children are decoded.
+pub const MAX_TOTAL_COLLECTION_ITEMS: usize = 65_536;
 /// Nested decodes one request may perform in total, across every level.
 ///
 /// Generous against anything a real multicall produces — a batch of a hundred
 /// calls each decoding a handful of nested results stays far below it — and
 /// finite, which the depth and width caps are not when combined.
-pub const MAX_TOTAL_DECODES: usize = 4_096;
+pub const MAX_TOTAL_DECODES: usize = 8_192;
 pub const MAX_SEMANTIC_TRANSFORMATIONS: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -278,7 +284,7 @@ impl DecodeBudget {
     #[must_use]
     pub const fn for_request() -> Self {
         Self {
-            collection_items_remaining: MAX_COLLECTION_ITEMS,
+            collection_items_remaining: MAX_TOTAL_COLLECTION_ITEMS,
             decodes_remaining: MAX_TOTAL_DECODES,
         }
     }

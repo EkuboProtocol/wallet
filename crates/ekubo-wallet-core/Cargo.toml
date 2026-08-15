@@ -1,6 +1,6 @@
 [package]
 name = "ekubo-wallet-core"
-version = "1.1.3"
+version = "1.1.4"
 edition = "2024"
 rust-version = "1.91"
 description = "The security kernel of the ekubo-wallet binary: policy, custody, signing, storage"
@@ -33,7 +33,7 @@ minisign-verify = "0.2.5"
 num-bigint = "0.5.1"
 percent-encoding = "2.3.2"
 rand = "0.10.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "brotli", "deflate", "gzip", "rustls", "zstd"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -48,6 +48,7 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]
+flate2 = "1.1.9"
 futures = "0.3.31"
 minisign = "0.7.9"
 proptest = "1.9.0"

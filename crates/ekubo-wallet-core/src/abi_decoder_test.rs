@@ -39,7 +39,7 @@ fn a_parameter_descriptor_is_bounded_by_bytes_as_well_as_count() {
     assert!(input.len() < MAX_COLLECTION_ITEMS);
 
     let mut budget = DecodeBudget {
-        collection_items_remaining: MAX_COLLECTION_ITEMS,
+        collection_items_remaining: MAX_TOTAL_COLLECTION_ITEMS,
         decodes_remaining: MAX_TOTAL_DECODES,
     };
     let Err(failure) = decode_parameters("0x", &input, &mut budget) else {
@@ -286,6 +286,72 @@ fn serializes_named_tuple_as_object() {
         decode_abi_result(&raw, &plan, true).decoded,
         Some(json!({"owner": address.to_checksum(None), "amount": "7"}))
     );
+}
+
+#[test]
+fn decodes_the_full_supported_bytes_array_width() {
+    let child_plan = AbiDecodePlan::AbiParameters {
+        parameters: vec![parameter("uint256")],
+        semantic_codecs: Vec::new(),
+        required: true,
+    };
+    let child_raw =
+        DynSolValue::Tuple(vec![DynSolValue::Uint(U256::from(7), 256)]).abi_encode_params();
+    let children = vec![DynSolValue::Bytes(child_raw); MAX_MULTICALL_CHILDREN];
+    let raw = encode(&[DynSolValue::Array(children)]);
+    assert!((raw.len() - 2) / 2 < MAX_RETURN_DATA_BYTES);
+
+    let plan = AbiDecodePlan::FunctionResultBytesArray {
+        abi: vec![json!({
+            "type": "function",
+            "name": "multicall",
+            "stateMutability": "view",
+            "inputs": [],
+            "outputs": [{"name": "results", "type": "bytes[]"}]
+        })],
+        function_name: "multicall".into(),
+        expected_result_count: Some(MAX_MULTICALL_CHILDREN),
+        results: (0..MAX_MULTICALL_CHILDREN)
+            .map(|index| BytesArraySelection {
+                index,
+                decode: Some(Box::new(child_plan.clone())),
+            })
+            .collect(),
+        required: true,
+    };
+    let decoded = decode_abi_result(&raw, &plan, false);
+    assert_eq!(decoded.decode_status, DecodeStatus::Decoded);
+    let results = decoded
+        .decoded
+        .as_ref()
+        .and_then(|value| value.get("results"))
+        .and_then(Value::as_array)
+        .expect("nested results");
+    assert_eq!(results.len(), MAX_MULTICALL_CHILDREN);
+    assert_eq!(
+        results.last().unwrap()["decoded"],
+        Value::String("7".into())
+    );
+}
+
+#[test]
+fn rejects_a_nested_decode_plan_beyond_the_supported_width() {
+    let plan = AbiDecodePlan::FunctionResultBytesArray {
+        abi: vec![json!({
+            "type": "function",
+            "name": "multicall",
+            "stateMutability": "view",
+            "inputs": [],
+            "outputs": [{"name": "results", "type": "bytes[]"}]
+        })],
+        function_name: "multicall".into(),
+        expected_result_count: Some(MAX_MULTICALL_CHILDREN + 1),
+        results: Vec::new(),
+        required: true,
+    };
+    let decoded = decode_abi_result("0x", &plan, false);
+    assert_eq!(decoded.decode_status, DecodeStatus::Failed);
+    assert_eq!(decoded.decode_error.unwrap().code, "resource_limit");
 }
 
 mod shared_budget_tests {
