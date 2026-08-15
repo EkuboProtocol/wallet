@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn shutdown_timeout_is_created_inside_the_tokio_runtime() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let handle = runtime.handle().clone();
+
+    let value = std::thread::spawn(move || {
+        block_on_with_timeout(&handle, Duration::from_millis(10), async { 42 })
+    })
+    .join()
+    .expect("the desktop shutdown thread must not panic")
+    .expect("the ready shutdown future must finish before its timeout");
+
+    assert_eq!(value, 42);
+}
+
+#[test]
 fn update_handoff_releases_the_instance_before_relaunch() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let (sender, _receiver) = std::sync::mpsc::channel();
@@ -20,6 +38,52 @@ fn update_handoff_releases_the_instance_before_relaunch() {
         SingleInstance::acquire(directory.path(), sender).unwrap(),
         InstanceOutcome::Primary(_)
     ));
+}
+
+#[test]
+fn close_window_binding_matches_the_platform_convention() {
+    let binding = close_window_key_binding();
+    #[cfg(target_os = "macos")]
+    let shortcut = "cmd-w";
+    #[cfg(target_os = "linux")]
+    let shortcut = "ctrl-w";
+    #[cfg(target_os = "windows")]
+    let shortcut = "alt-f4";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let shortcut = "ctrl-w";
+    let keystroke = gpui::Keystroke::parse(shortcut).expect("a valid platform shortcut");
+
+    assert_eq!(binding.match_keystrokes(&[keystroke]), Some(false));
+    assert!(binding.action().as_any().is::<CloseWindow>());
+}
+
+struct EmptyWindow;
+
+impl Render for EmptyWindow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[gpui::test]
+fn close_window_action_removes_the_active_window(cx: &mut gpui::TestAppContext) {
+    let window = cx.update(|cx| {
+        cx.on_action(close_active_window);
+        let window = cx
+            .open_window(WindowOptions::default(), |_, cx| cx.new(|_| EmptyWindow))
+            .expect("a test window");
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("the test window activates");
+        cx.dispatch_action(&CloseWindow);
+        window
+    });
+    cx.run_until_parked();
+
+    assert!(
+        window.update(cx, |_, _, _| ()).is_err(),
+        "the close action must remove the active window"
+    );
 }
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 use ekubo_wallet_core::core::policy::Effect;

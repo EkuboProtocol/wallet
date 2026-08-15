@@ -69,6 +69,7 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -82,7 +83,13 @@ use zeroize::Zeroizing;
 
 actions!(
     ekubo_wallet,
-    [OpenCommandPalette, CloseOverlay, HideApplication, Quit]
+    [
+        OpenCommandPalette,
+        CloseOverlay,
+        CloseWindow,
+        HideApplication,
+        Quit
+    ]
 );
 
 const UI_FONT_FAMILY: &str = "Suisse Intl";
@@ -13822,6 +13829,19 @@ fn release_single_instance(instance_slot: &Arc<Mutex<Option<SingleInstance>>>) -
     Ok(())
 }
 
+fn block_on_with_timeout<F>(
+    tokio: &tokio::runtime::Handle,
+    timeout: Duration,
+    future: F,
+) -> std::result::Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future,
+{
+    // Construct the timer lazily after `block_on` enters the runtime. Tokio
+    // panics if `timeout` itself is called on this ordinary shutdown thread.
+    tokio.block_on(async move { tokio::time::timeout(timeout, future).await })
+}
+
 fn perform_desktop_shutdown(
     server: Option<McpIpcServer>,
     tokio: &tokio::runtime::Handle,
@@ -13830,10 +13850,7 @@ fn perform_desktop_shutdown(
     data_dir: &Path,
 ) -> Result<bool> {
     if let Some(server) = server {
-        let stopped = tokio.block_on(tokio::time::timeout(
-            DESKTOP_SERVER_SHUTDOWN_TIMEOUT,
-            server.stop(),
-        ));
+        let stopped = block_on_with_timeout(tokio, DESKTOP_SERVER_SHUTDOWN_TIMEOUT, server.stop());
         let failure = match stopped {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(format!("local MCP server shutdown failed: {error:#}")),
@@ -13863,6 +13880,29 @@ fn perform_desktop_shutdown(
         },
     )?;
     Ok(true)
+}
+
+fn close_window_key_binding() -> KeyBinding {
+    #[cfg(target_os = "macos")]
+    const SHORTCUT: &str = "cmd-w";
+    #[cfg(target_os = "linux")]
+    const SHORTCUT: &str = "ctrl-w";
+    #[cfg(target_os = "windows")]
+    const SHORTCUT: &str = "alt-f4";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    const SHORTCUT: &str = "ctrl-w";
+
+    KeyBinding::new(SHORTCUT, CloseWindow, None)
+}
+
+fn close_active_window(_: &CloseWindow, cx: &mut App) {
+    if let Some(window) = cx.active_window() {
+        // Global actions run while the active window is already being updated.
+        // Remove it on the next app turn to avoid a re-entrant window update.
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        });
+    }
 }
 
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
@@ -13942,6 +13982,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let mut key_bindings = vec![
                 KeyBinding::new("cmd-k", OpenCommandPalette, None),
                 KeyBinding::new("ctrl-k", OpenCommandPalette, None),
+                close_window_key_binding(),
                 KeyBinding::new("escape", CloseOverlay, Some("Wallet")),
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-h", HideApplication, None),
@@ -13963,6 +14004,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 None,
             ));
             cx.bind_keys(key_bindings);
+            cx.on_action(close_active_window);
             cx.on_action(|_: &HideApplication, cx| cx.hide());
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
