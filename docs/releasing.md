@@ -26,6 +26,11 @@ receive Apple, Azure, or Minisign credentials. The publishing job creates the
 release at the verified commit SHA and uploads only the strict native-asset
 allowlist. No trusted job checks out or executes build-run source.
 
+Windows signing exchanges GitHub's short-lived OIDC token with Azure through
+the pinned Azure Login action. Trusted Signing is restricted to that Azure CLI
+credential; interactive, cached, developer-tool, workload, environment, and
+managed-identity fallbacks are disabled.
+
 `cargo-packager` produces the unsigned macOS app, per-user NSIS installer,
 AppImage, and DEB on native runners. The trusted stage signs the macOS app,
 creates the distributed DMG and updater tar, applies mandatory Authenticode to
