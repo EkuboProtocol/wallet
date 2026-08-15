@@ -31,6 +31,31 @@ the pinned Azure Login action. Trusted Signing is restricted to that Azure CLI
 credential; interactive, cached, developer-tool, workload, environment, and
 managed-identity fallbacks are disabled.
 
+The Azure app registration must trust exactly the immutable GitHub subject
+`repo:EkuboProtocol@135474885/wallet@1322111549:environment:release` with issuer
+`https://token.actions.githubusercontent.com` and audience
+`api://AzureADTokenExchange`. Its service principal has the **Artifact Signing
+Certificate Profile Signer** role scoped only to the `ekubo` signing account.
+The protected `AZURE_TRUSTED_SIGNING_PROFILE` secret names the
+`ekubo-release` public-trust profile.
+
+For the initial activation, wait until the identity validation is **Completed**
+in the Azure portal, copy its identity validation ID, and create the reserved
+profile:
+
+```sh
+az artifact-signing certificate-profile create \
+  --resource-group ekubo-signing \
+  --account-name ekubo \
+  --name ekubo-release \
+  --profile-type PublicTrust \
+  --identity-validation-id '<completed-identity-validation-id>'
+```
+
+Until that profile exists, Windows signing is expected to fail closed and the
+publishing job must remain skipped. No client secret is required or permitted
+for the GitHub release identity.
+
 `cargo-packager` produces the unsigned macOS app, per-user NSIS installer,
 AppImage, and DEB on native runners. The trusted stage signs the macOS app,
 creates the distributed DMG and updater tar, applies mandatory Authenticode to
