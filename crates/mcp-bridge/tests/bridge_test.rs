@@ -176,6 +176,10 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         let hello = read(&mut reader);
         assert_eq!(hello["client"], "codex");
         assert_eq!(hello["version"], BUILD_VERSION);
+        write(
+            &mut writer,
+            &json!({"ekubo_wallet_bridge":{"status":"accepted","wallet_version":BUILD_VERSION}}),
+        );
         let initialize = read(&mut reader);
         write(
             &mut writer,
@@ -315,7 +319,7 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
 
 #[cfg(unix)]
 #[test]
-fn version_mismatch_replaces_tools_with_restart_diagnostics() {
+fn pre_mcp_version_rejection_replaces_tools_with_restart_diagnostics() {
     use std::{
         fs,
         os::unix::fs::PermissionsExt as _,
@@ -343,15 +347,16 @@ fn version_mismatch_replaces_tools_with_restart_diagnostics() {
         let mut reader = BufReader::new(stream);
         let hello = read(&mut reader);
         assert_eq!(hello["version"], BUILD_VERSION);
-        let initialize = read(&mut reader);
         write(
             &mut writer,
-            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-                "protocolVersion":"2025-11-25",
-                "capabilities":{},
-                "serverInfo":{"name":"newer-wallet","version":"999.0.0"}
+            &json!({"ekubo_wallet_bridge":{
+                "status":"version_mismatch",
+                "wallet_version":"999.0.0",
+                "instruction":"Start a new agent session"
             }}),
         );
+        // Deliberately return without reading the queued initialize request:
+        // a rejecting wallet processes only the private bridge hello.
     });
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))

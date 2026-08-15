@@ -276,18 +276,6 @@ fn version_tool_reports_the_exact_running_processes_without_the_network() {
 }
 
 #[test]
-fn a_bridge_from_another_build_cannot_call_any_wallet_tool() {
-    assert!(bridge_version_compatible(Some(crate::BUILD_VERSION)));
-    assert!(!bridge_version_compatible(None));
-    assert!(!bridge_version_compatible(Some("older-build")));
-    let (_directory, mut server) = server();
-    server.bridge_compatible = false;
-    let error = server.tool_gate("wallet_list").unwrap_err();
-    assert!(error.message.contains(crate::BUILD_VERSION));
-    assert!(error.message.contains("Start a new agent session"));
-}
-
-#[test]
 fn tool_schemas_contain_no_boolean_schemas() {
     // Schemars renders serde_json::Value as the boolean schema `true`,
     // which Claude Code's MCP client rejects when it validates tools/list

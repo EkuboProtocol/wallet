@@ -10,6 +10,7 @@ use anyhow::{Context, Result, ensure};
 use ekubo_wallet_core::desktop_store::AgentKind;
 use rmcp::ServiceExt as _;
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -18,7 +19,7 @@ use std::{
     },
 };
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, BufReader},
+    io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -29,10 +30,41 @@ const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
 struct BridgeHello {
     client: String,
     /// Absent only for bridges installed before versioned handshakes shipped.
-    /// Those sessions may finish MCP initialization so their next tool call
-    /// receives an explicit restart instruction instead of looking offline.
+    /// They are rejected before the wallet reads an MCP frame.
     #[serde(default)]
     version: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BridgeHandshakeStatus {
+    Accepted,
+    VersionMismatch,
+}
+
+fn bridge_handshake_status(version: Option<&str>) -> BridgeHandshakeStatus {
+    if version == Some(crate::BUILD_VERSION) {
+        BridgeHandshakeStatus::Accepted
+    } else {
+        BridgeHandshakeStatus::VersionMismatch
+    }
+}
+
+fn bridge_handshake_response(status: BridgeHandshakeStatus) -> Value {
+    match status {
+        BridgeHandshakeStatus::Accepted => json!({
+            "ekubo_wallet_bridge": {
+                "status": "accepted",
+                "wallet_version": crate::BUILD_VERSION,
+            }
+        }),
+        BridgeHandshakeStatus::VersionMismatch => json!({
+            "ekubo_wallet_bridge": {
+                "status": "version_mismatch",
+                "wallet_version": crate::BUILD_VERSION,
+                "instruction": "Start a new agent session so the harness launches the MCP bridge installed by this Ekubo Wallet release.",
+            }
+        }),
+    }
 }
 
 struct ActiveConnection {
@@ -216,7 +248,7 @@ async fn serve_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let (read, write) = tokio::io::split(stream);
+    let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
     let hello = read_bounded_line(&mut read)
         .await?
@@ -238,8 +270,21 @@ where
         "opencode" => AgentKind::Opencode,
         _ => unreachable!("validated harness"),
     };
+    let handshake_status = bridge_handshake_status(hello.version.as_deref());
+    let handshake_response = serde_json::to_vec(&bridge_handshake_response(handshake_status))?;
+    write.write_all(&handshake_response).await?;
+    write.write_all(b"\n").await?;
+    write.flush().await?;
+    if handshake_status == BridgeHandshakeStatus::VersionMismatch {
+        tracing::warn!(
+            harness = hello.client,
+            "rejected MCP bridge from another wallet build before MCP initialization"
+        );
+        return Ok(());
+    }
+    let bridge_version = hello.version.expect("accepted bridge has an exact version");
     let session_id = uuid::Uuid::new_v4();
-    let server = agent.server(session_id, harness, hello.version)?;
+    let server = agent.server(session_id, harness, bridge_version)?;
     let _active = ActiveConnection::begin(active, events);
     let result = server
         .serve((read, write))
@@ -255,6 +300,10 @@ where
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "ipc_server_test.rs"]
+mod tests;
 
 async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,

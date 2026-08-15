@@ -156,15 +156,10 @@ pub(crate) struct WalletMcpServer {
     /// tests substitute an in-memory store so no real keychain is touched.
     keys: Arc<dyn KeyStore>,
     requesting_client: Option<(AgentKind, Arc<Mutex<DesktopStore>>)>,
-    /// Exact build reported by the local stdio bridge. Production sessions
-    /// require it to match the wallet before any tool can run; direct test
-    /// servers have no bridge and remain compatible by construction.
+    /// Exact build reported by the local stdio bridge. The IPC listener proves
+    /// it matches the wallet before constructing a production server. Direct
+    /// test servers have no bridge.
     bridge_version: Option<String>,
-    bridge_compatible: bool,
-}
-
-fn bridge_version_compatible(version: Option<&str>) -> bool {
-    version == Some(crate::BUILD_VERSION)
 }
 
 impl WalletMcpServer {
@@ -188,8 +183,12 @@ impl WalletMcpServer {
         desktop: Arc<Mutex<DesktopStore>>,
         global_quota: Arc<Mutex<GlobalAgentQuota>>,
         events: EventBus,
-        bridge_version: Option<String>,
+        bridge_version: String,
     ) -> Result<Self> {
+        ensure!(
+            bridge_version == crate::BUILD_VERSION,
+            "refusing to construct an MCP server for another bridge build"
+        );
         // Loading first initializes the encrypted wallet configuration in the
         // same database that the stores below open. No plaintext configuration
         // file participates in startup or request handling.
@@ -214,9 +213,7 @@ impl WalletMcpServer {
         server.client_namespace = client_id;
         server.global_quota = global_quota;
         server.events = events;
-        server.bridge_compatible = bridge_version_compatible(bridge_version.as_deref());
-        server.bridge_version =
-            bridge_version.filter(|version| version.as_str() == crate::BUILD_VERSION);
+        server.bridge_version = Some(bridge_version);
         Ok(server)
     }
 
@@ -256,7 +253,6 @@ impl WalletMcpServer {
             keys,
             requesting_client: None,
             bridge_version: None,
-            bridge_compatible: true,
         })
     }
 
@@ -1125,7 +1121,7 @@ impl WalletMcpServer {
             wallet_version: crate::BUILD_VERSION.to_string(),
             mcp_server_version: crate::BUILD_VERSION.to_string(),
             bridge_version: self.bridge_version.clone(),
-            compatible: self.bridge_compatible,
+            compatible: true,
             instruction: "These are the exact builds running in this session. To determine whether a newer signed release is published, call wallet_check_for_updates once."
                 .to_string(),
         })
@@ -3524,16 +3520,14 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
 }
 
 impl WalletMcpServer {
-    /// The per-call session and legal gate. A bridge from another wallet build
-    /// can have a different protocol surface, so it is stopped before any
-    /// store or wallet capability is touched and told how to obtain a matching
-    /// process. Every tool except the three informational tools below then
-    /// requires
-    /// current acceptance of the terms of service and privacy policy. Before
-    /// either, every tool re-checks the database schema version, so a database
-    /// replaced underneath this process refuses all requests with a restart
-    /// instruction instead of being written through a stale understanding of
-    /// its shape.
+    /// The per-call session and legal gate. The IPC listener has already
+    /// rejected bridges from other wallet builds before reading MCP
+    /// initialization. Every tool except the three informational tools below
+    /// then requires current acceptance of the terms of service and privacy
+    /// policy. Before either, every tool re-checks the database schema version,
+    /// so a database replaced underneath this process refuses all requests
+    /// with a restart instruction instead of being written through a stale
+    /// understanding of its shape.
     ///
     /// `wallet_get_version` is exempt because it reports only compile-time
     /// process identity. `wallet_get_legal` is exempt because it is how the
@@ -3544,15 +3538,6 @@ impl WalletMcpServer {
     /// would tell a user their wallet is disabled without letting the agent
     /// mention that a newer build is what they are being asked to accept.
     fn tool_gate(&self, tool_name: &str) -> Result<(), ErrorData> {
-        if !self.bridge_compatible {
-            return Err(ErrorData::invalid_request(
-                format!(
-                    "This agent session is using an MCP bridge from another Ekubo Wallet build and cannot safely call Ekubo Wallet {}. Start a new agent session so the harness launches the matching bridge.",
-                    crate::BUILD_VERSION
-                ),
-                None,
-            ));
-        }
         self.policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy store lock was poisoned"))

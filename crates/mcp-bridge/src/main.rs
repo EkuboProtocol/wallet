@@ -18,6 +18,11 @@ struct VersionMismatch {
     wallet_version: String,
 }
 
+enum WalletHandshake {
+    Accepted { wallet_version: String },
+    VersionMismatch { wallet_version: String },
+}
+
 impl VersionMismatch {
     fn message(&self) -> String {
         format!(
@@ -70,9 +75,8 @@ impl fmt::Display for VersionMismatch {
 
 impl std::error::Error for VersionMismatch {}
 
-fn reported_wallet_version(initialize_response: &Value) -> String {
-    initialize_response
-        .pointer("/result/serverInfo/version")
+fn safe_reported_version(version: Option<&Value>) -> String {
+    version
         .and_then(Value::as_str)
         .filter(|version| {
             !version.is_empty()
@@ -83,6 +87,26 @@ fn reported_wallet_version(initialize_response: &Value) -> String {
         })
         .unwrap_or("unknown")
         .to_string()
+}
+
+fn reported_wallet_version(initialize_response: &Value) -> String {
+    safe_reported_version(initialize_response.pointer("/result/serverInfo/version"))
+}
+
+fn wallet_handshake(message: &Value) -> Result<WalletHandshake> {
+    let handshake = message
+        .get("ekubo_wallet_bridge")
+        .context("wallet did not acknowledge the versioned bridge handshake")?;
+    let status = handshake
+        .get("status")
+        .and_then(Value::as_str)
+        .context("wallet bridge handshake has no status")?;
+    let wallet_version = safe_reported_version(handshake.get("wallet_version"));
+    match status {
+        "accepted" => Ok(WalletHandshake::Accepted { wallet_version }),
+        "version_mismatch" => Ok(WalletHandshake::VersionMismatch { wallet_version }),
+        _ => anyhow::bail!("wallet bridge handshake has an unsupported status"),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -333,10 +357,37 @@ async fn run() -> Result<()> {
             let connected: Result<_> = async {
                         let (read, mut write) = tokio::io::split(stream);
                         let mut read = BufReader::new(read);
+                        let handshake_frame = match tokio::time::timeout(
+                            Duration::from_secs(2),
+                            read_frame(&mut read),
+                        )
+                        .await
+                        {
+                            Ok(frame) => frame?
+                                .context("wallet closed during the versioned bridge handshake")?,
+                            Err(_) => {
+                                return Err(VersionMismatch {
+                                    wallet_version: "unknown".to_string(),
+                                }
+                                .into());
+                            }
+                        };
+                        let handshake_response: Value = serde_json::from_slice(&handshake_frame)
+                            .context("invalid wallet bridge handshake response")?;
+                        match wallet_handshake(&handshake_response)? {
+                            WalletHandshake::Accepted { wallet_version } => {
+                                if wallet_version != BUILD_VERSION {
+                                    return Err(VersionMismatch { wallet_version }.into());
+                                }
+                            }
+                            WalletHandshake::VersionMismatch { wallet_version } => {
+                                return Err(VersionMismatch { wallet_version }.into());
+                            }
+                        }
                         write.write_all(&initialize_frame).await?;
                         let initialize_response = read_frame(&mut read)
                             .await?
-                            .context("wallet closed during initialization")?;
+                            .context("wallet closed during MCP initialization")?;
                         let initialize_response: Value = serde_json::from_slice(&initialize_response)
                             .context("invalid wallet initialize response")?;
                         ensure!(initialize_response.get("result").is_some(), "wallet rejected MCP initialization");

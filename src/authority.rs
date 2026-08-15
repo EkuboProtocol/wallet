@@ -577,7 +577,7 @@ impl AgentApi {
         &self,
         client_id: Uuid,
         harness: AgentKind,
-        bridge_version: Option<String>,
+        bridge_version: String,
     ) -> Result<WalletMcpServer> {
         WalletMcpServer::production(
             self.config.clone(),
