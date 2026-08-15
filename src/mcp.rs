@@ -1143,7 +1143,7 @@ impl WalletMcpServer {
         // Deliberately not gated on legal acceptance, unlike every tool that
         // touches a wallet: "you are running a stale build" is exactly the
         // kind of thing someone still setting the wallet up should hear.
-        Ok(Json(release_check::check(self.config.data_dir()).await))
+        Ok(Json(release_check::check().await))
     }
 
     #[tool(

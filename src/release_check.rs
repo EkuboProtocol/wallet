@@ -4,14 +4,14 @@
 //! `wallet_check_for_updates` MCP tool. The security kernel owns authenticated
 //! update discovery, download, authorization, and installation. The release tag
 //! used for the informational check is validated before it enters a URL. Every
-//! failure here — offline, rate limited, malformed JSON, an unwritable cache —
+//! failure here — offline, rate limited, or malformed JSON —
 //! resolves to "no update known" rather than an error, because nothing that
 //! depends on this answer should fail when the answer is merely unavailable.
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::time::Duration;
 use std::{
     fs::OpenOptions,
@@ -165,13 +165,6 @@ const SKIP_ENVIRONMENT_VARIABLE: &str = "EKUBO_WALLET_SKIP_UPDATE_CHECK";
 /// Overrides the repository for development and tests.
 const REPOSITORY_ENVIRONMENT_VARIABLE: &str = "EKUBO_WALLET_REPOSITORY";
 
-const CACHE_FILE: &str = "release-check.json";
-
-/// A day. Releases are not frequent enough for a shorter window to tell anyone
-/// anything, and GitHub's unauthenticated limit is 60 requests an hour per
-/// address — which this stays far below even with both surfaces asking.
-const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
-
 /// Short enough that a hung endpoint cannot delay a desktop action or a tool call
 /// by anything a person would notice.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -186,11 +179,9 @@ const MAX_RESPONSE_BYTES: u64 = 1 << 20;
 pub enum CheckSource {
     /// Asked the release endpoint just now.
     Network,
-    /// Reused an answer from within the last day.
-    Cache,
     /// Turned off by the environment.
     Disabled,
-    /// Nothing answered, and no cached answer was usable.
+    /// Nothing answered.
     Unavailable,
 }
 
@@ -207,7 +198,7 @@ pub struct ReleaseCheck {
     pub update_available: bool,
     /// The repository's stable latest-release page.
     pub release_url: Option<String>,
-    /// When `latest_version` was learned — now, or when the cache was written.
+    /// When `latest_version` was learned from the release endpoint.
     pub checked_at: Option<DateTime<Utc>>,
     pub source: CheckSource,
     /// What the caller should do about it, in words, because the caller is
@@ -328,44 +319,6 @@ fn is_newer(installed: &str, latest: &str) -> Option<bool> {
     Some(installed.prerelease && !latest.prerelease)
 }
 
-#[derive(Serialize, Deserialize)]
-struct Cache {
-    /// Which repository the tag was read from. A tag only means something
-    /// alongside the repository that published it: without this, pointing
-    /// `EKUBO_WALLET_REPOSITORY` somewhere else would keep answering with the
-    /// previous repository's tag for a day, and build a release URL and an
-    /// install command naming a tag the new repository does not have.
-    repository: String,
-    latest_version: String,
-    checked_at: DateTime<Utc>,
-}
-
-fn read_cache(data_dir: &Path, repository: &str) -> Option<Cache> {
-    let text = std::fs::read_to_string(data_dir.join(CACHE_FILE)).ok()?;
-    let cache: Cache = serde_json::from_str(&text).ok()?;
-    (cache.repository == repository && valid_tag(&cache.latest_version)).then_some(cache)
-}
-
-/// Best effort in both directions: a cache that cannot be written costs a
-/// request next time and nothing else, so no failure here reaches the caller.
-fn write_cache(data_dir: &Path, cache: &Cache) {
-    let Ok(text) = serde_json::to_string(cache) else {
-        return;
-    };
-    // Written beside the target and renamed, so a concurrent reader sees one
-    // whole file or the previous one, never a half-written mix.
-    let temporary = data_dir.join(format!("{CACHE_FILE}.tmp"));
-    if std::fs::create_dir_all(data_dir).is_err() {
-        return;
-    }
-    if std::fs::write(&temporary, text).is_err() {
-        return;
-    }
-    if std::fs::rename(&temporary, data_dir.join(CACHE_FILE)).is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-}
-
 /// Read a response body, stopping at `MAX_RESPONSE_BYTES`.
 ///
 /// The `content_length` check above is a courtesy the server extends. It can
@@ -426,7 +379,6 @@ async fn fetch_latest_tag(repository: String) -> Option<String> {
 /// The check, with the network call and the clock supplied by the caller so
 /// the whole of the logic is reachable from a test without either.
 async fn check_with<F, Fut>(
-    data_dir: &Path,
     installed_version: &str,
     repository: &str,
     now: DateTime<Utc>,
@@ -441,50 +393,14 @@ where
         return ReleaseCheck::unknown(installed_version, CheckSource::Disabled);
     }
 
-    let cached = read_cache(data_dir, repository);
-    // A half-open range rather than a `<`, so a cache dated in the future —
-    // a clock that moved backwards, a file copied between machines — is stale
-    // rather than fresh forever.
-    let fresh = cached.as_ref().filter(|cache| {
-        (0..CACHE_TTL_SECONDS).contains(&now.signed_duration_since(cache.checked_at).num_seconds())
-    });
-
-    let (tag, checked_at, source) = match fresh {
-        Some(cache) => (
-            cache.latest_version.clone(),
-            cache.checked_at,
-            CheckSource::Cache,
-        ),
-        // Validated here rather than only in the fetch, so the guard sits
-        // where the tag is used: everything downstream — the cache it is
-        // written to and the release URL trust this point and
-        // nothing re-checks. Rejecting one is the same as being offline.
-        None => match fetch().await.filter(|tag| valid_tag(tag)) {
-            Some(tag) => {
-                write_cache(
-                    data_dir,
-                    &Cache {
-                        repository: repository.to_string(),
-                        latest_version: tag.clone(),
-                        checked_at: now,
-                    },
-                );
-                (tag, now, CheckSource::Network)
-            }
-            // Offline with a stale answer is still a better answer than none:
-            // the version it names was published, and the only thing its age
-            // can cause is under-reporting a newer one.
-            None => match cached {
-                Some(cache) => (cache.latest_version, cache.checked_at, CheckSource::Cache),
-                None => {
-                    return ReleaseCheck::unknown(installed_version, CheckSource::Unavailable);
-                }
-            },
-        },
+    // Validated here rather than only in the fetch, so the guard sits where
+    // the tag is used. Rejecting one is the same as being offline.
+    let Some(tag) = fetch().await.filter(|tag| valid_tag(tag)) else {
+        return ReleaseCheck::unknown(installed_version, CheckSource::Unavailable);
     };
 
     let Some(update_available) = is_newer(installed_version, &tag) else {
-        return ReleaseCheck::unknown(installed_version, source);
+        return ReleaseCheck::unknown(installed_version, CheckSource::Network);
     };
 
     let release_url = format!("https://github.com/{repository}/releases/latest");
@@ -501,17 +417,16 @@ where
         latest_version: Some(tag.clone()),
         update_available,
         release_url: Some(release_url),
-        checked_at: Some(checked_at),
-        source,
+        checked_at: Some(now),
+        source: CheckSource::Network,
         instruction,
     }
 }
 
-/// Ask whether a newer release exists, reusing a cached answer for a day.
-pub async fn check(data_dir: &Path) -> ReleaseCheck {
+/// Ask GitHub whether a newer release exists.
+pub async fn check() -> ReleaseCheck {
     let repository = repository();
     check_with(
-        data_dir,
         crate::BUILD_VERSION,
         &repository,
         Utc::now(),

@@ -396,7 +396,9 @@ fn every_route_explains_itself_in_one_sentence() {
             route.label()
         );
         assert!(
-            !description.contains(route.label()),
+            !description
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(route.label()),
             "{} description only repeats its own title",
             route.label()
         );
@@ -1073,7 +1075,6 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Signed),
         TransactionActions {
-            refresh: false,
             send: true,
             cancel: false,
             discard: true,
@@ -1082,7 +1083,6 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Broadcast),
         TransactionActions {
-            refresh: true,
             send: true,
             cancel: true,
             discard: false,
@@ -1091,7 +1091,6 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Cancelling),
         TransactionActions {
-            refresh: true,
             send: false,
             cancel: true,
             discard: false,
@@ -1100,12 +1099,33 @@ fn activity_exposes_only_lifecycle_safe_owner_actions() {
     assert_eq!(
         transaction_actions(PendingStatus::Confirmed),
         TransactionActions {
-            refresh: false,
             send: false,
             cancel: false,
             discard: false,
         }
     );
+}
+
+#[test]
+fn automatic_status_refresh_only_polls_transactions_the_network_can_advance() {
+    for status in [
+        PendingStatus::Submitting,
+        PendingStatus::Broadcast,
+        PendingStatus::Cancelling,
+    ] {
+        assert!(transaction_status_needs_automatic_refresh(status));
+    }
+    for status in [
+        PendingStatus::AwaitingApproval,
+        PendingStatus::Rejected,
+        PendingStatus::Signed,
+        PendingStatus::Confirmed,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+    ] {
+        assert!(!transaction_status_needs_automatic_refresh(status));
+    }
 }
 
 #[test]
@@ -1273,6 +1293,103 @@ fn ages_read_as_elapsed_time_until_they_are_old_enough_to_need_a_date() {
     let old = relative_time_label(ago(60 * 86_400), now);
     assert!(!old.contains("ago"), "{old} should be a calendar date");
     assert!(old.contains("2026"), "{old} should name its year");
+}
+
+#[test]
+fn walletconnect_expiry_reads_as_time_remaining() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let after = |seconds: i64| now.timestamp() + seconds;
+
+    assert_eq!(
+        walletconnect_expiry_label(after(-1), now),
+        "Expired; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(30), now),
+        "Expires in less than a minute; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(90), now),
+        "Expires in 2 minutes; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(3_600), now),
+        "Expires in 1 hour; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(2 * 86_400), now),
+        "Expires in 2 days; reconnect to renew"
+    );
+}
+
+#[test]
+fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
+    assert_eq!(
+        next_overflow_indicator_offset(px(-900.0), px(1_000.0), px(400.0)),
+        px(-1_000.0)
+    );
+    assert_eq!(
+        next_overflow_indicator_offset(px(-200.0), px(1_000.0), px(400.0)),
+        px(-488.0)
+    );
+}
+
+#[test]
+fn overflow_indicator_breathes_and_reaches_full_opacity_on_hover() {
+    assert!((overflow_indicator_opacity(false, Duration::from_millis(350)) - 0.90).abs() < 0.001);
+    assert!((overflow_indicator_opacity(false, Duration::from_millis(1_050)) - 0.70).abs() < 0.001);
+    assert!((overflow_indicator_opacity(true, Duration::ZERO) - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn overflow_indicator_animation_is_isolated_in_a_child_view() {
+    let source = include_str!("desktop.rs");
+    assert!(source.contains("struct ScrollOverflowIndicatorView"));
+    assert!(source.contains("impl Render for ScrollOverflowIndicatorView"));
+    assert!(!source.contains("fn scroll_overflow_indicator<"));
+    assert!(!source.contains("window.request_animation_frame()"));
+}
+
+#[test]
+fn activity_detail_scroll_uses_the_overflow_indicator() {
+    let source = include_str!("desktop.rs");
+    let detail_overlay = source
+        .split_once("fn render_activity_detail_overlay")
+        .expect("activity detail overlay exists")
+        .1
+        .split_once("/// A labelled key/value block")
+        .expect("activity detail overlay has an end marker")
+        .0;
+
+    assert!(detail_overlay.contains("track_scroll(&self.activity_detail_scroll_handle)"));
+    assert!(detail_overlay.contains("self.activity_detail_overflow_indicator.element()"));
+}
+
+#[test]
+fn sidebar_tooltips_are_immediate_right_side_theme_elements() {
+    let source = include_str!("desktop.rs");
+    let sidebar = source
+        .split_once("fn render_sidebar")
+        .expect("sidebar renderer exists")
+        .1
+        .split_once("/// One waiting request")
+        .expect("sidebar renderer has an end marker")
+        .0;
+
+    assert!(sidebar.contains(".on_hover("));
+    assert!(sidebar.contains(".anchor(Anchor::LeftCenter)"));
+    assert!(sidebar.contains(".position(tooltip_position)"));
+    assert!(sidebar.contains(".bg(cx.theme().primary)"));
+    assert!(!sidebar.contains(".tooltip("));
+}
+
+#[test]
+fn sidebar_tooltip_uses_the_measured_button_right_center() {
+    let bounds = gpui::Bounds::new(point(px(12.0), px(100.0)), size(px(48.0), px(48.0)));
+
+    assert_eq!(sidebar_tooltip_position(bounds), point(px(70.0), px(124.0)));
 }
 
 #[test]
