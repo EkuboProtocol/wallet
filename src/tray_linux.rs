@@ -411,7 +411,6 @@ fn initial_snapshot() -> TraySnapshot {
     TraySnapshot {
         pending_reviews: 0,
         mcp_online: false,
-        connected_agents: 0,
         walletconnect_sessions: 0,
     }
 }

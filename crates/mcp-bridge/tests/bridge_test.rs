@@ -335,7 +335,7 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
 
 #[cfg(unix)]
 #[test]
-fn standard_server_version_mismatch_blocks_upstream_messages() {
+fn standard_server_version_mismatch_terminates_the_bridge() {
     use std::{
         fs,
         os::unix::fs::PermissionsExt as _,
@@ -381,6 +381,7 @@ fn standard_server_version_mismatch_blocks_upstream_messages() {
         .env("EKUBO_WALLET_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -394,31 +395,13 @@ fn standard_server_version_mismatch_blocks_upstream_messages() {
         &mut stdin,
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     );
-    assert_eq!(
-        receive(&mut stdout)["method"],
-        "notifications/tools/list_changed"
-    );
-
-    send(
-        &mut stdin,
-        &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
-    );
-    let tools = receive(&mut stdout);
-    assert!(tools["result"]["tools"].as_array().unwrap().is_empty());
-
-    send(
-        &mut stdin,
-        &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"wallet_list","arguments":{}}}),
-    );
-    let rejected = receive(&mut stdout);
-    assert!(
-        rejected["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Start a new agent session")
-    );
-
     drop(stdin);
-    assert!(child.wait().unwrap().success());
+    drop(stdout);
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Start a new agent session"), "{stderr}");
+    assert!(stderr.contains("999.0.0"), "{stderr}");
+    assert!(stderr.contains(BUILD_VERSION), "{stderr}");
     wallet.join().unwrap();
 }

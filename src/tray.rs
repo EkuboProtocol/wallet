@@ -31,7 +31,6 @@ pub enum TrayCommand {
 pub struct TraySnapshot {
     pub pending_reviews: usize,
     pub mcp_online: bool,
-    pub connected_agents: usize,
     pub walletconnect_sessions: usize,
 }
 
@@ -111,7 +110,6 @@ impl PlatformTray {
             snapshot: TraySnapshot {
                 pending_reviews: 0,
                 mcp_online: false,
-                connected_agents: 0,
                 walletconnect_sessions: 0,
             },
             #[cfg(windows)]
@@ -140,8 +138,8 @@ impl PlatformTray {
         }
     }
 
-    /// Update only MCP connectivity without discarding newer review, agent,
-    /// or dapp counts held by the shared tray snapshot.
+    /// Update only MCP connectivity without discarding newer review or dapp
+    /// counts held by the shared tray snapshot.
     pub fn set_mcp_online(&mut self, online: bool) {
         let mut snapshot = self.snapshot.clone();
         snapshot.mcp_online = online;
@@ -227,26 +225,17 @@ fn count_phrase(count: usize, singular: &str) -> String {
     }
 }
 
-/// What can reach the wallet right now, in one line. The old wording —
-/// `MCP online · 2 agent(s) · 1 dapp(s)` — named the protocol rather than the
-/// capability and used a suffix nobody says out loud.
+/// Whether agents can reach the wallet, plus established dapp sessions. Live
+/// bridge-process counts are deliberately absent: harnesses start and stop
+/// bridges as needed, so that number does not describe installation health.
 fn agent_menu_text(snapshot: &TraySnapshot) -> String {
     if !snapshot.mcp_online {
         return "Agents cannot connect right now".to_owned();
     }
-    match (snapshot.connected_agents, snapshot.walletconnect_sessions) {
-        (0, 0) => "Ready for agents · nothing connected".to_owned(),
-        (agents, 0) => format!(
+    match snapshot.walletconnect_sessions {
+        0 => "Ready for agents".to_owned(),
+        dapps => format!(
             "Ready for agents · {} connected",
-            count_phrase(agents, "agent")
-        ),
-        (0, dapps) => format!(
-            "Ready for agents · {} connected",
-            count_phrase(dapps, "dapp")
-        ),
-        (agents, dapps) => format!(
-            "Ready for agents · {} and {} connected",
-            count_phrase(agents, "agent"),
             count_phrase(dapps, "dapp")
         ),
     }

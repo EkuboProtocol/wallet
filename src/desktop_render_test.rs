@@ -545,6 +545,42 @@ fn claude_connector_instructions_require_detected_claude_desktop(cx: &mut gpui::
 }
 
 #[gpui::test]
+fn every_detected_agent_has_its_own_configuration_action(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.detected_agents = AgentDetectionState::Ready(vec![
+            DetectedAgent {
+                kind: AgentKind::Codex,
+                display_name: "Codex",
+                config_path: "/tmp/codex.toml".into(),
+                installed: Ok(true),
+            },
+            DetectedAgent {
+                kind: AgentKind::Cursor,
+                display_name: "Cursor",
+                config_path: "/tmp/cursor.json".into(),
+                installed: Ok(false),
+            },
+        ]);
+    });
+
+    let actions = measure_at(
+        cx,
+        window,
+        &view,
+        gpui::size(px(1400.0), px(1400.0)),
+        &["configure-detected-agent-0", "configure-detected-agent-1"],
+    );
+    assert!(
+        actions.iter().all(Option::is_some),
+        "installed and uninstalled agents must each expose their own action: {actions:?}"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn checking_for_updates_keeps_the_action_in_place(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);

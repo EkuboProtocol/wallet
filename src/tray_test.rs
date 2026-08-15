@@ -120,13 +120,11 @@ fn menu_labels_are_finished_sentences_without_trailing_ellipses() {
     let idle = TraySnapshot {
         pending_reviews: 0,
         mcp_online: false,
-        connected_agents: 0,
         walletconnect_sessions: 0,
     };
     let busy = TraySnapshot {
         pending_reviews: 3,
         mcp_online: true,
-        connected_agents: 2,
         walletconnect_sessions: 1,
     };
 
@@ -137,23 +135,14 @@ fn menu_labels_are_finished_sentences_without_trailing_ellipses() {
     assert_eq!(agent_menu_text(&idle), "Agents cannot connect right now");
     assert_eq!(
         agent_menu_text(&busy),
-        "Ready for agents · 2 agents and 1 dapp connected"
+        "Ready for agents · 1 dapp connected"
     );
     assert_eq!(
         agent_menu_text(&TraySnapshot {
-            connected_agents: 1,
             walletconnect_sessions: 0,
             ..busy.clone()
         }),
-        "Ready for agents · 1 agent connected"
-    );
-    assert_eq!(
-        agent_menu_text(&TraySnapshot {
-            connected_agents: 0,
-            walletconnect_sessions: 0,
-            ..busy.clone()
-        }),
-        "Ready for agents · nothing connected"
+        "Ready for agents"
     );
 
     assert_eq!(tray_tooltip(&idle), "Ekubo Wallet");

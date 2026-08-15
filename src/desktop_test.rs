@@ -197,48 +197,6 @@ fn recognized_balance_effects_separate_the_symbol_from_the_exact_address() {
 }
 
 #[test]
-fn the_install_button_reflects_what_is_left_to_install() {
-    let agent = |installed| DetectedAgent {
-        kind: AgentKind::Codex,
-        display_name: "Agent",
-        config_path: "agent.json".into(),
-        installed,
-    };
-
-    let mixed = AgentDetectionState::Ready(vec![agent(Ok(true)), agent(Ok(false))]);
-    assert!(agents_need_install(&mixed));
-    assert!(!agents_all_installed(&mixed));
-    assert!(agents_any_installed(&mixed));
-
-    let done = AgentDetectionState::Ready(vec![agent(Ok(true))]);
-    assert!(!agents_need_install(&done));
-    assert!(agents_all_installed(&done));
-    assert!(agents_any_installed(&done));
-
-    // An unreadable configuration is not an installed one, so the button
-    // stays live and the reassurance stays off.
-    let broken = AgentDetectionState::Ready(vec![agent(Err("unreadable".into()))]);
-    assert!(agents_need_install(&broken));
-    assert!(!agents_all_installed(&broken));
-    assert!(!agents_any_installed(&broken));
-
-    // Nothing detected: nothing to install, and nothing to claim either.
-    let none = AgentDetectionState::Ready(Vec::new());
-    assert!(!agents_need_install(&none));
-    assert!(!agents_all_installed(&none));
-    assert!(!agents_any_installed(&none));
-
-    // Still looking, or unable to look: offer the button, promise nothing.
-    for unknown in [
-        AgentDetectionState::Loading,
-        AgentDetectionState::Failed("detection failed".into()),
-    ] {
-        assert!(agents_need_install(&unknown));
-        assert!(!agents_all_installed(&unknown));
-    }
-}
-
-#[test]
 fn structured_network_editor_builds_the_complete_network_configuration() {
     let draft = NetworkEditorDraft {
         name: "owner-chain".into(),
@@ -1377,21 +1335,11 @@ fn status_colour_separates_success_from_waiting_from_failure() {
 }
 
 #[test]
-fn a_gateway_that_could_not_start_reads_as_a_failure_and_carries_its_reason() {
-    assert_eq!(McpGatewayStatus::Starting.tone(), StatusTone::Working);
-    assert_eq!(McpGatewayStatus::Starting.label(), "Starting");
+fn gateway_status_only_exposes_an_actionable_failure_reason() {
     assert_eq!(McpGatewayStatus::Starting.detail(), None);
-
-    assert_eq!(McpGatewayStatus::Online.tone(), StatusTone::Done);
-    assert_eq!(McpGatewayStatus::Online.label(), "Reachable");
-    // Nothing to explain: the endpoint beside the pill is the whole story.
     assert_eq!(McpGatewayStatus::Online.detail(), None);
 
     let offline = McpGatewayStatus::Offline("address already in use".into());
-    assert_eq!(offline.tone(), StatusTone::Failed);
-    assert_eq!(offline.label(), "Unreachable");
-    // The one fact a reader cannot guess from a status word: the port is
-    // fixed, so why it could not be served is the whole of the diagnosis.
     assert_eq!(offline.detail().as_deref(), Some("address already in use"));
 }
 

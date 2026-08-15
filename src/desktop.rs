@@ -605,37 +605,6 @@ fn lazy_copy_button(
     }
 }
 
-/// Whether the one install button still has anything to do. An unknown list —
-/// still detecting, or detection failed — counts as "maybe": refusing the only
-/// install control on a guess is worse than a write that changes nothing.
-fn agents_need_install(state: &AgentDetectionState) -> bool {
-    match state {
-        AgentDetectionState::Ready(detected) => detected
-            .iter()
-            .any(|agent| !agent.installed.as_ref().copied().unwrap_or(false)),
-        AgentDetectionState::Loading | AgentDetectionState::Failed(_) => true,
-    }
-}
-
-/// Whether the wallet can say every detected agent is configured. Detecting
-/// nothing is not the same as having configured everything, so an empty list
-/// says nothing.
-fn agents_all_installed(state: &AgentDetectionState) -> bool {
-    match state {
-        AgentDetectionState::Ready(detected) => {
-            !detected.is_empty()
-                && detected
-                    .iter()
-                    .all(|agent| agent.installed.as_ref().copied().unwrap_or(false))
-        }
-        AgentDetectionState::Loading | AgentDetectionState::Failed(_) => false,
-    }
-}
-
-fn agents_any_installed(state: &AgentDetectionState) -> bool {
-    matches!(state, AgentDetectionState::Ready(detected) if detected.iter().any(|agent| agent.installed.as_ref().copied().unwrap_or(false)))
-}
-
 /// Which account tab the policies page shows as selected. The editor owns the
 /// selection, so an account whose editor has not opened yet — or that has been
 /// deleted out from under the editor — falls back to the first tab.
@@ -1240,9 +1209,10 @@ impl StatusTone {
 
 /// Whether an agent can reach this wallet right now.
 ///
-/// The listener status shared by the tray and Settings. Bridges keep running
-/// independently, so an offline listener means they will wait and reconnect
-/// when the wallet makes same-user IPC available again.
+/// The listener status drives tray availability and the actionable Settings
+/// error. Bridges keep running independently, so an offline listener means
+/// they will wait and reconnect when the wallet makes same-user IPC available
+/// again.
 #[derive(Clone)]
 enum McpGatewayStatus {
     Starting,
@@ -1251,24 +1221,8 @@ enum McpGatewayStatus {
 }
 
 impl McpGatewayStatus {
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Starting => "Starting",
-            Self::Online => "Reachable",
-            Self::Offline(_) => "Unreachable",
-        }
-    }
-
-    const fn tone(&self) -> StatusTone {
-        match self {
-            Self::Starting => StatusTone::Working,
-            Self::Online => StatusTone::Done,
-            Self::Offline(_) => StatusTone::Failed,
-        }
-    }
-
-    /// The sentence under the pill. Only a failure has one: the reason the
-    /// port could not be served is the only thing here nobody can guess.
+    /// Only a failure has detail: the reason the local endpoint could not be
+    /// served is actionable even though routine reachability is not shown.
     fn detail(&self) -> Option<SharedString> {
         match self {
             Self::Starting | Self::Online => None,
@@ -1460,54 +1414,19 @@ fn pluralize(count: usize, singular: &str) -> String {
     }
 }
 
-fn upsert_detected_agents() -> Result<String> {
-    let adapters = AgentAdapter::supported()?
+fn set_agent_installed(kind: AgentKind, installed: bool) -> Result<()> {
+    let adapter = AgentAdapter::supported()?
         .into_iter()
-        .filter(AgentAdapter::detected)
-        .collect::<Vec<_>>();
-    if adapters.is_empty() {
-        return Ok("No supported agent installations were detected.".into());
-    }
-    let detected = adapters.len();
-    let previews = adapters
-        .into_iter()
-        .map(|adapter| adapter.preview_install())
-        .collect::<Result<Vec<_>>>()?;
-    let changed = previews
-        .iter()
-        .filter(|preview| preview.has_changes())
-        .count();
-    let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
+        .find(|adapter| adapter.kind == kind)
+        .with_context(|| format!("{} is not a supported agent", kind.label()))?;
+    let preview = if installed {
+        adapter.preview_install()?
+    } else {
+        adapter.preview_remove()?
+    };
+    let batch = crate::agent_config::ConfigBatchInstall::install(vec![preview])?;
     batch.commit();
-    Ok(format!(
-        "Set up {} that this machine has installed; {} changed. Running bridges connect automatically whenever Ekubo Wallet opens.",
-        pluralize(detected, "agent"),
-        pluralize(changed, "configuration file")
-    ))
-}
-
-fn remove_detected_agents() -> Result<String> {
-    let adapters = AgentAdapter::supported()?
-        .into_iter()
-        .filter(AgentAdapter::detected)
-        .collect::<Vec<_>>();
-    if adapters.is_empty() {
-        return Ok("No supported agent installations were detected.".into());
-    }
-    let previews = adapters
-        .into_iter()
-        .map(|adapter| adapter.preview_remove())
-        .collect::<Result<Vec<_>>>()?;
-    let changed = previews
-        .iter()
-        .filter(|preview| preview.has_changes())
-        .count();
-    let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
-    batch.commit();
-    Ok(format!(
-        "Removed Ekubo's managed entries from {}.",
-        pluralize(changed, "configuration file")
-    ))
+    Ok(())
 }
 
 fn detect_agents() -> Result<Vec<DetectedAgent>> {
@@ -1741,12 +1660,8 @@ pub struct WalletWindow {
     /// when the blocker leaves.
     notification_navigation: NotificationNavigation,
     agent_reinstall: AgentReinstallState,
-    /// Set for a second after an install the reader asked for, so the button
-    /// can answer with a check mark instead of a spinner nobody can read.
-    agent_install_confirmed: bool,
     detected_agents: AgentDetectionState,
     detected_agents_generation: u64,
-    active_bridges: usize,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
     account_entry_mode: AccountEntryMode,
@@ -4459,10 +4374,8 @@ impl WalletWindow {
             review_flow: ReviewFlowState::Ready,
             notification_navigation: NotificationNavigation::default(),
             agent_reinstall: AgentReinstallState::Idle,
-            agent_install_confirmed: false,
             detected_agents: AgentDetectionState::Loading,
             detected_agents_generation: 0,
-            active_bridges: 0,
             account_id_input: None,
             private_key_input: None,
             account_entry_mode: AccountEntryMode::Create,
@@ -6477,73 +6390,21 @@ impl WalletWindow {
         }
     }
 
-    /// `confirm` marks an install the reader asked for by hand, which is the
-    /// only one worth reporting back: the startup pass repairs configurations
-    /// nobody was looking at.
-    fn reinstall_detected_agents(&mut self, confirm: bool, cx: &mut Context<Self>) {
-        if self.agent_reinstall == AgentReinstallState::Running {
-            self.set_route_error(
-                Route::Settings,
-                "Agent configuration repair is already running.",
-            );
-            cx.notify();
-            return;
-        }
-        self.clear_route_error(Route::Settings);
-        self.agent_reinstall = AgentReinstallState::Running;
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(upsert_detected_agents)
-                .await
-                .context("agent configuration repair task failed")?
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let installed = view
-                .update(cx, |view, cx| {
-                    view.agent_reinstall = AgentReinstallState::Idle;
-                    let installed = match result {
-                        Ok(_) => true,
-                        Err(error) => {
-                            view.set_route_error(
-                                Route::Settings,
-                                format!("Could not install the MCP server: {error:#}"),
-                            );
-                            false
-                        }
-                    };
-                    view.agent_install_confirmed = confirm && installed;
-                    view.reload_detected_agents(cx);
-                    cx.notify();
-                    view.agent_install_confirmed
-                })
-                .unwrap_or(false);
-            if !installed {
-                return;
-            }
-            cx.background_executor().timer(Duration::from_secs(1)).await;
-            let _ = view.update(cx, |view, cx| {
-                view.agent_install_confirmed = false;
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn reinstall_detected_agents_from_menu(&mut self, cx: &mut Context<Self>) {
-        self.reinstall_detected_agents(true, cx);
-    }
-
-    fn remove_detected_agents_from_menu(&mut self, cx: &mut Context<Self>) {
+    fn set_detected_agent_installed(
+        &mut self,
+        kind: AgentKind,
+        installed: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.agent_reinstall == AgentReinstallState::Running {
             return;
         }
         self.clear_route_error(Route::Settings);
         self.agent_reinstall = AgentReinstallState::Running;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(remove_detected_agents)
+            tokio::task::spawn_blocking(move || set_agent_installed(kind, installed))
                 .await
-                .context("agent configuration removal task failed")?
+                .context("agent configuration task failed")?
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -6552,28 +6413,23 @@ impl WalletWindow {
                 if let Err(error) = result {
                     view.set_route_error(
                         Route::Settings,
-                        format!("Could not remove the MCP server: {error:#}"),
+                        format!(
+                            "Could not {} {}: {error:#}",
+                            if installed {
+                                "install for"
+                            } else {
+                                "remove from"
+                            },
+                            kind.label()
+                        ),
                     );
                 }
-                view.agent_install_confirmed = false;
                 view.reload_detected_agents(cx);
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
-    }
-
-    fn detected_agents_need_install(&self) -> bool {
-        agents_need_install(&self.detected_agents)
-    }
-
-    fn detected_agents_all_installed(&self) -> bool {
-        agents_all_installed(&self.detected_agents)
-    }
-
-    fn detected_agents_any_installed(&self) -> bool {
-        agents_any_installed(&self.detected_agents)
     }
 
     /// The accounts list is background-cached and never depends on the
@@ -9979,9 +9835,6 @@ impl WalletWindow {
                         )),
                 );
             }
-            // Installation is one button for every agent, so a row is a
-            // status and not a decision: an icon, the agent, and the file the
-            // wallet writes to.
             AgentDetectionState::Ready(detected) => {
                 for (index, agent) in detected.iter().enumerate() {
                     let installed = agent.installed.as_ref().copied().unwrap_or(false);
@@ -9989,10 +9842,11 @@ impl WalletWindow {
                     let (icon, icon_color) = if installed {
                         (IconName::CircleCheck, cx.theme().success)
                     } else if config_error.is_some() {
-                        (IconName::TriangleAlert, cx.theme().danger)
+                        (IconName::CircleX, cx.theme().danger)
                     } else {
                         (IconName::CircleX, cx.theme().muted_foreground)
                     };
+                    let action_selector = format!("configure-detected-agent-{index}");
                     agents = agents.child(
                         ListItem::new(SharedString::from(format!("detected-agent-{index}"))).child(
                             div()
@@ -10009,7 +9863,7 @@ impl WalletWindow {
                                             div()
                                                 .flex_none()
                                                 .text_color(icon_color)
-                                                .child(Icon::new(icon).small()),
+                                                .child(Icon::new(icon).large()),
                                         )
                                         .child(
                                             div()
@@ -10032,21 +9886,23 @@ impl WalletWindow {
                                                 ),
                                         )
                                         .child(
-                                            div()
-                                                .flex_none()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .max_w(PROSE_MEASURE)
-                                                .child(selectable_text(
-                                                    ("detected-agent-status", index),
-                                                    if installed {
-                                                        "Installed"
-                                                    } else if config_error.is_some() {
-                                                        "Needs attention"
-                                                    } else {
-                                                        "Not installed"
-                                                    },
-                                                )),
+                                            app_button(action_selector.clone())
+                                                .debug_selector(move || action_selector.clone())
+                                                .label(if installed { "Remove" } else { "Install" })
+                                                .when(!installed, ButtonVariants::primary)
+                                                .disabled(
+                                                    self.legal_gate
+                                                        || self.agent_reinstall
+                                                            == AgentReinstallState::Running,
+                                                )
+                                                .on_click(cx.listener({
+                                                    let kind = agent.kind;
+                                                    move |view, _, _, cx| {
+                                                        view.set_detected_agent_installed(
+                                                            kind, !installed, cx,
+                                                        );
+                                                    }
+                                                })),
                                         ),
                                 )
                                 .when_some(config_error, |row, error| {
@@ -10200,28 +10056,6 @@ impl WalletWindow {
                 "Detected agents",
                 GroupBox::new()
                     .id("detected-agent-settings")
-                    // Whether the endpoint below is actually being served. It
-                    // is the first thing every row under it depends on, so it
-                    // is the first thing the section says.
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .child(selectable_label("Agent gateway")),
-                            )
-                            .child(status_pill(
-                                self.mcp_status.label(),
-                                self.mcp_status.tone(),
-                                cx,
-                            )),
-                    )
                     .when_some(self.mcp_status.detail(), |group, error| {
                         group.child(
                             selectable_error_alert(
@@ -10242,9 +10076,10 @@ impl WalletWindow {
                             .text_color(cx.theme().muted_foreground)
 .max_w(PROSE_MEASURE)
                             .child(selectable_label(
-                                "Installing writes a credential-free stdio bridge into each agent's configuration. The bridge stays running and connects automatically whenever Ekubo Wallet opens.",
+                                "Installing adds a credential-free stdio entry to an agent's configuration. That agent starts the bridge when it uses the wallet; the bridge reaches this app through same-user operating-system IPC.",
                             )),
                     )
+                    .child(agents)
                     .when(claude_desktop_detected, |group| {
                         group.child(
                             h_flex()
@@ -10285,75 +10120,7 @@ impl WalletWindow {
                                     "Copy Claude Desktop connector URL",
                                 )),
                         )
-                    })
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label(format!(
-                                "{} active bridge{} connected.",
-                                self.active_bridges,
-                                if self.active_bridges == 1 { "" } else { "s" }
-                            ))),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                app_button("reinstall-all-detected-agents")
-                                    // Writing a handful of local config files
-                                    // takes milliseconds. A spinner for that
-                                    // is a flash of movement that says
-                                    // nothing; the check mark says the thing
-                                    // that matters, as the copy buttons do.
-                                    .w(px(184.0))
-                                    .when(self.agent_install_confirmed, |button| {
-                                        button.icon(IconName::Check)
-                                    })
-                                    .label(if self.agent_install_confirmed {
-                                        "Installed"
-                                    } else {
-                                        "Install for all agents"
-                                    })
-                                    .primary()
-                                    .disabled(
-                                        self.legal_gate
-                                            || self.agent_reinstall == AgentReinstallState::Running
-                                            || self.agent_install_confirmed
-                                            || !self.detected_agents_need_install(),
-                                    )
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.reinstall_detected_agents_from_menu(cx);
-                                    })),
-                            )
-                            .child(
-                                app_button("remove-all-detected-agents")
-                                    .label("Remove from all agents")
-                                    .disabled(
-                                        self.legal_gate
-                                            || self.agent_reinstall
-                                                == AgentReinstallState::Running
-                                            || !self.detected_agents_any_installed(),
-                                    )
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.remove_detected_agents_from_menu(cx);
-                                    })),
-                            )
-                            .when(self.detected_agents_all_installed(), |row| {
-                                row.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-.max_w(PROSE_MEASURE)
-                                        .child(selectable_label(
-                                            "Every detected agent is already configured.",
-                                        )),
-                                )
-                            }),
-                    )
-                    .child(agents),
+                    }),
             ))
             .child(self.render_updates(cx))
             .child(self.render_legal(cx))
@@ -14999,7 +14766,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 tray.update(&TraySnapshot {
                     pending_reviews: initial_pending_reviews,
                     mcp_online: false,
-                    connected_agents: 0,
                     walletconnect_sessions: 0,
                 });
             }
@@ -15208,7 +14974,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let event_tokio = gpui_tokio::Tokio::handle(cx);
             cx.spawn(async move |cx| {
                 let mut mcp_online = false;
-                let mut connected_bridges = 0;
                 loop {
                     let changed = match view_events.recv().await {
                         Ok(event) => {
@@ -15222,16 +14987,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind
                             {
                                 mcp_online = *online;
-                            }
-                            if let crate::events::DomainEventKind::AgentConnectionChanged {
-                                active_connections,
-                            } = &event.kind
-                            {
-                                connected_bridges = *active_connections;
-                                event_view.update(cx, |view, cx| {
-                                    view.active_bridges = *active_connections;
-                                    cx.notify();
-                                });
                             }
                             let portfolio_changed = matches!(
                                 &event.kind,
@@ -15250,7 +15005,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             let snapshot_changed = matches!(
                                 &event.kind,
                                 crate::events::DomainEventKind::ConfigurationChanged
-                                    | crate::events::DomainEventKind::AgentConnectionChanged { .. }
                                     | crate::events::DomainEventKind::ReviewChanged { .. }
                                     | crate::events::DomainEventKind::PolicyProposalChanged { .. }
                                     | crate::events::DomainEventKind::Transaction { .. }
@@ -15297,7 +15051,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                             testnet_mode,
                                         )
                                     }),
-                                    connected_bridges,
                                     sessions,
                                 )
                             })
@@ -15307,12 +15060,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             tray.update(&TraySnapshot {
                                 pending_reviews: counts.0,
                                 mcp_online,
-                                connected_agents: counts.1,
-                                walletconnect_sessions: counts.2.len(),
+                                walletconnect_sessions: counts.1.len(),
                             });
                         }
                         event_view.update(cx, |view, cx| {
-                            view.walletconnect_sessions = counts.2;
+                            view.walletconnect_sessions = counts.1;
                             cx.notify();
                         });
                     } else {

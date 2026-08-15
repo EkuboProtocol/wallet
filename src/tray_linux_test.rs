@@ -4,7 +4,6 @@ fn snapshot(pending_reviews: usize) -> TraySnapshot {
     TraySnapshot {
         pending_reviews,
         mcp_online: true,
-        connected_agents: 2,
         walletconnect_sessions: 1,
     }
 }

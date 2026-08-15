@@ -4,8 +4,11 @@ Local harnesses start the installed `ekubo-wallet-mcp-bridge` command over
 stdio with one fixed `--client` argument. The bridge completes MCP
 initialization without the wallet, keeps stdout exclusively for MCP frames,
 and uses stderr for diagnostics. It remains alive while the harness stdin is
-open, reconnects automatically when the wallet opens or restarts, and enforces
-a 24 MiB frame ceiling in both directions.
+open, reconnects automatically when a same-version wallet opens or restarts,
+and enforces a 24 MiB frame ceiling in both directions. If wallet
+initialization reports a different version, the bridge exits with a diagnostic
+instead of retrying; the harness must launch the matching installed helper in
+a new agent session.
 
 The wallet singleton listens on same-user local IPC only. macOS and Linux use
 `mcp.sock` inside the wallet's private `0700` data directory; the socket is
@@ -34,9 +37,9 @@ Desktop”; it never authorizes an operation.
 Before its first wallet connection the bridge advertises an empty tool list.
 After connection it replays the harness initialization parameters, refreshes
 the catalog, and emits `notifications/tools/list_changed` when the catalog
-changes. If the wallet stops, in-flight requests fail clearly, the last catalog
-is retained for useful offline errors, and the bridge reconnects without a
-harness restart.
+changes. If the same-version wallet stops, in-flight requests fail clearly,
+the last catalog is retained for useful offline errors, and the bridge
+reconnects without a harness restart. A version mismatch is terminal.
 
 Managed agent configuration contains the absolute installed helper path and
 exact fixed harness argument under `ekubo_wallet`. Harnesses that support
@@ -47,6 +50,10 @@ an account-level custom connector through Customize → Connectors. Installing
 or repairing managed file entries creates no credential and requires no owner
 authentication. Grok Build uses its native `~/.grok/config.toml`
 `[mcp_servers]` table with the same exact two managed entries.
+Settings derives each larger check or X from those exact managed entries and
+offers a typed install or removal for that agent alone.
+It does not treat the number of live bridge processes as installation status:
+harnesses start and stop their stdio bridges as needed.
 The local transport has no HTTP listener, OAuth routes, bearer credentials, or
 login flow. The hosted companion is an independent HTTPS service.
 
