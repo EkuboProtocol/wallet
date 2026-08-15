@@ -595,6 +595,44 @@ fn add_network_is_part_of_the_fixed_header(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn portfolio_refresh_uses_the_button_label_without_a_second_spinner(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        }]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.desktop_snapshot_loading = true;
+        wallet.portfolio = PortfolioState::Loading;
+        wallet.set_route(Route::Overview);
+    });
+
+    let overview = measure(
+        cx,
+        window,
+        &view,
+        &["refresh-portfolio", "route-header-loading"],
+    );
+    assert!(
+        overview[0].is_some(),
+        "the disabled Refreshing… button must remain in the portfolio header"
+    );
+    assert!(
+        overview[1].is_none(),
+        "the portfolio header must not add a redundant loading spinner"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn network_editor_shows_rpc_endpoints_as_a_multiline_field(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
@@ -921,6 +959,11 @@ fn a_4096_call_security_review_with_large_exact_data_stays_virtual_and_scrollabl
     draw(cx, window, &view);
     let scroll_handle = cx.read_entity(&view, |wallet, _| {
         let review = wallet.active_review.as_ref().expect("active review");
+        assert_eq!(
+            review.scroll_handler_generation.get(),
+            Some(review.state.generation()),
+            "the virtual list's scroll callback is installed once for this review generation"
+        );
         assert_eq!(
             review.scroll_handle.item_count(),
             CALLS + 3 + chunk_count,

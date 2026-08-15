@@ -125,27 +125,47 @@ fn next_overflow_indicator_offset(
     (current - viewport_height * 0.72 * f32::from(multiplier)).max(-maximum)
 }
 
-const OVERFLOW_PAGING_BURST_TIMEOUT: Duration = Duration::from_millis(250);
+const OVERFLOW_PAGING_BURST_TIMEOUT: Duration = Duration::from_millis(400);
 
 #[derive(Default)]
 struct OverflowPagingState {
     last_press: Option<Instant>,
     multiplier: u16,
     animation_generation: u64,
+    target_y: Option<gpui::Pixels>,
 }
 
 impl OverflowPagingState {
-    fn begin_press(&mut self, now: Instant) -> (u16, u64) {
-        self.multiplier = if self.last_press.is_some_and(|last_press| {
+    fn begin_press(
+        &mut self,
+        now: Instant,
+        current: gpui::Pixels,
+        maximum: gpui::Pixels,
+        viewport_height: gpui::Pixels,
+    ) -> (gpui::Pixels, u64) {
+        let continues_burst = self.last_press.is_some_and(|last_press| {
             now.saturating_duration_since(last_press) <= OVERFLOW_PAGING_BURST_TIMEOUT
-        }) {
+        });
+        self.multiplier = if continues_burst {
             self.multiplier.max(1).saturating_mul(2)
         } else {
             1
         };
+        // A rapid press arrives before the previous animation has covered
+        // much distance. Build from that animation's destination instead of
+        // its intermediate offset, otherwise replacing the animation throws
+        // most of the accelerated distance away.
+        let origin = if continues_burst {
+            self.target_y.unwrap_or(current)
+        } else {
+            current
+        };
+        let target_y =
+            next_overflow_indicator_offset(origin, maximum, viewport_height, self.multiplier);
         self.last_press = Some(now);
+        self.target_y = Some(target_y);
         self.animation_generation = self.animation_generation.wrapping_add(1);
-        (self.multiplier, self.animation_generation)
+        (target_y, self.animation_generation)
     }
 }
 
@@ -297,14 +317,9 @@ impl Render for ScrollOverflowIndicatorView {
                         let max =
                             (scroll_handle.content_size().height - viewport_height).max(px(0.0));
                         let offset = scroll_handle.offset();
-                        let (multiplier, animation_generation) =
-                            paint_paging.borrow_mut().begin_press(Instant::now());
-                        let target_y = next_overflow_indicator_offset(
-                            offset.y,
-                            max,
-                            viewport_height,
-                            multiplier,
-                        );
+                        let (target_y, animation_generation) = paint_paging
+                            .borrow_mut()
+                            .begin_press(Instant::now(), offset.y, max, viewport_height);
                         let animated_handle = scroll_handle.clone();
                         let animated_paging = paint_paging.clone();
                         window
@@ -2039,7 +2054,9 @@ struct ActiveReview {
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
     detail_rows: Arc<[SecurityReviewDetailRow]>,
+    wallet_connect_accounts: Option<Arc<[String]>>,
     scroll_handle: VariableListState,
+    scroll_handler_generation: Cell<Option<u64>>,
     end_rendered: Arc<AtomicBool>,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
@@ -2060,11 +2077,9 @@ impl ActiveReview {
             completion,
             awaiting_refresh: false,
             detail_rows: Arc::from([]),
-            scroll_handle: VariableListState::new(
-                0,
-                ListAlignment::Top,
-                ACTIVITY_DETAIL_LIST_OVERDRAW,
-            ),
+            wallet_connect_accounts: None,
+            scroll_handle: virtual_review_detail_list(0),
+            scroll_handler_generation: Cell::new(None),
             end_rendered: Arc::new(AtomicBool::new(false)),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
@@ -2076,19 +2091,23 @@ impl ActiveReview {
     }
 
     fn rebuild_detail_list(&mut self) {
+        self.wallet_connect_accounts = self.completion.as_ref().and_then(|completion| {
+            let ActiveReviewCompletion::WalletConnect { choices, .. } = completion else {
+                return None;
+            };
+            Some(Arc::from(
+                choices
+                    .iter()
+                    .map(|choice| choice.account.id.clone())
+                    .collect::<Vec<_>>(),
+            ))
+        });
         self.detail_rows = Arc::from(security_review_detail_rows(
             self.state.document(),
-            matches!(
-                &self.completion,
-                Some(ActiveReviewCompletion::WalletConnect { .. })
-            ),
+            self.wallet_connect_accounts.is_some(),
         ));
-        self.scroll_handle = VariableListState::new(
-            self.detail_rows.len(),
-            ListAlignment::Top,
-            ACTIVITY_DETAIL_LIST_OVERDRAW,
-        )
-        .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+        self.scroll_handle = virtual_review_detail_list(self.detail_rows.len());
+        self.scroll_handler_generation.set(None);
         self.end_rendered = Arc::new(AtomicBool::new(false));
         self.scroll_check_scheduled = false;
         self.scroll_layout_ready = false;
@@ -2448,15 +2467,7 @@ impl ReadyActivityInspection {
         let detail_rows = Arc::<[TransactionActivityDetailRow]>::from(
             transaction_activity_detail_rows(&inspection.document, false),
         );
-        let detail_list = VariableListState::new(
-            detail_rows.len(),
-            ListAlignment::Top,
-            ACTIVITY_DETAIL_LIST_OVERDRAW,
-        )
-        // Action cards are not uniform, but this gives the unmeasured tail a
-        // useful scrollbar estimate without eagerly laying out thousands of
-        // calls. Each visible card replaces its hint with its exact height.
-        .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+        let detail_list = virtual_review_detail_list(detail_rows.len());
         Self {
             inspection,
             detail_rows: RefCell::new(detail_rows),
@@ -2490,6 +2501,14 @@ enum TransactionActivityDetailRow {
 
 const ACTIVITY_DETAIL_ITEM_HEIGHT_HINT: gpui::Pixels = px(180.0);
 const ACTIVITY_DETAIL_LIST_OVERDRAW: gpui::Pixels = px(480.0);
+
+fn virtual_review_detail_list(row_count: usize) -> VariableListState {
+    VariableListState::new(row_count, ListAlignment::Top, ACTIVITY_DETAIL_LIST_OVERDRAW)
+        // Review cards are not uniform, but this gives the unmeasured tail a
+        // useful scrollbar estimate without eagerly laying out thousands of
+        // calls. Each visible card replaces its hint with its exact height.
+        .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT)
+}
 
 fn transaction_activity_detail_rows(
     document: &ReviewDocument,
@@ -12937,38 +12956,32 @@ impl WalletWindow {
         let list_state = active.scroll_handle.clone();
         let end_rendered = active.end_rendered.clone();
         let row_count = rows.len();
-        let wallet_connect_accounts = active.completion.as_ref().and_then(|completion| {
+        let selected_wallet_connect_account = active.completion.as_ref().and_then(|completion| {
             let ActiveReviewCompletion::WalletConnect {
-                choices,
-                selected_account,
-                ..
+                selected_account, ..
             } = completion
             else {
                 return None;
             };
-            Some((
-                Arc::<[String]>::from(
-                    choices
-                        .iter()
-                        .map(|choice| choice.account.id.clone())
-                        .collect::<Vec<_>>(),
-                ),
-                *selected_account,
-            ))
+            Some(*selected_account)
         });
+        let wallet_connect_accounts = active.wallet_connect_accounts.clone();
         let editor = cx.entity().downgrade();
-        let scroll_editor = editor.clone();
-        list_state.set_scroll_handler(move |_, _, cx| {
-            let scroll_editor = scroll_editor.clone();
-            // GPUI invokes this callback while the list state's RefCell is
-            // mutably borrowed. Defer the geometry read until that borrow has
-            // been released.
-            cx.defer(move |cx| {
-                let _ = scroll_editor.update(cx, |view, cx| {
-                    view.update_review_scroll_state(generation, cx);
+        if active.scroll_handler_generation.get() != Some(generation) {
+            active.scroll_handler_generation.set(Some(generation));
+            let scroll_editor = editor.clone();
+            list_state.set_scroll_handler(move |_, _, cx| {
+                let scroll_editor = scroll_editor.clone();
+                // GPUI invokes this callback while the list state's RefCell is
+                // mutably borrowed. Defer the geometry read until that borrow
+                // has been released.
+                cx.defer(move |cx| {
+                    let _ = scroll_editor.update(cx, |view, cx| {
+                        view.update_review_scroll_state(generation, cx);
+                    });
                 });
             });
-        });
+        }
         let review_body = variable_list(list_state.clone(), move |row_index, _, cx| {
             let Some(row) = rows.get(row_index).copied() else {
                 return div().into_any_element();
@@ -13044,7 +13057,10 @@ impl WalletWindow {
                         .into_any_element()
                 }
                 SecurityReviewDetailRow::WalletConnectAccounts => {
-                    let Some((accounts, selected_account)) = &wallet_connect_accounts else {
+                    let (Some(accounts), Some(selected_account)) = (
+                        wallet_connect_accounts.as_ref(),
+                        selected_wallet_connect_account,
+                    ) else {
                         return div().into_any_element();
                     };
                     let account_editor = editor.clone();
@@ -13059,8 +13075,8 @@ impl WalletWindow {
                                 let account_editor = account_editor.clone();
                                 app_button(SharedString::from(format!("wc-account-{index}")))
                                     .label(account_id.clone())
-                                    .toggled(index == *selected_account)
-                                    .when(index == *selected_account, ButtonVariants::primary)
+                                    .toggled(index == selected_account)
+                                    .when(index == selected_account, ButtonVariants::primary)
                                     .on_click(move |_, _, cx| {
                                         let _ = account_editor.update(cx, |view, cx| {
                                             view.select_walletconnect_account(
@@ -13621,6 +13637,7 @@ impl WalletWindow {
                 Some(
                     div().flex_none().child(
                         app_button("refresh-portfolio")
+                            .debug_selector(|| "refresh-portfolio".to_owned())
                             .label(if loading { "Refreshing…" } else { "Refresh" })
                             .disabled(loading || no_networks)
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -13761,9 +13778,16 @@ impl WalletWindow {
                     .when_some(self.route_header_actions(cx), |header, actions| {
                         header.child(actions)
                     })
-                    .when(self.desktop_snapshot_loading, |header| {
-                        header.child(Spinner::new().small())
-                    }),
+                    .when(
+                        self.desktop_snapshot_loading && self.route != Route::Overview,
+                        |header| {
+                            header.child(
+                                div()
+                                    .id("route-header-loading")
+                                    .child(Spinner::new().small()),
+                            )
+                        },
+                    ),
             )
             .when_some(self.route_account_selector(cx), |header, selector| {
                 header.child(selector)

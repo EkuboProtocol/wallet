@@ -1416,15 +1416,51 @@ fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
 fn overflow_indicator_rapid_presses_double_until_the_burst_expires() {
     let start = std::time::Instant::now();
     let mut paging = OverflowPagingState::default();
-    assert_eq!(paging.begin_press(start).0, 1);
-    assert_eq!(paging.begin_press(start + Duration::from_millis(200)).0, 2);
-    assert_eq!(paging.begin_press(start + Duration::from_millis(449)).0, 4);
-    assert_eq!(paging.begin_press(start + Duration::from_millis(699)).0, 8);
+    let maximum = px(5_000.0);
+    let viewport = px(400.0);
     assert_eq!(
-        paging.begin_press(start + Duration::from_millis(950)).0,
-        1,
-        "the next press after more than 250 ms starts a fresh 1x burst"
+        paging.begin_press(start, px(-200.0), maximum, viewport).0,
+        px(-488.0)
     );
+    assert_eq!(paging.multiplier, 1);
+    assert_eq!(
+        paging
+            .begin_press(
+                start + Duration::from_millis(300),
+                px(-240.0),
+                maximum,
+                viewport,
+            )
+            .0,
+        px(-1_064.0),
+        "a rapid second press must accumulate from the first destination"
+    );
+    assert_eq!(paging.multiplier, 2);
+    assert_eq!(
+        paging
+            .begin_press(
+                start + Duration::from_millis(650),
+                px(-500.0),
+                maximum,
+                viewport,
+            )
+            .0,
+        px(-2_216.0)
+    );
+    assert_eq!(paging.multiplier, 4);
+    assert_eq!(
+        paging
+            .begin_press(
+                start + Duration::from_millis(1_051),
+                px(-800.0),
+                maximum,
+                viewport,
+            )
+            .0,
+        px(-1_088.0),
+        "the next press after more than 400 ms starts a fresh 1x burst from the live offset"
+    );
+    assert_eq!(paging.multiplier, 1);
 }
 
 #[test]
@@ -1513,12 +1549,7 @@ fn large_transaction_details_keep_every_call_as_a_virtual_row() {
         Some(&TransactionActivityDetailRow::ExactPayloadDisclosure)
     );
 
-    let list = VariableListState::new(
-        rows.len(),
-        ListAlignment::Top,
-        ACTIVITY_DETAIL_LIST_OVERDRAW,
-    )
-    .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+    let list = virtual_review_detail_list(rows.len());
     assert_eq!(list.item_count(), CALLS + 6);
 
     let review_rows = security_review_detail_rows(&document, false);
@@ -1547,12 +1578,7 @@ fn large_transaction_details_keep_every_call_as_a_virtual_row() {
             end: 2,
         })
     ));
-    let review_list = VariableListState::new(
-        review_rows.len(),
-        ListAlignment::Top,
-        ACTIVITY_DETAIL_LIST_OVERDRAW,
-    )
-    .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+    let review_list = virtual_review_detail_list(review_rows.len());
     assert_eq!(review_list.item_count(), CALLS + 8);
 }
 
