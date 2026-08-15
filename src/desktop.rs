@@ -132,7 +132,7 @@ where
             if remaining <= px(1.0) {
                 return None;
             }
-            let hitbox_size = size(px(48.0), px(32.0));
+            let hitbox_size = size(px(80.0), px(36.0));
             let hitbox_bounds = gpui::Bounds::new(
                 point(
                     bounds.origin.x + (bounds.size.width - hitbox_size.width) / 2.0,
@@ -150,35 +150,29 @@ where
                 return;
             };
             let hovered = hitbox.is_hovered(window);
-            let seconds = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0.0, |elapsed| elapsed.as_secs_f32());
-            let pulse = ((seconds / 1.4) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-            let opacity = if hovered { 0.80 } else { 0.60 + pulse * 0.12 };
-            let bob = px(pulse * 2.0);
-            window.request_animation_frame();
+            let opacity = if hovered { 0.90 } else { 0.70 };
             window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
             window.paint_quad(
-                fill(hitbox.bounds, accent.opacity(opacity * 0.18)).corner_radii(px(16.0)),
+                fill(hitbox.bounds, accent.opacity(opacity * 0.28)).corner_radii(px(18.0)),
             );
 
             let center_x = hitbox.origin.x + hitbox.size.width / 2.0;
-            let center_y = hitbox.origin.y + hitbox.size.height / 2.0 + bob;
+            let center_y = hitbox.origin.y + hitbox.size.height / 2.0;
             let mut chevron = PathBuilder::stroke(px(2.5));
-            chevron.move_to(point(center_x - px(9.0), center_y - px(4.0)));
+            chevron.move_to(point(center_x - px(13.0), center_y - px(5.0)));
             chevron.line_to(point(center_x, center_y + px(5.0)));
-            chevron.line_to(point(center_x + px(9.0), center_y - px(4.0)));
+            chevron.line_to(point(center_x + px(13.0), center_y - px(5.0)));
             if let Ok(path) = chevron.build() {
                 window.paint_path(path, accent.opacity(opacity));
             }
 
             let view_id = window.current_view();
             window.on_mouse_event({
-                move |_: &MouseMoveEvent, phase, _, cx| {
-                    if phase.bubble() {
-                        // Repaint the inexpensive overlay so its pulsing
-                        // 0.6 → 0.72 idle state and 0.8 hover state follow the
-                        // pointer without changing page layout.
+                let hitbox = hitbox.clone();
+                move |_: &MouseMoveEvent, phase, window, cx| {
+                    if phase.bubble() && hitbox.is_hovered(window) != hovered {
+                        // This listener is rebuilt after the transition, so it
+                        // repaints exactly once on pointer entry and exit.
                         cx.notify(view_id);
                     }
                 }
@@ -199,10 +193,10 @@ where
                     let animated_handle = scroll_handle.clone();
                     window
                         .spawn(cx, async move |cx| {
-                            const FRAMES: u16 = 12;
+                            const FRAMES: u16 = 20;
                             for frame in 1..=FRAMES {
                                 cx.background_executor()
-                                    .timer(Duration::from_millis(15))
+                                    .timer(Duration::from_millis(8))
                                     .await;
                                 let progress = f32::from(frame) / f32::from(FRAMES);
                                 let eased = 1.0 - (1.0 - progress).powi(3);

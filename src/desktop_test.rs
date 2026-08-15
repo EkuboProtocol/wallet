@@ -1337,6 +1337,21 @@ fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
 }
 
 #[test]
+fn overflow_indicator_does_not_schedule_perpetual_idle_frames() {
+    let source = include_str!("desktop.rs");
+    let indicator = source
+        .split_once("fn scroll_overflow_indicator")
+        .expect("overflow indicator function exists")
+        .1
+        .split_once("/// A conventional bordered section")
+        .expect("overflow indicator function has an end marker")
+        .0;
+
+    assert!(!indicator.contains("request_animation_frame"));
+    assert!(!indicator.contains("SystemTime::now"));
+}
+
+#[test]
 fn counts_are_written_the_way_a_person_would_say_them() {
     assert_eq!(pluralize(0, "request"), "0 requests");
     assert_eq!(pluralize(1, "request"), "1 request");
