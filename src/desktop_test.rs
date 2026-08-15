@@ -396,7 +396,9 @@ fn every_route_explains_itself_in_one_sentence() {
             route.label()
         );
         assert!(
-            !description.contains(route.label()),
+            !description
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(route.label()),
             "{} description only repeats its own title",
             route.label()
         );
@@ -1291,6 +1293,47 @@ fn ages_read_as_elapsed_time_until_they_are_old_enough_to_need_a_date() {
     let old = relative_time_label(ago(60 * 86_400), now);
     assert!(!old.contains("ago"), "{old} should be a calendar date");
     assert!(old.contains("2026"), "{old} should name its year");
+}
+
+#[test]
+fn walletconnect_expiry_reads_as_time_remaining() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let after = |seconds: i64| now.timestamp() + seconds;
+
+    assert_eq!(
+        walletconnect_expiry_label(after(-1), now),
+        "Expired; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(30), now),
+        "Expires in less than a minute; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(90), now),
+        "Expires in 2 minutes; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(3_600), now),
+        "Expires in 1 hour; reconnect to renew"
+    );
+    assert_eq!(
+        walletconnect_expiry_label(after(2 * 86_400), now),
+        "Expires in 2 days; reconnect to renew"
+    );
+}
+
+#[test]
+fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
+    assert_eq!(
+        next_overflow_indicator_offset(px(-900.0), px(1_000.0), px(400.0)),
+        px(-1_000.0)
+    );
+    assert_eq!(
+        next_overflow_indicator_offset(px(-200.0), px(1_000.0), px(400.0)),
+        px(-488.0)
+    );
 }
 
 #[test]

@@ -38,11 +38,12 @@ use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
-    AnyElement, AnyView, App, ClipboardItem, Context, ElementId, Entity, FocusHandle,
-    Interactivity, KeyBinding, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
-    WindowOptions, actions, div, img, prelude::*, px, size, uniform_list,
+    AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity, FocusHandle,
+    HitboxBehavior, Interactivity, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    PathBuilder, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions,
+    canvas, div, fill, img, point, prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -55,7 +56,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
-    scroll::ScrollableElement,
+    scroll::ScrollbarHandle,
     skeleton::Skeleton,
     spinner::Spinner,
     switch::Switch,
@@ -107,6 +108,122 @@ fn app_button(id: impl Into<ElementId>) -> Button {
         .font_medium()
 }
 
+fn next_overflow_indicator_offset(
+    current: gpui::Pixels,
+    maximum: gpui::Pixels,
+    viewport_height: gpui::Pixels,
+) -> gpui::Pixels {
+    (current - viewport_height * 0.72).max(-maximum)
+}
+
+/// A bottom-edge affordance that exists only while more vertical content is
+/// below the viewport. It paints directly from the live scroll handle, so it
+/// neither contributes layout space nor needs a persistent scrollbar track.
+fn scroll_overflow_indicator<H>(scroll_handle: &H, accent: gpui::Hsla) -> impl IntoElement
+where
+    H: ScrollbarHandle + Clone,
+{
+    let prepaint_handle = scroll_handle.clone();
+    let paint_handle = scroll_handle.clone();
+    canvas(
+        move |bounds, window, _| {
+            let remaining = (prepaint_handle.content_size().height - bounds.size.height)
+                + prepaint_handle.offset().y;
+            if remaining <= px(1.0) {
+                return None;
+            }
+            let hitbox_size = size(px(48.0), px(32.0));
+            let hitbox_bounds = gpui::Bounds::new(
+                point(
+                    bounds.origin.x + (bounds.size.width - hitbox_size.width) / 2.0,
+                    bounds.origin.y + bounds.size.height - hitbox_size.height - px(6.0),
+                ),
+                hitbox_size,
+            );
+            Some((
+                window.insert_hitbox(hitbox_bounds, HitboxBehavior::Normal),
+                bounds.size.height,
+            ))
+        },
+        move |_bounds, indicator, window, _cx| {
+            let Some((hitbox, viewport_height)) = indicator else {
+                return;
+            };
+            let hovered = hitbox.is_hovered(window);
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |elapsed| elapsed.as_secs_f32());
+            let pulse = ((seconds / 1.4) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+            let opacity = if hovered { 0.80 } else { 0.60 + pulse * 0.12 };
+            let bob = px(pulse * 2.0);
+            window.request_animation_frame();
+            window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+            window.paint_quad(
+                fill(hitbox.bounds, accent.opacity(opacity * 0.18)).corner_radii(px(16.0)),
+            );
+
+            let center_x = hitbox.origin.x + hitbox.size.width / 2.0;
+            let center_y = hitbox.origin.y + hitbox.size.height / 2.0 + bob;
+            let mut chevron = PathBuilder::stroke(px(2.5));
+            chevron.move_to(point(center_x - px(9.0), center_y - px(4.0)));
+            chevron.line_to(point(center_x, center_y + px(5.0)));
+            chevron.line_to(point(center_x + px(9.0), center_y - px(4.0)));
+            if let Ok(path) = chevron.build() {
+                window.paint_path(path, accent.opacity(opacity));
+            }
+
+            let view_id = window.current_view();
+            window.on_mouse_event({
+                move |_: &MouseMoveEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        // Repaint the inexpensive overlay so its pulsing
+                        // 0.6 → 0.72 idle state and 0.8 hover state follow the
+                        // pointer without changing page layout.
+                        cx.notify(view_id);
+                    }
+                }
+            });
+            window.on_mouse_event({
+                let hitbox = hitbox.clone();
+                let scroll_handle = paint_handle.clone();
+                move |event: &MouseDownEvent, phase, window, cx| {
+                    if !phase.bubble()
+                        || event.button != MouseButton::Left
+                        || !hitbox.is_hovered(window)
+                    {
+                        return;
+                    }
+                    let max = (scroll_handle.content_size().height - viewport_height).max(px(0.0));
+                    let offset = scroll_handle.offset();
+                    let target_y = next_overflow_indicator_offset(offset.y, max, viewport_height);
+                    let animated_handle = scroll_handle.clone();
+                    window
+                        .spawn(cx, async move |cx| {
+                            const FRAMES: u16 = 12;
+                            for frame in 1..=FRAMES {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(15))
+                                    .await;
+                                let progress = f32::from(frame) / f32::from(FRAMES);
+                                let eased = 1.0 - (1.0 - progress).powi(3);
+                                let y = offset.y + (target_y - offset.y) * eased;
+                                let frame_handle = animated_handle.clone();
+                                let _ = cx.update(move |_, cx| {
+                                    frame_handle.set_offset(point(offset.x, y));
+                                    cx.notify(view_id);
+                                });
+                            }
+                        })
+                        .detach();
+                    cx.stop_propagation();
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// A conventional bordered section with its heading inside the content flow.
 /// Keeping the title in normal layout avoids border collisions and preserves
 /// the same hierarchy on every settings surface.
@@ -155,6 +272,7 @@ impl RenderOnce for GroupBox {
         div()
             .id(self.id.unwrap_or_else(|| "group-box".into()))
             .w_full()
+            .min_w_0()
             .p_4()
             .rounded(cx.theme().radius)
             .border_1()
@@ -1125,6 +1243,27 @@ fn absolute_time_label(moment: chrono::DateTime<chrono::Utc>) -> String {
         .to_string()
 }
 
+fn walletconnect_expiry_label(expires_at: i64, now: chrono::DateTime<chrono::Utc>) -> String {
+    let remaining = expires_at.saturating_sub(now.timestamp());
+    if remaining <= 0 {
+        return "Expired; reconnect to renew".to_owned();
+    }
+    if remaining < 60 {
+        return "Expires in less than a minute; reconnect to renew".to_owned();
+    }
+    let (count, unit) = if remaining < 3_600 {
+        (remaining.saturating_add(59) / 60, "minute")
+    } else if remaining < 86_400 {
+        (remaining.saturating_add(3_599) / 3_600, "hour")
+    } else {
+        (remaining.saturating_add(86_399) / 86_400, "day")
+    };
+    format!(
+        "Expires in {count} {unit}{}; reconnect to renew",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
 /// "1 request" / "3 requests" — the `(s)` suffix reads like a form field.
 fn pluralize(count: usize, singular: &str) -> String {
     if count == 1 {
@@ -1262,11 +1401,9 @@ impl Route {
                 "The rules that decide which agent requests go through, which need you, and which are refused."
             }
             Self::WalletConnect => {
-                "Agents and dapps that can reach this wallet right now, and how to connect another."
+                "Connect your wallet to dapps via WalletConnect and use them like you would with any other wallet."
             }
-            Self::Tokens => {
-                "Token names and decimals this wallet trusts when it describes an amount to you."
-            }
+            Self::Tokens => "Token metadata that helps you understand transaction amounts.",
             Self::Networks => {
                 "The chains this wallet will sign for, and the RPC endpoints it uses."
             }
@@ -1372,6 +1509,7 @@ pub struct WalletWindow {
     command_palette_subscription: Option<Subscription>,
     form_input_subscriptions: Vec<Subscription>,
     token_list: Option<Entity<ListState<TokenListDelegate>>>,
+    token_search_input: Option<Entity<InputState>>,
     token_proposal_list: Option<Entity<ListState<TokenProposalListDelegate>>>,
     token_list_url_input: Option<Entity<InputState>>,
     token_chain_id_input: Option<Entity<InputState>>,
@@ -1449,6 +1587,7 @@ pub struct WalletWindow {
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
     network_editor_open: bool,
+    network_editor_scroll_handle: ScrollHandle,
     network_editor_original: Option<NetworkConfig>,
     network_editor_disabled: bool,
     network_editor_testnet: bool,
@@ -3777,6 +3916,7 @@ impl WalletWindow {
             command_palette_subscription: None,
             form_input_subscriptions: Vec::new(),
             token_list: None,
+            token_search_input: None,
             token_proposal_list: None,
             token_list_url_input: None,
             token_chain_id_input: None,
@@ -3841,6 +3981,7 @@ impl WalletWindow {
             walletconnect_presenter,
             walletconnect_uri_input: None,
             network_editor_open: false,
+            network_editor_scroll_handle: ScrollHandle::new(),
             network_editor_original: None,
             network_editor_disabled: false,
             network_editor_testnet: false,
@@ -3942,12 +4083,35 @@ impl WalletWindow {
         if self.token_list.is_none() {
             let owner = self.owner.clone();
             self.token_list = Some(cx.new(|cx| {
-                ListState::new(TokenListDelegate::new(owner), window, cx)
-                    .searchable(true)
-                    .selectable(false)
+                ListState::new(TokenListDelegate::new(owner), window, cx).selectable(false)
             }));
             token_lists_created = true;
             self.reload_tokens(cx);
+        }
+        if self.token_search_input.is_none()
+            && let Some(token_list) = self.token_list.clone()
+        {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Search token name, symbol, chain ID, or address")
+            });
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                move |_, input, event: &InputEvent, _, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let query = input.read(cx).value().trim().to_owned();
+                    token_list.update(cx, |list, cx| {
+                        let delegate = list.delegate_mut();
+                        delegate.query = query;
+                        delegate.apply_filters();
+                        cx.notify();
+                    });
+                },
+            ));
+            self.token_search_input = Some(input);
         }
         if self.token_proposal_list.is_none() {
             self.token_proposal_list = Some(cx.new(|cx| {
@@ -4161,6 +4325,7 @@ impl WalletWindow {
         self.form_input_subscriptions.clear();
         self.appearance_subscription = None;
         self.token_list = None;
+        self.token_search_input = None;
         self.token_proposal_list = None;
         self.token_list_url_input = None;
         self.token_chain_id_input = None;
@@ -6037,6 +6202,7 @@ impl WalletWindow {
             replace_input_value(input, "", window, cx);
         }
         self.network_editor_open = true;
+        self.network_editor_scroll_handle = ScrollHandle::new();
         self.network_editor_original = None;
         self.network_editor_disabled = false;
         self.network_editor_testnet = false;
@@ -6093,17 +6259,15 @@ impl WalletWindow {
                 // dialog stops inside the window, the footer stays put, and the
                 // form scrolls within it.
                 let dialog_height = (viewport.height - vertical_inset * 2.0).max(px(120.0));
-                let (busy, editing, form, footer) = {
+                let form_height = (dialog_height - px(180.0)).max(px(100.0));
+                let (busy, editing, form, footer, scroll_handle) = {
                     let wallet = entity.read(cx);
                     (
                         wallet.network_editor_busy,
                         wallet.network_editor_original.is_some(),
-                        // No scroll container here. `Dialog` already gives its
-                        // body one, and a second nested inside it captured the
-                        // wheel while the outer one was the one with anywhere
-                        // to go — which left the form unscrollable.
                         wallet.render_network_editor_form(&view, cx),
                         wallet.render_network_editor_footer(&view),
+                        wallet.network_editor_scroll_handle.clone(),
                     )
                 };
                 let on_close_view = view.clone();
@@ -6138,7 +6302,25 @@ impl WalletWindow {
                             view.close_network_editor(cx);
                         });
                     })
-                    .child(form)
+                    .child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .h(form_height)
+                            .min_h_0()
+                            .child(
+                                div()
+                                    .id("network-editor-scroll")
+                                    .size_full()
+                                    .track_scroll(&scroll_handle)
+                                    .overflow_y_scroll()
+                                    .child(form),
+                            )
+                            .child(scroll_overflow_indicator(
+                                &scroll_handle,
+                                cx.theme().primary,
+                            )),
+                    )
                     .footer(footer)
             });
             focus.update(cx, |input, cx| input.focus(window, cx));
@@ -6252,6 +6434,7 @@ impl WalletWindow {
             cx,
         );
         self.network_editor_open = true;
+        self.network_editor_scroll_handle = ScrollHandle::new();
         self.network_editor_original = Some(network.clone());
         self.network_editor_disabled = network.disabled;
         self.network_editor_testnet = network.testnet;
@@ -8666,7 +8849,7 @@ impl WalletWindow {
                             .flex_1()
                             .min_h_0()
                             .pr_2()
-                            .overflow_y_scrollbar()
+                            .overflow_y_scroll()
                             .child(detail),
                     )
                     // Fixed chrome, the way the security review's decision row
@@ -9294,6 +9477,9 @@ impl WalletWindow {
                     .when(claude_desktop_detected, |group| {
                         group.child(
                             h_flex()
+                                .debug_selector(|| {
+                                    "claude-desktop-hosted-connector".to_owned()
+                                })
                                 .w_full()
                                 .flex_wrap()
                                 .items_center()
@@ -9411,6 +9597,7 @@ impl WalletWindow {
         // button were all the same distance apart and read as one dense block.
         let mut form = div()
             .p_5()
+            .pb_6()
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
@@ -9539,11 +9726,7 @@ impl WalletWindow {
                 )
             });
 
-        let mut accounts = div().flex().flex_col().gap_3().child(
-            div()
-                .font_semibold()
-                .child(selectable_label("Accounts on this device")),
-        );
+        let mut accounts = div().w_full().min_w_0().flex().flex_col().gap_3();
         accounts = match self.cached_accounts() {
             Ok([]) => accounts.child(
                 div()
@@ -9551,6 +9734,7 @@ impl WalletWindow {
                     .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
                     .text_color(cx.theme().muted_foreground)
                     .flex()
                     .flex_col()
@@ -9686,21 +9870,33 @@ impl WalletWindow {
             ),
         };
 
-        div().flex().flex_col().gap_4().child(form).child(accounts)
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(form)
+            .child(accounts)
     }
 
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut content = div().min_h(px(520.0)).flex().flex_col().gap_4().when_some(
-            self.policy_action_error.clone(),
-            |content, error| {
+        let mut content = div()
+            .debug_selector(|| "policies-content".to_owned())
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when_some(self.policy_action_error.clone(), |content, error| {
                 content.child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().danger)
                         .child(selectable_label(error)),
                 )
-            },
-        );
+            });
         let accounts = match self.cached_accounts() {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -9736,6 +9932,15 @@ impl WalletWindow {
                     )),
             );
         };
+
+        content = content.child(
+            GroupBox::new().id("policy-agent-tip").title("Did you know?").child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label("Ask a connected agent to craft a policy from what you want to do. Its suggestion opens here for you to inspect as exact JSON and computed permission changes before anything can be installed.")),
+            ),
+        );
 
         match self.cached_reviews().map(|reviews| {
             policy_proposal_for_account(&reviews.policy_proposals, &editor.wallet_id)
@@ -9841,9 +10046,12 @@ impl WalletWindow {
             validated.is_some_and(|review| current_document.as_ref() == review.document.as_str());
         let mut editor_panel = div()
             .id("policy-json-editor")
+            .debug_selector(|| "policy-json-editor".to_owned())
             .anchor_scroll(Some(self.policy_editor_anchor.clone()))
-            .flex_1()
+            .w_full()
+            .min_w_0()
             .min_h(px(420.0))
+            .flex_shrink_0()
             .p_4()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -9883,26 +10091,42 @@ impl WalletWindow {
         editor_panel = editor_panel
             .child(
                 div()
-                .id("policy-json-editor-input")
-                .debug_selector(|| "policy-json-editor-input".to_owned())
-                .flex_1()
-                .min_h(px(320.0))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_medium()
-                        .child(selectable_label("Policy JSON")),
-                )
-                .child(
-                    app_input(input, cx)
-                        .aria_label("Policy JSON")
-                        .font_family(MONO_FONT_FAMILY)
-                        .w_full()
-                        .h_full(),
-                ),
+                    .id("policy-json-editor-input")
+                    .debug_selector(|| "policy-json-editor-input".to_owned())
+                    .w_full()
+                    .min_w_0()
+                    .flex_1()
+                    .min_h(px(320.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .font_medium()
+                            .child(selectable_label("Policy JSON")),
+                    )
+                    // The input's `h_full` is relative to this remaining-space
+                    // wrapper, not to the column that also contains its label.
+                    // Otherwise the label and gap are added above a 100%-high
+                    // editor and push it through the panel's bottom border.
+                    .child(
+                        div()
+                            .debug_selector(|| "policy-json-control".to_owned())
+                            .w_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex_1()
+                            .child(
+                                app_input(input, cx)
+                                    .aria_label("Policy JSON")
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .w_full()
+                                    .min_w_0()
+                                    .h_full(),
+                            ),
+                    ),
             )
             .when(allow_anything_draft, |panel| {
                 panel.child(
@@ -9954,44 +10178,50 @@ impl WalletWindow {
                     ),
             )
             .child(
-                GroupBox::new()
-                    .id("policy-preview-workflow")
-                    .title("Review changes")
+                div()
+                    .debug_selector(|| "policy-preview-workflow".to_owned())
+                    .w_full()
+                    .min_w_0()
                     .child(
-                        div()
-                            .text_sm()
-                            .child(selectable_label("Preview and review the computed permission changes before installation. Install remains unavailable until the preview matches this exact JSON document.")),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label(match editor.validation.as_ref() {
-                                Some(Ok(_)) if reviewed_exact_document => {
-                                    "The computed permission changes below match this draft."
-                                }
-                                Some(Ok(_)) => {
-                                    "This draft changed after its last preview. Refresh the computed changes."
-                                }
-                                Some(Err(_)) => {
-                                    "Fix the JSON validation error, then preview its permission changes."
-                                }
-                                None => "Review the computed permission changes before you can install this policy.",
-                            })),
-                    )
-                    .child(
-                        app_button("validate-policy-draft")
-                            .self_start()
-                            .label(if reviewed_exact_document {
-                                "Refresh preview"
-                            } else {
-                                "Preview changes"
-                            })
-                            .when(!reviewed_exact_document, ButtonVariants::primary)
-                            .disabled(self.policy_installing)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.validate_policy_editor(window, cx);
-                            })),
+                        GroupBox::new()
+                            .id("policy-preview-workflow")
+                            .title("Review changes")
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(selectable_label("Preview and review the computed permission changes before installation. Install remains unavailable until the preview matches this exact JSON document.")),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(match editor.validation.as_ref() {
+                                        Some(Ok(_)) if reviewed_exact_document => {
+                                            "The computed permission changes below match this draft."
+                                        }
+                                        Some(Ok(_)) => {
+                                            "This draft changed after its last preview. Refresh the computed changes."
+                                        }
+                                        Some(Err(_)) => {
+                                            "Fix the JSON validation error, then preview its permission changes."
+                                        }
+                                        None => "Review the computed permission changes before you can install this policy.",
+                                    })),
+                            )
+                            .child(
+                                app_button("validate-policy-draft")
+                                    .self_start()
+                                    .label(if reviewed_exact_document {
+                                        "Refresh preview"
+                                    } else {
+                                        "Preview changes"
+                                    })
+                                    .when(!reviewed_exact_document, ButtonVariants::primary)
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.validate_policy_editor(window, cx);
+                                    })),
+                            ),
                     ),
             );
         content = content.child(editor_panel);
@@ -10015,30 +10245,42 @@ impl WalletWindow {
                     );
                 }
                 content.child(
-                    GroupBox::new()
-                        .id("policy-permission-diff")
-                        .title("Computed permission changes")
+                    div()
+                        .debug_selector(|| "policy-permission-diff".to_owned())
+                        .w_full()
+                        .min_w_0()
+                        // This card contributes its complete intrinsic height to
+                        // the route scroller. Letting the flex column shrink it
+                        // made the child rows overflow while the scrollbar still
+                        // believed the page ended above the install action.
+                        .flex_shrink_0()
                         .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(selectable_label("Installing requires operating-system authentication and rechecks the policy revision immediately before the write.")),
-                        )
-                        .child(changes)
-                        .child(
-                            app_button("install-policy-draft")
-                            .self_start()
-                                .label(if self.policy_installing {
-                                    "Authenticating…"
-                                } else {
-                                    "Authenticate & install"
-                                })
-                                .primary()
-                                .loading(self.policy_installing)
-                                .disabled(self.policy_installing)
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.install_policy_editor(cx);
-                                })),
+                            GroupBox::new()
+                                .id("policy-permission-diff")
+                                .title("Computed permission changes")
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(selectable_label("Installing requires operating-system authentication and rechecks the policy revision immediately before the write.")),
+                                )
+                                .child(changes)
+                                .child(
+                                    app_button("install-policy-draft")
+                                        .debug_selector(|| "install-policy-draft".to_owned())
+                                        .self_start()
+                                        .label(if self.policy_installing {
+                                            "Authenticating…"
+                                        } else {
+                                            "Authenticate & install"
+                                        })
+                                        .primary()
+                                        .loading(self.policy_installing)
+                                        .disabled(self.policy_installing)
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.install_policy_editor(cx);
+                                        })),
+                                ),
                         ),
                 )
             }
@@ -10204,11 +10446,7 @@ impl WalletWindow {
                 );
             }
         }
-        let mut sessions = div().flex().flex_col().gap_3().child(
-            div()
-                .font_semibold()
-                .child(selectable_label("Active sessions")),
-        );
+        let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
         if self.walletconnect_sessions.is_empty() {
             return div().flex().flex_col().gap_4().child(panel).child(
                 sessions.child(
@@ -10217,6 +10455,7 @@ impl WalletWindow {
                         .rounded(cx.theme().radius_lg)
                         .border_1()
                         .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
                         .text_color(cx.theme().muted_foreground)
                         .flex()
                         .flex_col()
@@ -10283,15 +10522,13 @@ impl WalletWindow {
                                 )),
                         )
                         .when_some(session.expires_at, |column, expires_at| {
-                            let deadline = chrono::DateTime::from_timestamp(expires_at, 0)
-                                .map_or_else(|| expires_at.to_string(), |value| value.to_rfc3339());
                             column.child(
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(selectable_text(
                                         format!("walletconnect-session-expiry-{session_id}"),
-                                        &format!("Expires {deadline}; reconnect to renew"),
+                                        &walletconnect_expiry_label(expires_at, chrono::Utc::now()),
                                     )),
                             )
                         })
@@ -10514,13 +10751,18 @@ impl WalletWindow {
                             .text_color(cx.theme().muted_foreground)
                             .child(selectable_label("One http:// or https:// URL per line.")),
                     )
-                    // No height override here: the input already asks for five
-                    // rows, and a fixed pixel height fought that and clipped
-                    // the fifth.
                     .child(
-                        app_input(rpc_urls, cx)
-                            .aria_label("RPC endpoints")
-                            .disabled(busy),
+                        div()
+                            .debug_selector(|| "network-rpc-endpoints-input".to_owned())
+                            .w_full()
+                            .h(px(144.0))
+                            .child(
+                                app_input(rpc_urls, cx)
+                                    .aria_label("RPC endpoints")
+                                    .w_full()
+                                    .h_full()
+                                    .disabled(busy),
+                            ),
                     )
                     .when_some(
                         self.network_editor_errors.rpc_urls.clone(),
@@ -11200,8 +11442,6 @@ impl WalletWindow {
                                 row.border_b_1().border_color(cx.theme().border)
                             })
                             .flex()
-                            .flex_col()
-                            .gap_0p5()
                             .child(
                                 div()
                                     .w_full()
@@ -11216,7 +11456,11 @@ impl WalletWindow {
                                             .min_w(px(180.0))
                                             .flex_1()
                                             .flex_basis(px(260.0))
-                                            .child(identity),
+                                            .flex()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(identity)
+                                            .child(metadata),
                                     )
                                     .child(
                                         div()
@@ -11243,8 +11487,7 @@ impl WalletWindow {
                                                 .whitespace_nowrap(),
                                             ),
                                     ),
-                            )
-                            .child(metadata),
+                            ),
                     );
                 }
                 if row_count == 0 {
@@ -11314,6 +11557,9 @@ impl WalletWindow {
         let Some(list) = self.token_list.as_ref() else {
             return div().child(Spinner::new());
         };
+        let Some(search_input) = self.token_search_input.as_ref() else {
+            return div().child(Spinner::new());
+        };
         let Some(proposal_list) = self.token_proposal_list.as_ref() else {
             return div().child(Spinner::new());
         };
@@ -11333,7 +11579,7 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .flex_1()
-            .min_h(px(320.0))
+            .min_h_0()
             .gap_3()
             .when_some(self.token_proposal_error.clone(), |content, error| {
                 content.child(
@@ -11392,7 +11638,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("Fetch a public HTTPS token-list JSON for all enabled networks. Nothing is trusted until you inspect and accept the exact resulting list below.")),
+                            .child(selectable_label("Fetch a public HTTPS token-list JSON for all enabled networks. Its entries are only used after you inspect and accept the exact resulting list below.")),
                     )
                     .child(
                         div()
@@ -11594,6 +11840,32 @@ impl WalletWindow {
             );
         }
 
+        let mut token_search = Input::new(search_input)
+            .large()
+            .prefix(
+                Icon::new(IconName::Search)
+                    .with_size(px(24.0))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .p_0()
+            .appearance(false);
+        if !search_input.read(cx).value().is_empty() {
+            let clear_input = search_input.clone();
+            token_search = token_search.suffix(
+                Button::new("clear-token-search")
+                    .icon(Icon::new(IconName::CircleX).with_size(px(24.0)))
+                    .ghost()
+                    .h(px(36.0))
+                    .w(px(36.0))
+                    .p_0()
+                    .tab_stop(false)
+                    .text_color(cx.theme().muted_foreground)
+                    .on_click(move |_, window, cx| {
+                        clear_input.update(cx, |input, cx| input.set_value("", window, cx));
+                    }),
+            );
+        }
+
         content
             .child(
                 div()
@@ -11605,14 +11877,43 @@ impl WalletWindow {
                     ))),
             )
             .child(
-                List::new(list)
-                    .search_placeholder("Search token name, symbol, chain ID, or address")
+                div()
+                    .debug_selector(|| "token-inventory-list".to_owned())
                     .flex_1()
                     .min_h(px(260.0))
                     .w_full()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .w_full()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .rounded(cx.theme().radius)
+                            .overflow_hidden()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .debug_selector(|| "token-inventory-search".to_owned())
+                                    .flex_shrink_0()
+                                    .px_3()
+                                    .py_1()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border)
+                                    .child(token_search),
+                            )
+                            .child(
+                                List::new(list)
+                                    .scrollbar_visible(false)
+                                    .flex_1()
+                                    .min_h_0()
+                                    .w_full(),
+                            ),
+                    ),
             )
     }
 
@@ -11641,17 +11942,16 @@ impl WalletWindow {
                 ))),
         );
         panel = match &self.release_state {
-            ReleaseDisplayState::Idle => panel.child(
-                app_button("check-latest-release")
-                    .self_start()
-                    .label("Check latest version")
-                    .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
-            ),
+            ReleaseDisplayState::Idle => panel.child(div().h(px(20.0))),
             ReleaseDisplayState::Checking => panel.child(
                 h_flex()
+                    .h(px(20.0))
+                    .debug_selector(|| "release-check-progress".to_owned())
                     .gap_2()
-                    .child(Spinner::new())
-                    .child(selectable_label("Checking the latest published version…")),
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new().small())
+                    .child(selectable_label("Checking for updates…")),
             ),
             ReleaseDisplayState::Downloading => panel.child(
                 h_flex()
@@ -11689,26 +11989,25 @@ impl WalletWindow {
                             .label("View latest release")
                             .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
                     )
-                })
-                .child(
-                    app_button("recheck-latest-release")
-                        .self_start()
-                        .label("Check again")
-                        .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
-                ),
-            ReleaseDisplayState::Failed(error) => panel
-                .child(
-                    div()
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label(error.clone())),
-                )
-                .child(
-                    app_button("retry-latest-release")
-                        .self_start()
-                        .label("Try again")
-                        .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
-                ),
+                }),
+            ReleaseDisplayState::Failed(error) => panel.child(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(selectable_label(error.clone())),
+            ),
         };
+        let checking = matches!(&self.release_state, ReleaseDisplayState::Checking);
+        let downloading = matches!(&self.release_state, ReleaseDisplayState::Downloading);
+        panel = panel.child(
+            app_button("check-latest-release")
+                .debug_selector(|| "check-latest-release".to_owned())
+                .self_start()
+                // Keep the action in place; the status line above swaps to a
+                // spinner and progress copy while this control is disabled.
+                .label("Check latest version")
+                .disabled(checking || downloading)
+                .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
+        );
         settings_section(
             "Updates",
             GroupBox::new().id("software-updates").child(panel),
@@ -12178,18 +12477,27 @@ impl WalletWindow {
             ))
             .child(
                 div()
-                    .id(("review-scroll", generation))
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .track_scroll(&active.scroll_handle)
-                    .overflow_y_scrollbar()
-                    .on_scroll_wheel(cx.listener(move |_, _, window, cx| {
-                        cx.defer_in(window, move |view, _, cx| {
-                            view.update_review_scroll_state(generation, cx);
-                        });
-                    }))
-                    .pr_2()
-                    .child(div().w_full().flex().justify_center().child(review_body)),
+                    .child(
+                        div()
+                            .id(("review-scroll", generation))
+                            .size_full()
+                            .track_scroll(&active.scroll_handle)
+                            .overflow_y_scroll()
+                            .on_scroll_wheel(cx.listener(move |_, _, window, cx| {
+                                cx.defer_in(window, move |view, _, cx| {
+                                    view.update_review_scroll_state(generation, cx);
+                                });
+                            }))
+                            .pr_2()
+                            .child(div().w_full().flex().justify_center().child(review_body)),
+                    )
+                    .child(scroll_overflow_indicator(
+                        &active.scroll_handle,
+                        cx.theme().primary,
+                    )),
             )
             .child(
                 div()
@@ -12335,25 +12643,34 @@ impl WalletWindow {
             .child(div().font_semibold().child(review.document.title()))
             .child(
                 div()
-                    .id("legal-document-scroll")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .p_3()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .vertical_scrollbar(&review.scroll_handle)
-                    .on_scroll_wheel(cx.listener(|view, _, window, cx| {
-                        let digest = view
-                            .legal_review
-                            .as_ref()
-                            .map(|review| review.digest.clone());
-                        if let Some(digest) = digest {
-                            cx.defer_in(window, move |view, _, cx| {
-                                view.update_legal_scroll_state(&digest, cx);
-                            });
-                        }
-                    }))
-                    .child(document),
+                    .child(
+                        div()
+                            .id("legal-document-scroll")
+                            .size_full()
+                            .p_3()
+                            .overflow_y_scroll()
+                            .on_scroll_wheel(cx.listener(|view, _, window, cx| {
+                                let digest = view
+                                    .legal_review
+                                    .as_ref()
+                                    .map(|review| review.digest.clone());
+                                if let Some(digest) = digest {
+                                    cx.defer_in(window, move |view, _, cx| {
+                                        view.update_legal_scroll_state(&digest, cx);
+                                    });
+                                }
+                            }))
+                            .child(document),
+                    )
+                    .child(scroll_overflow_indicator(
+                        &review.scroll_handle,
+                        cx.theme().primary,
+                    )),
             )
             .when_some(review.error.clone(), |panel, error| {
                 panel.child(
@@ -12732,10 +13049,18 @@ impl WalletWindow {
         let content = div()
             .debug_selector(|| "route-content-inner".to_owned())
             .w_full()
+            .min_w_0()
             .max_w(PAGE_CONTENT_MAX_WIDTH)
+            .mx_auto()
             .flex()
             .flex_col()
             .gap_4()
+            .when(self.route == Route::Tokens, |content| {
+                content.flex_1().min_h_0()
+            })
+            .when(self.route != Route::Tokens, |content| {
+                content.flex_shrink_0()
+            })
             .when_some(self.desktop_snapshot_error.clone(), |content, error| {
                 content.child(
                     selectable_error_alert("desktop-snapshot-error", error)
@@ -12755,6 +13080,16 @@ impl WalletWindow {
                 },
             )
             .child(route_panel);
+        let scroll_content = div()
+            .debug_selector(|| "route-scroll-content".to_owned())
+            .w_full()
+            .min_w_0()
+            .px_5()
+            .pb_5()
+            .when(self.route == Route::Tokens, |scroll_content| {
+                scroll_content.h_full().min_h_0().flex().flex_col()
+            })
+            .child(content);
         div()
             .flex_1()
             .min_w_0()
@@ -12776,17 +13111,22 @@ impl WalletWindow {
             )
             .child(
                 div()
-                    .id("route-content-scroll")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .track_scroll(&self.route_scroll_handle)
-                    .overflow_y_scrollbar()
-                    .px_5()
-                    .pb_5()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(content),
+                    .child(
+                        div()
+                            .id("route-content-scroll")
+                            .debug_selector(|| "route-content-scroll".to_owned())
+                            .size_full()
+                            .track_scroll(&self.route_scroll_handle)
+                            .overflow_y_scroll()
+                            .child(scroll_content),
+                    )
+                    .child(scroll_overflow_indicator(
+                        &self.route_scroll_handle,
+                        cx.theme().primary,
+                    )),
             )
     }
 
@@ -13158,6 +13498,12 @@ fn apply_interface_palette(cx: &mut App) {
     colors.primary_hover = color(interaction.primary_hover);
     colors.progress_bar = accent;
     colors.ring = accent;
+    colors.scrollbar = gpui::transparent_black();
+    // Scrolling is communicated by the non-obstructing bottom chevron rather
+    // than by tracks laid over content. This also hides the component
+    // library's internal dialog scrollbar, which does not expose its handle.
+    colors.scrollbar_thumb = gpui::transparent_black();
+    colors.scrollbar_thumb_hover = gpui::transparent_black();
     colors.secondary = surface;
     colors.secondary_active = color(interaction.button_active);
     colors.secondary_foreground = foreground;

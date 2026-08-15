@@ -166,9 +166,19 @@ fn measure(
     view: &Entity<WalletWindow>,
     selectors: &[&'static str],
 ) -> Vec<Option<gpui::Bounds<gpui::Pixels>>> {
+    measure_at(cx, window, view, VIEWPORT, selectors)
+}
+
+fn measure_at(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    viewport: gpui::Size<gpui::Pixels>,
+    selectors: &[&'static str],
+) -> Vec<Option<gpui::Bounds<gpui::Pixels>>> {
     let mut visual = gpui::VisualTestContext::from_window(window, cx);
     let view = view.clone();
-    visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
+    visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
         gpui::AnyView::from(view).into_any_element()
     });
     let bounds = selectors
@@ -177,6 +187,20 @@ fn measure(
         .collect();
     visual.run_until_parked();
     bounds
+}
+
+/// Hosts the network form in a real view so entity-backed inputs have the
+/// rendered-view context GPUI requires during prepaint.
+struct NetworkEditorFormTestView {
+    wallet: Entity<WalletWindow>,
+}
+
+impl Render for NetworkEditorFormTestView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.wallet
+            .read(cx)
+            .render_network_editor_form(&self.wallet.downgrade(), cx)
+    }
 }
 
 #[gpui::test]
@@ -188,6 +212,71 @@ fn every_route_lays_out(cx: &mut gpui::TestAppContext) {
         cx.update_entity(&view, |wallet, _| wallet.set_route(route));
         draw(cx, window, &view);
     }
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn scrollbar_tracks_stay_hidden_in_favor_of_the_overflow_chevron(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    cx.read(|cx| {
+        let theme = Theme::global(cx);
+        assert!(theme.colors.scrollbar_thumb.a.abs() < f32::EPSILON);
+        assert!(theme.colors.scrollbar_thumb_hover.a.abs() < f32::EPSILON);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn an_accounts_page_that_fits_has_no_phantom_scroll_range(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Accounts));
+    draw(cx, window, &view);
+
+    let max = cx.read_entity(&view, |wallet, _| wallet.route_scroll_handle.max_offset());
+    assert_eq!(max.x, px(0.0), "Accounts must not scroll horizontally");
+    assert_eq!(
+        max.y,
+        px(0.0),
+        "page padding must not manufacture vertical scroll space when Accounts fits"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn settings_remain_scrollable_in_a_short_window(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
+    });
+    let short = gpui::size(px(900.0), px(420.0));
+    let initial = measure_at(cx, window, &view, short, &["route-content-scroll"])[0]
+        .expect("the settings scroll viewport must be laid out");
+    assert!(
+        initial.size.height >= px(180.0),
+        "a short window must preserve a usable settings viewport: {initial:?}"
+    );
+    let max = cx.read_entity(&view, |wallet, _| wallet.route_scroll_handle.max_offset());
+    assert!(max.y > px(0.0), "short settings must expose real overflow");
+
+    cx.read_entity(&view, |wallet, _| {
+        wallet.route_scroll_handle.scroll_to_bottom();
+    });
+    let bottom = measure_at(cx, window, &view, short, &["route-content-scroll"])[0]
+        .expect("the settings viewport must remain laid out");
+    assert!(bottom.size.height >= px(180.0));
+    let (offset, max) = cx.read_entity(&view, |wallet, _| {
+        (
+            wallet.route_scroll_handle.offset(),
+            wallet.route_scroll_handle.max_offset(),
+        )
+    });
+    assert_eq!(
+        offset.y, -max.y,
+        "short settings must be able to reach their true bottom"
+    );
     release(cx, &view);
 }
 
@@ -332,6 +421,62 @@ fn inbox_tabs_render_one_queue_at_a_time(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn claude_connector_instructions_require_detected_claude_desktop(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
+    });
+    assert!(
+        measure(cx, window, &view, &["claude-desktop-hosted-connector"],)[0].is_none(),
+        "hosted connector instructions must stay hidden without Claude Desktop"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.detected_agents = AgentDetectionState::Ready(vec![DetectedAgent {
+            kind: AgentKind::ClaudeDesktop,
+            display_name: "Claude Desktop",
+            config_path: "/tmp/Claude/claude_desktop_config.json".into(),
+            installed: Ok(false),
+        }]);
+    });
+    assert!(
+        measure(cx, window, &view, &["claude-desktop-hosted-connector"],)[0].is_some(),
+        "detected Claude Desktop must expose its account-connector instructions"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn checking_for_updates_keeps_the_action_in_place(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
+        wallet.release_state = ReleaseDisplayState::Idle;
+    });
+    let idle = measure(cx, window, &view, &["check-latest-release"])[0]
+        .expect("the idle update action must be laid out");
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.release_state = ReleaseDisplayState::Checking;
+    });
+    let checking = measure(cx, window, &view, &["check-latest-release"])[0]
+        .expect("the checking update action must remain laid out");
+    assert_eq!(
+        checking, idle,
+        "checking must disable the existing action without moving or resizing it"
+    );
+    assert!(
+        measure(cx, window, &view, &["release-check-progress"])[0].is_some(),
+        "the version-status line must show checking progress and its spinner"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn add_network_is_part_of_the_fixed_header(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
@@ -354,6 +499,31 @@ fn add_network_is_part_of_the_fixed_header(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn network_editor_shows_rpc_endpoints_as_a_multiline_field(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    draw(cx, window, &view);
+    let form_view = cx.new(|_| NetworkEditorFormTestView {
+        wallet: view.clone(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
+        gpui::AnyView::from(form_view.clone()).into_any_element()
+    });
+    let rpc = visual
+        .debug_bounds("network-rpc-endpoints-input")
+        .expect("the RPC endpoints field must be laid out");
+    visual.run_until_parked();
+    assert!(
+        rpc.size.height >= px(140.0),
+        "the RPC endpoint list must visibly present as a multiline textbox: {:?}",
+        rpc.size.height
+    );
+    drop(form_view);
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn an_action_button_is_the_width_of_its_label(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
@@ -370,6 +540,45 @@ fn an_action_button_is_the_width_of_its_label(cx: &mut gpui::TestAppContext) {
         button.size.width,
         VIEWPORT.width
     );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn token_inventory_fills_the_remaining_page_height(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Tokens));
+
+    let measured = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "route-content-inner",
+            "token-inventory-list",
+            "token-inventory-search",
+        ],
+    );
+    let content = measured[0].expect("the token page content must be laid out");
+    let list = measured[1].expect("the token inventory must be laid out");
+    let search = measured[2].expect("the token search control must be laid out");
+    assert!(
+        list.size.height > px(260.0),
+        "the token inventory must grow beyond its minimum to use the viewport: {:?}",
+        list.size.height
+    );
+    assert_eq!(
+        list.origin.y + list.size.height,
+        content.origin.y + content.size.height,
+        "the inventory must end at the bottom of the available content area"
+    );
+    assert!(
+        search.size.height >= px(52.0),
+        "the token search control must be substantially larger than the old compact input: \
+         {:?}",
+        search.size.height
+    );
+
     release(cx, &view);
 }
 
@@ -412,16 +621,40 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
         cx,
         window,
         &view,
-        &["policy-json-editor-input", "policy-editor-status"],
+        &[
+            "policy-json-editor",
+            "policy-json-editor-input",
+            "policy-json-control",
+            "policy-preview-workflow",
+            "policy-editor-status",
+        ],
     );
     assert!(
-        before[1].is_none(),
+        before[4].is_none(),
         "an installed policy must not spend editor space on its revision number"
     );
-    let before = before[0].expect("policy JSON editor must be laid out");
+    let panel = before[0].expect("policy panel must be laid out");
+    let editor = before[1].expect("policy JSON editor must be laid out");
+    let control = before[2].expect("policy JSON control must be laid out");
+    let workflow = before[3].expect("policy review workflow must be laid out");
     assert!(
-        before.size.height >= px(320.0),
+        editor.size.height >= px(320.0),
         "the initial editor must honor its usable minimum height"
+    );
+    assert!(
+        control.origin.x + control.size.width <= panel.origin.x + panel.size.width,
+        "the JSON control must stay inside the policy panel horizontally: \
+         panel {panel:?}, control {control:?}"
+    );
+    assert!(
+        control.origin.y + control.size.height <= panel.origin.y + panel.size.height,
+        "the JSON control must stay inside the policy panel vertically: \
+         panel {panel:?}, control {control:?}"
+    );
+    assert!(
+        workflow.origin.y + workflow.size.height <= panel.origin.y + panel.size.height,
+        "the complete workflow must stay inside the policy panel: \
+         panel {panel:?}, workflow {workflow:?}"
     );
 
     cx.update_entity(&view, |wallet, _| {
@@ -438,11 +671,57 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
     let after = measure(cx, window, &view, &["policy-json-editor-input"])[0]
         .expect("policy JSON editor must remain laid out after review");
     assert!(
-        after.size.height >= before.size.height,
+        after.size.height >= editor.size.height,
         "reviewing must extend the scrollable page instead of shrinking the editor: \
          before {:?}, after {:?}",
-        before.size.height,
+        editor.size.height,
         after.size.height
+    );
+
+    let max_offset = cx.read_entity(&view, |wallet, _| wallet.route_scroll_handle.max_offset());
+    cx.read_entity(&view, |wallet, _| {
+        wallet
+            .route_scroll_handle
+            .set_offset(gpui::point(px(0.0), -max_offset.y));
+    });
+    let bottom = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "route-content-scroll",
+            "route-content-inner",
+            "policies-content",
+            "policy-json-editor",
+            "policy-preview-workflow",
+            "policy-permission-diff",
+            "install-policy-draft",
+        ],
+    );
+    let scroll = bottom[0].expect("policy scroll viewport must be laid out");
+    let route_content = bottom[1].expect("route content must be laid out");
+    let policies = bottom[2].expect("policy content must be laid out");
+    let editor = bottom[3].expect("policy editor must be laid out");
+    let workflow = bottom[4].expect("policy workflow must be laid out");
+    let diff = bottom[5].expect("computed permission changes must be laid out");
+    let install = bottom[6].expect("policy install action must be laid out");
+    let scroll_state = cx.read_entity(&view, |wallet, _| {
+        (
+            wallet.route_scroll_handle.offset(),
+            wallet.route_scroll_handle.max_offset(),
+            wallet.route_scroll_handle.bounds(),
+        )
+    });
+    assert!(
+        install.origin.y + install.size.height <= diff.origin.y + diff.size.height,
+        "the install action must remain inside the permission-diff border: \
+         diff {diff:?}, install {install:?}"
+    );
+    assert!(
+        diff.origin.y + diff.size.height + px(16.0) <= scroll.origin.y + scroll.size.height,
+        "the bottom of the policy must retain visible scroll padding: \
+         viewport {scroll:?}, route content {route_content:?}, policies {policies:?}, \
+         editor {editor:?}, workflow {workflow:?}, diff {diff:?}, scroll state {scroll_state:?}"
     );
 
     release(cx, &view);
@@ -611,7 +890,38 @@ fn screenshots() {
             view.update(cx, |wallet, _| {
                 // Re-applied each frame: the first render opens the legal gate,
                 // and that overlay covers whichever page is behind it.
-                wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+                let mut snapshot = quiet_snapshot();
+                // The Policies page is only meaningfully reviewable with an
+                // account selected and its real editor open. The renderer will
+                // load the default policy for this throwaway account on draw.
+                if route == Route::Policies {
+                    snapshot.accounts = Ok(vec![WalletMetadata {
+                        instance_id: uuid::Uuid::nil(),
+                        id: "primary".into(),
+                        address: alloy::primitives::Address::ZERO,
+                        created_at: chrono::Utc::now(),
+                        source: ekubo_wallet_core::config::WalletSource::Created,
+                        exported_at: None,
+                    }]);
+                    wallet.policy_editor = Some(PolicyEditor {
+                        wallet_id: "primary".into(),
+                        source_revision: Some(1),
+                        current_policy: Some(WalletPolicy::require_approval_for_everything()),
+                        proposal: None,
+                        validation: Some(Ok(PolicyDraftReview {
+                            wallet_id: "primary".into(),
+                            source_revision: Some(1),
+                            document: String::new(),
+                            policy: WalletPolicy::require_approval_for_everything(),
+                            diff: vec![
+                                "+ Require approval for every transaction".into(),
+                                "+ Refuse automatic signing unless a rule permits it".into(),
+                            ],
+                        })),
+                    });
+                    wallet.policy_action_error = None;
+                }
+                wallet.desktop_snapshot = Some(Arc::new(snapshot));
                 wallet.desktop_snapshot_error = None;
                 wallet.legal_gate = false;
                 wallet.legal_review = None;
@@ -626,6 +936,18 @@ fn screenshots() {
             let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
         });
         cx.run_until_parked();
+        if route == Route::Policies {
+            cx.update(|cx| {
+                view.update(cx, |wallet, _| {
+                    let max = wallet.route_scroll_handle.max_offset();
+                    wallet
+                        .route_scroll_handle
+                        .set_offset(gpui::point(px(0.0), -max.y));
+                });
+                let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
+            });
+            cx.run_until_parked();
+        }
         let image = cx
             .capture_screenshot(window.into())
             .expect("offscreen render");
