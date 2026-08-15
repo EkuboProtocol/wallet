@@ -324,13 +324,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ needs.verify-build.outputs.commit_sha }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$RELEASE_TAG" -f target_commitish="$RELEASE_SHA" \
-            -f name="$RELEASE_TAG" -F prerelease="$( [[ "$RELEASE_TAG" == *-* ]] && echo true || echo false )" > release.json
+            -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TAG" \
+            -F prerelease="$( [[ "$RELEASE_TAG" == *-* ]] && echo true || echo false )" > release.json
           upload_url="$(jq -r '.upload_url | sub("\\{.*"; "")' release.json)"
           for file in dist/*; do
             encoded="$(printf '%s' "$(basename "$file")" | jq -sRr @uri)"
