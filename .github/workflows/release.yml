@@ -185,12 +185,14 @@ jobs:
           if ($files.Count -ne 1) { throw "expected exactly one installer" }
           Copy-Item $files[0].FullName dist/
       - name: Authenticate to Azure with GitHub OIDC
+        if: vars.AZURE_TRUSTED_SIGNING_ENABLED == 'true'
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Apply mandatory Authenticode
+      - name: Apply Authenticode when enabled
+        if: vars.AZURE_TRUSTED_SIGNING_ENABLED == 'true'
         uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
         with:
           endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
@@ -212,16 +214,24 @@ jobs:
       - uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
         with:
           tool: cargo-packager@0.11.8
-      - name: Sign final installer for updater
+      - name: Sign final installer for updater and enforce Authenticode mode
         shell: pwsh
         env:
+          AZURE_TRUSTED_SIGNING_ENABLED: ${{ vars.AZURE_TRUSTED_SIGNING_ENABLED }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
         run: |
           $installer = @(Get-ChildItem dist/*setup.exe)
           if ($installer.Count -ne 1) { throw "expected exactly one installer" }
           cargo packager signer sign $installer[0].FullName
-          if ((Get-AuthenticodeSignature $installer[0]).Status -ne 'Valid') { throw 'invalid Authenticode signature' }
+          $status = (Get-AuthenticodeSignature $installer[0]).Status
+          if ($env:AZURE_TRUSTED_SIGNING_ENABLED -eq 'true') {
+            if ($status -ne 'Valid') { throw 'invalid Authenticode signature' }
+          } elseif ($env:AZURE_TRUSTED_SIGNING_ENABLED -eq 'false') {
+            if ($status -ne 'NotSigned') { throw "expected unsigned installer, found Authenticode status $status" }
+          } else {
+            throw 'AZURE_TRUSTED_SIGNING_ENABLED must be exactly true or false'
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signed-windows

@@ -91,9 +91,12 @@ authorization, or other owner capabilities.
 Update metadata and hosting are untrusted. `latest.json` and artifacts are
 Minisign-verified; core checks the bundled version marker and repeats checks
 immediately before installation. Platform signing precedes final updater
-signing. Apple and Windows signing services and release keys remain trust
-dependencies whose compromise requires publication halt, key rotation through
-a trusted channel, and an audit of released bytes and workflow logs.
+signing when configured. While Azure public-trust validation is pending, a
+protected release variable may require Windows to remain Authenticode-unsigned;
+the workflow verifies that state and still requires the detached updater
+signature. Apple and enabled Windows signing services and release keys remain
+trust dependencies whose compromise requires publication halt, key rotation
+through a trusted channel, and an audit of released bytes and workflow logs.
 
 The signed native package covers the separately bundled MCP helper during
 distribution. The wallet atomically installs a versioned copy in its private
