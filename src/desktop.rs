@@ -8202,9 +8202,12 @@ impl WalletWindow {
                         wrapper.child(
                             deferred(
                                 anchored()
-                                    .anchor(Anchor::TopLeft)
+                                    .anchor(Anchor::LeftCenter)
                                     .snap_to_window_with_margin(px(8.0))
-                                    .offset(point(NAVIGATION_BUTTON_SIZE + px(10.0), px(5.0)))
+                                    .offset(point(
+                                        NAVIGATION_BUTTON_SIZE + px(10.0),
+                                        NAVIGATION_BUTTON_SIZE / 2.0,
+                                    ))
                                     .child(
                                         div()
                                             .whitespace_nowrap()

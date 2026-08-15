@@ -1379,7 +1379,9 @@ fn sidebar_tooltips_are_immediate_right_side_theme_elements() {
         .0;
 
     assert!(sidebar.contains(".on_hover("));
+    assert!(sidebar.contains(".anchor(Anchor::LeftCenter)"));
     assert!(sidebar.contains("NAVIGATION_BUTTON_SIZE + px(10.0)"));
+    assert!(sidebar.contains("NAVIGATION_BUTTON_SIZE / 2.0"));
     assert!(sidebar.contains(".bg(cx.theme().primary)"));
     assert!(!sidebar.contains(".tooltip("));
 }
