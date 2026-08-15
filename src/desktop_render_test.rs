@@ -326,6 +326,102 @@ fn a_record_detail_lays_out_with_its_fixed_footer(cx: &mut gpui::TestAppContext)
 }
 
 #[gpui::test]
+fn an_expanded_multi_megabyte_transaction_payload_stays_virtual_and_scrollable(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let request_id = uuid::Uuid::new_v4();
+    let wallet_instance_id = uuid::Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let transaction: PendingTransaction = serde_json::from_value(serde_json::json!({
+        "request_id": request_id,
+        "wallet_instance_id": wallet_instance_id,
+        "wallet_id": "primary",
+        "wallet_address": "0x1111111111111111111111111111111111111111",
+        "network_name": "ethereum",
+        "chain_id": "1",
+        "execution_plan": {
+            "schema_version": "1",
+            "chain_id": "1",
+            "caip2_chain_id": "eip155:1",
+            "sender": "0x1111111111111111111111111111111111111111",
+            "ordered_steps": [{
+                "step": 1,
+                "kind": "execution",
+                "transaction": {
+                    "chain_id": "1",
+                    "from": "0x1111111111111111111111111111111111111111",
+                    "to": "0x2222222222222222222222222222222222222222",
+                    "data": "0x",
+                    "value": "1"
+                }
+            }]
+        },
+        "plan_source": "inline data URI",
+        "digest": "0x00",
+        "policy_revision": 1,
+        "approval_required": true,
+        "status": "rejected",
+        "created_at": now,
+        "updated_at": now
+    }))
+    .expect("test transaction");
+    let payload = format!(
+        "{{\n{}\n}}",
+        (0..32_768)
+            .map(|index| format!("  \"field_{index}\": \"{}\"", "a".repeat(48)))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    );
+    assert!(payload.len() > 2 * 1024 * 1024);
+    let chunk_count = exact_payload_chunk_ranges(&payload).len();
+    let document = ReviewDocument::from_request(
+        ApprovalRequest::new(
+            ApprovalKind::Transaction,
+            "Large transaction",
+            "The exact execution plan remains available without one enormous text layout.",
+        ),
+        vec![payload],
+    );
+    let ready = Rc::new(ReadyActivityInspection::new(OwnerTransactionInspection {
+        document,
+        receipt_loaded: false,
+        receipt_error: None,
+    }));
+    ready.set_exact_payload_expanded(true);
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.activity = Ok(Arc::from(vec![OwnerActivityRecord::Transaction(Box::new(
+            transaction,
+        ))]));
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Activity);
+        wallet.selected_record = Some(request_id);
+        wallet
+            .activity_inspections
+            .insert(request_id, ActivityInspectionState::Ready(ready.clone()));
+        wallet
+            .activity_payloads_expanded
+            .insert((request_id, "execution-plan".to_owned()));
+    });
+
+    draw(cx, window, &view);
+    assert_eq!(
+        ready.detail_list.item_count(),
+        2 + chunk_count,
+        "the prelude, disclosure, and each bounded payload chunk stay separate virtual rows"
+    );
+    assert!(
+        ready.detail_list.max_offset_for_scrollbar().y > px(0.0),
+        "the expanded transaction detail must expose a real outer-list scroll range"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn the_settings_pane_is_capped_to_a_readable_measure(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
@@ -787,7 +883,9 @@ fn every_review_kind_lays_out_its_decision_row(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn a_4096_call_security_review_lays_out_as_a_virtual_list(cx: &mut gpui::TestAppContext) {
+fn a_4096_call_security_review_with_large_exact_data_stays_virtual_and_scrollable(
+    cx: &mut gpui::TestAppContext,
+) {
     const CALLS: usize = 4_096;
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
@@ -802,7 +900,13 @@ fn a_4096_call_security_review_lays_out_as_a_virtual_list(cx: &mut gpui::TestApp
             .section_kind(ApprovalSectionKind::Action, format!("Call {index}"))
             .fact("Target", format!("0x{index:040x}"));
     }
-    let document = ReviewDocument::from_request(request, vec!["{}".to_owned()]);
+    let payload = (0..8_192)
+        .map(|index| format!("\"field_{index}\": \"{}\"", "b".repeat(48)))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let chunk_count = exact_payload_chunk_ranges(&payload).len();
+    assert!(chunk_count > 100);
+    let document = ReviewDocument::from_request(request, vec![payload]);
     cx.update_entity(&view, |wallet, _| {
         wallet.active_review = Some(ActiveReview::new(
             document,
@@ -817,7 +921,11 @@ fn a_4096_call_security_review_lays_out_as_a_virtual_list(cx: &mut gpui::TestApp
     draw(cx, window, &view);
     let scroll_handle = cx.read_entity(&view, |wallet, _| {
         let review = wallet.active_review.as_ref().expect("active review");
-        assert_eq!(review.scroll_handle.item_count(), CALLS + 3);
+        assert_eq!(
+            review.scroll_handle.item_count(),
+            CALLS + 3 + chunk_count,
+            "the prelude, exact-data heading, payload heading, and bounded chunks are virtual rows"
+        );
         assert_eq!(
             review
                 .detail_rows

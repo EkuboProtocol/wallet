@@ -1399,12 +1399,31 @@ fn walletconnect_expiry_reads_as_time_remaining() {
 #[test]
 fn overflow_indicator_final_click_clamps_to_the_true_bottom() {
     assert_eq!(
-        next_overflow_indicator_offset(px(-900.0), px(1_000.0), px(400.0)),
+        next_overflow_indicator_offset(px(-900.0), px(1_000.0), px(400.0), 1),
         px(-1_000.0)
     );
     assert_eq!(
-        next_overflow_indicator_offset(px(-200.0), px(1_000.0), px(400.0)),
+        next_overflow_indicator_offset(px(-200.0), px(1_000.0), px(400.0), 1),
         px(-488.0)
+    );
+    assert_eq!(
+        next_overflow_indicator_offset(px(-200.0), px(2_000.0), px(400.0), 4),
+        px(-1_352.0)
+    );
+}
+
+#[test]
+fn overflow_indicator_rapid_presses_double_until_the_burst_expires() {
+    let start = std::time::Instant::now();
+    let mut paging = OverflowPagingState::default();
+    assert_eq!(paging.begin_press(start).0, 1);
+    assert_eq!(paging.begin_press(start + Duration::from_millis(200)).0, 2);
+    assert_eq!(paging.begin_press(start + Duration::from_millis(449)).0, 4);
+    assert_eq!(paging.begin_press(start + Duration::from_millis(699)).0, 8);
+    assert_eq!(
+        paging.begin_press(start + Duration::from_millis(950)).0,
+        1,
+        "the next press after more than 250 ms starts a fresh 1x burst"
     );
 }
 
@@ -1472,7 +1491,7 @@ fn large_transaction_details_keep_every_call_as_a_virtual_row() {
         .fact("Result", "No balance changes");
     let document = ReviewDocument::from_request(request, vec!["{}".to_owned()]);
 
-    let rows = transaction_activity_detail_rows(&document);
+    let rows = transaction_activity_detail_rows(&document, false);
     assert_eq!(rows.first(), Some(&TransactionActivityDetailRow::Prelude));
     assert_eq!(
         rows.get(1),
@@ -1491,7 +1510,7 @@ fn large_transaction_details_keep_every_call_as_a_virtual_row() {
     assert!(rows.contains(&TransactionActivityDetailRow::RecordKeeping));
     assert_eq!(
         rows.last(),
-        Some(&TransactionActivityDetailRow::ExactPayload)
+        Some(&TransactionActivityDetailRow::ExactPayloadDisclosure)
     );
 
     let list = VariableListState::new(
@@ -1519,17 +1538,65 @@ fn large_transaction_details_keep_every_call_as_a_virtual_row() {
     assert!(review_rows.contains(&SecurityReviewDetailRow::Warning(0)));
     assert!(review_rows.contains(&SecurityReviewDetailRow::RequestDetails));
     assert!(review_rows.contains(&SecurityReviewDetailRow::ExactDataHeading));
-    assert_eq!(
+    assert!(review_rows.contains(&SecurityReviewDetailRow::ExactPayloadHeading(0)));
+    assert!(matches!(
         review_rows.last(),
-        Some(&SecurityReviewDetailRow::ExactPayload(0))
-    );
+        Some(SecurityReviewDetailRow::ExactPayloadChunk {
+            payload_index: 0,
+            start: 0,
+            end: 2,
+        })
+    ));
     let review_list = VariableListState::new(
         review_rows.len(),
         ListAlignment::Top,
         ACTIVITY_DETAIL_LIST_OVERDRAW,
     )
     .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
-    assert_eq!(review_list.item_count(), CALLS + 7);
+    assert_eq!(review_list.item_count(), CALLS + 8);
+}
+
+#[test]
+fn exact_payload_chunks_are_utf8_safe_complete_and_virtual_rows_when_expanded() {
+    let payload = format!(
+        "{}\n{}\n{}",
+        "x".repeat(EXACT_PAYLOAD_CHUNK_BYTES - 3),
+        "🦀".repeat(EXACT_PAYLOAD_CHUNK_BYTES),
+        "tail"
+    );
+    let ranges = exact_payload_chunk_ranges(&payload);
+    assert!(ranges.len() > 3);
+    assert_eq!(ranges.first().map(|range| range.0), Some(0));
+    assert_eq!(ranges.last().map(|range| range.1), Some(payload.len()));
+    assert!(ranges.windows(2).all(|pair| pair[0].1 == pair[1].0));
+    assert!(ranges.iter().all(|(start, end)| {
+        payload.is_char_boundary(*start)
+            && payload.is_char_boundary(*end)
+            && end - start <= EXACT_PAYLOAD_CHUNK_BYTES
+    }));
+    assert_eq!(
+        ranges
+            .iter()
+            .map(|(start, end)| &payload[*start..*end])
+            .collect::<String>(),
+        payload
+    );
+
+    let document = ReviewDocument::from_request(
+        ekubo_wallet_core::approval::ApprovalRequest::new(
+            ekubo_wallet_core::approval::ApprovalKind::Transaction,
+            "Large exact payload",
+            "The exact payload is chunked only for rendering.",
+        ),
+        vec![payload],
+    );
+    let rows = transaction_activity_detail_rows(&document, true);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(row, TransactionActivityDetailRow::ExactPayloadChunk { .. }))
+            .count(),
+        ranges.len()
+    );
 }
 
 #[test]

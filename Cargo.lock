@@ -3301,7 +3301,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3352,7 +3352,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-core"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -6309,7 +6309,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-bridge"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "directories",

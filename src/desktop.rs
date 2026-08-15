@@ -76,7 +76,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -120,8 +120,33 @@ fn next_overflow_indicator_offset(
     current: gpui::Pixels,
     maximum: gpui::Pixels,
     viewport_height: gpui::Pixels,
+    multiplier: u16,
 ) -> gpui::Pixels {
-    (current - viewport_height * 0.72).max(-maximum)
+    (current - viewport_height * 0.72 * f32::from(multiplier)).max(-maximum)
+}
+
+const OVERFLOW_PAGING_BURST_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct OverflowPagingState {
+    last_press: Option<Instant>,
+    multiplier: u16,
+    animation_generation: u64,
+}
+
+impl OverflowPagingState {
+    fn begin_press(&mut self, now: Instant) -> (u16, u64) {
+        self.multiplier = if self.last_press.is_some_and(|last_press| {
+            now.saturating_duration_since(last_press) <= OVERFLOW_PAGING_BURST_TIMEOUT
+        }) {
+            self.multiplier.max(1).saturating_mul(2)
+        } else {
+            1
+        };
+        self.last_press = Some(now);
+        self.animation_generation = self.animation_generation.wrapping_add(1);
+        (self.multiplier, self.animation_generation)
+    }
 }
 
 const fn overflow_indicator_opacity(hovered: bool) -> f32 {
@@ -198,12 +223,14 @@ impl From<VariableListState> for OverflowScrollHandle {
 
 struct ScrollOverflowIndicatorView {
     scroll_handle: Rc<RefCell<OverflowScrollHandle>>,
+    paging: Rc<RefCell<OverflowPagingState>>,
 }
 
 impl Render for ScrollOverflowIndicatorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let prepaint_handle = self.scroll_handle.clone();
         let paint_handle = self.scroll_handle.clone();
+        let paint_paging = self.paging.clone();
         let accent = cx.theme().primary;
         canvas(
             move |bounds, window, _| {
@@ -270,9 +297,16 @@ impl Render for ScrollOverflowIndicatorView {
                         let max =
                             (scroll_handle.content_size().height - viewport_height).max(px(0.0));
                         let offset = scroll_handle.offset();
-                        let target_y =
-                            next_overflow_indicator_offset(offset.y, max, viewport_height);
+                        let (multiplier, animation_generation) =
+                            paint_paging.borrow_mut().begin_press(Instant::now());
+                        let target_y = next_overflow_indicator_offset(
+                            offset.y,
+                            max,
+                            viewport_height,
+                            multiplier,
+                        );
                         let animated_handle = scroll_handle.clone();
+                        let animated_paging = paint_paging.clone();
                         window
                             .spawn(cx, async move |cx| {
                                 const FRAMES: u16 = 20;
@@ -280,6 +314,11 @@ impl Render for ScrollOverflowIndicatorView {
                                     cx.background_executor()
                                         .timer(Duration::from_millis(8))
                                         .await;
+                                    if animated_paging.borrow().animation_generation
+                                        != animation_generation
+                                    {
+                                        break;
+                                    }
                                     let progress = f32::from(frame) / f32::from(FRAMES);
                                     let eased = 1.0 - (1.0 - progress).powi(3);
                                     let y = offset.y + (target_y - offset.y) * eased;
@@ -313,8 +352,10 @@ impl ScrollOverflowIndicator {
     ) -> ScrollOverflowIndicator {
         let scroll_handle = Rc::new(RefCell::new(scroll_handle.into()));
         let view_handle = scroll_handle.clone();
+        let paging = Rc::new(RefCell::new(OverflowPagingState::default()));
         let view = cx.new(|_| ScrollOverflowIndicatorView {
             scroll_handle: view_handle,
+            paging,
         });
         Self {
             scroll_handle,
@@ -456,9 +497,14 @@ struct CopyFeedbackState {
 #[derive(IntoElement)]
 struct CopyButton {
     id: ElementId,
-    value: String,
+    value: CopyButtonValue,
     accessibility_label: SharedString,
     large: bool,
+}
+
+enum CopyButtonValue {
+    Owned(String),
+    Lazy(Rc<dyn Fn() -> String>),
 }
 
 impl CopyButton {
@@ -493,7 +539,11 @@ impl RenderOnce for CopyButton {
             .tooltip(self.accessibility_label)
             .when(!copied, |button| {
                 button.on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                    let value = match &value {
+                        CopyButtonValue::Owned(value) => value.clone(),
+                        CopyButtonValue::Lazy(value) => value(),
+                    };
+                    cx.write_to_clipboard(ClipboardItem::new_string(value));
                     state_for_click.update(cx, |state, cx| {
                         state.copied = true;
                         cx.notify();
@@ -519,7 +569,20 @@ fn copy_button(
 ) -> CopyButton {
     CopyButton {
         id: id.into(),
-        value,
+        value: CopyButtonValue::Owned(value),
+        accessibility_label: accessibility_label.into(),
+        large: false,
+    }
+}
+
+fn lazy_copy_button(
+    id: impl Into<ElementId>,
+    value: Rc<dyn Fn() -> String>,
+    accessibility_label: impl Into<SharedString>,
+) -> CopyButton {
+    CopyButton {
+        id: id.into(),
+        value: CopyButtonValue::Lazy(value),
         accessibility_label: accessibility_label.into(),
         large: false,
     }
@@ -2043,7 +2106,44 @@ enum SecurityReviewDetailRow {
     WalletConnectAccounts,
     RequestDetails,
     ExactDataHeading,
-    ExactPayload(usize),
+    ExactPayloadHeading(usize),
+    ExactPayloadChunk {
+        payload_index: usize,
+        start: usize,
+        end: usize,
+    },
+}
+
+const EXACT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
+
+fn exact_payload_chunk_ranges(payload: &str) -> Vec<(usize, usize)> {
+    if payload.is_empty() {
+        return vec![(0, 0)];
+    }
+
+    let mut ranges = Vec::with_capacity(payload.len().div_ceil(EXACT_PAYLOAD_CHUNK_BYTES));
+    let mut start = 0;
+    while start < payload.len() {
+        let mut end = (start + EXACT_PAYLOAD_CHUNK_BYTES).min(payload.len());
+        while !payload.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < payload.len()
+            && let Some(newline) = payload[start..end].rfind('\n')
+            && newline > 0
+        {
+            end = start + newline + 1;
+        }
+        if end == start {
+            end = payload[start..]
+                .char_indices()
+                .nth(1)
+                .map_or(payload.len(), |(offset, _)| start + offset);
+        }
+        ranges.push((start, end));
+        start = end;
+    }
+    ranges
 }
 
 fn security_review_detail_rows(
@@ -2068,7 +2168,11 @@ fn security_review_detail_rows(
             + usize::from(!document.request.warnings.is_empty())
             + usize::from(wallet_connect_accounts)
             + usize::from(!document.request.facts.is_empty())
-            + document.exact_payloads.len()
+            + document
+                .exact_payloads
+                .iter()
+                .map(|payload| 1 + exact_payload_chunk_ranges(payload).len())
+                .sum::<usize>()
             + usize::from(!document.exact_payloads.is_empty()),
     );
     rows.push(SecurityReviewDetailRow::Prelude);
@@ -2086,7 +2190,18 @@ fn security_review_detail_rows(
     }
     if !document.exact_payloads.is_empty() {
         rows.push(SecurityReviewDetailRow::ExactDataHeading);
-        rows.extend((0..document.exact_payloads.len()).map(SecurityReviewDetailRow::ExactPayload));
+        for (payload_index, payload) in document.exact_payloads.iter().enumerate() {
+            rows.push(SecurityReviewDetailRow::ExactPayloadHeading(payload_index));
+            rows.extend(
+                exact_payload_chunk_ranges(payload)
+                    .into_iter()
+                    .map(|(start, end)| SecurityReviewDetailRow::ExactPayloadChunk {
+                        payload_index,
+                        start,
+                        end,
+                    }),
+            );
+        }
     }
     rows
 }
@@ -2324,14 +2439,14 @@ enum ActivityInspectionState {
 
 struct ReadyActivityInspection {
     inspection: OwnerTransactionInspection,
-    detail_rows: Arc<[TransactionActivityDetailRow]>,
+    detail_rows: RefCell<Arc<[TransactionActivityDetailRow]>>,
     detail_list: VariableListState,
 }
 
 impl ReadyActivityInspection {
     fn new(inspection: OwnerTransactionInspection) -> Self {
         let detail_rows = Arc::<[TransactionActivityDetailRow]>::from(
-            transaction_activity_detail_rows(&inspection.document),
+            transaction_activity_detail_rows(&inspection.document, false),
         );
         let detail_list = VariableListState::new(
             detail_rows.len(),
@@ -2344,9 +2459,21 @@ impl ReadyActivityInspection {
         .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
         Self {
             inspection,
-            detail_rows,
+            detail_rows: RefCell::new(detail_rows),
             detail_list,
         }
+    }
+
+    fn set_exact_payload_expanded(&self, expanded: bool) {
+        let rows = Arc::<[TransactionActivityDetailRow]>::from(transaction_activity_detail_rows(
+            &self.inspection.document,
+            expanded,
+        ));
+        let offset = self.detail_list.scroll_px_offset_for_scrollbar();
+        self.detail_list
+            .reset_with_uniform_height(rows.len(), ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+        self.detail_list.set_offset_from_scrollbar(offset);
+        self.detail_rows.replace(rows);
     }
 }
 
@@ -2357,7 +2484,8 @@ enum TransactionActivityDetailRow {
     WarningsHeading,
     Warning(usize),
     RecordKeeping,
-    ExactPayload,
+    ExactPayloadDisclosure,
+    ExactPayloadChunk { start: usize, end: usize },
 }
 
 const ACTIVITY_DETAIL_ITEM_HEIGHT_HINT: gpui::Pixels = px(180.0);
@@ -2365,6 +2493,7 @@ const ACTIVITY_DETAIL_LIST_OVERDRAW: gpui::Pixels = px(480.0);
 
 fn transaction_activity_detail_rows(
     document: &ReviewDocument,
+    exact_payload_expanded: bool,
 ) -> Vec<TransactionActivityDetailRow> {
     let mut section_indices = (0..document.request.sections.len()).collect::<Vec<_>>();
     section_indices
@@ -2375,7 +2504,15 @@ fn transaction_activity_detail_rows(
             + document.request.warnings.len()
             + usize::from(!document.request.warnings.is_empty())
             + usize::from(!document.request.facts.is_empty())
-            + usize::from(!document.exact_payloads.is_empty()),
+            + usize::from(!document.exact_payloads.is_empty())
+            + if exact_payload_expanded {
+                document
+                    .exact_payloads
+                    .first()
+                    .map_or(0, |payload| exact_payload_chunk_ranges(payload).len())
+            } else {
+                0
+            },
     );
     rows.push(TransactionActivityDetailRow::Prelude);
     rows.extend(
@@ -2393,7 +2530,19 @@ fn transaction_activity_detail_rows(
         rows.push(TransactionActivityDetailRow::RecordKeeping);
     }
     if !document.exact_payloads.is_empty() {
-        rows.push(TransactionActivityDetailRow::ExactPayload);
+        rows.push(TransactionActivityDetailRow::ExactPayloadDisclosure);
+        if exact_payload_expanded {
+            rows.extend(
+                exact_payload_chunk_ranges(&document.exact_payloads[0])
+                    .into_iter()
+                    .map(
+                        |(start, end)| TransactionActivityDetailRow::ExactPayloadChunk {
+                            start,
+                            end,
+                        },
+                    ),
+            );
+        }
     }
     rows
 }
@@ -8767,7 +8916,7 @@ impl WalletWindow {
         let explanation = transaction_record_explanation(item);
         let can_refresh = item.status.can_reach_a_chain();
         let receipt_loaded = ready.inspection.receipt_loaded;
-        let rows = ready.detail_rows.clone();
+        let rows = ready.detail_rows.borrow().clone();
         let ready = ready.clone();
         let list_state = ready.detail_list.clone();
         let editor = cx.entity().downgrade();
@@ -8891,10 +9040,11 @@ impl WalletWindow {
                     cx,
                 )
                 .into_any_element(),
-                TransactionActivityDetailRow::ExactPayload => {
+                TransactionActivityDetailRow::ExactPayloadDisclosure => {
                     let Some(exact_plan) = ready.inspection.document.exact_payloads.first() else {
                         return div().into_any_element();
                     };
+                    let copy_ready = ready.clone();
                     Self::render_exact_payload_block(
                         request_id,
                         "execution-plan",
@@ -8902,7 +9052,30 @@ impl WalletWindow {
                         exact_plan,
                         exact_payload_expanded,
                         editor.clone(),
-                        Some((list_state.clone(), row_index)),
+                        false,
+                        Some(Rc::new(move || {
+                            copy_ready
+                                .inspection
+                                .document
+                                .exact_payloads
+                                .first()
+                                .cloned()
+                                .unwrap_or_default()
+                        })),
+                        cx,
+                    )
+                    .into_any_element()
+                }
+                TransactionActivityDetailRow::ExactPayloadChunk { start, end } => {
+                    let Some(exact_plan) = ready.inspection.document.exact_payloads.first() else {
+                        return div().into_any_element();
+                    };
+                    let Some(chunk) = exact_plan.get(start..end) else {
+                        return div().into_any_element();
+                    };
+                    Self::render_exact_payload_chunk(
+                        format!("activity-exact-payload-{request_id}-{start}"),
+                        chunk,
                         cx,
                     )
                     .into_any_element()
@@ -9391,9 +9564,38 @@ impl WalletWindow {
             payload,
             expanded,
             cx.entity().downgrade(),
+            true,
             None,
             cx,
         )
+    }
+
+    fn toggle_activity_payload(&mut self, key: &(uuid::Uuid, String), cx: &mut Context<Self>) {
+        let expanded = if self.activity_payloads_expanded.remove(key) {
+            false
+        } else {
+            self.activity_payloads_expanded.insert(key.clone());
+            true
+        };
+        if key.1 == "execution-plan"
+            && let Some(ActivityInspectionState::Ready(ready)) =
+                self.activity_inspections.get(&key.0)
+        {
+            ready.set_exact_payload_expanded(expanded);
+        }
+        cx.notify();
+    }
+
+    fn render_exact_payload_chunk(id: impl Into<ElementId>, payload: &str, cx: &App) -> gpui::Div {
+        div()
+            .w_full()
+            .min_w_0()
+            .p_3()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(selectable_code_text(id, payload))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9404,7 +9606,8 @@ impl WalletWindow {
         payload: &str,
         expanded: bool,
         editor: WeakEntity<Self>,
-        remeasure: Option<(VariableListState, usize)>,
+        show_payload_inline: bool,
+        copy_value: Option<Rc<dyn Fn() -> String>>,
         cx: &App,
     ) -> gpui::Div {
         let key = (request_id, slot.to_owned());
@@ -9432,45 +9635,32 @@ impl WalletWindow {
                     })
                     .on_click(move |_, _, cx| {
                         let key = key.clone();
-                        let remeasure = remeasure.clone();
                         let _ = editor.update(cx, move |view, cx| {
-                            if !view.activity_payloads_expanded.remove(&key) {
-                                view.activity_payloads_expanded.insert(key);
-                            }
-                            if let Some((list, index)) = remeasure {
-                                list.remeasure_items(index..index + 1);
-                            }
-                            cx.notify();
+                            view.toggle_activity_payload(&key, cx);
                         });
                     }),
                 )
                 .when(expanded, |row| {
-                    row.child(copy_button(
-                        format!("copy-exact-payload-{request_id}-{slot}"),
-                        payload.to_owned(),
-                        "Copy",
-                    ))
+                    let id = format!("copy-exact-payload-{request_id}-{slot}");
+                    if let Some(copy_value) = copy_value {
+                        row.child(lazy_copy_button(id, copy_value, "Copy"))
+                    } else {
+                        row.child(copy_button(id, payload.to_owned(), "Copy"))
+                    }
                 }),
         );
-        if expanded {
+        if expanded && show_payload_inline {
             block = block.child(
                 // No height cap and no scroll region of its own. Nested inside
                 // the detail's scroll area, an inner one only swallowed the
                 // wheel: the plan would not move and neither would the modal
                 // under the pointer. The block runs to its full height and the
                 // one scroll area that owns the surface carries it.
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .p_3()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .child(selectable_code_text(
-                        format!("exact-payload-{request_id}-{slot}"),
-                        payload,
-                    )),
+                Self::render_exact_payload_chunk(
+                    format!("exact-payload-{request_id}-{slot}"),
+                    payload,
+                    cx,
+                ),
             );
         }
         block
@@ -12914,10 +13104,11 @@ impl WalletWindow {
                             ),
                     )
                     .into_any_element(),
-                SecurityReviewDetailRow::ExactPayload(payload_index) => {
-                    let Some(payload) = document.exact_payloads.get(payload_index) else {
+                SecurityReviewDetailRow::ExactPayloadHeading(payload_index) => {
+                    if document.exact_payloads.get(payload_index).is_none() {
                         return div().into_any_element();
-                    };
+                    }
+                    let copy_document = document.clone();
                     div()
                         .w_full()
                         .min_w_0()
@@ -12934,35 +13125,40 @@ impl WalletWindow {
                                 } else {
                                     format!("Action {payload_index} exact calldata")
                                 }))
-                                .child(copy_button(
+                                .child(lazy_copy_button(
                                     SharedString::from(format!(
                                         "copy-review-payload-{generation}-{payload_index}"
                                     )),
-                                    payload.clone(),
+                                    Rc::new(move || {
+                                        copy_document
+                                            .exact_payloads
+                                            .get(payload_index)
+                                            .cloned()
+                                            .unwrap_or_default()
+                                    }),
                                     "Copy exact review data",
                                 )),
                         )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!(
-                                    "review-exact-payload-{generation}-{payload_index}"
-                                )))
-                                .w_full()
-                                .min_w_0()
-                                .overflow_x_scroll()
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().muted)
-                                .child(selectable_code_text(
-                                    SharedString::from(format!(
-                                        "review-payload-text-{generation}-{payload_index}"
-                                    )),
-                                    payload,
-                                )),
-                        )
                         .into_any_element()
+                }
+                SecurityReviewDetailRow::ExactPayloadChunk {
+                    payload_index,
+                    start,
+                    end,
+                } => {
+                    let Some(chunk) = document
+                        .exact_payloads
+                        .get(payload_index)
+                        .and_then(|payload| payload.get(start..end))
+                    else {
+                        return div().into_any_element();
+                    };
+                    Self::render_exact_payload_chunk(
+                        format!("review-payload-{generation}-{payload_index}-{start}"),
+                        chunk,
+                        cx,
+                    )
+                    .into_any_element()
                 }
             };
             div()
