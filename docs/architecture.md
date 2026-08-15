@@ -8,6 +8,14 @@ and WalletConnect. It issues two compile-time capabilities:
 - `AgentApi`, supplied to the local IPC listener, constructs restricted MCP
   sessions for connected bridges only.
 
+Restricted describes the operations a session can perform, not an absence of
+storage or signing dependencies. A constructed MCP server owns typed
+SQLCipher-backed stores and an OS credential-store signer so it can persist
+agent requests and ask core to sign transactions that the active policy allows
+automatically. It receives no owner-authorization capability, raw key export,
+unrestricted database access, native-review decision, or owner-only settings
+mutation.
+
 Background work runs on the Tokio executor bridged into GPUI. Domain events
 carry proposal, review, transaction, configuration, connection, and service
 changes back to focused GPUI entities. The desktop shell has routes for

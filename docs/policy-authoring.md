@@ -3,7 +3,10 @@
 Read the active policy and schema before proposing a complete replacement.
 Bind the proposal to the returned revision and explain its purpose. An agent
 cannot install a policy: the owner reviews a minimized permission diff in the
-native Policies screen and authenticates before installation.
+native Policies screen. Core compares the proposed document with the current
+policy at the persistence boundary. A widening or ambiguous transition requires
+OS owner authentication; a transition that core proves only tightens authority
+can be installed from the owner UI without an additional OS challenge.
 
 Policy version 1 is intentionally small. It contains one ordered `rules` list.
 Every rule must have an `effect` of `allow` or `deny` and may constrain
@@ -17,7 +20,9 @@ Documents are limited to 256 rules.
 The empty policy is the default and asks the owner about every transaction. A
 matcherless deny rule disables transaction signing. A matcherless allow rule is
 the danger-marked **Allow anything** preset. All three presets still go through
-the same diff, final state check, and OS-authenticated installation path.
+the same diff, current-state check, and atomic core installation path. Whether
+an OS challenge is required depends on the transition from the active policy:
+only a provable tightening can omit it.
 
 The guided editor is the primary interface. It presents rules in their actual
 order and supports adding, editing, removing, and moving them. Use exact or set

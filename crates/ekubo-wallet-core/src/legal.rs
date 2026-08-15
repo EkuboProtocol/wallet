@@ -141,7 +141,7 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 6 — Effective 2026-08-14
+Version 7 — Effective 2026-08-14
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
@@ -187,8 +187,12 @@ operator only, keep one endpoint in the Networks screen.
 
 The wallet does not treat a bundled or owner-configured RPC response as a
 security policy. RPC configuration can nevertheless affect balances and
-simulation results shown for review, so only owner-authorized core operations
-can add, edit, enable, disable, restore, or remove a network. Agents cannot
+simulation results shown for review, so core-enforced owner authorization is
+required to add, edit, enable, restore, or remove a network. Disabling the exact
+network profile currently shown in the native application is the fail-safe
+exception: core can commit that change without a fresh operating-system
+authentication challenge because disabling stops that network's RPC requests
+and signing. Enabling it again requires owner authentication. Agents cannot
 change these settings through the MCP interface.
 
 ## 4. Execution plans fetched by reference
@@ -272,9 +276,9 @@ agent naming this software and its version, which every copy of a given
 release shares.
 
 The check runs when you open or refresh the desktop's software-update controls
-and when an agent calls the `wallet_check_for_updates` tool. The release-listing
-answer used by the read-only MCP tool is cached in your wallet data directory
-for a day.
+and when an agent calls the `wallet_check_for_updates` tool. Each check asks the
+release endpoint directly; the wallet does not persist the release-listing
+response or version tag.
 Setting `EKUBO_WALLET_SKIP_UPDATE_CHECK=1` disables the check entirely, and
 nothing else about the software changes when you do.
 
@@ -320,7 +324,23 @@ determined by your agent stack, not by this software. THE DEVELOPER IS NOT
 RESPONSIBLE FOR ANY DATA DISCLOSED OR LEAKED THROUGH THE AGENT OR ASSOCIATED
 TOOLING.
 
-## 8. Local data
+## 8. Operating-system notifications
+
+Transaction lifecycle changes can raise an operating-system notification.
+Detailed previews are the default: the title describes the lifecycle state and
+the body names the wallet's local account label and configured network. A
+notification never contains the request identifier, exact calldata, or an
+approval or rejection action. When detailed previews are disabled, the account
+and network are replaced with an instruction to open Ekubo Wallet. The preview
+preference is stored in the encrypted local database and changing it requires
+owner authentication.
+
+Your operating system decides whether notifications appear on a lock screen,
+how long they remain in notification history, and which other local users or
+services can see them. The wallet does not send a separate copy to the
+developer.
+
+## 9. Local data
 
 Keys stay in the operating system credential store. Policies, transaction
 lifecycle records, token metadata, legal acceptance
@@ -332,11 +352,9 @@ configure, are stored in that encrypted database. A dapp session
 is not recorded: the pairing keys live only in memory and are gone when the
 application restarts, though the transactions and signatures it produced are kept
 like any others. Nothing in this section leaves your machine except as
-described in sections 2, 4, 5, 6, and 7. The release check in section 6 reads
-a cache in this directory and writes the version tag it learned; that file
-holds nothing about you and is never sent anywhere.
+described in sections 2, 4, 5, 6, and 7.
 
-## 9. Acknowledgment
+## 10. Acknowledgment
 
 Acknowledgment is recorded locally against the exact text of this document. A
 release that materially changes these privacy disclosures requires a fresh

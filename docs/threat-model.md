@@ -24,12 +24,22 @@ dependency or OS, and control of the wallet process are out of scope.
 
 ## Owner authorization
 
-Security-sensitive mutations terminate in core through narrow typed
+Mutations that widen signing authority, add or replace trusted inputs, reveal
+protected material, or reduce privacy terminate in core through narrow typed
 operations. A visible dialog is not authorization. Core requests human
 presence, issues a short-lived scope-bound capability, re-reads protected state
 after authentication, and commits atomically. Dapp approval binds the exact
 review and account. Update authorization binds publisher, version, platform,
 format, canonical URL, and verified digest.
+
+Three owner-UI operations are deliberate fail-safe reductions and do not ask
+for a fresh OS challenge: a policy transition that core proves only tightens
+the active policy, disabling the exact network profile that was displayed, and
+removing the exact trusted-token row that was displayed. Core re-reads or
+exact-matches current protected state and commits each reduction atomically.
+Agents cannot invoke them. Re-enabling a network, widening or ambiguously
+changing policy, and adding or replacing token metadata require owner
+authentication.
 
 ## Local MCP IPC
 
@@ -40,9 +50,13 @@ uses a current-user-only named-pipe DACL and rejects a foreign peer SID. Native
 package signatures establish distribution integrity and do not authorize IPC.
 
 Each bridge connection creates a fresh restricted MCP server and session UUID.
-Only `AgentApi` enters that server; owner authorization, raw storage, custody,
-exports, and owner-only mutations do not. Harness kind is informational
-activity attribution only. The local stack has no HTTP or OAuth surface.
+Only `AgentApi`, not `OwnerApi`, crosses the IPC boundary. It constructs a
+server with typed SQLCipher-backed stores and an OS credential-store signer so
+tools can persist requests and core can sign transactions that current policy
+allows automatically. No MCP path receives owner authorization, raw key
+export, native-review decisions, unrestricted storage, or owner-only mutation
+capabilities. Harness kind is informational activity attribution only. The
+local stack has no HTTP or OAuth surface.
 Managed configurations contain only the installed helper command with a fixed
 `--client` argument and, where that file format supports remote MCP, the
 independent hosted companion URL. Claude Desktop keeps the remote companion in
@@ -61,8 +75,10 @@ seven-day deadline; incoming extension requests cannot move it.
 RPC responses, simulations, fee data, receipts, and broadcasts are untrusted.
 Signing uses a server-authored review identity which changes with displayed
 content. Account replacement, digests, policy, simulation, nonce, and fee
-assumptions are revalidated at signing. Policy can reduce prompts but cannot
-grant custody, exports, settings mutation, or owner capabilities.
+assumptions are revalidated at signing. Policy can authorize matching
+transactions to use the OS-held key without a prompt; it cannot reveal raw key
+material or grant exports, settings mutation, review decisions, owner
+authorization, or other owner capabilities.
 
 ## Updates and release supply chain
 
@@ -82,10 +98,13 @@ local MCP IPC listener directly.
 ## Local platform and lifecycle
 
 The OS credential store protects the database key and account keys.
-Notifications default to privacy-preserving content. Explicit Quit disconnects
-WalletConnect, stops local MCP IPC, and installs only an already verified,
-exactly authorized update. Hiding or closing windows does not mutate protected
-state.
+Transaction notifications default to detailed previews: their titles disclose
+lifecycle state and their bodies name the local account and configured network.
+They contain no request identifier or approval action. The encrypted preview
+preference is security-sensitive, and changing it requires owner
+authentication. Explicit Quit disconnects WalletConnect, stops local MCP IPC,
+and installs only an already verified, exactly authorized update. Hiding or
+closing windows does not mutate protected state.
 
 SQLCipher authenticates pages at rest but does not provide freshness. A
 same-user process able to replace the database may roll it back to an earlier

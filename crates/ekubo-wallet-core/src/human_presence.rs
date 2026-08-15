@@ -119,15 +119,13 @@ pub async fn authorize_owner(
 
 /// What the owner is being asked to authorize at the platform prompt.
 ///
-/// Every variant is a moment the private key comes out of the credential
-/// store or leaves it for good — plus the ones that never touch the key but
-/// still decide where value goes with nobody watching. Replacing a wallet's
-/// policy is one: the policy decides what an agent may sign unattended, so
-/// rewriting it grants signing authority even though it reads no key
-/// material. Nothing else belongs here. Changing a network or importing a token list
-/// grants no signing authority and redirects no payment, and asking for a
-/// fingerprint before each one only teaches the owner to give it without
-/// reading. Those use explicit native confirmation without a biometric prompt.
+/// Every variant either uses private-key material or changes a protected input
+/// that can widen unattended authority, redirect network trust, change trusted
+/// display metadata, reduce privacy, or install update authority. A policy
+/// transition proven to be tightening, disabling an exact reviewed network,
+/// and removing an exact reviewed token row are the three fail-safe reductions
+/// that deliberately create no request here; their typed core operations still
+/// exact-match current state and commit atomically.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceRequest {
     SignTransaction { wallet: String },

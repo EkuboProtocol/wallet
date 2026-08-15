@@ -558,9 +558,12 @@ impl OwnerActivityRecord {
 
 /// The restricted capability cloned into authenticated MCP sessions.
 ///
-/// It intentionally exposes only server construction. Account custody,
-/// approvals, policy installation, exports, and client registration are not
-/// methods on this type and therefore cannot be reached from an MCP handler.
+/// It intentionally exposes only server construction. The constructed server
+/// receives narrow typed stores and a key-store capability so it can persist
+/// agent requests and sign transactions that the active policy permits
+/// automatically. It receives no `OwnerApi`, owner authorization, raw-key
+/// export, native-review decision, policy installation, or client-registration
+/// capability.
 #[derive(Clone)]
 pub struct AgentApi {
     config: ConfigStore,

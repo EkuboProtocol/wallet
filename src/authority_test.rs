@@ -93,7 +93,7 @@ fn export_lease_counts_down_to_zero_and_stays_there() {
 }
 
 #[tokio::test]
-async fn notification_preview_preference_round_trips() {
+async fn notification_previews_default_to_detailed_and_private_mode_round_trips() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("wallet.db");
     let desktop = DesktopStore::open(&database, &DatabaseKey::new([13; 32])).unwrap();
@@ -102,6 +102,8 @@ async fn notification_preview_preference_round_trips() {
         desktop: Arc::new(Mutex::new(desktop)),
         events: EventBus::default(),
     };
+    // The public privacy disclosure and threat model name this default: a
+    // fresh store exposes the local account and network in lifecycle banners.
     assert!(owner.detailed_notification_previews().unwrap());
     owner
         .set_detailed_notification_previews(false)

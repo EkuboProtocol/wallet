@@ -15,11 +15,20 @@ peer SID. Native package signatures protect helper distribution integrity, not
 IPC access. Same-user local code execution is the authorization boundary.
 
 Every bridge connection receives a new MCP session UUID and a freshly
-restricted `WalletMcpServer`. The transport receives `AgentApi` only: it has no
-owner authorization, database, Keychain, custody, export, or settings-mutation
-capability. The bridge-provided harness kind is stored only as untrusted
-activity attribution such as “via Claude Desktop”; it never authorizes an
-operation.
+restricted `WalletMcpServer`. The IPC layer receives `AgentApi`, not `OwnerApi`.
+`AgentApi` is a server factory; the server it constructs intentionally opens
+typed SQLCipher-backed stores and an OS credential-store signer. Those
+capabilities let MCP tools read agent-visible wallet state, persist proposals
+and transaction lifecycle records, and ask core to sign a transaction when the
+active policy permits automatic execution.
+
+The server receives no owner-authorization capability and no operation that
+exports raw key material, decides a native review, installs a signing policy,
+accepts legal terms, or mutates owner-only settings. Its typed stores do not
+expose an unrestricted database handle to MCP handlers, and the signer is used
+only through core's guarded transaction paths. The bridge-provided harness
+kind is stored only as untrusted activity attribution such as “via Claude
+Desktop”; it never authorizes an operation.
 
 Before its first wallet connection the bridge advertises an empty tool list.
 After connection it replays the harness initialization parameters, refreshes

@@ -1896,6 +1896,15 @@ fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
     // opposite — that MCP tools add tokens after verifying them on chain.
     assert!(SECURITY_MODEL.contains("never read from the contract"));
     assert!(!SECURITY_MODEL.contains("on-chain Multicall3 verification"));
+    // Restricted is an operation boundary, not a claim that the constructed
+    // server has no persistence or signer. It needs both to keep lifecycle
+    // state and execute transactions that the current policy allows without a
+    // native review.
+    assert!(SECURITY_MODEL.contains("typed SQLCipher-backed stores"));
+    assert!(SECURITY_MODEL.contains("OS credential-store signer"));
+    assert!(SECURITY_MODEL.contains("active policy permits automatic execution"));
+    assert!(SECURITY_MODEL.contains("no owner-authorization capability"));
+    assert!(!SECURITY_MODEL.contains("no owner authorization, database, Keychain, custody"));
 }
 
 #[test]
