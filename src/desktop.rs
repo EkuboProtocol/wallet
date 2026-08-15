@@ -1715,6 +1715,7 @@ pub struct WalletWindow {
     activity_detail_record: Cell<Option<uuid::Uuid>>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
+    policy_editor_expanded: bool,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
@@ -4130,6 +4131,7 @@ impl WalletWindow {
             activity_detail_record: Cell::new(None),
             policy_json_input: None,
             policy_editor: None,
+            policy_editor_expanded: false,
             policy_installing: false,
             policy_action_error: None,
             token_proposal_busy: false,
@@ -4478,6 +4480,7 @@ impl WalletWindow {
         self.network_editor_original = None;
         self.policy_json_input = None;
         self.policy_editor = None;
+        self.policy_editor_expanded = false;
         self.policy_installing = false;
         self.token_proposal_busy = false;
         self.network_proposal_busy = false;
@@ -5710,6 +5713,7 @@ impl WalletWindow {
                     == Some(proposal)
                 {
                     self.policy_editor = None;
+                    self.policy_editor_expanded = false;
                 }
                 None
             }
@@ -6034,6 +6038,11 @@ impl WalletWindow {
     }
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.policy_editor_expanded {
+            self.policy_editor_expanded = false;
+            cx.notify();
+            return;
+        }
         if self.legal_review.is_some() && !self.legal_gate {
             self.legal_review = None;
             cx.notify();
@@ -7878,7 +7887,7 @@ impl WalletWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.legal_gate || self.network_editor_open {
+        if self.legal_gate || self.network_editor_open || self.policy_editor_expanded {
             return;
         }
         self.command_palette = !self.command_palette;
@@ -7899,6 +7908,7 @@ impl WalletWindow {
             // it still open would strand a modal about a row nobody can see
             // over whichever page was asked for.
             self.selected_record = None;
+            self.policy_editor_expanded = false;
         }
         reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
         self.route = route;
@@ -10303,11 +10313,27 @@ impl WalletWindow {
                     .flex_col()
                     .gap_1()
                     .child(
-                        div()
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_2()
                             .flex_shrink_0()
                             .text_sm()
                             .font_medium()
-                            .child(selectable_label("Policy JSON")),
+                            .child(selectable_label("Policy JSON"))
+                            .child(
+                                app_button("expand-policy-json-editor")
+                                    .icon(IconName::Maximize)
+                                    .label("Expand editor")
+                                    .tooltip("Use the full window to edit Policy JSON")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.policy_editor_expanded = true;
+                                        if let Some(input) = view.policy_json_input.as_ref() {
+                                            input.update(cx, |input, cx| input.focus(window, cx));
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
                     )
                     // The input's `h_full` is relative to this remaining-space
                     // wrapper, not to the column that also contains its label.
@@ -10426,7 +10452,9 @@ impl WalletWindow {
                             ),
                     ),
             );
-        content = content.child(editor_panel);
+        if !self.policy_editor_expanded {
+            content = content.child(editor_panel);
+        }
 
         match editor.validation.as_ref() {
             Some(Ok(review)) if reviewed_exact_document => {
@@ -13078,6 +13106,135 @@ impl WalletWindow {
             .into_any_element()
     }
 
+    fn render_policy_editor_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.policy_editor_expanded {
+            return None;
+        }
+        let (editor, input) = (
+            self.policy_editor.as_ref()?,
+            self.policy_json_input.as_ref()?,
+        );
+        let validation_error = editor
+            .validation
+            .as_ref()
+            .and_then(|validation| validation.as_ref().err().cloned());
+        let unrestricted = serde_json::from_str(input.read(cx).value().as_ref())
+            .ok()
+            .and_then(|value| WalletPolicy::parse(value).ok())
+            .is_some_and(|policy| policy == WalletPolicy::allow_anything());
+
+        Some(
+            div()
+                .id("policy-editor-full-window")
+                .debug_selector(|| "policy-editor-full-window".to_owned())
+                .absolute()
+                .inset_0()
+                .occlude()
+                .p_4()
+                .bg(cx.theme().background)
+                .child(
+                    div()
+                        .size_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .p_4()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .flex_shrink_0()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .font_semibold()
+                                                .child(selectable_label("Policy JSON")),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(selectable_label(format!(
+                                                    "Account · {}",
+                                                    editor.wallet_id
+                                                ))),
+                                        ),
+                                )
+                                .child(
+                                    app_button("collapse-policy-json-editor")
+                                        .icon(IconName::Minimize)
+                                        .label("Collapse editor")
+                                        .tooltip("Return to the policy review workflow (Esc)")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.policy_editor_expanded = false;
+                                            if let Some(input) = view.policy_json_input.as_ref() {
+                                                input.update(cx, |input, cx| {
+                                                    input.focus(window, cx);
+                                                });
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .when_some(validation_error, |surface, error| {
+                            surface.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(selectable_label(error)),
+                            )
+                        })
+                        .when(unrestricted, |surface| {
+                            surface.child(
+                                div()
+                                    .id("policy-full-window-unrestricted-warning")
+                                    .role(Role::Alert)
+                                    .flex_shrink_0()
+                                    .p_3()
+                                    .rounded(cx.theme().radius_lg)
+                                    .border_1()
+                                    .border_color(cx.theme().danger)
+                                    .text_color(cx.theme().danger)
+                                    .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
+                            )
+                        })
+                        .child(
+                            div()
+                                .debug_selector(|| {
+                                    "policy-full-window-json-control".to_owned()
+                                })
+                                .w_full()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex_1()
+                                .child(
+                                    app_input(input, cx)
+                                        .aria_label("Policy JSON")
+                                        .font_family(MONO_FONT_FAMILY)
+                                        .size_full()
+                                        .min_w_0(),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Page-level actions belong in the fixed header, not in the scrolling
     /// body: a refresh control that scrolls away is a control you cannot find
     /// while looking at what you wanted to refresh.
@@ -13466,6 +13623,7 @@ impl Render for WalletWindow {
         }
         div()
             .key_context("Wallet")
+            .debug_selector(|| "wallet-window-root".to_owned())
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(|view, _: &CloseOverlay, _, cx| {
                 view.close_overlay(cx);
@@ -13477,6 +13635,9 @@ impl Render for WalletWindow {
             .text_color(cx.theme().foreground)
             .child(self.render_sidebar(cx))
             .child(self.render_content(cx))
+            .when_some(self.render_policy_editor_overlay(cx), |view, overlay| {
+                view.child(overlay)
+            })
             .when(self.command_palette, |view| {
                 view.child(self.render_palette(cx))
             })

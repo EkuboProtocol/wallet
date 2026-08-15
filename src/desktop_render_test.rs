@@ -733,6 +733,81 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
     release(cx, &view);
 }
 
+#[gpui::test]
+fn policy_json_editor_can_fill_the_window(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, _| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            current_policy: Some(WalletPolicy::require_approval_for_everything()),
+            proposal: None,
+            validation: None,
+        });
+        wallet.policy_editor_expanded = true;
+    });
+
+    let expanded = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "wallet-window-root",
+            "policy-editor-full-window",
+            "policy-full-window-json-control",
+            "policy-json-editor",
+        ],
+    );
+    let root = expanded[0].expect("the wallet root must be laid out");
+    let overlay = expanded[1].expect("the expanded policy editor must be laid out");
+    let control = expanded[2].expect("the expanded JSON control must be laid out");
+    assert_eq!(
+        overlay, root,
+        "the policy editor must cover the full window"
+    );
+    assert!(
+        control.size.width > PAGE_CONTENT_MAX_WIDTH,
+        "the expanded JSON control must grow beyond the normal page width: {control:?}"
+    );
+    assert!(
+        control.size.height > px(700.0),
+        "the expanded JSON control must use most of the window height: {control:?}"
+    );
+    assert!(
+        expanded[3].is_none(),
+        "the normal editor must not render the same input behind the overlay"
+    );
+
+    cx.update_entity(&view, WalletWindow::close_overlay);
+    let collapsed = measure(
+        cx,
+        window,
+        &view,
+        &["policy-editor-full-window", "policy-json-editor"],
+    );
+    assert!(collapsed[0].is_none());
+    assert!(
+        collapsed[1].is_some(),
+        "Escape must return the input to the normal policy workflow"
+    );
+
+    release(cx, &view);
+}
+
 /// A review document with the shape a real one has: a summary, effects, and
 /// exact bytes to disclose.
 fn review_document() -> ReviewDocument {
