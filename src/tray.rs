@@ -1,4 +1,5 @@
 use crate::desktop::Route;
+#[cfg(any(target_os = "macos", windows))]
 use anyhow::{Context, Result};
 #[cfg(any(target_os = "macos", windows))]
 use tray_icon::{
@@ -6,11 +7,17 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
+#[cfg(any(test, target_os = "macos", windows))]
 const OPEN_ID: &str = "ekubo.open";
+#[cfg(any(test, target_os = "macos", windows))]
 const REVIEWS_ID: &str = "ekubo.reviews";
+#[cfg(any(test, target_os = "macos", windows))]
 const CONNECT_ID: &str = "ekubo.connect";
+#[cfg(any(test, target_os = "macos", windows))]
 const AGENTS_ID: &str = "ekubo.agents";
+#[cfg(any(test, target_os = "macos", windows))]
 const SETTINGS_ID: &str = "ekubo.settings";
+#[cfg(any(test, target_os = "macos", windows))]
 const QUIT_ID: &str = "ekubo.quit";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,7 +205,7 @@ fn set_application_badge_count(count: usize) {
         .setBadgeLabel(label.as_deref());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 fn set_application_badge_count(_count: usize) {}
 
 /// "3 requests waiting for you", and the flat truth when there are none. The
@@ -258,6 +265,7 @@ fn tray_tooltip(snapshot: &TraySnapshot) -> String {
     }
 }
 
+#[cfg(any(test, target_os = "macos", windows))]
 fn command_for_id(id: &str) -> Option<TrayCommand> {
     match id {
         OPEN_ID => Some(TrayCommand::OpenWallet),

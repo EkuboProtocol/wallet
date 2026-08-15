@@ -11,8 +11,11 @@
     clippy::used_underscore_binding
 )]
 
-use super::*;
-use anyhow::{Result, anyhow};
+use super::{
+    TrayCommand, TrayService, TraySnapshot, agent_menu_text, review_menu_text, tray_tooltip,
+};
+use crate::desktop::Route;
+use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use std::{
     borrow::Cow,
