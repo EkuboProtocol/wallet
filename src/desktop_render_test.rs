@@ -751,17 +751,7 @@ fn review_document() -> ReviewDocument {
 }
 
 fn active_review(completion: ActiveReviewCompletion) -> ActiveReview {
-    ActiveReview {
-        state: ReviewState::new(review_document()),
-        simulation: None,
-        completion: Some(completion),
-        awaiting_refresh: false,
-        scroll_handle: ScrollHandle::new(),
-        scroll_check_scheduled: false,
-        scroll_layout_ready: false,
-        scroll_last_max: None,
-        scroll_stable_samples: 0,
-    }
+    ActiveReview::new(review_document(), None, Some(completion))
 }
 
 #[gpui::test]
@@ -793,6 +783,80 @@ fn every_review_kind_lays_out_its_decision_row(cx: &mut gpui::TestAppContext) {
         });
         draw(cx, window, &view);
     }
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn a_4096_call_security_review_lays_out_as_a_virtual_list(cx: &mut gpui::TestAppContext) {
+    const CALLS: usize = 4_096;
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let mut request = ApprovalRequest::new(
+        ApprovalKind::Transaction,
+        "Large transaction",
+        "Every call remains available without laying out the whole document.",
+    );
+    for index in 0..CALLS {
+        request = request
+            .section_kind(ApprovalSectionKind::Action, format!("Call {index}"))
+            .fact("Target", format!("0x{index:040x}"));
+    }
+    let document = ReviewDocument::from_request(request, vec!["{}".to_owned()]);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.active_review = Some(ActiveReview::new(
+            document,
+            None,
+            Some(ActiveReviewCompletion::Message {
+                request_id: uuid::Uuid::new_v4(),
+                digest: "0xabc".into(),
+            }),
+        ));
+    });
+
+    draw(cx, window, &view);
+    let scroll_handle = cx.read_entity(&view, |wallet, _| {
+        let review = wallet.active_review.as_ref().expect("active review");
+        assert_eq!(review.scroll_handle.item_count(), CALLS + 3);
+        assert_eq!(
+            review
+                .detail_rows
+                .iter()
+                .filter(|row| matches!(row, SecurityReviewDetailRow::Section(_)))
+                .count(),
+            CALLS
+        );
+        assert!(!review.end_rendered.load(Ordering::Acquire));
+        assert!(!review.state.approve_enabled());
+        review.scroll_handle.clone()
+    });
+
+    scroll_handle.scroll_to_end();
+    draw(cx, window, &view);
+    draw(cx, window, &view);
+    let generation = cx.read_entity(&view, |wallet, _| {
+        wallet
+            .active_review
+            .as_ref()
+            .expect("active review")
+            .state
+            .generation()
+    });
+    for _ in 0..3 {
+        cx.update_entity(&view, |wallet, cx| {
+            wallet
+                .active_review
+                .as_mut()
+                .expect("active review")
+                .scroll_layout_ready = true;
+            wallet.update_review_scroll_state(generation, cx);
+        });
+    }
+    cx.read_entity(&view, |wallet, _| {
+        let review = wallet.active_review.as_ref().expect("active review");
+        assert!(review.end_rendered.load(Ordering::Acquire));
+        assert!(review.state.approve_enabled());
+    });
     release(cx, &view);
 }
 

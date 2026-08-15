@@ -1,5 +1,8 @@
 use crate::approval::{ReviewDecision, ReviewDocument};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 static NEXT_REVIEW_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -18,7 +21,7 @@ fn next_review_generation() -> u64 {
 /// never approve its replacement.
 #[derive(Clone, Debug)]
 pub struct ReviewState {
-    document: ReviewDocument,
+    document: Arc<ReviewDocument>,
     generation: u64,
     selected: ReviewDecision,
     viewed_to_end: bool,
@@ -29,7 +32,7 @@ impl ReviewState {
     #[must_use]
     pub fn new(document: ReviewDocument) -> Self {
         Self {
-            document,
+            document: Arc::new(document),
             generation: next_review_generation(),
             selected: ReviewDecision::Reject,
             viewed_to_end: false,
@@ -58,8 +61,13 @@ impl ReviewState {
     }
 
     #[must_use]
-    pub const fn document(&self) -> &ReviewDocument {
-        &self.document
+    pub fn document(&self) -> &ReviewDocument {
+        self.document.as_ref()
+    }
+
+    #[must_use]
+    pub fn document_arc(&self) -> Arc<ReviewDocument> {
+        self.document.clone()
     }
 
     pub fn mark_viewed_to_end(&mut self, generation: u64) -> bool {
@@ -90,7 +98,7 @@ impl ReviewState {
 
     pub fn refresh(&mut self, document: ReviewDocument) {
         let identity_changed = self.document.identity != document.identity;
-        self.document = document;
+        self.document = Arc::new(document);
         self.generation = next_review_generation();
         self.selected = ReviewDecision::Reject;
         self.viewed_to_end = false;

@@ -39,12 +39,12 @@ use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
     Anchor, AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity,
-    FocusHandle, HitboxBehavior, Interactivity, KeyBinding, MouseButton, MouseDownEvent,
-    MouseMoveEvent, PathBuilder, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
-    WindowOptions, actions, anchored, canvas, deferred, div, fill, img, point, prelude::*, px,
-    size, uniform_list,
+    FocusHandle, HitboxBehavior, Interactivity, KeyBinding, ListAlignment,
+    ListState as VariableListState, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
+    QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, anchored, canvas,
+    deferred, div, fill, img, list as variable_list, point, prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -143,6 +143,7 @@ fn sidebar_tooltip_position(
 enum OverflowScrollHandle {
     Continuous(ScrollHandle),
     Uniform(UniformListScrollHandle),
+    Variable(VariableListState),
 }
 
 impl ScrollbarHandle for OverflowScrollHandle {
@@ -150,6 +151,7 @@ impl ScrollbarHandle for OverflowScrollHandle {
         match self {
             Self::Continuous(handle) => handle.offset(),
             Self::Uniform(handle) => handle.offset(),
+            Self::Variable(handle) => handle.scroll_px_offset_for_scrollbar(),
         }
     }
 
@@ -157,6 +159,7 @@ impl ScrollbarHandle for OverflowScrollHandle {
         match self {
             Self::Continuous(handle) => handle.set_offset(offset),
             Self::Uniform(handle) => handle.set_offset(offset),
+            Self::Variable(handle) => handle.set_offset_from_scrollbar(offset),
         }
     }
 
@@ -164,6 +167,13 @@ impl ScrollbarHandle for OverflowScrollHandle {
         match self {
             Self::Continuous(handle) => handle.content_size(),
             Self::Uniform(handle) => handle.content_size(),
+            Self::Variable(handle) => {
+                let viewport = handle.viewport_bounds().size;
+                size(
+                    viewport.width,
+                    viewport.height + handle.max_offset_for_scrollbar().y,
+                )
+            }
         }
     }
 }
@@ -177,6 +187,12 @@ impl From<ScrollHandle> for OverflowScrollHandle {
 impl From<UniformListScrollHandle> for OverflowScrollHandle {
     fn from(handle: UniformListScrollHandle) -> Self {
         Self::Uniform(handle)
+    }
+}
+
+impl From<VariableListState> for OverflowScrollHandle {
+    fn from(handle: VariableListState) -> Self {
+        Self::Variable(handle)
     }
 }
 
@@ -1956,14 +1972,123 @@ struct PolicyEditor {
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveReview {
     state: ReviewState,
-    simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
+    simulation: Option<Arc<ekubo_wallet_core::simulation::SimulationResult>>,
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
-    scroll_handle: ScrollHandle,
+    detail_rows: Arc<[SecurityReviewDetailRow]>,
+    scroll_handle: VariableListState,
+    end_rendered: Arc<AtomicBool>,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
     scroll_last_max: Option<gpui::Pixels>,
     scroll_stable_samples: u8,
+}
+
+impl ActiveReview {
+    fn new(
+        document: ReviewDocument,
+        simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
+        completion: Option<ActiveReviewCompletion>,
+    ) -> Self {
+        let state = ReviewState::new(document);
+        let mut review = Self {
+            state,
+            simulation: simulation.map(Arc::new),
+            completion,
+            awaiting_refresh: false,
+            detail_rows: Arc::from([]),
+            scroll_handle: VariableListState::new(
+                0,
+                ListAlignment::Top,
+                ACTIVITY_DETAIL_LIST_OVERDRAW,
+            ),
+            end_rendered: Arc::new(AtomicBool::new(false)),
+            scroll_check_scheduled: false,
+            scroll_layout_ready: false,
+            scroll_last_max: None,
+            scroll_stable_samples: 0,
+        };
+        review.rebuild_detail_list();
+        review
+    }
+
+    fn rebuild_detail_list(&mut self) {
+        self.detail_rows = Arc::from(security_review_detail_rows(
+            self.state.document(),
+            matches!(
+                &self.completion,
+                Some(ActiveReviewCompletion::WalletConnect { .. })
+            ),
+        ));
+        self.scroll_handle = VariableListState::new(
+            self.detail_rows.len(),
+            ListAlignment::Top,
+            ACTIVITY_DETAIL_LIST_OVERDRAW,
+        )
+        .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+        self.end_rendered = Arc::new(AtomicBool::new(false));
+        self.scroll_check_scheduled = false;
+        self.scroll_layout_ready = false;
+        self.scroll_last_max = None;
+        self.scroll_stable_samples = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecurityReviewDetailRow {
+    Prelude,
+    Section(usize),
+    WarningsHeading,
+    Warning(usize),
+    WalletConnectAccounts,
+    RequestDetails,
+    ExactDataHeading,
+    ExactPayload(usize),
+}
+
+fn security_review_detail_rows(
+    document: &ReviewDocument,
+    wallet_connect_accounts: bool,
+) -> Vec<SecurityReviewDetailRow> {
+    let mut effects = Vec::new();
+    let mut remaining = Vec::new();
+    for (index, section) in document.request.sections.iter().enumerate() {
+        if section.kind == ApprovalSectionKind::Effects {
+            effects.push(index);
+        } else {
+            remaining.push(index);
+        }
+    }
+    remaining.sort_by_key(|index| review_section_priority(document.request.sections[*index].kind));
+
+    let mut rows = Vec::with_capacity(
+        1 + effects.len()
+            + remaining.len()
+            + document.request.warnings.len()
+            + usize::from(!document.request.warnings.is_empty())
+            + usize::from(wallet_connect_accounts)
+            + usize::from(!document.request.facts.is_empty())
+            + document.exact_payloads.len()
+            + usize::from(!document.exact_payloads.is_empty()),
+    );
+    rows.push(SecurityReviewDetailRow::Prelude);
+    rows.extend(effects.into_iter().map(SecurityReviewDetailRow::Section));
+    if !document.request.warnings.is_empty() {
+        rows.push(SecurityReviewDetailRow::WarningsHeading);
+        rows.extend((0..document.request.warnings.len()).map(SecurityReviewDetailRow::Warning));
+    }
+    if wallet_connect_accounts {
+        rows.push(SecurityReviewDetailRow::WalletConnectAccounts);
+    }
+    rows.extend(remaining.into_iter().map(SecurityReviewDetailRow::Section));
+    if !document.request.facts.is_empty() {
+        rows.push(SecurityReviewDetailRow::RequestDetails);
+    }
+    if !document.exact_payloads.is_empty() {
+        rows.push(SecurityReviewDetailRow::ExactDataHeading);
+        rows.extend((0..document.exact_payloads.len()).map(SecurityReviewDetailRow::ExactPayload));
+    }
+    rows
 }
 
 enum ActiveReviewCompletion {
@@ -2191,11 +2316,86 @@ impl ActivityFeedback {
     }
 }
 
-#[derive(Clone)]
 enum ActivityInspectionState {
     Loading,
-    Ready(Box<OwnerTransactionInspection>),
+    Ready(Rc<ReadyActivityInspection>),
     Failed(SharedString),
+}
+
+struct ReadyActivityInspection {
+    inspection: OwnerTransactionInspection,
+    detail_rows: Arc<[TransactionActivityDetailRow]>,
+    detail_list: VariableListState,
+}
+
+impl ReadyActivityInspection {
+    fn new(inspection: OwnerTransactionInspection) -> Self {
+        let detail_rows = Arc::<[TransactionActivityDetailRow]>::from(
+            transaction_activity_detail_rows(&inspection.document),
+        );
+        let detail_list = VariableListState::new(
+            detail_rows.len(),
+            ListAlignment::Top,
+            ACTIVITY_DETAIL_LIST_OVERDRAW,
+        )
+        // Action cards are not uniform, but this gives the unmeasured tail a
+        // useful scrollbar estimate without eagerly laying out thousands of
+        // calls. Each visible card replaces its hint with its exact height.
+        .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+        Self {
+            inspection,
+            detail_rows,
+            detail_list,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransactionActivityDetailRow {
+    Prelude,
+    Section(usize),
+    WarningsHeading,
+    Warning(usize),
+    RecordKeeping,
+    ExactPayload,
+}
+
+const ACTIVITY_DETAIL_ITEM_HEIGHT_HINT: gpui::Pixels = px(180.0);
+const ACTIVITY_DETAIL_LIST_OVERDRAW: gpui::Pixels = px(480.0);
+
+fn transaction_activity_detail_rows(
+    document: &ReviewDocument,
+) -> Vec<TransactionActivityDetailRow> {
+    let mut section_indices = (0..document.request.sections.len()).collect::<Vec<_>>();
+    section_indices
+        .sort_by_key(|index| review_section_priority(document.request.sections[*index].kind));
+
+    let mut rows = Vec::with_capacity(
+        1 + section_indices.len()
+            + document.request.warnings.len()
+            + usize::from(!document.request.warnings.is_empty())
+            + usize::from(!document.request.facts.is_empty())
+            + usize::from(!document.exact_payloads.is_empty()),
+    );
+    rows.push(TransactionActivityDetailRow::Prelude);
+    rows.extend(
+        section_indices
+            .into_iter()
+            .map(TransactionActivityDetailRow::Section),
+    );
+    if !document.request.warnings.is_empty() {
+        rows.push(TransactionActivityDetailRow::WarningsHeading);
+        rows.extend(
+            (0..document.request.warnings.len()).map(TransactionActivityDetailRow::Warning),
+        );
+    }
+    if !document.request.facts.is_empty() {
+        rows.push(TransactionActivityDetailRow::RecordKeeping);
+    }
+    if !document.exact_payloads.is_empty() {
+        rows.push(TransactionActivityDetailRow::ExactPayload);
+    }
+    rows
 }
 
 fn activity_record_is_awaiting_approval(record: &OwnerActivityRecord) -> bool {
@@ -3505,6 +3705,7 @@ fn review_section_priority(kind: ApprovalSectionKind) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn review_sections_for_display(document: &ReviewDocument) -> Vec<&ApprovalSection> {
     let mut sections = document.request.sections.iter().collect::<Vec<_>>();
     sections.sort_by_key(|section| review_section_priority(section.kind));
@@ -5197,21 +5398,15 @@ impl WalletWindow {
 
     fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
         let document = prompt.choices[0].document.clone();
-        self.active_review = Some(ActiveReview {
-            state: ReviewState::new(document),
-            simulation: None,
-            completion: Some(ActiveReviewCompletion::WalletConnect {
+        self.active_review = Some(ActiveReview::new(
+            document,
+            None,
+            Some(ActiveReviewCompletion::WalletConnect {
                 choices: prompt.choices,
                 selected_account: 0,
                 response: prompt.response,
             }),
-            awaiting_refresh: false,
-            scroll_handle: ScrollHandle::new(),
-            scroll_check_scheduled: false,
-            scroll_layout_ready: false,
-            scroll_last_max: None,
-            scroll_stable_samples: 0,
-        });
+        ));
     }
 
     fn activate_next_queued_review(&mut self) {
@@ -5297,11 +5492,7 @@ impl WalletWindow {
         };
         *selected_account = index;
         active.state = ReviewState::new(choice.document.clone());
-        active.scroll_handle = ScrollHandle::new();
-        active.scroll_check_scheduled = false;
-        active.scroll_layout_ready = false;
-        active.scroll_last_max = None;
-        active.scroll_stable_samples = 0;
+        active.rebuild_detail_list();
         cx.notify();
     }
 
@@ -5914,19 +6105,13 @@ impl WalletWindow {
         match self.owner.account_removal_document(&wallet_id) {
             Ok(review) => {
                 self.account_action_errors.remove(&wallet_id);
-                self.active_review = Some(ActiveReview {
-                    state: ReviewState::new(review.document),
-                    simulation: None,
-                    completion: Some(ActiveReviewCompletion::AccountRemoval {
+                self.active_review = Some(ActiveReview::new(
+                    review.document,
+                    None,
+                    Some(ActiveReviewCompletion::AccountRemoval {
                         wallet: review.wallet,
                     }),
-                    awaiting_refresh: false,
-                    scroll_handle: ScrollHandle::new(),
-                    scroll_check_scheduled: false,
-                    scroll_layout_ready: false,
-                    scroll_last_max: None,
-                    scroll_stable_samples: 0,
-                });
+                ));
             }
             Err(error) => {
                 self.account_action_errors.insert(
@@ -7007,7 +7192,9 @@ impl WalletWindow {
                 view.activity_inspections.insert(
                     request_id,
                     match result {
-                        Ok(inspection) => ActivityInspectionState::Ready(Box::new(inspection)),
+                        Ok(inspection) => ActivityInspectionState::Ready(Rc::new(
+                            ReadyActivityInspection::new(inspection),
+                        )),
                         Err(error) => ActivityInspectionState::Failed(
                             format!("Could not inspect transaction: {error:#}").into(),
                         ),
@@ -7414,14 +7601,10 @@ impl WalletWindow {
             && active.completion.is_none()
         {
             active.state.refresh(prompt.document);
-            active.scroll_handle = ScrollHandle::new();
-            active.scroll_check_scheduled = false;
-            active.scroll_layout_ready = false;
-            active.scroll_last_max = None;
-            active.scroll_stable_samples = 0;
-            active.simulation = Some(prompt.simulation);
+            active.simulation = Some(Arc::new(prompt.simulation));
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
             active.awaiting_refresh = false;
+            active.rebuild_detail_list();
             return;
         }
         if !self.review_document_is_visible(&prompt.document) {
@@ -7444,17 +7627,11 @@ impl WalletWindow {
 
     fn activate_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
         self.review_flow = ReviewFlowState::Busy;
-        self.active_review = Some(ActiveReview {
-            state: ReviewState::new(prompt.document),
-            simulation: Some(prompt.simulation),
-            completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
-            awaiting_refresh: false,
-            scroll_handle: ScrollHandle::new(),
-            scroll_check_scheduled: false,
-            scroll_layout_ready: false,
-            scroll_last_max: None,
-            scroll_stable_samples: 0,
-        });
+        self.active_review = Some(ActiveReview::new(
+            prompt.document,
+            Some(prompt.simulation),
+            Some(ActiveReviewCompletion::Transaction(prompt.response)),
+        ));
     }
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
@@ -7466,17 +7643,11 @@ impl WalletWindow {
         match self.owner.message_review_document(request_id) {
             Ok(document) => {
                 let digest = document.request.digest.clone().unwrap_or_default();
-                self.active_review = Some(ActiveReview {
-                    state: ReviewState::new(document),
-                    simulation: None,
-                    completion: Some(ActiveReviewCompletion::Message { request_id, digest }),
-                    awaiting_refresh: false,
-                    scroll_handle: ScrollHandle::new(),
-                    scroll_check_scheduled: false,
-                    scroll_layout_ready: false,
-                    scroll_last_max: None,
-                    scroll_stable_samples: 0,
-                });
+                self.active_review = Some(ActiveReview::new(
+                    document,
+                    None,
+                    Some(ActiveReviewCompletion::Message { request_id, digest }),
+                ));
                 self.clear_route_error(Route::Activity);
             }
             Err(error) => {
@@ -7498,17 +7669,11 @@ impl WalletWindow {
         match self.owner.typed_data_review_document(request_id) {
             Ok(document) => {
                 let digest = document.request.digest.clone().unwrap_or_default();
-                self.active_review = Some(ActiveReview {
-                    state: ReviewState::new(document),
-                    simulation: None,
-                    completion: Some(ActiveReviewCompletion::TypedData { request_id, digest }),
-                    awaiting_refresh: false,
-                    scroll_handle: ScrollHandle::new(),
-                    scroll_check_scheduled: false,
-                    scroll_layout_ready: false,
-                    scroll_last_max: None,
-                    scroll_stable_samples: 0,
-                });
+                self.active_review = Some(ActiveReview::new(
+                    document,
+                    None,
+                    Some(ActiveReviewCompletion::TypedData { request_id, digest }),
+                ));
                 self.clear_route_error(Route::Activity);
             }
             Err(error) => {
@@ -7571,7 +7736,7 @@ impl WalletWindow {
         if review.state.generation() != generation {
             return;
         }
-        let max_offset = review.scroll_handle.max_offset().y;
+        let max_offset = review.scroll_handle.max_offset_for_scrollbar().y;
         if review.scroll_last_max == Some(max_offset) {
             review.scroll_stable_samples = review.scroll_stable_samples.saturating_add(1);
         } else {
@@ -7584,7 +7749,11 @@ impl WalletWindow {
         }
         if review.scroll_layout_ready
             && !review.state.approve_enabled()
-            && scroll_reached_end(review.scroll_handle.offset().y, max_offset)
+            && review.end_rendered.load(Ordering::Acquire)
+            && scroll_reached_end(
+                review.scroll_handle.scroll_px_offset_for_scrollbar().y,
+                max_offset,
+            )
             && review.state.mark_viewed_to_end(generation)
         {
             cx.notify();
@@ -8509,66 +8678,254 @@ impl WalletWindow {
         content
     }
 
+    fn render_activity_detail_header(
+        request_id: uuid::Uuid,
+        title: &'static str,
+        status: &'static str,
+        tone: StatusTone,
+        explanation: &'static str,
+        meta: &str,
+        cx: &App,
+    ) -> gpui::Div {
+        // Title, current state, and the one sentence that explains the state.
+        // The request UUID is not here: it names the row to the wallet, not to
+        // the reader, and it used to be the second line of every detail pane.
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            // No Close button in here. This header scrolls with the rest of
+            // the record, and a settled transaction's detail runs taller than
+            // the window — so the only way out sat above the top of the
+            // viewport for as long as anybody was reading. It lives in the
+            // modal's fixed footer instead.
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        selectable_text(
+                            SharedString::from(format!("activity-heading-{request_id}")),
+                            title,
+                        )
+                        .text_lg()
+                        .font_semibold(),
+                    )
+                    .child(status_pill(status, tone, cx)),
+            )
+            .child(
+                selectable_text(
+                    SharedString::from(format!("activity-heading-explanation-{request_id}")),
+                    explanation,
+                )
+                .whitespace_normal()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                selectable_text(
+                    SharedString::from(format!("activity-heading-meta-{request_id}")),
+                    meta,
+                )
+                .whitespace_normal()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+            )
+    }
+
+    fn render_ready_transaction_activity_detail(
+        &self,
+        item: &PendingTransaction,
+        ready: &Rc<ReadyActivityInspection>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let request_id = item.request_id;
+        let meta = SharedString::from(format!(
+            "{} · {} · requested {} · last changed {}",
+            item.wallet_id,
+            chain_label(item.chain_id.parse().ok(), &self.network_display_names()),
+            absolute_time_label(item.created_at),
+            relative_time_label(item.updated_at, chrono::Utc::now()),
+        ));
+        let explorer_url = item
+            .broadcast_transaction_hash
+            .as_ref()
+            .or(item.signed_transaction_hash.as_ref())
+            .and_then(|hash| {
+                item.chain_id.parse::<u64>().ok().and_then(|chain_id| {
+                    self.cached_networks().ok().and_then(|networks| {
+                        block_explorer_transaction_url(networks, chain_id, hash)
+                    })
+                })
+            });
+        let status = transaction_record_label(item);
+        let tone = transaction_record_tone(item);
+        let explanation = transaction_record_explanation(item);
+        let can_refresh = item.status.can_reach_a_chain();
+        let receipt_loaded = ready.inspection.receipt_loaded;
+        let rows = ready.detail_rows.clone();
+        let ready = ready.clone();
+        let list_state = ready.detail_list.clone();
+        let editor = cx.entity().downgrade();
+        let exact_payload_expanded = self
+            .activity_payloads_expanded
+            .contains(&(request_id, "execution-plan".to_owned()));
+
+        variable_list(list_state.clone(), move |row_index, _, cx| {
+            let Some(row) = rows.get(row_index).copied() else {
+                return div().into_any_element();
+            };
+            let content = match row {
+                TransactionActivityDetailRow::Prelude => {
+                    let refresh_editor = editor.clone();
+                    let mut buttons = div().flex().flex_wrap().gap_2();
+                    if let Some(explorer_url) = explorer_url.clone() {
+                        buttons = buttons.child(
+                            app_button(SharedString::from(format!(
+                                "open-transaction-explorer-{request_id}"
+                            )))
+                            .label("View on block explorer")
+                            .on_click(move |_, _, cx| cx.open_url(&explorer_url)),
+                        );
+                    }
+                    // Nothing to look for on a request that was never signed:
+                    // there can be no receipt for the network to return.
+                    if can_refresh {
+                        buttons = buttons.child(
+                            app_button(SharedString::from(format!(
+                                "refresh-transaction-inspection-{request_id}"
+                            )))
+                            .label(if receipt_loaded {
+                                "Check the network again"
+                            } else {
+                                "Look for a receipt"
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = refresh_editor.update(cx, |view, cx| {
+                                    view.load_transaction_inspection(request_id, cx);
+                                });
+                            }),
+                        );
+                    }
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(Self::render_activity_detail_header(
+                            request_id,
+                            "Transaction",
+                            status,
+                            tone,
+                            explanation,
+                            &meta,
+                            cx,
+                        ))
+                        .child(buttons)
+                        .child(
+                            selectable_text(
+                                format!("transaction-inspection-summary-{request_id}"),
+                                &ready.inspection.document.request.summary,
+                            )
+                            .text_color(cx.theme().muted_foreground)
+                            .whitespace_normal(),
+                        )
+                        .into_any_element()
+                }
+                TransactionActivityDetailRow::Section(section_index) => {
+                    let Some(section) = ready
+                        .inspection
+                        .document
+                        .request
+                        .sections
+                        .get(section_index)
+                    else {
+                        return div().into_any_element();
+                    };
+                    Self::render_review_section(
+                        section,
+                        &format!("activity-{request_id}-{section_index}"),
+                        cx,
+                    )
+                    .into_any_element()
+                }
+                TransactionActivityDetailRow::WarningsHeading => h_flex()
+                    .gap_2()
+                    .text_color(cx.theme().warning)
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child(div().font_semibold().child("Worth knowing"))
+                    .into_any_element(),
+                TransactionActivityDetailRow::Warning(warning_index) => {
+                    let Some(warning) = ready
+                        .inspection
+                        .document
+                        .request
+                        .warnings
+                        .get(warning_index)
+                    else {
+                        return div().into_any_element();
+                    };
+                    div()
+                        .p_3()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().warning)
+                        .child(selectable_text(
+                            format!("activity-warning-{request_id}-{warning_index}"),
+                            warning,
+                        ))
+                        .into_any_element()
+                }
+                TransactionActivityDetailRow::RecordKeeping => Self::render_review_section(
+                    &ApprovalSection {
+                        kind: ApprovalSectionKind::Details,
+                        heading: "Record keeping".to_owned(),
+                        facts: ready.inspection.document.request.facts.clone(),
+                    },
+                    &format!("activity-{request_id}-lifecycle"),
+                    cx,
+                )
+                .into_any_element(),
+                TransactionActivityDetailRow::ExactPayload => {
+                    let Some(exact_plan) = ready.inspection.document.exact_payloads.first() else {
+                        return div().into_any_element();
+                    };
+                    Self::render_exact_payload_block(
+                        request_id,
+                        "execution-plan",
+                        "the exact execution plan",
+                        exact_plan,
+                        exact_payload_expanded,
+                        editor.clone(),
+                        Some((list_state.clone(), row_index)),
+                        cx,
+                    )
+                    .into_any_element()
+                }
+            };
+            div()
+                .w_full()
+                .min_w_0()
+                .pb_4()
+                .child(content)
+                .into_any_element()
+        })
+        .size_full()
+        .pr_2()
+        .into_any_element()
+    }
+
     fn render_activity_detail(
         &self,
         record: &OwnerActivityRecord,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let request_id = record.request_id();
-        // Title, current state, and the one sentence that explains the state.
-        // The request UUID is not here: it names the row to the wallet, not to
-        // the reader, and it used to be the second line of every detail pane.
-        let header = |title: &'static str,
-                      status: &'static str,
-                      tone: StatusTone,
-                      explanation: &'static str,
-                      meta: String| {
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_2()
-                // No Close button in here. This header scrolls with the rest
-                // of the record, and a settled transaction's detail runs
-                // taller than the window — so the only way out sat above the
-                // top of the viewport for as long as anybody was reading. It
-                // lives in the modal's fixed footer instead.
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            selectable_text(
-                                SharedString::from(format!("activity-heading-{request_id}")),
-                                title,
-                            )
-                            .text_lg()
-                            .font_semibold(),
-                        )
-                        .child(status_pill(status, tone, cx)),
-                )
-                .child(
-                    selectable_text(
-                        SharedString::from(format!("activity-heading-explanation-{request_id}")),
-                        explanation,
-                    )
-                    .whitespace_normal()
-                    .text_color(cx.theme().muted_foreground),
-                )
-                .child(
-                    selectable_text(
-                        SharedString::from(format!("activity-heading-meta-{request_id}")),
-                        &meta,
-                    )
-                    .whitespace_normal()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground),
-                )
-        };
         match record {
             OwnerActivityRecord::Transaction(item) => {
                 let mut detail = div()
@@ -8578,18 +8935,20 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(header(
+                    .child(Self::render_activity_detail_header(
+                        request_id,
                         "Transaction",
                         transaction_record_label(item),
                         transaction_record_tone(item),
                         transaction_record_explanation(item),
-                        format!(
+                        &format!(
                             "{} · {} · requested {} · last changed {}",
                             item.wallet_id,
                             chain_label(item.chain_id.parse().ok(), &self.network_display_names()),
                             absolute_time_label(item.created_at),
                             relative_time_label(item.updated_at, chrono::Utc::now()),
                         ),
+                        cx,
                     ));
                 match self.activity_inspections.get(&request_id) {
                     Some(ActivityInspectionState::Loading) => {
@@ -8622,134 +8981,7 @@ impl WalletWindow {
                                 );
                     }
                     Some(ActivityInspectionState::Ready(inspection)) => {
-                        let document = &inspection.document;
-                        detail = detail
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .when_some(
-                                        item.broadcast_transaction_hash
-                                            .as_ref()
-                                            .or(item.signed_transaction_hash.as_ref())
-                                            .and_then(|hash| {
-                                                item.chain_id.parse::<u64>().ok().and_then(
-                                                    |chain_id| {
-                                                        self.cached_networks().ok().and_then(
-                                                            |networks| {
-                                                                block_explorer_transaction_url(
-                                                                    networks, chain_id, hash,
-                                                                )
-                                                            },
-                                                        )
-                                                    },
-                                                )
-                                            }),
-                                        |buttons, explorer_url| {
-                                            buttons.child(
-                                                app_button(SharedString::from(format!(
-                                                    "open-transaction-explorer-{request_id}"
-                                                )))
-                                                .label("View on block explorer")
-                                                .on_click(move |_, _, cx| {
-                                                    cx.open_url(&explorer_url);
-                                                }),
-                                            )
-                                        },
-                                    )
-                                    // Nothing to look for on a request that
-                                    // was never signed: the button offered
-                                    // to go and check the network for a
-                                    // receipt the wallet had guaranteed
-                                    // would never exist.
-                                    .when(item.status.can_reach_a_chain(), |buttons| {
-                                        buttons.child(
-                                            app_button(SharedString::from(format!(
-                                                "refresh-transaction-inspection-{request_id}"
-                                            )))
-                                            .label(if inspection.receipt_loaded {
-                                                "Check the network again"
-                                            } else {
-                                                "Look for a receipt"
-                                            })
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.load_transaction_inspection(request_id, cx);
-                                            })),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                selectable_text(
-                                    format!("transaction-inspection-summary-{request_id}"),
-                                    &document.request.summary,
-                                )
-                                .text_color(cx.theme().muted_foreground)
-                                .whitespace_normal(),
-                            );
-                        // What moved first, then what was called, then the fee
-                        // and the raw lifecycle bookkeeping — the same order a
-                        // person asks the questions in.
-                        for (index, section) in review_sections_for_display(document)
-                            .into_iter()
-                            .enumerate()
-                        {
-                            detail = detail.child(Self::render_review_section(
-                                section,
-                                &format!("activity-{request_id}-{index}"),
-                                cx,
-                            ));
-                        }
-                        if !document.request.warnings.is_empty() {
-                            detail = detail.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .text_color(cx.theme().warning)
-                                            .child(Icon::new(IconName::TriangleAlert).small())
-                                            .child(div().font_semibold().child("Worth knowing")),
-                                    )
-                                    .children(document.request.warnings.iter().enumerate().map(
-                                        |(index, warning)| {
-                                            div()
-                                                .p_3()
-                                                .rounded(cx.theme().radius_lg)
-                                                .border_1()
-                                                .border_color(cx.theme().warning)
-                                                .child(selectable_text(
-                                                    format!(
-                                                        "activity-warning-{request_id}-{index}"
-                                                    ),
-                                                    warning,
-                                                ))
-                                        },
-                                    )),
-                            );
-                        }
-                        if !document.request.facts.is_empty() {
-                            detail = detail.child(Self::render_review_section(
-                                &ApprovalSection {
-                                    kind: ApprovalSectionKind::Details,
-                                    heading: "Record keeping".to_owned(),
-                                    facts: document.request.facts.clone(),
-                                },
-                                &format!("activity-{request_id}-lifecycle"),
-                                cx,
-                            ));
-                        }
-                        if let Some(exact_plan) = document.exact_payloads.first() {
-                            detail = detail.child(self.render_exact_payload(
-                                request_id,
-                                "execution-plan",
-                                "the exact execution plan",
-                                exact_plan,
-                                cx,
-                            ));
-                        }
+                        return self.render_ready_transaction_activity_detail(item, inspection, cx);
                     }
                     None => {
                         detail = detail.child(
@@ -8807,16 +9039,18 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(header(
+                    .child(Self::render_activity_detail_header(
+                        request_id,
                         "Message signature",
                         item.status.label(),
                         message_status_tone(item.status),
                         message_status_explanation(item.status),
-                        format!(
+                        &format!(
                             "{} · {}",
                             item.wallet_id,
                             relative_time_label(item.created_at, chrono::Utc::now())
                         ),
+                        cx,
                     ))
                     .child(Self::render_fact_list(
                         "About this request",
@@ -8899,16 +9133,18 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(header(
+                    .child(Self::render_activity_detail_header(
+                        request_id,
                         "Typed-data signature",
                         item.status.label(),
                         typed_data_status_tone(item.status),
                         typed_data_status_explanation(item.status),
-                        format!(
+                        &format!(
                             "{} · {}",
                             item.wallet_id,
                             relative_time_label(item.created_at, chrono::Utc::now())
                         ),
+                        cx,
                     ))
                     .child(Self::render_fact_list(
                         "About this request",
@@ -8984,12 +9220,52 @@ impl WalletWindow {
             // record that leaves mid-frame draws nothing rather than panicking.
             return div().into_any_element();
         };
+        let variable_detail_list = match record {
+            OwnerActivityRecord::Transaction(_) => self
+                .activity_inspections
+                .get(&request_id)
+                .and_then(|state| match state {
+                    ActivityInspectionState::Ready(ready) => Some(ready.detail_list.clone()),
+                    ActivityInspectionState::Loading | ActivityInspectionState::Failed(_) => None,
+                }),
+            OwnerActivityRecord::Message(_) | OwnerActivityRecord::TypedData(_) => None,
+        };
         if self.activity_detail_record.get() != Some(request_id) {
             self.activity_detail_scroll_handle
                 .set_offset(point(px(0.0), px(0.0)));
+            if let Some(list) = &variable_detail_list {
+                list.set_offset_from_scrollbar(point(px(0.0), px(0.0)));
+            }
             self.activity_detail_record.set(Some(request_id));
         }
+        if let Some(list) = &variable_detail_list {
+            self.activity_detail_overflow_indicator
+                .set_scroll_handle(list.clone());
+        } else {
+            self.activity_detail_overflow_indicator
+                .set_scroll_handle(self.activity_detail_scroll_handle.clone());
+        }
         let detail = self.render_activity_detail(record, cx);
+        let detail_surface = if variable_detail_list.is_some() {
+            div()
+                .id(SharedString::from(format!(
+                    "activity-detail-list-{request_id}"
+                )))
+                .size_full()
+                .child(detail)
+                .into_any_element()
+        } else {
+            div()
+                .id(SharedString::from(format!(
+                    "activity-detail-scroll-{request_id}"
+                )))
+                .size_full()
+                .track_scroll(&self.activity_detail_scroll_handle)
+                .pr_2()
+                .overflow_y_scroll()
+                .child(detail)
+                .into_any_element()
+        };
         div()
             .absolute()
             .inset_0()
@@ -9028,17 +9304,7 @@ impl WalletWindow {
                             .relative()
                             .flex_1()
                             .min_h_0()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "activity-detail-scroll-{request_id}"
-                                    )))
-                                    .size_full()
-                                    .track_scroll(&self.activity_detail_scroll_handle)
-                                    .pr_2()
-                                    .overflow_y_scroll()
-                                    .child(detail),
-                            )
+                            .child(detail_surface)
                             .child(self.activity_detail_overflow_indicator.element()),
                     )
                     // Fixed chrome, the way the security review's decision row
@@ -9118,6 +9384,30 @@ impl WalletWindow {
     ) -> gpui::Div {
         let key = (request_id, slot.to_owned());
         let expanded = self.activity_payloads_expanded.contains(&key);
+        Self::render_exact_payload_block(
+            request_id,
+            slot,
+            description,
+            payload,
+            expanded,
+            cx.entity().downgrade(),
+            None,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_exact_payload_block(
+        request_id: uuid::Uuid,
+        slot: &str,
+        description: &'static str,
+        payload: &str,
+        expanded: bool,
+        editor: WeakEntity<Self>,
+        remeasure: Option<(VariableListState, usize)>,
+        cx: &App,
+    ) -> gpui::Div {
+        let key = (request_id, slot.to_owned());
         let mut block = div().w_full().min_w_0().flex().flex_col().gap_2().child(
             h_flex()
                 .w_full()
@@ -9140,12 +9430,19 @@ impl WalletWindow {
                     } else {
                         IconName::ChevronRight
                     })
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        if !view.activity_payloads_expanded.remove(&key) {
-                            view.activity_payloads_expanded.insert(key.clone());
-                        }
-                        cx.notify();
-                    })),
+                    .on_click(move |_, _, cx| {
+                        let key = key.clone();
+                        let remeasure = remeasure.clone();
+                        let _ = editor.update(cx, move |view, cx| {
+                            if !view.activity_payloads_expanded.remove(&key) {
+                                view.activity_payloads_expanded.insert(key);
+                            }
+                            if let Some((list, index)) = remeasure {
+                                list.remeasure_items(index..index + 1);
+                            }
+                            cx.notify();
+                        });
+                    }),
                 )
                 .when(expanded, |row| {
                     row.child(copy_button(
@@ -12234,7 +12531,7 @@ impl WalletWindow {
         section_kind: ApprovalSectionKind,
         section_id: &str,
         index: usize,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> gpui::Div {
         let fact_id = SharedString::from(format!("review-fact-{section_id}-{index}"));
         if section_kind == ApprovalSectionKind::Effects {
@@ -12341,11 +12638,7 @@ impl WalletWindow {
             )
     }
 
-    fn render_review_section(
-        section: &ApprovalSection,
-        section_id: &str,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    fn render_review_section(section: &ApprovalSection, section_id: &str, cx: &App) -> gpui::Div {
         let (icon, heading_color) = match section.kind {
             ApprovalSectionKind::Effects => (IconName::Star, cx.theme().foreground),
             ApprovalSectionKind::Action => (IconName::Inspector, cx.theme().foreground),
@@ -12377,7 +12670,7 @@ impl WalletWindow {
 
     fn render_review_simulation(
         simulation: &ekubo_wallet_core::simulation::SimulationResult,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> gpui::Div {
         let (icon, color, title) = if simulation.simulation.success {
             (
@@ -12434,8 +12727,7 @@ impl WalletWindow {
             return div().into_any_element();
         };
         let generation = active.state.generation();
-        let document = active.state.document();
-        let exact_data_required = !document.exact_payloads.is_empty();
+        let document = active.state.document_arc();
         let approve_enabled = active.state.approve_enabled() && !active.awaiting_refresh;
         let can_refresh = matches!(
             active.completion,
@@ -12450,200 +12742,238 @@ impl WalletWindow {
         // button that keeps it. A reader who reads only the colour was being
         // pointed at the safe choice as though it were the costly one.
         let decisions = review_decision_labels(active.completion.as_ref());
-        let mut review_body = div()
-            .w_full()
-            .max_w(px(920.0))
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                selectable_text(("review-title", generation), &document.request.title)
-                    .text_3xl()
-                    .font_medium(),
-            )
-            .child(
-                selectable_text(("review-summary", generation), &document.request.summary)
-                    .text_color(cx.theme().muted_foreground),
-            );
-
-        if let Some(simulation) = &active.simulation {
-            review_body = review_body.child(Self::render_review_simulation(simulation, cx));
-        }
-
-        for (index, section) in review_sections_for_display(document)
-            .into_iter()
-            .filter(|section| section.kind == ApprovalSectionKind::Effects)
-            .enumerate()
-        {
-            review_body = review_body.child(Self::render_review_section(
-                section,
-                &format!("{generation}-effects-{index}"),
-                cx,
-            ));
-        }
-
-        if !document.request.warnings.is_empty() {
-            review_body = review_body.child(
-                div()
+        let rows = active.detail_rows.clone();
+        let simulation = active.simulation.clone();
+        let list_state = active.scroll_handle.clone();
+        let end_rendered = active.end_rendered.clone();
+        let row_count = rows.len();
+        let wallet_connect_accounts = active.completion.as_ref().and_then(|completion| {
+            let ActiveReviewCompletion::WalletConnect {
+                choices,
+                selected_account,
+                ..
+            } = completion
+            else {
+                return None;
+            };
+            Some((
+                Arc::<[String]>::from(
+                    choices
+                        .iter()
+                        .map(|choice| choice.account.id.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                *selected_account,
+            ))
+        });
+        let editor = cx.entity().downgrade();
+        let scroll_editor = editor.clone();
+        list_state.set_scroll_handler(move |_, _, cx| {
+            let scroll_editor = scroll_editor.clone();
+            // GPUI invokes this callback while the list state's RefCell is
+            // mutably borrowed. Defer the geometry read until that borrow has
+            // been released.
+            cx.defer(move |cx| {
+                let _ = scroll_editor.update(cx, |view, cx| {
+                    view.update_review_scroll_state(generation, cx);
+                });
+            });
+        });
+        let review_body = variable_list(list_state.clone(), move |row_index, _, cx| {
+            let Some(row) = rows.get(row_index).copied() else {
+                return div().into_any_element();
+            };
+            if row_index + 1 == row_count && !end_rendered.swap(true, Ordering::AcqRel) {
+                let end_editor = editor.clone();
+                cx.defer(move |cx| {
+                    let _ = end_editor.update(cx, |view, cx| {
+                        view.update_review_scroll_state(generation, cx);
+                    });
+                });
+            }
+            let content = match row {
+                SecurityReviewDetailRow::Prelude => {
+                    let mut prelude = div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            selectable_text(("review-title", generation), &document.request.title)
+                                .text_3xl()
+                                .font_medium(),
+                        )
+                        .child(
+                            selectable_text(
+                                ("review-summary", generation),
+                                &document.request.summary,
+                            )
+                            .text_color(cx.theme().muted_foreground),
+                        );
+                    if let Some(simulation) = simulation.as_deref() {
+                        prelude = prelude.child(Self::render_review_simulation(simulation, cx));
+                    }
+                    prelude.into_any_element()
+                }
+                SecurityReviewDetailRow::Section(section_index) => {
+                    let Some(section) = document.request.sections.get(section_index) else {
+                        return div().into_any_element();
+                    };
+                    Self::render_review_section(
+                        section,
+                        &format!("{generation}-section-{section_index}"),
+                        cx,
+                    )
+                    .into_any_element()
+                }
+                SecurityReviewDetailRow::WarningsHeading => h_flex()
+                    .gap_2()
+                    .text_color(cx.theme().warning)
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child(div().font_semibold().child("Important warnings"))
+                    .into_any_element(),
+                SecurityReviewDetailRow::Warning(warning_index) => {
+                    let Some(warning) = document.request.warnings.get(warning_index) else {
+                        return div().into_any_element();
+                    };
+                    div()
+                        .id(SharedString::from(format!(
+                            "review-warning-{generation}-{warning_index}"
+                        )))
+                        .p_3()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().warning)
+                        .child(selectable_text(
+                            SharedString::from(format!(
+                                "review-warning-text-{generation}-{warning_index}"
+                            )),
+                            warning,
+                        ))
+                        .into_any_element()
+                }
+                SecurityReviewDetailRow::WalletConnectAccounts => {
+                    let Some((accounts, selected_account)) = &wallet_connect_accounts else {
+                        return div().into_any_element();
+                    };
+                    let account_editor = editor.clone();
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(div().font_semibold().child("Account to expose"))
+                        .child(div().flex().flex_wrap().gap_2().children(
+                            accounts.iter().enumerate().map(move |(index, account_id)| {
+                                let account_editor = account_editor.clone();
+                                app_button(SharedString::from(format!("wc-account-{index}")))
+                                    .label(account_id.clone())
+                                    .toggled(index == *selected_account)
+                                    .when(index == *selected_account, ButtonVariants::primary)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = account_editor.update(cx, |view, cx| {
+                                            view.select_walletconnect_account(
+                                                generation, index, cx,
+                                            );
+                                        });
+                                    })
+                            }),
+                        ))
+                        .into_any_element()
+                }
+                SecurityReviewDetailRow::RequestDetails => Self::render_review_section(
+                    &ApprovalSection {
+                        kind: ApprovalSectionKind::Details,
+                        heading: "Request details".to_owned(),
+                        facts: document.request.facts.clone(),
+                    },
+                    &format!("{generation}-request-details"),
+                    cx,
+                )
+                .into_any_element(),
+                SecurityReviewDetailRow::ExactDataHeading => div()
                     .w_full()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
                     .flex()
                     .flex_col()
                     .gap_2()
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_color(cx.theme().warning)
-                            .child(Icon::new(IconName::TriangleAlert).small())
-                            .child(div().font_semibold().child("Important warnings")),
+                        div()
+                            .min_w_0()
+                            .child(div().font_semibold().child("Exact data"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("The complete bytes are always part of this review."),
+                            ),
                     )
-                    .children(document.request.warnings.iter().enumerate().map(
-                        |(index, warning)| {
-                            div()
-                                .id(SharedString::from(format!(
-                                    "review-warning-{generation}-{index}"
-                                )))
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().warning)
-                                .child(selectable_text(
-                                    SharedString::from(format!(
-                                        "review-warning-text-{generation}-{index}"
-                                    )),
-                                    warning,
-                                ))
-                        },
-                    )),
-            );
-        }
-
-        if let Some(ActiveReviewCompletion::WalletConnect {
-            choices,
-            selected_account,
-            ..
-        }) = active.completion.as_ref()
-        {
-            review_body =
-                review_body
-                    .child(div().mt_2().font_semibold().child("Account to expose"))
-                    .child(div().flex().flex_wrap().gap_2().children(
-                        choices.iter().enumerate().map(|(index, choice)| {
-                            app_button(SharedString::from(format!("wc-account-{index}")))
-                                .label(choice.account.id.clone())
-                                .toggled(index == *selected_account)
-                                .when(index == *selected_account, ButtonVariants::primary)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.select_walletconnect_account(generation, index, cx);
-                                }))
-                        }),
-                    ));
-        }
-
-        for (index, section) in review_sections_for_display(document)
-            .into_iter()
-            .filter(|section| section.kind != ApprovalSectionKind::Effects)
-            .enumerate()
-        {
-            review_body = review_body.child(Self::render_review_section(
-                section,
-                &format!("{generation}-section-{index}"),
-                cx,
-            ));
-        }
-
-        if !document.request.facts.is_empty() {
-            let context = ApprovalSection {
-                kind: ApprovalSectionKind::Details,
-                heading: "Request details".to_owned(),
-                facts: document.request.facts.clone(),
-            };
-            review_body = review_body.child(Self::render_review_section(
-                &context,
-                &format!("{generation}-request-details"),
-                cx,
-            ));
-        }
-
-        if exact_data_required {
-            review_body = review_body
-                .child(
+                    .into_any_element(),
+                SecurityReviewDetailRow::ExactPayload(payload_index) => {
+                    let Some(payload) = document.exact_payloads.get(payload_index) else {
+                        return div().into_any_element();
+                    };
                     div()
                         .w_full()
-                        .p_4()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap_2()
                         .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().font_semibold().child(if payload_index == 0 {
+                                    "Execution plan JSON".to_owned()
+                                } else {
+                                    format!("Action {payload_index} exact calldata")
+                                }))
+                                .child(copy_button(
+                                    SharedString::from(format!(
+                                        "copy-review-payload-{generation}-{payload_index}"
+                                    )),
+                                    payload.clone(),
+                                    "Copy exact review data",
+                                )),
+                        )
+                        .child(
                             div()
-                                .min_w_0()
-                                .child(div().font_semibold().child("Exact data"))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            "The complete bytes are always part of this review.",
-                                        ),
-                                ),
-                        ),
-                )
-                .children(
-                    document
-                        .exact_payloads
-                        .iter()
-                        .enumerate()
-                        .map(|(index, payload)| {
-                            div()
+                                .id(SharedString::from(format!(
+                                    "review-exact-payload-{generation}-{payload_index}"
+                                )))
                                 .w_full()
                                 .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(div().font_semibold().child(if index == 0 {
-                                            "Execution plan JSON".to_owned()
-                                        } else {
-                                            format!("Action {index} exact calldata")
-                                        }))
-                                        .child(copy_button(
-                                            SharedString::from(format!(
-                                                "copy-review-payload-{generation}-{index}"
-                                            )),
-                                            payload.clone(),
-                                            "Copy exact review data",
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "review-exact-payload-{generation}-{index}"
-                                        )))
-                                        .w_full()
-                                        .min_w_0()
-                                        .overflow_x_scroll()
-                                        .p_3()
-                                        .rounded(cx.theme().radius_lg)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .bg(cx.theme().muted)
-                                        .child(selectable_code_text(
-                                            SharedString::from(format!(
-                                                "review-payload-text-{generation}-{index}"
-                                            )),
-                                            payload,
-                                        )),
-                                )
-                        }),
-                );
-        }
+                                .overflow_x_scroll()
+                                .p_3()
+                                .rounded(cx.theme().radius_lg)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().muted)
+                                .child(selectable_code_text(
+                                    SharedString::from(format!(
+                                        "review-payload-text-{generation}-{payload_index}"
+                                    )),
+                                    payload,
+                                )),
+                        )
+                        .into_any_element()
+                }
+            };
+            div()
+                .w_full()
+                .min_w_0()
+                .pb_4()
+                .child(div().w_full().max_w(px(920.0)).mx_auto().child(content))
+                .into_any_element()
+        })
+        .size_full()
+        .pr_2();
         div()
             .absolute()
             .inset_0()
@@ -12686,15 +13016,7 @@ impl WalletWindow {
                         div()
                             .id(("review-scroll", generation))
                             .size_full()
-                            .track_scroll(&active.scroll_handle)
-                            .overflow_y_scroll()
-                            .on_scroll_wheel(cx.listener(move |_, _, window, cx| {
-                                cx.defer_in(window, move |view, _, cx| {
-                                    view.update_review_scroll_state(generation, cx);
-                                });
-                            }))
-                            .pr_2()
-                            .child(div().w_full().flex().justify_center().child(review_body)),
+                            .child(review_body),
                     )
                     .child({
                         self.review_overflow_indicator

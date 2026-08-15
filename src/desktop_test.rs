@@ -1444,7 +1444,92 @@ fn activity_detail_scroll_uses_the_overflow_indicator() {
         .0;
 
     assert!(detail_overlay.contains("track_scroll(&self.activity_detail_scroll_handle)"));
+    assert!(detail_overlay.contains("variable_detail_list"));
+    assert!(detail_overlay.contains("activity-detail-list"));
     assert!(detail_overlay.contains("self.activity_detail_overflow_indicator.element()"));
+}
+
+#[test]
+fn large_transaction_details_keep_every_call_as_a_virtual_row() {
+    const CALLS: usize = 4_096;
+    let mut request = ekubo_wallet_core::approval::ApprovalRequest::new(
+        ekubo_wallet_core::approval::ApprovalKind::Transaction,
+        "Large transaction",
+        "Every call remains inspectable.",
+    )
+    .fact("Wallet", "main")
+    .warning("Review every action before relying on this record.");
+    for index in 0..CALLS {
+        request = request
+            .section_kind(ApprovalSectionKind::Action, format!("Call {index}"))
+            .fact("What it does", format!("Action {index}"));
+    }
+    // Effects sort before actions even when the authored document placed them
+    // last; virtualization must preserve that display ordering as well as all
+    // 4,096 individual action cards.
+    request = request
+        .section_kind(ApprovalSectionKind::Effects, "Effects")
+        .fact("Result", "No balance changes");
+    let document = ReviewDocument::from_request(request, vec!["{}".to_owned()]);
+
+    let rows = transaction_activity_detail_rows(&document);
+    assert_eq!(rows.first(), Some(&TransactionActivityDetailRow::Prelude));
+    assert_eq!(
+        rows.get(1),
+        Some(&TransactionActivityDetailRow::Section(CALLS))
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(
+                |row| matches!(row, TransactionActivityDetailRow::Section(index) if *index < CALLS)
+            )
+            .count(),
+        CALLS
+    );
+    assert!(rows.contains(&TransactionActivityDetailRow::WarningsHeading));
+    assert!(rows.contains(&TransactionActivityDetailRow::Warning(0)));
+    assert!(rows.contains(&TransactionActivityDetailRow::RecordKeeping));
+    assert_eq!(
+        rows.last(),
+        Some(&TransactionActivityDetailRow::ExactPayload)
+    );
+
+    let list = VariableListState::new(
+        rows.len(),
+        ListAlignment::Top,
+        ACTIVITY_DETAIL_LIST_OVERDRAW,
+    )
+    .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+    assert_eq!(list.item_count(), CALLS + 6);
+
+    let review_rows = security_review_detail_rows(&document, false);
+    assert_eq!(review_rows.first(), Some(&SecurityReviewDetailRow::Prelude));
+    assert_eq!(
+        review_rows.get(1),
+        Some(&SecurityReviewDetailRow::Section(CALLS))
+    );
+    assert_eq!(
+        review_rows
+            .iter()
+            .filter(|row| matches!(row, SecurityReviewDetailRow::Section(index) if *index < CALLS))
+            .count(),
+        CALLS
+    );
+    assert!(review_rows.contains(&SecurityReviewDetailRow::WarningsHeading));
+    assert!(review_rows.contains(&SecurityReviewDetailRow::Warning(0)));
+    assert!(review_rows.contains(&SecurityReviewDetailRow::RequestDetails));
+    assert!(review_rows.contains(&SecurityReviewDetailRow::ExactDataHeading));
+    assert_eq!(
+        review_rows.last(),
+        Some(&SecurityReviewDetailRow::ExactPayload(0))
+    );
+    let review_list = VariableListState::new(
+        review_rows.len(),
+        ListAlignment::Top,
+        ACTIVITY_DETAIL_LIST_OVERDRAW,
+    )
+    .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT);
+    assert_eq!(review_list.item_count(), CALLS + 7);
 }
 
 #[test]
