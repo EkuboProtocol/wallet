@@ -267,7 +267,9 @@ jobs:
           assets=(dist/*)
           test "${#assets[@]}" -eq 10
           find dist -maxdepth 1 -type f -printf '%f\n' | while read -r name; do
-            [[ "$name" =~ ^Ekubo[._\ WalletA-Za-z0-9-]+\.(AppImage|deb|dmg|app\.tar\.gz|exe)(\.sig)?$ ]]
+            [[ "$name" =~ ^Ekubo\.Wallet_[0-9A-Za-z.+-]+_aarch64\.(dmg|app\.tar\.gz)(\.sig)?$ \
+              || "$name" =~ ^ekubo-wallet_[0-9A-Za-z.+-]+_x64-setup\.exe(\.sig)?$ \
+              || "$name" =~ ^ekubo-wallet_[0-9A-Za-z.+-]+_(x86_64\.AppImage|amd64\.deb)(\.sig)?$ ]]
           done
           macos_bundles=(dist/*.app.tar.gz)
           windows_bundles=(dist/*setup.exe)
