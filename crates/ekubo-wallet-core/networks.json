@@ -16,7 +16,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://etherscan.io",
    "documentation_url": "https://ethereum.org/en/developers/docs/apis/json-rpc/",
    "simulate_endpoints": 6,
@@ -42,7 +41,6 @@
     "symbol": "EXP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://expanse.tech",
    "simulate_endpoints": 0,
@@ -64,7 +62,6 @@
     "symbol": "TCH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.thaichain.org",
    "documentation_url": "https://thaichain.io",
    "simulate_endpoints": 0,
@@ -86,7 +83,6 @@
     "symbol": "QUAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://quaiscan.io",
    "documentation_url": "https://qu.ai",
    "simulate_endpoints": 0,
@@ -110,7 +106,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://optimistic.etherscan.io",
    "documentation_url": "https://docs.optimism.io/op-mainnet/network-information/connecting-to-op",
    "simulate_endpoints": 6,
@@ -136,7 +131,6 @@
     "symbol": "META",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://metadium.com",
    "simulate_endpoints": 0,
@@ -157,7 +151,6 @@
     "symbol": "KAL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://metadium.com",
    "simulate_endpoints": 0,
@@ -178,7 +171,6 @@
     "symbol": "FLR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://flare-explorer.flare.network",
    "documentation_url": "https://flare.network",
    "simulate_endpoints": 0,
@@ -203,7 +195,6 @@
     "symbol": "DIODE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://diode.io/prenet",
    "simulate_endpoints": 0,
@@ -224,7 +215,6 @@
     "symbol": "CFLR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://coston-explorer.flare.network",
    "documentation_url": "https://flare.network",
    "simulate_endpoints": 0,
@@ -246,7 +236,6 @@
     "symbol": "TST",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.thundercore.com",
    "documentation_url": "https://thundercore.com",
    "simulate_endpoints": 0,
@@ -268,7 +257,6 @@
     "symbol": "SGB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://songbird-explorer.flare.network",
    "documentation_url": "https://flare.network",
    "simulate_endpoints": 0,
@@ -290,7 +278,6 @@
     "symbol": "ELA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://esc.elastos.io",
    "documentation_url": "https://www.elastos.org/",
    "simulate_endpoints": 0,
@@ -313,7 +300,6 @@
     "symbol": "ELA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.elastos.org/",
    "simulate_endpoints": 0,
@@ -334,7 +320,6 @@
     "symbol": "CRO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.cronos.org",
    "documentation_url": "https://cronos.org/",
    "simulate_endpoints": 4,
@@ -359,7 +344,6 @@
     "symbol": "L1",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.genesisl1.org",
    "documentation_url": "https://www.genesisl1.com",
    "simulate_endpoints": 0,
@@ -386,7 +370,6 @@
     "symbol": "RBTC",
     "decimals": 18
    },
-   "max_gas_limit": "6800000",
    "block_explorer_url": "https://explorer.rsk.co",
    "documentation_url": "https://rootstock.io",
    "simulate_endpoints": 0,
@@ -408,7 +391,6 @@
     "symbol": "tRBTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.rsk.co",
    "documentation_url": "https://rootstock.io",
    "simulate_endpoints": 0,
@@ -431,7 +413,6 @@
     "symbol": "SCAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.securechain.ai",
    "documentation_url": "https://securechain.ai",
    "simulate_endpoints": 0,
@@ -452,7 +433,6 @@
     "symbol": "XPLA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.conx.xyz/mainnet",
    "documentation_url": "https://conx.xyz",
    "simulate_endpoints": 0,
@@ -473,7 +453,6 @@
     "symbol": "U2U",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://u2uscan.xyz",
    "documentation_url": "https://u2u.xyz",
    "simulate_endpoints": 0,
@@ -494,7 +473,6 @@
     "symbol": "TLOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://teloscan.io",
    "documentation_url": "https://telos.net",
    "simulate_endpoints": 0,
@@ -515,7 +493,6 @@
     "symbol": "TLOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.teloscan.io",
    "documentation_url": "https://telos.net",
    "simulate_endpoints": 0,
@@ -536,7 +513,6 @@
     "symbol": "LYX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.lukso.network",
    "documentation_url": "https://lukso.network",
    "simulate_endpoints": 3,
@@ -559,7 +535,6 @@
     "symbol": "RING",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.darwinia.network",
    "documentation_url": "https://darwinia.network",
    "simulate_endpoints": 0,
@@ -580,7 +555,6 @@
     "symbol": "XDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://xdcscan.com",
    "documentation_url": "https://xinfin.org",
    "simulate_endpoints": 0,
@@ -606,7 +580,6 @@
     "symbol": "TXDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.xdcscan.com",
    "documentation_url": "https://xinfin.org",
    "simulate_endpoints": 4,
@@ -632,7 +605,6 @@
     "symbol": "cet",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.coinex.net",
    "documentation_url": "https://www.coinex.org/",
    "simulate_endpoints": 0,
@@ -658,7 +630,6 @@
     "symbol": "cett",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.coinex.net",
    "documentation_url": "https://www.coinex.org/",
    "simulate_endpoints": 0,
@@ -682,7 +653,6 @@
     "symbol": "BNB",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://bscscan.com",
    "documentation_url": "https://www.bnbchain.org/en",
    "simulate_endpoints": 6,
@@ -708,7 +678,6 @@
     "symbol": "SYS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.syscoin.org",
    "documentation_url": "https://www.syscoin.org",
    "simulate_endpoints": 3,
@@ -731,7 +700,6 @@
     "symbol": "GO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.gochain.io",
    "documentation_url": "https://gochain.io",
    "simulate_endpoints": 0,
@@ -752,7 +720,6 @@
     "symbol": "ETC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://etc.blockscout.com",
    "documentation_url": "https://ethereumclassic.org",
    "simulate_endpoints": 0,
@@ -777,7 +744,6 @@
     "symbol": "METC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://etc-mordor.blockscout.com",
    "documentation_url": "https://ethereumclassic.org/development/testnets",
    "simulate_endpoints": 0,
@@ -800,7 +766,6 @@
     "symbol": "CFX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evmtestnet.confluxscan.net",
    "documentation_url": "https://confluxnetwork.org",
    "simulate_endpoints": 0,
@@ -821,7 +786,6 @@
     "symbol": "EIDI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.idchain.one",
    "documentation_url": "https://idchain.one/begin/",
    "simulate_endpoints": 0,
@@ -842,7 +806,6 @@
     "symbol": "DEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.decimalchain.com",
    "documentation_url": "https://decimalchain.com",
    "simulate_endpoints": 0,
@@ -866,7 +829,6 @@
     "symbol": "PETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://primusmoney.com",
    "simulate_endpoints": 0,
@@ -887,7 +849,6 @@
     "symbol": "JOC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.japanopenchain.org",
    "documentation_url": "https://www.japanopenchain.org/",
    "simulate_endpoints": 0,
@@ -910,7 +871,6 @@
     "symbol": "MTR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan-warringstakes.meter.io",
    "documentation_url": "https://www.meter.io",
    "simulate_endpoints": 0,
@@ -931,7 +891,6 @@
     "symbol": "GT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.gatescan.org",
    "documentation_url": "https://www.gatechain.io",
    "simulate_endpoints": 0,
@@ -952,7 +911,6 @@
     "symbol": "VIC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://viction.xyz",
    "simulate_endpoints": 0,
@@ -974,7 +932,6 @@
     "symbol": "VIC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://viction.xyz",
    "simulate_endpoints": 0,
@@ -996,7 +953,6 @@
     "symbol": "BCTS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.swissdlt.ch",
    "documentation_url": "https://bcts.ch",
    "simulate_endpoints": 0,
@@ -1017,7 +973,6 @@
     "symbol": "CADL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.camdl.gov.kh",
    "documentation_url": "https://camdl.gov.kh/",
    "simulate_endpoints": 0,
@@ -1038,7 +993,6 @@
     "symbol": "KUB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://kubscan.com",
    "documentation_url": "https://www.kubchain.com/",
    "simulate_endpoints": 0,
@@ -1059,7 +1013,6 @@
     "symbol": "tBNB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.bscscan.com",
    "documentation_url": "https://www.bnbchain.org/en",
    "simulate_endpoints": 5,
@@ -1088,7 +1041,6 @@
     "symbol": "XDAI",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://gnosisscan.io",
    "documentation_url": "https://docs.gnosischain.com/about/networks/mainnet",
    "simulate_endpoints": 4,
@@ -1114,7 +1066,6 @@
     "symbol": "WLC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.worldland.foundation",
    "documentation_url": "https://worldland.foundation",
    "simulate_endpoints": 0,
@@ -1135,7 +1086,6 @@
     "symbol": "VLX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evmexplorer.velas.com",
    "documentation_url": "https://velas.com",
    "simulate_endpoints": 0,
@@ -1157,7 +1107,6 @@
     "symbol": "TT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://viewblock.io/thundercore",
    "documentation_url": "https://thundercore.com",
    "simulate_endpoints": 0,
@@ -1181,7 +1130,6 @@
     "symbol": "BONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.shibariumscan.io",
    "documentation_url": "https://shibariumecosystem.com",
    "simulate_endpoints": 0,
@@ -1202,7 +1150,6 @@
     "symbol": "GIDR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://coinbit-explorer.chain.sbcrypto.app",
    "documentation_url": "https://crypto.stockbit.com/",
    "simulate_endpoints": 0,
@@ -1223,7 +1170,6 @@
     "symbol": "C2FLR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://coston2-explorer.flare.network",
    "documentation_url": "https://flare.network",
    "simulate_endpoints": 0,
@@ -1247,7 +1193,6 @@
     "symbol": "UPTICK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm-explorer.uptick.network",
    "documentation_url": "https://www.uptick.network",
    "simulate_endpoints": 0,
@@ -1268,7 +1213,6 @@
     "symbol": "FUSE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.fuse.io",
    "documentation_url": "https://fuse.io/",
    "simulate_endpoints": 3,
@@ -1292,7 +1236,6 @@
     "symbol": "SPARK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://docs.fuse.io/general/fuse-network-blockchain/fuse-testnet",
    "simulate_endpoints": 1,
@@ -1315,7 +1258,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://uniscan.xyz",
    "documentation_url": "https://unichain.org",
    "simulate_endpoints": 2,
@@ -1339,7 +1281,6 @@
     "symbol": "HSK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.hsk.xyz",
    "documentation_url": "https://hashkeychain.net",
    "simulate_endpoints": 1,
@@ -1363,7 +1304,6 @@
     "symbol": "POL",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://polygonscan.com",
    "documentation_url": "https://polygon.technology/",
    "simulate_endpoints": 6,
@@ -1389,7 +1329,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.d-bis.org",
    "documentation_url": "https://d-bis.org",
    "simulate_endpoints": 5,
@@ -1414,7 +1353,6 @@
     "symbol": "ERA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.eteria.io",
    "documentation_url": "https://eteria.io",
    "simulate_endpoints": 0,
@@ -1437,7 +1375,6 @@
     "symbol": "MON",
     "decimals": 18
    },
-   "max_gas_limit": "30000000",
    "block_explorer_url": "https://monadvision.com",
    "documentation_url": "https://docs.monad.xyz/developer-essentials/network-information",
    "simulate_endpoints": 0,
@@ -1462,7 +1399,6 @@
     "symbol": "S",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://sonicscan.org",
    "documentation_url": "https://soniclabs.com",
    "simulate_endpoints": 3,
@@ -1488,7 +1424,6 @@
     "symbol": "SMR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.evm.shimmer.network",
    "documentation_url": "https://shimmer.network",
    "simulate_endpoints": 0,
@@ -1509,7 +1444,6 @@
     "symbol": "tSIX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sixscan.io/fivenet",
    "documentation_url": "https://six.network/",
    "simulate_endpoints": 0,
@@ -1530,7 +1464,6 @@
     "symbol": "RBNT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://redbelly.routescan.io",
    "documentation_url": "https://redbelly.network",
    "simulate_endpoints": 1,
@@ -1551,7 +1484,6 @@
     "symbol": "RBNT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://redbelly.testnet.routescan.io",
    "documentation_url": "https://redbelly.network",
    "simulate_endpoints": 1,
@@ -1572,7 +1504,6 @@
     "symbol": "RBA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://rbascan.com",
    "documentation_url": "https://www.roburna.com/",
    "simulate_endpoints": 0,
@@ -1593,7 +1524,6 @@
     "symbol": "AIOZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.aioz.network",
    "documentation_url": "https://aioz.network",
    "simulate_endpoints": 0,
@@ -1614,7 +1544,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://pacific-explorer.manta.network",
    "documentation_url": "https://pacific-info.manta.network",
    "simulate_endpoints": 5,
@@ -1640,7 +1569,6 @@
     "symbol": "CO2E",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.co2e.cc",
    "documentation_url": "https://co2e.cc",
    "simulate_endpoints": 2,
@@ -1662,7 +1590,6 @@
     "symbol": "EGAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.eniac.network",
    "documentation_url": "https://eniac.network/",
    "simulate_endpoints": 0,
@@ -1688,7 +1615,6 @@
     "symbol": "EGAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan-testnet.eniac.network",
    "documentation_url": "https://eniac.network/",
    "simulate_endpoints": 0,
@@ -1709,7 +1635,6 @@
     "symbol": "HSK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://hashkey.blockscout.com",
    "documentation_url": "https://hsk.xyz",
    "simulate_endpoints": 1,
@@ -1731,7 +1656,6 @@
     "symbol": "tABEY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.abeyscan.com",
    "documentation_url": "https://abey.com",
    "simulate_endpoints": 0,
@@ -1752,7 +1676,6 @@
     "symbol": "ABEY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://abeyscan.com",
    "documentation_url": "https://abey.com",
    "simulate_endpoints": 0,
@@ -1773,7 +1696,6 @@
     "symbol": "AME",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://amescan.io",
    "documentation_url": "https://amechain.io/",
    "simulate_endpoints": 0,
@@ -1794,7 +1716,6 @@
     "symbol": "BNB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://l2-scan.iost.io",
    "documentation_url": "https://iost.io",
    "simulate_endpoints": 0,
@@ -1815,7 +1736,6 @@
     "symbol": "OKB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.oklink.com/xlayer",
    "documentation_url": "https://www.okx.com/xlayer",
    "simulate_endpoints": 1,
@@ -1839,7 +1759,6 @@
     "symbol": "BTT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bttcscan.com",
    "documentation_url": "https://bt.io",
    "simulate_endpoints": 0,
@@ -1862,7 +1781,6 @@
     "symbol": "BNB",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://mainnet.opbnbscan.com",
    "documentation_url": "https://opbnb.bnbchain.org/en",
    "simulate_endpoints": 0,
@@ -1886,7 +1804,6 @@
     "symbol": "VC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.vinuscan.com",
    "documentation_url": "https://vitainu.org",
    "simulate_endpoints": 0,
@@ -1907,7 +1824,6 @@
     "symbol": "BTN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://btnscan.com",
    "documentation_url": "https://bitnet.technology",
    "simulate_endpoints": 0,
@@ -1928,7 +1844,6 @@
     "symbol": "MAPO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.maposcan.io",
    "documentation_url": "https://mapprotocol.io/",
    "simulate_endpoints": 0,
@@ -1949,7 +1864,6 @@
     "symbol": "B2",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://hub-explorer.bsquared.network",
    "documentation_url": "https://www.bsquared.network",
    "simulate_endpoints": 0,
@@ -1970,7 +1884,6 @@
     "symbol": "IDN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.idn-network.com",
    "documentation_url": "https://www.idn.world",
    "simulate_endpoints": 0,
@@ -1993,7 +1906,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.bsquared.network",
    "documentation_url": "https://www.bsquared.network",
    "simulate_endpoints": 1,
@@ -2018,7 +1930,6 @@
     "symbol": "PROM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://prom-blockscout.eu-north-2.gateway.fm",
    "documentation_url": "https://prom.io",
    "simulate_endpoints": 0,
@@ -2039,7 +1950,6 @@
     "symbol": "GHO",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.lens.xyz",
    "documentation_url": "https://lens.xyz",
    "simulate_endpoints": 0,
@@ -2061,7 +1971,6 @@
     "symbol": "JNFTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://protojumbo.jumbochain.org",
    "documentation_url": "https://jumbochain.org",
    "simulate_endpoints": 0,
@@ -2082,7 +1991,6 @@
     "symbol": "OWCT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blastchain.org",
    "documentation_url": "https://docs.blastchain.org",
    "simulate_endpoints": 0,
@@ -2103,7 +2011,6 @@
     "symbol": "TAC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.tac.build",
    "documentation_url": "https://tac.build/",
    "simulate_endpoints": 0,
@@ -2126,7 +2033,6 @@
     "symbol": "zkTCRO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.zkevm.cronos.org/testnet",
    "documentation_url": "https://docs-zkevm.cronos.org",
    "simulate_endpoints": 0,
@@ -2148,7 +2054,6 @@
     "symbol": "CHOO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blocks.choochain.io",
    "documentation_url": "https://github.com/Trinketz/ChooChain",
    "simulate_endpoints": 0,
@@ -2169,7 +2074,6 @@
     "symbol": "OAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.oasys.games",
    "documentation_url": "https://oasys.games",
    "simulate_endpoints": 2,
@@ -2191,7 +2095,6 @@
     "symbol": "FTM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ftmscan.com",
    "documentation_url": "https://fantom.foundation",
    "simulate_endpoints": 0,
@@ -2219,7 +2122,6 @@
     "symbol": "FRAX",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://fraxscan.com",
    "documentation_url": "https://mainnet.frax.com",
    "simulate_endpoints": 3,
@@ -2245,7 +2147,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://swanscan.io",
    "documentation_url": "https://swanchain.io/",
    "simulate_endpoints": 5,
@@ -2270,7 +2171,6 @@
     "symbol": "ANKR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.neuraprotocol.io",
    "documentation_url": "https://www.neuraprotocol.io/",
    "simulate_endpoints": 0,
@@ -2291,7 +2191,6 @@
     "symbol": "LAC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.lachain.network",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -2313,7 +2212,6 @@
     "symbol": "BPX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.bpxchain.cc",
    "documentation_url": "https://bpxchain.cc",
    "simulate_endpoints": 0,
@@ -2334,7 +2232,6 @@
     "symbol": "NETX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://netxscan.io",
    "documentation_url": "https://netx.world/",
    "simulate_endpoints": 1,
@@ -2355,7 +2252,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://bobascan.com",
    "documentation_url": "https://boba.network",
    "simulate_endpoints": 0,
@@ -2379,7 +2275,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.orderly.network",
    "documentation_url": "https://orderly.network/",
    "simulate_endpoints": 1,
@@ -2401,7 +2296,6 @@
     "symbol": "HBAR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.arkhia.io",
    "documentation_url": "https://hedera.com",
    "simulate_endpoints": 0,
@@ -2423,7 +2317,6 @@
     "symbol": "HBAR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://hashscan.io/testnet",
    "documentation_url": "https://hedera.com",
    "simulate_endpoints": 0,
@@ -2445,7 +2338,6 @@
     "symbol": "HBAR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://hashscan.io/previewnet",
    "documentation_url": "https://hedera.com",
    "simulate_endpoints": 0,
@@ -2466,7 +2358,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.explorer.zksync.io",
    "documentation_url": "https://zksync.io/",
    "simulate_endpoints": 0,
@@ -2490,7 +2381,6 @@
     "symbol": "FIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://filfox.info/en",
    "documentation_url": "https://filecoin.io",
    "simulate_endpoints": 0,
@@ -2515,7 +2405,6 @@
     "symbol": "WEM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://wemscan.com",
    "documentation_url": "https://worldecomoney.com",
    "simulate_endpoints": 0,
@@ -2536,7 +2425,6 @@
     "symbol": "KCS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.kcc.io/en",
    "documentation_url": "https://kcc.io",
    "simulate_endpoints": 0,
@@ -2561,7 +2449,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.zksync.io",
    "documentation_url": "https://zksync.io/",
    "simulate_endpoints": 0,
@@ -2587,7 +2474,6 @@
     "symbol": "VBC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.digitalregion.jp",
    "documentation_url": "https://vbc.digitalregion.jp",
    "simulate_endpoints": 0,
@@ -2608,7 +2494,6 @@
     "symbol": "OMAX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.omaxscan.com",
    "documentation_url": "https://www.omaxcoin.com/",
    "simulate_endpoints": 0,
@@ -2629,7 +2514,6 @@
     "symbol": "JEWEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-test.dfkchain.com",
    "documentation_url": "https://defikingdoms.com",
    "simulate_endpoints": 0,
@@ -2650,7 +2534,6 @@
     "symbol": "TCRO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.cronos.org/testnet",
    "documentation_url": "https://cronos.org",
    "simulate_endpoints": 1,
@@ -2672,7 +2555,6 @@
     "symbol": "BOURSE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bourse.capitalexchange.com",
    "documentation_url": "https://about.capitalexchange.com",
    "simulate_endpoints": 2,
@@ -2694,7 +2576,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://shapescan.xyz",
    "documentation_url": "https://shape.network",
    "simulate_endpoints": 1,
@@ -2716,7 +2597,6 @@
     "symbol": "TFUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.thetatoken.org",
    "documentation_url": "https://www.thetatoken.org/",
    "simulate_endpoints": 0,
@@ -2737,7 +2617,6 @@
     "symbol": "TFUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.thetatoken.org",
    "documentation_url": "https://www.thetatoken.org/",
    "simulate_endpoints": 0,
@@ -2758,7 +2637,6 @@
     "symbol": "PLS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ipfs.scan.pulsechain.com",
    "documentation_url": "https://pulsechain.com/",
    "simulate_endpoints": 5,
@@ -2784,7 +2662,6 @@
     "symbol": "CADL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.camdl.gov.kh",
    "documentation_url": "https://camdl.gov.kh/",
    "simulate_endpoints": 0,
@@ -2805,7 +2682,6 @@
     "symbol": "TLA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testexplorer.lachain.network",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -2826,7 +2702,6 @@
     "symbol": "GRAMZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.nutriemp-chain.link",
    "documentation_url": "https://nutriemp.com",
    "simulate_endpoints": 0,
@@ -2848,7 +2723,6 @@
     "symbol": "BYC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.boyaa.network",
    "documentation_url": "https://boyaa.network",
    "simulate_endpoints": 1,
@@ -2869,7 +2743,6 @@
     "symbol": "AZO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.arzio.co",
    "documentation_url": "https://chain.arzio.co",
    "simulate_endpoints": 0,
@@ -2890,7 +2763,6 @@
     "symbol": "AREA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.areum.network",
    "documentation_url": "https://areum.network",
    "simulate_endpoints": 0,
@@ -2915,7 +2787,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.appchain.xyz",
    "documentation_url": "https://appchain.xyz",
    "simulate_endpoints": 1,
@@ -2938,7 +2809,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://worldscan.org",
    "documentation_url": "https://world.org/world-chain",
    "simulate_endpoints": 0,
@@ -2963,7 +2833,6 @@
     "symbol": "BXN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blackfortscan.com",
    "documentation_url": "https://blackfort.com",
    "simulate_endpoints": 1,
@@ -2984,7 +2853,6 @@
     "symbol": "CAM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://suite.camino.network/explorer",
    "documentation_url": "https://camino.network/",
    "simulate_endpoints": 0,
@@ -3005,7 +2873,6 @@
     "symbol": "XT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://xscscan.pub",
    "documentation_url": "https://xsc.pub/",
    "simulate_endpoints": 0,
@@ -3027,7 +2894,6 @@
     "symbol": "FLOW",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm-testnet.flowscan.io",
    "documentation_url": "https://developers.flow.com/evm/about",
    "simulate_endpoints": 0,
@@ -3048,7 +2914,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.river.build",
    "documentation_url": "https://www.river.build",
    "simulate_endpoints": 2,
@@ -3070,7 +2935,6 @@
     "symbol": "VLDM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.validium.network",
    "documentation_url": "https://www.validium.network",
    "simulate_endpoints": 0,
@@ -3091,7 +2955,6 @@
     "symbol": "DOGE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.dogechain.dog",
    "documentation_url": "https://dogechain.dog",
    "simulate_endpoints": 0,
@@ -3112,7 +2975,6 @@
     "symbol": "SYS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.rollux.com",
    "documentation_url": "https://rollux.com",
    "simulate_endpoints": 0,
@@ -3133,7 +2995,6 @@
     "symbol": "NETX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.netxscan.io",
    "documentation_url": "https://netx.world/",
    "simulate_endpoints": 1,
@@ -3154,7 +3015,6 @@
     "symbol": "LADY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ladyscan.us",
    "documentation_url": "https://ladyswap.us",
    "simulate_endpoints": 0,
@@ -3175,7 +3035,6 @@
     "symbol": "ASTR",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://astar.subscan.io",
    "documentation_url": "https://astar.network/",
    "simulate_endpoints": 0,
@@ -3197,7 +3056,6 @@
     "symbol": "GLQ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.graphlinq.io",
    "documentation_url": "https://graphlinq.io",
    "simulate_endpoints": 0,
@@ -3218,7 +3076,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.battlechain.com",
    "documentation_url": "https://battlechain.com",
    "simulate_endpoints": 0,
@@ -3239,7 +3096,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.battlechain.com",
    "documentation_url": "https://battlechain.com",
    "simulate_endpoints": 0,
@@ -3260,7 +3116,6 @@
     "symbol": "ACE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.endurance.fusionist.io",
    "documentation_url": "https://ace.fusionist.io/",
    "simulate_endpoints": 1,
@@ -3281,7 +3136,6 @@
     "symbol": "JASMY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.jasmyscan.net",
    "documentation_url": "https://jasmy.global",
    "simulate_endpoints": 0,
@@ -3302,7 +3156,6 @@
     "symbol": "JASMY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://jasmy-chain-testnet-explorer.alt.technology",
    "documentation_url": "https://jasmy.global",
    "simulate_endpoints": 0,
@@ -3323,7 +3176,6 @@
     "symbol": "KAR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.karura.network",
    "documentation_url": "https://acala.network/karura",
    "simulate_endpoints": 0,
@@ -3344,7 +3196,6 @@
     "symbol": "NERO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.neroscan.io",
    "documentation_url": "https://docs.nerochain.io/",
    "simulate_endpoints": 0,
@@ -3365,7 +3216,6 @@
     "symbol": "BNB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://matchscan.io",
    "documentation_url": "https://www.matchain.io",
    "simulate_endpoints": 0,
@@ -3386,7 +3236,6 @@
     "symbol": "TIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://eden.blockscout.com",
    "documentation_url": "https://celestia.org",
    "simulate_endpoints": 0,
@@ -3407,7 +3256,6 @@
     "symbol": "BAC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bacscan.net",
    "documentation_url": "https://bitassetchain.io",
    "simulate_endpoints": 0,
@@ -3428,7 +3276,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://tranched-mainnet.calderaexplorer.xyz",
    "documentation_url": "https://tranched-mainnet.hub.caldera.xyz",
    "simulate_endpoints": 1,
@@ -3451,7 +3298,6 @@
     "symbol": "FLOW",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://evm.flowscan.io",
    "documentation_url": "https://developers.flow.com/evm/about",
    "simulate_endpoints": 0,
@@ -3472,7 +3318,6 @@
     "symbol": "THEO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.autheo.com",
    "documentation_url": "https://autheo.com",
    "simulate_endpoints": 0,
@@ -3493,7 +3338,6 @@
     "symbol": "ACA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.acala.network",
    "documentation_url": "https://acala.network",
    "simulate_endpoints": 0,
@@ -3514,7 +3358,6 @@
     "symbol": "EVOZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evozscan.com",
    "documentation_url": "https://rpc.evozscan.com",
    "simulate_endpoints": 0,
@@ -3535,7 +3378,6 @@
     "symbol": "MEER",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://qng.qitmeer.io",
    "documentation_url": "https://github.com/Qitmeer",
    "simulate_endpoints": 1,
@@ -3556,7 +3398,6 @@
     "symbol": "WMTX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.worldmobile.io",
    "documentation_url": "https://worldmobile.io/the-chain",
    "simulate_endpoints": 0,
@@ -3577,7 +3418,6 @@
     "symbol": "PTT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.myweber.org",
    "documentation_url": "https://myweber.org",
    "simulate_endpoints": 0,
@@ -3598,7 +3438,6 @@
     "symbol": "WAN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://wanscan.org",
    "documentation_url": "https://www.wanscan.org",
    "simulate_endpoints": 0,
@@ -3620,7 +3459,6 @@
     "symbol": "FIRE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://rinia.firescan.io",
    "documentation_url": "https://thefirechain.com",
    "simulate_endpoints": 1,
@@ -3641,7 +3479,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.explorer.mode.network",
    "documentation_url": "https://docs.mode.network/",
    "simulate_endpoints": 1,
@@ -3663,7 +3500,6 @@
     "symbol": "tPLS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.v4.testnet.pulsechain.com",
    "documentation_url": "https://pulsechain.com",
    "simulate_endpoints": 2,
@@ -3687,7 +3523,6 @@
     "symbol": "TAO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm-testscan.dev.opentensor.ai",
    "documentation_url": "https://bittensor.com/",
    "simulate_endpoints": 0,
@@ -3709,7 +3544,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.lyra.finance",
    "documentation_url": "https://lyra.finance",
    "simulate_endpoints": 1,
@@ -3730,7 +3564,6 @@
     "symbol": "BTCC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.bitcoincode.technology",
    "documentation_url": "https://bitcoincode.technology",
    "simulate_endpoints": 0,
@@ -3751,7 +3584,6 @@
     "symbol": "TAO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://bittensor.com/",
    "simulate_endpoints": 0,
@@ -3774,7 +3606,6 @@
     "symbol": "DGRAM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.datagram.network",
    "documentation_url": "https://doc.datagram.network/introduction/what-is-datagram",
    "simulate_endpoints": 0,
@@ -3795,7 +3626,6 @@
     "symbol": "OORT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet-scan.oortech.com",
    "documentation_url": "https://oortech.com",
    "simulate_endpoints": 0,
@@ -3816,7 +3646,6 @@
     "symbol": "OPN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.iopn.tech",
    "documentation_url": "https://iopn.tech",
    "simulate_endpoints": 0,
@@ -3837,7 +3666,6 @@
     "symbol": "CMEMO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.metamemo.one:8080",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -3858,7 +3686,6 @@
     "symbol": "USDT0",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://stablescan.xyz",
    "documentation_url": "https://stable.xyz",
    "simulate_endpoints": 0,
@@ -3881,7 +3708,6 @@
     "symbol": "WETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://bifrost.io/",
    "simulate_endpoints": 0,
@@ -3902,7 +3728,6 @@
     "symbol": "HYPE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://hyperfoundation.org/",
    "simulate_endpoints": 0,
@@ -3924,7 +3749,6 @@
     "symbol": "WAN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.wanscan.org",
    "documentation_url": "https://testnet.wanscan.org",
    "simulate_endpoints": 1,
@@ -3946,7 +3770,6 @@
     "symbol": "KAIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://kairos.kaiascope.com",
    "documentation_url": "https://kaia.io/",
    "simulate_endpoints": 0,
@@ -3970,7 +3793,6 @@
     "symbol": "tLEMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://dapp.allthingslemon.io/home",
    "simulate_endpoints": 0,
@@ -3991,7 +3813,6 @@
     "symbol": "LEMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://dapp.allthingslemon.io/home",
    "simulate_endpoints": 0,
@@ -4012,7 +3833,6 @@
     "symbol": "NEW",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.newtonproject.org/",
    "simulate_endpoints": 0,
@@ -4033,7 +3853,6 @@
     "symbol": "JNFTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://jumboscan.jumbochain.org",
    "documentation_url": "https://jumbochain.org",
    "simulate_endpoints": 0,
@@ -4057,7 +3876,6 @@
     "symbol": "EVC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://evrice.com",
    "simulate_endpoints": 0,
@@ -4078,7 +3896,6 @@
     "symbol": "NEW",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.newtonproject.org/",
    "simulate_endpoints": 0,
@@ -4099,7 +3916,6 @@
     "symbol": "MAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://maiscan.org",
    "documentation_url": null,
    "simulate_endpoints": 3,
@@ -4122,7 +3938,6 @@
     "symbol": "BTT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.bttcscan.com",
    "documentation_url": "https://bt.io",
    "simulate_endpoints": 0,
@@ -4143,7 +3958,6 @@
     "symbol": "CFX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm.confluxscan.net",
    "documentation_url": "https://confluxnetwork.org",
    "simulate_endpoints": 0,
@@ -4166,7 +3980,6 @@
     "symbol": "DIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.diadata.org",
    "documentation_url": "https://www.diadata.org",
    "simulate_endpoints": 1,
@@ -4187,7 +4000,6 @@
     "symbol": "OGPU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ogpuscan.io",
    "documentation_url": "https://opengpu.network",
    "simulate_endpoints": 0,
@@ -4208,7 +4020,6 @@
     "symbol": "METIS",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://andromeda-explorer.metis.io",
    "documentation_url": "https://www.metis.io",
    "simulate_endpoints": 0,
@@ -4234,7 +4045,6 @@
     "symbol": "HEART",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://humans.explorers.guru",
    "documentation_url": "https://humans.ai",
    "simulate_endpoints": 0,
@@ -4256,7 +4066,6 @@
     "symbol": "DYM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dym.fyi",
    "documentation_url": "https://dymension.xyz",
    "simulate_endpoints": 0,
@@ -4279,7 +4088,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zkevm.polygonscan.com",
    "documentation_url": "https://polygon.technology/polygon-zkevm",
    "simulate_endpoints": 0,
@@ -4301,7 +4109,6 @@
     "symbol": "WEMIX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.wemix.com",
    "documentation_url": "https://wemix.com",
    "simulate_endpoints": 0,
@@ -4323,7 +4130,6 @@
     "symbol": "tWEMIX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://microscope.test.wemix.com",
    "documentation_url": "https://wemix.com",
    "simulate_endpoints": 0,
@@ -4345,7 +4151,6 @@
     "symbol": "B2",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-hub-explorer.bsquared.network",
    "documentation_url": "https://www.bsquared.network",
    "simulate_endpoints": 0,
@@ -4366,7 +4171,6 @@
     "symbol": "tCORE2",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.test2.btcs.network",
    "documentation_url": "https://www.coredao.org",
    "simulate_endpoints": 1,
@@ -4387,7 +4191,6 @@
     "symbol": "CORE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.coredao.org",
    "documentation_url": "https://www.coredao.org",
    "simulate_endpoints": 2,
@@ -4410,7 +4213,6 @@
     "symbol": "QRY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.quarrychain.network",
    "documentation_url": "https://quarrychain.network/",
    "simulate_endpoints": 0,
@@ -4431,7 +4233,6 @@
     "symbol": "MESH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.statemesh.net",
    "documentation_url": "https://statemesh.net",
    "simulate_endpoints": 0,
@@ -4452,7 +4253,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.lisk.com",
    "documentation_url": "https://lisk.com",
    "simulate_endpoints": 0,
@@ -4475,7 +4275,6 @@
     "symbol": "TRUST",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.intuition.systems",
    "documentation_url": "https://intuition.systems",
    "simulate_endpoints": 1,
@@ -4496,7 +4295,6 @@
     "symbol": "tCMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.mosscan.com",
    "documentation_url": "https://www.clubmos.com",
    "simulate_endpoints": 1,
@@ -4517,7 +4315,6 @@
     "symbol": "UOC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm-explorer.origin.uptick.network",
    "documentation_url": "https://www.uptick.network",
    "simulate_endpoints": 0,
@@ -4538,7 +4335,6 @@
     "symbol": "POP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.popcateum.org",
    "documentation_url": "https://popcateum.org",
    "simulate_endpoints": 0,
@@ -4559,7 +4355,6 @@
     "symbol": "ULX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ulxscan.com",
    "documentation_url": "https://ultron.foundation",
    "simulate_endpoints": 0,
@@ -4580,7 +4375,6 @@
     "symbol": "FITFI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://stepscan.io",
    "documentation_url": "https://step.network",
    "simulate_endpoints": 0,
@@ -4601,7 +4395,6 @@
     "symbol": "BAK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://brainark.online",
    "simulate_endpoints": 0,
@@ -4622,7 +4415,6 @@
     "symbol": "OM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://omscan.omplatform.com",
    "documentation_url": "https://omplatform.com/",
    "simulate_endpoints": 0,
@@ -4643,7 +4435,6 @@
     "symbol": "IRYS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.irys.xyz",
    "documentation_url": "https://irys.xyz",
    "simulate_endpoints": 2,
@@ -4665,7 +4456,6 @@
     "symbol": "GLMR",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://moonbeam.moonscan.io",
    "documentation_url": "https://moonbeam.network/networks/moonbeam/",
    "simulate_endpoints": 0,
@@ -4691,7 +4481,6 @@
     "symbol": "MOVR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://moonriver.moonscan.io",
    "documentation_url": "https://moonbeam.network/networks/moonriver/",
    "simulate_endpoints": 0,
@@ -4715,7 +4504,6 @@
     "symbol": "DEV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://moonbase.moonscan.io",
    "documentation_url": "https://docs.moonbeam.network/learn/platform/networks/moonbase/",
    "simulate_endpoints": 0,
@@ -4737,7 +4525,6 @@
     "symbol": "SWTR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-evm.testnet.swisstronik.com",
    "documentation_url": "https://www.swisstronik.com",
    "simulate_endpoints": 0,
@@ -4758,7 +4545,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://unichain-sepolia.blockscout.com",
    "documentation_url": "https://unichain.org",
    "simulate_endpoints": 1,
@@ -4781,7 +4567,6 @@
     "symbol": "STOC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://stochainscan.io/en",
    "documentation_url": "https://www.stochain.io/",
    "simulate_endpoints": 0,
@@ -4802,7 +4587,6 @@
     "symbol": "DATA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://aeneid.datanetscan.io",
    "documentation_url": "https://datafdn.org/",
    "simulate_endpoints": 4,
@@ -4826,7 +4610,6 @@
     "symbol": "AIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://aiascan.com",
    "documentation_url": "https://aiachain.org/",
    "simulate_endpoints": 0,
@@ -4852,7 +4635,6 @@
     "symbol": "AIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.aiascan.com",
    "documentation_url": "https://aiachain.org",
    "simulate_endpoints": 0,
@@ -4873,7 +4655,6 @@
     "symbol": "SEI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.seiscan.io",
    "documentation_url": "https://www.sei.io",
    "simulate_endpoints": 0,
@@ -4894,7 +4675,6 @@
     "symbol": "SEI",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://seiscan.io",
    "documentation_url": "https://www.sei.io",
    "simulate_endpoints": 0,
@@ -4917,7 +4697,6 @@
     "symbol": "KII",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.kiichain.io",
    "documentation_url": "https://kiichain.io",
    "simulate_endpoints": 0,
@@ -4938,7 +4717,6 @@
     "symbol": "PYR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.elysiumchain.tech",
    "documentation_url": "https://elysiumchain.tech/",
    "simulate_endpoints": 0,
@@ -4960,7 +4738,6 @@
     "symbol": "BIE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://app.bie.ai/explorer",
    "documentation_url": "https://bie.ai",
    "simulate_endpoints": 0,
@@ -4981,7 +4758,6 @@
     "symbol": "RAMA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ramascan.com",
    "documentation_url": "https://www.ramestta.com",
    "simulate_endpoints": 0,
@@ -5003,7 +4779,6 @@
     "symbol": "ONI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.onino.io",
    "documentation_url": "https://onino.io",
    "simulate_endpoints": 0,
@@ -5024,7 +4799,6 @@
     "symbol": "INJ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.blockscout.injective.network",
    "documentation_url": "https://injective.com",
    "simulate_endpoints": 0,
@@ -5046,7 +4820,6 @@
     "symbol": "VANA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://vanascan.io",
    "documentation_url": "https://vana.org",
    "simulate_endpoints": 1,
@@ -5067,7 +4840,6 @@
     "symbol": "VTRU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.vitruveo.xyz",
    "documentation_url": "https://www.vitruveo.xyz",
    "simulate_endpoints": 0,
@@ -5088,7 +4860,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan-canary.bevm.io",
    "documentation_url": "https://chainx.org",
    "simulate_endpoints": 0,
@@ -5112,7 +4883,6 @@
     "symbol": "DATA",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://datanetscan.io",
    "documentation_url": "https://datafdn.org/",
    "simulate_endpoints": 6,
@@ -5138,7 +4908,6 @@
     "symbol": "DSC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dscscan.io",
    "documentation_url": "https://rpc01.dscscan.io",
    "simulate_endpoints": 0,
@@ -5159,7 +4928,6 @@
     "symbol": "TENET",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://tenetscan.io",
    "documentation_url": "https://tenet.org/",
    "simulate_endpoints": 0,
@@ -5180,7 +4948,6 @@
     "symbol": "REACT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://reactscan.net",
    "documentation_url": "https://reactive.network",
    "simulate_endpoints": 1,
@@ -5201,7 +4968,6 @@
     "symbol": "OPEN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.openledger.xyz",
    "documentation_url": "https://www.openledger.xyz",
    "simulate_endpoints": 0,
@@ -5222,7 +4988,6 @@
     "symbol": "G",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.gravity.xyz",
    "documentation_url": "https://gravity.xyz",
    "simulate_endpoints": 2,
@@ -5244,7 +5009,6 @@
     "symbol": "XGR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.xgr.network",
    "documentation_url": "https://xgr.network",
    "simulate_endpoints": 0,
@@ -5267,7 +5031,6 @@
     "symbol": "LCN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.liquichain.io",
    "documentation_url": "https://liquichain.io/",
    "simulate_endpoints": 0,
@@ -5288,7 +5051,6 @@
     "symbol": "NERO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.neroscan.io",
    "documentation_url": "https://docs.nerochain.io/",
    "simulate_endpoints": 0,
@@ -5309,7 +5071,6 @@
     "symbol": "JINDA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.blockchain.or.th",
    "documentation_url": "https://blockchain.or.th",
    "simulate_endpoints": 0,
@@ -5330,7 +5091,6 @@
     "symbol": "JINDA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.testnet.blockchain.or.th",
    "documentation_url": "https://blockchain.or.th",
    "simulate_endpoints": 0,
@@ -5351,7 +5111,6 @@
     "symbol": "DRC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.doric.network",
    "documentation_url": "https://doric.network",
    "simulate_endpoints": 0,
@@ -5372,7 +5131,6 @@
     "symbol": "PLT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://palettescan.com",
    "documentation_url": "https://hashpalette.com/",
    "simulate_endpoints": 0,
@@ -5393,7 +5151,6 @@
     "symbol": "ETP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dora.ethpar.net",
    "documentation_url": "https://ethpar.com",
    "simulate_endpoints": 0,
@@ -5414,7 +5171,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.reya.network",
    "documentation_url": "https://reya.network",
    "simulate_endpoints": 1,
@@ -5435,7 +5191,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.metall2.com",
    "documentation_url": "https://metall2.com",
    "simulate_endpoints": 1,
@@ -5457,7 +5212,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.metall2.com",
    "documentation_url": "https://metall2.com",
    "simulate_endpoints": 1,
@@ -5479,7 +5233,6 @@
     "symbol": "INJ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.injective.network",
    "documentation_url": "https://injective.com",
    "simulate_endpoints": 0,
@@ -5501,7 +5254,6 @@
     "symbol": "KII",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.kiichain.io",
    "documentation_url": "https://kiichain.io",
    "simulate_endpoints": 0,
@@ -5522,7 +5274,6 @@
     "symbol": "CRC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ethereum-pocr.github.io/explorer/kerleano",
    "documentation_url": "https://github.com/ethereum-pocr/kerleano",
    "simulate_endpoints": 0,
@@ -5544,7 +5295,6 @@
     "symbol": "LIF3",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.lif3scout.com",
    "documentation_url": "https://docs.lif3.com/",
    "simulate_endpoints": 0,
@@ -5565,7 +5315,6 @@
     "symbol": "PBG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.playblock.io",
    "documentation_url": "https://www.playnance.com",
    "simulate_endpoints": 1,
@@ -5586,7 +5335,6 @@
     "symbol": "SWTR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-evm.mainnet.swisstronik.com",
    "documentation_url": "https://www.swisstronik.com",
    "simulate_endpoints": 0,
@@ -5608,7 +5356,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://soneium.blockscout.com",
    "documentation_url": "https://soneium.org",
    "simulate_endpoints": 1,
@@ -5631,7 +5378,6 @@
     "symbol": "WBT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.whitechain.io",
    "documentation_url": "https://docs.whitechain.io",
    "simulate_endpoints": 0,
@@ -5652,7 +5398,6 @@
     "symbol": "WBT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.whitechain.io",
    "documentation_url": "https://whitechain.io",
    "simulate_endpoints": 0,
@@ -5673,7 +5418,6 @@
     "symbol": "XGR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.xgr.network",
    "documentation_url": "https://xgr.network",
    "simulate_endpoints": 0,
@@ -5696,7 +5440,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://phoenix.lightlink.io",
    "documentation_url": "https://lightlink.io",
    "simulate_endpoints": 0,
@@ -5717,7 +5460,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://pegasus.lightlink.io",
    "documentation_url": "https://lightlink.io",
    "simulate_endpoints": 0,
@@ -5738,7 +5480,6 @@
     "symbol": "BITCI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bitciexplorer.com",
    "documentation_url": "https://www.bitcichain.com",
    "simulate_endpoints": 0,
@@ -5759,7 +5500,6 @@
     "symbol": "TURK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://turkscan.com",
    "documentation_url": "https://turkscan.com",
    "simulate_endpoints": 0,
@@ -5780,7 +5520,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.swellnetwork.io",
    "documentation_url": "https://app.swellnetwork.io/layer2/swell-l2",
    "simulate_endpoints": 2,
@@ -5802,7 +5541,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://swell-testnet-explorer.alt.technology",
    "documentation_url": "https://app.swellnetwork.io/layer2/swell-l2",
    "simulate_endpoints": 1,
@@ -5824,7 +5562,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://soneium-minato.blockscout.com",
    "documentation_url": "https://soneium.org",
    "simulate_endpoints": 1,
@@ -5847,7 +5584,6 @@
     "symbol": "OKB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://web3.okx.com/explorer/x-layer-testnet",
    "documentation_url": "https://web3.okx.com/xlayer",
    "simulate_endpoints": 0,
@@ -5869,7 +5605,6 @@
     "symbol": "tSEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.selendra.org",
    "documentation_url": "https://selendra.org",
    "simulate_endpoints": 0,
@@ -5890,7 +5625,6 @@
     "symbol": "SEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.selendra.org",
    "documentation_url": "https://selendra.org",
    "simulate_endpoints": 0,
@@ -5911,7 +5645,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.trex.xyz",
    "documentation_url": "https://trex.xyz/",
    "simulate_endpoints": 0,
@@ -5932,7 +5665,6 @@
     "symbol": "TSCS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnetscan.scschain.com",
    "documentation_url": "https://testnet.scschain.com",
    "simulate_endpoints": 0,
@@ -5953,7 +5685,6 @@
     "symbol": "CRAT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.cratd2csmartchain.io",
    "documentation_url": "https://cratd2csmartchain.io",
    "simulate_endpoints": 0,
@@ -5976,7 +5707,6 @@
     "symbol": "KROWN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.krown.network",
    "documentation_url": "https://krown.network",
    "simulate_endpoints": 2,
@@ -5998,7 +5728,6 @@
     "symbol": "BSW",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://raas.gelato.network/rollups/details/public/lydia-coin",
    "simulate_endpoints": 1,
@@ -6019,7 +5748,6 @@
     "symbol": "TSTOC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.stochainscan.io/en",
    "documentation_url": "https://www.stochain.io/",
    "simulate_endpoints": 0,
@@ -6040,7 +5768,6 @@
     "symbol": "DOGE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.dogechain.dog",
    "documentation_url": "https://dogechain.dog",
    "simulate_endpoints": 0,
@@ -6066,7 +5793,6 @@
     "symbol": "GAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://polytopia.org/",
    "simulate_endpoints": 0,
@@ -6087,7 +5813,6 @@
     "symbol": "TEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://telscan.io",
    "documentation_url": "https://telcoin.network",
    "simulate_endpoints": 6,
@@ -6113,7 +5838,6 @@
     "symbol": "RON",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://app.roninchain.com",
    "documentation_url": "https://roninchain.com",
    "simulate_endpoints": 0,
@@ -6134,7 +5858,6 @@
     "symbol": "tARMA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://armascan.io",
    "documentation_url": "https://armadex.io",
    "simulate_endpoints": 0,
@@ -6155,7 +5878,6 @@
     "symbol": "CFG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://centrifuge.subscan.io",
    "documentation_url": "https://centrifuge.io",
    "simulate_endpoints": 0,
@@ -6178,7 +5900,6 @@
     "symbol": "NEURO",
     "decimals": 12
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://neuroweb.ai",
    "simulate_endpoints": 0,
@@ -6199,7 +5920,6 @@
     "symbol": "STOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://web3-explorer.thestratos.org",
    "documentation_url": "https://www.thestratos.org",
    "simulate_endpoints": 0,
@@ -6220,7 +5940,6 @@
     "symbol": "MFX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mfx.network",
    "documentation_url": "https://docs.mfx.network/integration.html",
    "simulate_endpoints": 0,
@@ -6241,7 +5960,6 @@
     "symbol": "LAX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.parallaxprotocol.org",
    "documentation_url": "https://parallaxprotocol.org",
    "simulate_endpoints": 0,
@@ -6262,7 +5980,6 @@
     "symbol": "USDT0",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.stablescan.xyz",
    "documentation_url": "https://stable.xyz",
    "simulate_endpoints": 0,
@@ -6283,7 +6000,6 @@
     "symbol": "TKAVA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.kava.io",
    "simulate_endpoints": 0,
@@ -6305,7 +6021,6 @@
     "symbol": "KAVA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://kavascan.com",
    "documentation_url": "https://www.kava.io",
    "simulate_endpoints": 0,
@@ -6331,7 +6046,6 @@
     "symbol": "CMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mosscan.com",
    "documentation_url": "https://www.clubmos.com",
    "simulate_endpoints": 0,
@@ -6352,7 +6066,6 @@
     "symbol": "ebro",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.ebrochain.com",
    "simulate_endpoints": 0,
@@ -6373,7 +6086,6 @@
     "symbol": "CRAT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.cratd2csmartchain.io",
    "documentation_url": "https://cratd2csmartchain.io",
    "simulate_endpoints": 0,
@@ -6396,7 +6108,6 @@
     "symbol": "ALT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://altcoinchain.org",
    "simulate_endpoints": 0,
@@ -6417,7 +6128,6 @@
     "symbol": "ATLA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.testnet-v2.atleta.network",
    "documentation_url": "https://atleta.network",
    "simulate_endpoints": 0,
@@ -6438,7 +6148,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.goat.network",
    "documentation_url": "https://www.goat.network",
    "simulate_endpoints": 2,
@@ -6461,7 +6170,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scope.silicon.network",
    "documentation_url": "https://docs.silicon.network",
    "simulate_endpoints": 0,
@@ -6483,7 +6191,6 @@
     "symbol": "KITE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://kitescan.ai",
    "documentation_url": "https://gokite.ai/",
    "simulate_endpoints": 0,
@@ -6505,7 +6212,6 @@
     "symbol": "KITE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.kitescan.ai",
    "documentation_url": "https://gokite.ai/",
    "simulate_endpoints": 0,
@@ -6526,7 +6232,6 @@
     "symbol": "TAC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://spb.explorer.tac.build",
    "documentation_url": "https://tac.build/",
    "simulate_endpoints": 0,
@@ -6548,7 +6253,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.karak.network",
    "documentation_url": "https://karak.network",
    "simulate_endpoints": 0,
@@ -6569,7 +6273,6 @@
     "symbol": "ATLA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.atleta.network",
    "documentation_url": "https://atleta.network",
    "simulate_endpoints": 0,
@@ -6592,7 +6295,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://cardona-zkevm.polygonscan.com",
    "documentation_url": "https://polygon.technology/polygon-zkevm",
    "simulate_endpoints": 0,
@@ -6614,7 +6316,6 @@
     "symbol": "6DO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.6dochain.com",
    "documentation_url": "https://6do.world",
    "simulate_endpoints": 0,
@@ -6637,7 +6338,6 @@
     "symbol": "NOW",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://nowscan.io",
    "documentation_url": "https://nowchain.co",
    "simulate_endpoints": 0,
@@ -6658,7 +6358,6 @@
     "symbol": "SVP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.svpchain.com",
    "documentation_url": "https://svpchain.org",
    "simulate_endpoints": 0,
@@ -6681,7 +6380,6 @@
     "symbol": "FRAX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://testnet.frax.com",
    "simulate_endpoints": 0,
@@ -6703,7 +6401,6 @@
     "symbol": "PHO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://phoscan.org",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -6724,7 +6421,6 @@
     "symbol": "CRC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ethereum-pocr.github.io/explorer/pocrnet",
    "documentation_url": "https://github.com/ethereum-pocr/pocrnet",
    "simulate_endpoints": 0,
@@ -6746,7 +6442,6 @@
     "symbol": "WBT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.whitechain.io",
    "documentation_url": "https://whitechain.io",
    "simulate_endpoints": 0,
@@ -6767,7 +6462,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet-explorer.ailayer.xyz",
    "documentation_url": "https://ailayer.xyz/",
    "simulate_endpoints": 0,
@@ -6788,7 +6482,6 @@
     "symbol": "SPLD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.splendor.org",
    "documentation_url": "https://splendor.org",
    "simulate_endpoints": 0,
@@ -6809,7 +6502,6 @@
     "symbol": "SPLDT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.splendor.org",
    "documentation_url": "https://splendor.org",
    "simulate_endpoints": 0,
@@ -6830,7 +6522,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://abscan.org",
    "documentation_url": "https://abs.xyz",
    "simulate_endpoints": 0,
@@ -6851,7 +6542,6 @@
     "symbol": "AERE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.aere.network",
    "documentation_url": "https://aere.network",
    "simulate_endpoints": 2,
@@ -6873,7 +6563,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.morphl2.io",
    "documentation_url": "https://morphl2.io",
    "simulate_endpoints": 0,
@@ -6896,7 +6585,6 @@
     "symbol": "CANDY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://streams.candychain.io",
    "documentation_url": "https://candychain.io",
    "simulate_endpoints": 0,
@@ -6917,7 +6605,6 @@
     "symbol": "3ULL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://3011.routescan.io",
    "documentation_url": "https://playa3ull.games",
    "simulate_endpoints": 0,
@@ -6938,7 +6625,6 @@
     "symbol": "VTCN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bchscan.io",
    "documentation_url": "https://www.versatizecoin.com/",
    "simulate_endpoints": 0,
@@ -6961,7 +6647,6 @@
     "symbol": "BFC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mainnet.bifrostnetwork.com",
    "documentation_url": "https://bifrostnetwork.com",
    "simulate_endpoints": 0,
@@ -6983,7 +6668,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.goalpha.org",
    "documentation_url": "https://docs.alphatoken.com/AlphaChain/about-alpha-chain",
    "simulate_endpoints": 1,
@@ -7004,7 +6688,6 @@
     "symbol": "XO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-mainnet.xo.market",
    "documentation_url": "https://xo.market",
    "simulate_endpoints": 1,
@@ -7025,7 +6708,6 @@
     "symbol": "DUBX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://arabianchain.org",
    "simulate_endpoints": 0,
@@ -7046,7 +6728,6 @@
     "symbol": "IRYS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm-explorer.irys.xyz",
    "documentation_url": "https://irys.xyz",
    "simulate_endpoints": 2,
@@ -7068,7 +6749,6 @@
     "symbol": "RIO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.realiostage.network",
    "documentation_url": "https://www.realio.network",
    "simulate_endpoints": 0,
@@ -7090,7 +6770,6 @@
     "symbol": "RIO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.realio.network",
    "documentation_url": "https://www.realio.network",
    "simulate_endpoints": 0,
@@ -7112,7 +6791,6 @@
     "symbol": "PEAQ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://peaq.subscan.io",
    "documentation_url": "https://www.peaq.xyz",
    "simulate_endpoints": 0,
@@ -7135,7 +6813,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://edge-mainnet.explorer.alchemy.com",
    "documentation_url": "https://www.edgex.exchange",
    "simulate_endpoints": 0,
@@ -7156,7 +6833,6 @@
     "symbol": "PC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.pentagon.games",
    "documentation_url": "https://pentagon.games",
    "simulate_endpoints": 0,
@@ -7177,7 +6853,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.layeredge.io",
    "documentation_url": "https://www.layeredge.io",
    "simulate_endpoints": 0,
@@ -7198,7 +6873,6 @@
     "symbol": "JPOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.jfinpos.com",
    "documentation_url": "https://jfinpos.com",
    "simulate_endpoints": 1,
@@ -7219,7 +6893,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://botanixscan.io",
    "documentation_url": "https://botanixlabs.com",
    "simulate_endpoints": 0,
@@ -7240,7 +6913,6 @@
     "symbol": "J",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://jscan.jnsdao.com",
    "documentation_url": "https://jnsdao.com",
    "simulate_endpoints": 0,
@@ -7261,7 +6933,6 @@
     "symbol": "ALV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://alveyscan.com",
    "documentation_url": "https://alveychain.com/",
    "simulate_endpoints": 0,
@@ -7283,7 +6954,6 @@
     "symbol": "FAVO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.favoscan.com",
    "documentation_url": "https://www.favoscan.com",
    "simulate_endpoints": 0,
@@ -7304,7 +6974,6 @@
     "symbol": "KLC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://kalyscan.io",
    "documentation_url": "https://kalychain.io",
    "simulate_endpoints": 0,
@@ -7325,7 +6994,6 @@
     "symbol": "KLC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.kalyscan.io",
    "documentation_url": "https://kalychain.io",
    "simulate_endpoints": 0,
@@ -7346,7 +7014,6 @@
     "symbol": "DOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://test.doscan.io",
    "documentation_url": "https://doschain.com",
    "simulate_endpoints": 0,
@@ -7367,7 +7034,6 @@
     "symbol": "PTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.pionetrace.com",
    "documentation_url": "https://pionetrace.com",
    "simulate_endpoints": 0,
@@ -7388,7 +7054,6 @@
     "symbol": "OZO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ozonescan.io",
    "documentation_url": "https://ozonechain.io",
    "simulate_endpoints": 0,
@@ -7409,7 +7074,6 @@
     "symbol": "GPU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ganscan.gpu.net",
    "documentation_url": "https://docs.gpu.net/",
    "simulate_endpoints": 0,
@@ -7430,7 +7094,6 @@
     "symbol": "AIOZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.aioz.network",
    "documentation_url": "https://aioz.network",
    "simulate_endpoints": 0,
@@ -7451,7 +7114,6 @@
     "symbol": "cBTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mainnet.citrea.xyz",
    "documentation_url": "https://citrea.xyz",
    "simulate_endpoints": 0,
@@ -7472,7 +7134,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.risechain.com",
    "documentation_url": "https://risechain.com",
    "simulate_endpoints": 1,
@@ -7493,7 +7154,6 @@
     "symbol": "XFI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://test.xfiscan.com",
    "documentation_url": "https://crossfi.org",
    "simulate_endpoints": 0,
@@ -7514,7 +7174,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.merlinchain.io",
    "documentation_url": "https://merlinchain.io",
    "simulate_endpoints": 0,
@@ -7537,7 +7196,6 @@
     "symbol": "LYXt",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.execution.testnet.lukso.network",
    "documentation_url": "https://lukso.network",
    "simulate_endpoints": 1,
@@ -7558,7 +7216,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia-blockscout.lisk.com",
    "documentation_url": "https://lisk.com",
    "simulate_endpoints": 0,
@@ -7580,7 +7237,6 @@
     "symbol": "EDGEN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://edgenscan.io",
    "documentation_url": "https://layeredge.io",
    "simulate_endpoints": 0,
@@ -7602,7 +7258,6 @@
     "symbol": "USD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore.tempo.xyz",
    "documentation_url": "https://tempo.xyz",
    "simulate_endpoints": 0,
@@ -7623,7 +7278,6 @@
     "symbol": "IKTokn",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.ikchain.net",
    "documentation_url": "https://ikchain.net",
    "simulate_endpoints": 0,
@@ -7644,7 +7298,6 @@
     "symbol": "TPIX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.tpix.online",
    "documentation_url": "https://tpix.online",
    "simulate_endpoints": 0,
@@ -7668,7 +7321,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "10000000000",
    "block_explorer_url": "https://mega.etherscan.io",
    "documentation_url": "https://docs.megaeth.com",
    "simulate_endpoints": 2,
@@ -7692,7 +7344,6 @@
     "symbol": "BEAM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://subnets.avax.network/beam",
    "documentation_url": "https://www.onbeam.com",
    "simulate_endpoints": 0,
@@ -7714,7 +7365,6 @@
     "symbol": "M",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://memecorescan.io",
    "documentation_url": "https://memecore.com",
    "simulate_endpoints": 1,
@@ -7735,7 +7385,6 @@
     "symbol": "ILY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.ility.xyz",
    "documentation_url": "https://ility.xyz",
    "simulate_endpoints": 1,
@@ -7756,7 +7405,6 @@
     "symbol": "OXIN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.oxinchain.io",
    "documentation_url": "https://oxinchain.io",
    "simulate_endpoints": 0,
@@ -7777,7 +7425,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.orderly.org",
    "documentation_url": "https://orderly.network",
    "simulate_endpoints": 1,
@@ -7798,7 +7445,6 @@
     "symbol": "HYDRA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://skynet.hydrachain.org",
    "documentation_url": "https://hydrachain.org",
    "simulate_endpoints": 0,
@@ -7819,7 +7465,6 @@
     "symbol": "EMYC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore-stage.emoney.network",
    "documentation_url": "https://emoney.network/",
    "simulate_endpoints": 0,
@@ -7840,7 +7485,6 @@
     "symbol": "EMYC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore.emoney.network",
    "documentation_url": "https://emoney.io/",
    "simulate_endpoints": 0,
@@ -7861,7 +7505,6 @@
     "symbol": "VERY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.veryscan.io",
    "documentation_url": "https://www.verylabs.io/",
    "simulate_endpoints": 0,
@@ -7882,7 +7525,6 @@
     "symbol": "MSTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mstscan.com",
    "documentation_url": "https://mstblockchain.com",
    "simulate_endpoints": 0,
@@ -7907,7 +7549,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "32000000",
    "block_explorer_url": "https://robinscan.io",
    "documentation_url": "https://docs.robinhood.com/chain/connecting/",
    "simulate_endpoints": 5,
@@ -7932,7 +7573,6 @@
     "symbol": "IOTX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://iotexscan.io",
    "documentation_url": "https://iotex.io",
    "simulate_endpoints": 0,
@@ -7957,7 +7597,6 @@
     "symbol": "IOTX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.iotexscan.io",
    "documentation_url": "https://iotex.io",
    "simulate_endpoints": 0,
@@ -7978,7 +7617,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.worldscan.org",
    "documentation_url": "https://world.org/world-chain",
    "simulate_endpoints": 1,
@@ -8002,7 +7640,6 @@
     "symbol": "BXNT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.blackfortscan.com",
    "documentation_url": "https://blackfort.com",
    "simulate_endpoints": 1,
@@ -8023,7 +7660,6 @@
     "symbol": "MNT",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://mantlescan.xyz",
    "documentation_url": "https://mantle.xyz",
    "simulate_endpoints": 0,
@@ -8047,7 +7683,6 @@
     "symbol": "MNT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.sepolia.mantle.xyz",
    "documentation_url": "https://mantle.xyz",
    "simulate_endpoints": 0,
@@ -8069,7 +7704,6 @@
     "symbol": "SOMI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.somnia.w3us.site",
    "documentation_url": "https://somnia.network",
    "simulate_endpoints": 0,
@@ -8091,7 +7725,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.skatechain.org",
    "documentation_url": "https://www.skatechain.org/",
    "simulate_endpoints": 0,
@@ -8112,7 +7745,6 @@
     "symbol": "DAN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dannyscan.com",
    "documentation_url": "https://dannychain.com",
    "simulate_endpoints": 1,
@@ -8133,7 +7765,6 @@
     "symbol": "PZO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zeroscan.org",
    "documentation_url": "https://pionechain.com",
    "simulate_endpoints": 0,
@@ -8154,7 +7785,6 @@
     "symbol": "cBTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.citrea.xyz",
    "documentation_url": "https://citrea.xyz",
    "simulate_endpoints": 0,
@@ -8175,7 +7805,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://seismic-testnet.socialscan.io",
    "documentation_url": "https://seismic.systems",
    "simulate_endpoints": 0,
@@ -8196,7 +7825,6 @@
     "symbol": "FTN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ftnscan.com",
    "documentation_url": "https://bahamut.io",
    "simulate_endpoints": 0,
@@ -8218,7 +7846,6 @@
     "symbol": "LMK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://litermark.org",
    "documentation_url": "https://litermark.com",
    "simulate_endpoints": 0,
@@ -8239,7 +7866,6 @@
     "symbol": "eHMND",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://humanode.subscan.io",
    "documentation_url": "https://humanode.io",
    "simulate_endpoints": 0,
@@ -8260,7 +7886,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.superseed.xyz",
    "documentation_url": "https://www.superseed.xyz",
    "simulate_endpoints": 1,
@@ -8282,7 +7907,6 @@
     "symbol": "NETS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.netsbo.io",
    "documentation_url": "https://netsbo.io",
    "simulate_endpoints": 0,
@@ -8304,7 +7928,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.settlus.network",
    "documentation_url": "https://settlus.org",
    "simulate_endpoints": 0,
@@ -8325,7 +7948,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.settlus.network",
    "documentation_url": "https://settlus.org",
    "simulate_endpoints": 0,
@@ -8346,7 +7968,6 @@
     "symbol": "EDX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.edexa.network",
    "documentation_url": "https://edexa.network/",
    "simulate_endpoints": 2,
@@ -8368,7 +7989,6 @@
     "symbol": "GAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sagaevm.sagaexplorer.io",
    "documentation_url": "https://www.saga.xyz",
    "simulate_endpoints": 0,
@@ -8389,7 +8009,6 @@
     "symbol": "PXP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.pointpay.io",
    "documentation_url": "https://pointpay.io",
    "simulate_endpoints": 0,
@@ -8410,7 +8029,6 @@
     "symbol": "VEX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.vexascan.com/evmexplorer",
    "documentation_url": "https://vexanium.com",
    "simulate_endpoints": 0,
@@ -8431,7 +8049,6 @@
     "symbol": "DOTON",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://app.jamton.network/",
    "simulate_endpoints": 0,
@@ -8452,7 +8069,6 @@
     "symbol": "tBNB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://opbnb-testnet.bscscan.com",
    "documentation_url": "https://opbnb.bnbchain.org/en",
    "simulate_endpoints": 0,
@@ -8475,7 +8091,6 @@
     "symbol": "tSYS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.tanenbaum.io",
    "documentation_url": "https://syscoin.org",
    "simulate_endpoints": 2,
@@ -8497,7 +8112,6 @@
     "symbol": "CTH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://cthscan.com",
    "documentation_url": "https://changcoin.foundation/",
    "simulate_endpoints": 1,
@@ -8518,7 +8132,6 @@
     "symbol": "MANTRA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://mantrachain.io",
    "simulate_endpoints": 0,
@@ -8539,7 +8152,6 @@
     "symbol": "MANTRA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.mantrascan.io",
    "documentation_url": "https://mantrachain.io",
    "simulate_endpoints": 0,
@@ -8560,7 +8172,6 @@
     "symbol": "BB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bbscan.io",
    "documentation_url": "https://bouncebit.io",
    "simulate_endpoints": 0,
@@ -8581,7 +8192,6 @@
     "symbol": "TVTCN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.bchscan.io",
    "documentation_url": "https://www.versatizecoin.com/",
    "simulate_endpoints": 0,
@@ -8602,7 +8212,6 @@
     "symbol": "UPTN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.uptn.io",
    "documentation_url": "https://uptn.io",
    "simulate_endpoints": 0,
@@ -8623,7 +8232,6 @@
     "symbol": "TEA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.tea.xyz",
    "documentation_url": "https://tea.xyz",
    "simulate_endpoints": 0,
@@ -8645,7 +8253,6 @@
     "symbol": "STEAMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore.steamexchange.io",
    "documentation_url": "https://steamexchange.io",
    "simulate_endpoints": 0,
@@ -8666,7 +8273,6 @@
     "symbol": "AURA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://aurascan.io",
    "documentation_url": "https://aura.network",
    "simulate_endpoints": 0,
@@ -8687,7 +8293,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-mega.etherscan.io",
    "documentation_url": "https://megaeth.com",
    "simulate_endpoints": 0,
@@ -8708,7 +8313,6 @@
     "symbol": "MIZU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://awaji.blockscout.com",
    "documentation_url": "https://mizuhiki.io/",
    "simulate_endpoints": 0,
@@ -8729,7 +8333,6 @@
     "symbol": "ERIS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://irishub.iobscan.io",
    "documentation_url": "https://www.irisnet.org",
    "simulate_endpoints": 0,
@@ -8750,7 +8353,6 @@
     "symbol": "VEX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://vexascan.com/evm",
    "documentation_url": "https://vexanium.com",
    "simulate_endpoints": 0,
@@ -8771,7 +8373,6 @@
     "symbol": "STAND",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.goldsmartchain.com",
    "documentation_url": "https://goldsmartchain.com",
    "simulate_endpoints": 0,
@@ -8792,7 +8393,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://racescan.io",
    "documentation_url": "https://race.foundation/",
    "simulate_endpoints": 0,
@@ -8813,7 +8413,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.racescan.io",
    "documentation_url": "https://race.foundation/",
    "simulate_endpoints": 0,
@@ -8834,7 +8433,6 @@
     "symbol": "MTT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mtt.network",
    "documentation_url": "https://mtt.network",
    "simulate_endpoints": 0,
@@ -8855,7 +8453,6 @@
     "symbol": "NIBI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://nibiru.fi",
    "simulate_endpoints": 0,
@@ -8876,7 +8473,6 @@
     "symbol": "NIBI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://nibiru.fi",
    "simulate_endpoints": 0,
@@ -8897,7 +8493,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://billions-testnet-blockscout.eu-north-2.gateway.fm",
    "documentation_url": "https://billions.network",
    "simulate_endpoints": 0,
@@ -8918,7 +8513,6 @@
     "symbol": "TOMB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://tombscout.com",
    "documentation_url": "https://tombchain.com/",
    "simulate_endpoints": 0,
@@ -8939,7 +8533,6 @@
     "symbol": "PSC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.polysmartchain.com/",
    "simulate_endpoints": 0,
@@ -8964,7 +8557,6 @@
     "symbol": "ZETA",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://zetascan.com",
    "documentation_url": "https://zetachain.com/docs",
    "simulate_endpoints": 0,
@@ -8988,7 +8580,6 @@
     "symbol": "ZETA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.zetascan.com",
    "documentation_url": "https://zetachain.com/docs",
    "simulate_endpoints": 0,
@@ -9012,7 +8603,6 @@
     "symbol": "XL3",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.0xl3.com",
    "documentation_url": "https://0xl3.com",
    "simulate_endpoints": 1,
@@ -9033,7 +8623,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.exsat.network",
    "documentation_url": "https://exsat.network/",
    "simulate_endpoints": 0,
@@ -9054,7 +8643,6 @@
     "symbol": "NXRA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://nexera.network",
    "simulate_endpoints": 1,
@@ -9075,7 +8663,6 @@
     "symbol": "INI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.iniscan.com",
    "documentation_url": "https://www.inichain.com",
    "simulate_endpoints": 1,
@@ -9096,7 +8683,6 @@
     "symbol": "ZEUSX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.zeuschainscan.io",
    "documentation_url": "https://testnet-explorer.zeuschainscan.io",
    "simulate_endpoints": 0,
@@ -9117,7 +8703,6 @@
     "symbol": "PRUV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.pruv.network",
    "documentation_url": "https://pruv.gitbook.io/pruv-network/",
    "simulate_endpoints": 0,
@@ -9138,7 +8723,6 @@
     "symbol": "PRUV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.pruv.network",
    "documentation_url": "https://pruv.gitbook.io/pruv-network/",
    "simulate_endpoints": 0,
@@ -9159,7 +8743,6 @@
     "symbol": "SHYFT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bx.shyft.network",
    "documentation_url": "https://shyft.network",
    "simulate_endpoints": 0,
@@ -9180,7 +8763,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.rarimo.com",
    "documentation_url": "https://rarimo.com",
    "simulate_endpoints": 0,
@@ -9201,7 +8783,6 @@
     "symbol": "FEE",
     "decimals": 6
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.tokclaw.com",
    "documentation_url": "https://tokclaw.com",
    "simulate_endpoints": 0,
@@ -9222,7 +8803,6 @@
     "symbol": "USDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://via-rubicon.mainnet.romeprotocol.xyz",
    "documentation_url": "https://rome.builders",
    "simulate_endpoints": 0,
@@ -9243,7 +8823,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://cyberscan.co",
    "documentation_url": "https://cyber.co/",
    "simulate_endpoints": 0,
@@ -9265,7 +8844,6 @@
     "symbol": "ADIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.adilchain-scan.io",
    "documentation_url": "https://adilchain.io",
    "simulate_endpoints": 0,
@@ -9286,7 +8864,6 @@
     "symbol": "ADIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://adilchain-scan.io",
    "documentation_url": "https://adilchain.io",
    "simulate_endpoints": 0,
@@ -9307,7 +8884,6 @@
     "symbol": "CARR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://carrscan.io",
    "documentation_url": "https://carrchain.io",
    "simulate_endpoints": 0,
@@ -9328,7 +8904,6 @@
     "symbol": "XRP",
     "decimals": 6
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.rootnet.live",
    "documentation_url": "https://www.futureverse.com/technology/root",
    "simulate_endpoints": 0,
@@ -9349,7 +8924,6 @@
     "symbol": "CANTO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.oklink.com/canto",
    "documentation_url": "https://canto.io",
    "simulate_endpoints": 0,
@@ -9370,7 +8944,6 @@
     "symbol": "TTL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.ttl1.top",
    "documentation_url": "https://github.com/okneo31/ttlcoin",
    "simulate_endpoints": 1,
@@ -9391,7 +8964,6 @@
     "symbol": "MAAL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://v2.maalscan.io",
    "documentation_url": "https://www.maalchain.com/",
    "simulate_endpoints": 0,
@@ -9412,7 +8984,6 @@
     "symbol": "MAAL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://new-testnet.maalscan.io",
    "documentation_url": "https://www.maalchain.com/",
    "simulate_endpoints": 0,
@@ -9433,7 +9004,6 @@
     "symbol": "DOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://doscan.io",
    "documentation_url": "https://doschain.com",
    "simulate_endpoints": 0,
@@ -9454,7 +9024,6 @@
     "symbol": "PROBE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://proscan.pro/rydberg",
    "documentation_url": "https://probechain.org",
    "simulate_endpoints": 0,
@@ -9475,7 +9044,6 @@
     "symbol": "SHM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.shardeum.org",
    "documentation_url": "https://docs.shardeum.org/",
    "simulate_endpoints": 0,
@@ -9496,7 +9064,6 @@
     "symbol": "TQF",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://toruscan.com",
    "documentation_url": "https://docs.toruschain.com",
    "simulate_endpoints": 0,
@@ -9517,7 +9084,6 @@
     "symbol": "KAIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://kaiascope.com",
    "documentation_url": "https://kaia.io",
    "simulate_endpoints": 0,
@@ -9539,7 +9105,6 @@
     "symbol": "FUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://subnets.avax.network/space",
    "documentation_url": "https://otherworld.network",
    "simulate_endpoints": 0,
@@ -9560,7 +9125,6 @@
     "symbol": "WKRC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.stablenet.network",
    "documentation_url": "https://stablenet.network",
    "simulate_endpoints": 0,
@@ -9581,7 +9145,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.b3.fun",
    "documentation_url": "https://b3.fun",
    "simulate_endpoints": 1,
@@ -9604,7 +9167,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://basescan.org",
    "documentation_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
    "simulate_endpoints": 6,
@@ -9630,7 +9192,6 @@
     "symbol": "MRT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.myrxwallet.io",
    "documentation_url": "https://myrxwallet.io",
    "simulate_endpoints": 1,
@@ -9651,7 +9212,6 @@
     "symbol": "HLUSD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet-blockexplorer.helachain.com",
    "documentation_url": "https://helalabs.com",
    "simulate_endpoints": 0,
@@ -9672,7 +9232,6 @@
     "symbol": "AI3",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.auto-evm.chronos.autonomys.xyz",
    "documentation_url": "https://www.autonomys.xyz",
    "simulate_endpoints": 0,
@@ -9693,7 +9252,6 @@
     "symbol": "EBC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ebcscan.net",
    "documentation_url": "https://ebcscan.net",
    "simulate_endpoints": 0,
@@ -9714,7 +9272,6 @@
     "symbol": "BLN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bullionscan.org",
    "documentation_url": "https://www.bullionsx.io",
    "simulate_endpoints": 0,
@@ -9735,7 +9292,6 @@
     "symbol": "IOTA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.evm.iota.org",
    "documentation_url": "https://www.iota.org",
    "simulate_endpoints": 0,
@@ -9757,7 +9313,6 @@
     "symbol": "tHYDRA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://hydragon.hydrachain.org",
    "documentation_url": "https://hydrachain.org",
    "simulate_endpoints": 0,
@@ -9778,7 +9333,6 @@
     "symbol": "UNQ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://uniquescan.io/unique",
    "documentation_url": "https://unique.network",
    "simulate_endpoints": 0,
@@ -9802,7 +9356,6 @@
     "symbol": "UNQ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://uniquescan.io/opal",
    "documentation_url": "https://unique.network",
    "simulate_endpoints": 0,
@@ -9823,7 +9376,6 @@
     "symbol": "VSC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://vsc-dataseed.vyvo.org",
    "simulate_endpoints": 0,
@@ -9844,7 +9396,6 @@
     "symbol": "JBC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp-l1.jibchain.net",
    "documentation_url": "https://jibchain.net",
    "simulate_endpoints": 0,
@@ -9866,7 +9417,6 @@
     "symbol": "ALG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.algen.network",
    "documentation_url": "https://www.algen.network",
    "simulate_endpoints": 1,
@@ -9887,7 +9437,6 @@
     "symbol": "ALG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.test.algen.network",
    "documentation_url": "https://www.algen.network",
    "simulate_endpoints": 1,
@@ -9908,7 +9457,6 @@
     "symbol": "GMMT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.gmmtchain.io",
    "documentation_url": "https://gmmtchain.io/",
    "simulate_endpoints": 0,
@@ -9929,7 +9477,6 @@
     "symbol": "TICS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://alphatestnet-explorer.qubetics.work/dashboard",
    "documentation_url": "https://www.qubetics.com/",
    "simulate_endpoints": 0,
@@ -9950,7 +9497,6 @@
     "symbol": "SHIDO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://shidoscan.com",
    "documentation_url": "https://shido.io",
    "simulate_endpoints": 0,
@@ -9971,7 +9517,6 @@
     "symbol": "TICS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.qubetics.work",
    "documentation_url": "https://www.qubetics.com/",
    "simulate_endpoints": 0,
@@ -9992,7 +9537,6 @@
     "symbol": "TICS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ticsscan.com",
    "documentation_url": "https://www.qubetics.com",
    "simulate_endpoints": 0,
@@ -10014,7 +9558,6 @@
     "symbol": "AP3X",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.nexus.mainnet.apexfusion.org",
    "documentation_url": "https://apexfusion.org/",
    "simulate_endpoints": 1,
@@ -10035,7 +9578,6 @@
     "symbol": "tAP3X",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.nexus.testnet.apexfusion.org",
    "documentation_url": "https://apexfusion.org/",
    "simulate_endpoints": 1,
@@ -10056,7 +9598,6 @@
     "symbol": "Z",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zscan.live",
    "documentation_url": "https://zero.tech",
    "simulate_endpoints": 0,
@@ -10077,7 +9618,6 @@
     "symbol": "OAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.oasys.games",
    "documentation_url": "https://oasys.games",
    "simulate_endpoints": 1,
@@ -10098,7 +9638,6 @@
     "symbol": "OORT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dev-scan.oortech.com",
    "documentation_url": "https://oortech.com",
    "simulate_endpoints": 0,
@@ -10119,7 +9658,6 @@
     "symbol": "XPL",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://plasmascan.to",
    "documentation_url": "https://plasma.to",
    "simulate_endpoints": 1,
@@ -10140,7 +9678,6 @@
     "symbol": "XPL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.plasmascan.to",
    "documentation_url": "https://plasma.to",
    "simulate_endpoints": 1,
@@ -10161,7 +9698,6 @@
     "symbol": "LRS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.larissa.network",
    "documentation_url": "https://larissa.network",
    "simulate_endpoints": 0,
@@ -10182,7 +9718,6 @@
     "symbol": "JNX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://jinglex.net/explorer",
    "documentation_url": "https://jinglex.net",
    "simulate_endpoints": 0,
@@ -10203,7 +9738,6 @@
     "symbol": "BCH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://smartbch.org/",
    "simulate_endpoints": 0,
@@ -10224,7 +9758,6 @@
     "symbol": "AEON",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.aeon.xyz",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -10245,7 +9778,6 @@
     "symbol": "JOCT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.japanopenchain.org",
    "documentation_url": "https://www.japanopenchain.org/",
    "simulate_endpoints": 0,
@@ -10266,7 +9798,6 @@
     "symbol": "MON",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.monadexplorer.com",
    "documentation_url": "https://monad.xyz",
    "simulate_endpoints": 0,
@@ -10290,7 +9821,6 @@
     "symbol": "XDAI",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://blockscout.chiadochain.net",
    "documentation_url": "https://docs.gnosischain.com/about/networks/chiado",
    "simulate_endpoints": 2,
@@ -10313,7 +9843,6 @@
     "symbol": "WLC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testscan.worldland.foundation",
    "documentation_url": "https://worldland.foundation",
    "simulate_endpoints": 0,
@@ -10334,7 +9863,6 @@
     "symbol": "NUM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.num.network",
    "documentation_url": "https://numbersprotocol.io",
    "simulate_endpoints": 0,
@@ -10355,7 +9883,6 @@
     "symbol": "LIMO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.limonata.xyz",
    "documentation_url": "https://limonata.xyz",
    "simulate_endpoints": 0,
@@ -10376,7 +9903,6 @@
     "symbol": "TBC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.trustbitcoin.io",
    "documentation_url": "https://trustbitcoin.io",
    "simulate_endpoints": 0,
@@ -10397,7 +9923,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-sepolia.shape.network",
    "documentation_url": "https://shape.network",
    "simulate_endpoints": 1,
@@ -10418,7 +9943,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.abscan.org",
    "documentation_url": "https://abs.xyz/",
    "simulate_endpoints": 0,
@@ -10440,7 +9964,6 @@
     "symbol": "ISLM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.haqq.network",
    "documentation_url": "https://islamiccoin.net",
    "simulate_endpoints": 0,
@@ -10464,7 +9987,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.geb.network",
    "documentation_url": "https://geb.network",
    "simulate_endpoints": 0,
@@ -10486,7 +10008,6 @@
     "symbol": "ARIA20",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://polygonsupernet.explorer.arianee.net",
    "documentation_url": "https://arianee.org",
    "simulate_endpoints": 0,
@@ -10507,7 +10028,6 @@
     "symbol": "L2P",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://l2pscan.com",
    "documentation_url": "https://l2protocol.com",
    "simulate_endpoints": 1,
@@ -10528,7 +10048,6 @@
     "symbol": "FIBO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.fibochain.org",
    "documentation_url": "https://fibochain.org",
    "simulate_endpoints": 0,
@@ -10553,7 +10072,6 @@
     "symbol": "BEAM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://subnets-test.avax.network/beam",
    "documentation_url": "https://www.onbeam.com",
    "simulate_endpoints": 0,
@@ -10575,7 +10093,6 @@
     "symbol": "IMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.immutable.com",
    "documentation_url": "https://www.immutable.com",
    "simulate_endpoints": 0,
@@ -10598,7 +10115,6 @@
     "symbol": "LBRTY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.libertychain.org",
    "documentation_url": "https://libertychain.org",
    "simulate_endpoints": 1,
@@ -10619,7 +10135,6 @@
     "symbol": "tIMX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.immutable.com",
    "documentation_url": "https://www.immutable.com",
    "simulate_endpoints": 0,
@@ -10641,7 +10156,6 @@
     "symbol": "G",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-sepolia.gravity.xyz",
    "documentation_url": "https://gravity.xyz",
    "simulate_endpoints": 1,
@@ -10663,7 +10177,6 @@
     "symbol": "tTRUST",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.intuition.systems",
    "documentation_url": "https://intuition.systems",
    "simulate_endpoints": 1,
@@ -10684,7 +10197,6 @@
     "symbol": "S",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.soniclabs.com",
    "documentation_url": "https://testnet.soniclabs.com",
    "simulate_endpoints": 1,
@@ -10706,7 +10218,6 @@
     "symbol": "VANA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://vanascan.io",
    "documentation_url": null,
    "simulate_endpoints": 1,
@@ -10727,7 +10238,6 @@
     "symbol": "eHMND",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://humanode.io",
    "simulate_endpoints": 0,
@@ -10748,7 +10258,6 @@
     "symbol": "QUAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://orchard.quaiscan.io",
    "documentation_url": "https://qu.ai",
    "simulate_endpoints": 0,
@@ -10769,7 +10278,6 @@
     "symbol": "POODL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.poodl.org",
    "documentation_url": "https://poodl.org",
    "simulate_endpoints": 0,
@@ -10790,7 +10298,6 @@
     "symbol": "POODL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.poodl.org",
    "documentation_url": "https://poodl.org",
    "simulate_endpoints": 0,
@@ -10811,7 +10318,6 @@
     "symbol": "NRXN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://nirmalxscan.com",
    "documentation_url": "https://nirmalxscan.com/",
    "simulate_endpoints": 0,
@@ -10832,7 +10338,6 @@
     "symbol": "CPH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://cypherium.tryethernal.com",
    "documentation_url": "https://www.cypherium.io/",
    "simulate_endpoints": 0,
@@ -10854,7 +10359,6 @@
     "symbol": "0G",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://chainscan-galileo.0g.ai",
    "documentation_url": "https://0g.ai",
    "simulate_endpoints": 0,
@@ -10875,7 +10379,6 @@
     "symbol": "0G",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://chainscan.0g.ai",
    "documentation_url": "https://0g.ai",
    "simulate_endpoints": 0,
@@ -10896,7 +10399,6 @@
     "symbol": "ERIS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://nyancat.iobscan.io",
    "documentation_url": "https://www.irisnet.org",
    "simulate_endpoints": 0,
@@ -10917,7 +10419,6 @@
     "symbol": "tIVAR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.ivarscan.com",
    "documentation_url": "https://ivarex.com",
    "simulate_endpoints": 0,
@@ -10938,7 +10439,6 @@
     "symbol": "tZKJ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout-testnet.expchain.ai",
    "documentation_url": "https://expchain.ai",
    "simulate_endpoints": 1,
@@ -10959,7 +10459,6 @@
     "symbol": "UOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evmexplorer.testnet.ultra.io",
    "documentation_url": "https://ultra.io/",
    "simulate_endpoints": 0,
@@ -10980,7 +10479,6 @@
     "symbol": "BCX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-evm.blockxnet.com",
    "documentation_url": "https://www.blockxnet.com/",
    "simulate_endpoints": 0,
@@ -11001,7 +10499,6 @@
     "symbol": "SEP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.secexplorer.io",
    "documentation_url": "https://smartenergychain.org",
    "simulate_endpoints": 0,
@@ -11022,7 +10519,6 @@
     "symbol": "SEP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://secexplorer.io",
    "documentation_url": "https://smartenergychain.org",
    "simulate_endpoints": 0,
@@ -11043,7 +10539,6 @@
     "symbol": "UOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evmexplorer.ultra.io",
    "documentation_url": "https://ultra.io",
    "simulate_endpoints": 0,
@@ -11064,7 +10559,6 @@
     "symbol": "SUP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.superaichain.ai",
    "documentation_url": "https://superaichain.ai",
    "simulate_endpoints": 0,
@@ -11085,7 +10579,6 @@
     "symbol": "KPG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mandalachain.io",
    "documentation_url": "https://mandalachain.io",
    "simulate_endpoints": 0,
@@ -11106,7 +10599,6 @@
     "symbol": "KPGT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.mandalachain.io",
    "documentation_url": "https://mandalachain.io",
    "simulate_endpoints": 0,
@@ -11127,7 +10619,6 @@
     "symbol": "sBTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.alpen.org",
    "documentation_url": "https://docs.alpenlabs.io",
    "simulate_endpoints": 1,
@@ -11148,7 +10639,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.dev.gblend.xyz",
    "documentation_url": "https://fluent.xyz",
    "simulate_endpoints": 1,
@@ -11169,7 +10659,6 @@
     "symbol": "AAH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.aah.name",
    "documentation_url": "https://aah.name",
    "simulate_endpoints": 0,
@@ -11190,7 +10679,6 @@
     "symbol": "FREE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.1moneynetwork.com",
    "simulate_endpoints": 4,
@@ -11214,7 +10702,6 @@
     "symbol": "DCP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.dcpay.io",
    "documentation_url": "https://dcpay.io",
    "simulate_endpoints": 0,
@@ -11235,7 +10722,6 @@
     "symbol": "MAPO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://maposcan.io",
    "documentation_url": "https://mapprotocol.io/",
    "simulate_endpoints": 0,
@@ -11256,7 +10742,6 @@
     "symbol": "ACCESS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://accesschain.org/explorer",
    "documentation_url": "https://accesschain.org",
    "simulate_endpoints": 0,
@@ -11277,7 +10762,6 @@
     "symbol": "ROSE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.oasis.io/mainnet/sapphire",
    "documentation_url": "https://docs.oasis.io/dapp/sapphire",
    "simulate_endpoints": 0,
@@ -11298,7 +10782,6 @@
     "symbol": "TEST",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.oasis.io/testnet/sapphire",
    "documentation_url": "https://docs.oasis.io/dapp/sapphire",
    "simulate_endpoints": 0,
@@ -11319,7 +10802,6 @@
     "symbol": "MINTME",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.mintme.com",
    "simulate_endpoints": 0,
@@ -11342,7 +10824,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://fluentscan.xyz",
    "documentation_url": "https://www.fluent.xyz/",
    "simulate_endpoints": 1,
@@ -11363,7 +10844,6 @@
     "symbol": "tKUB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.kubscan.com",
    "documentation_url": "https://www.kubchain.com/",
    "simulate_endpoints": 0,
@@ -11384,7 +10864,6 @@
     "symbol": "DUCX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.ducatusx.com",
    "documentation_url": "https://www.ducatuscoins.com/ducatusx",
    "simulate_endpoints": 0,
@@ -11406,7 +10885,6 @@
     "symbol": "DUCX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.ducatusx.com",
    "documentation_url": "https://www.ducatuscoins.com/ducatusx",
    "simulate_endpoints": 0,
@@ -11429,7 +10907,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://horizen.calderaexplorer.xyz",
    "documentation_url": "https://horizen.hub.caldera.xyz",
    "simulate_endpoints": 1,
@@ -11450,7 +10927,6 @@
     "symbol": "AB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.core.testnet.ab.org",
    "documentation_url": "https://ab.org",
    "simulate_endpoints": 0,
@@ -11471,7 +10947,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.bobascan.com",
    "documentation_url": "https://boba.network",
    "simulate_endpoints": 0,
@@ -11494,7 +10969,6 @@
     "symbol": "OAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.oasys.mycryptoheroes.net",
    "documentation_url": "https://www.mycryptoheroes.net/verse",
    "simulate_endpoints": 0,
@@ -11515,7 +10989,6 @@
     "symbol": "MY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://myscan.miyou.io",
    "documentation_url": "https://www.miyou.io",
    "simulate_endpoints": 0,
@@ -11537,7 +11010,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.ethiq.network",
    "documentation_url": "https://www.ethiq.network",
    "simulate_endpoints": 0,
@@ -11558,7 +11030,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.wirexpaychain.com",
    "documentation_url": "https://docs.wirexpaychain.com/tech/wirex-pay-chain",
    "simulate_endpoints": 0,
@@ -11579,7 +11050,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.test.mezo.org",
    "documentation_url": "https://mezo.org/",
    "simulate_endpoints": 1,
@@ -11601,7 +11071,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mezo.org",
    "documentation_url": "https://mezo.org/",
    "simulate_endpoints": 3,
@@ -11625,7 +11094,6 @@
     "symbol": "Brise",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://brisescan.com",
    "documentation_url": "https://bitgert.com/",
    "simulate_endpoints": 0,
@@ -11646,7 +11114,6 @@
     "symbol": "ZIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zilliqa.blockscout.com",
    "documentation_url": "https://www.zilliqa.com/",
    "simulate_endpoints": 0,
@@ -11667,7 +11134,6 @@
     "symbol": "ZIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.zilliqa.blockscout.com",
    "documentation_url": "https://www.zilliqa.com",
    "simulate_endpoints": 0,
@@ -11688,7 +11154,6 @@
     "symbol": "APE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.curtis.apechain.com",
    "documentation_url": "https://curtis.hub.caldera.xyz",
    "simulate_endpoints": 0,
@@ -11712,7 +11177,6 @@
     "symbol": "APE",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://apescan.io",
    "documentation_url": "https://apechain.com",
    "simulate_endpoints": 1,
@@ -11734,7 +11198,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://edge-testnet.explorer.alchemy.com",
    "documentation_url": "https://www.edgex.exchange",
    "simulate_endpoints": 0,
@@ -11755,7 +11218,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.funkichain.com",
    "documentation_url": "https://funkichain.com",
    "simulate_endpoints": 0,
@@ -11776,7 +11238,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.mode.network",
    "documentation_url": "https://docs.mode.network/",
    "simulate_endpoints": 2,
@@ -11799,7 +11260,6 @@
     "symbol": "ZEUSX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zeuschainscan.io",
    "documentation_url": "https://zeuschainscan.io",
    "simulate_endpoints": 0,
@@ -11820,7 +11280,6 @@
     "symbol": "taro",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://exp.j2o.io",
    "documentation_url": "https://j2o.io",
    "simulate_endpoints": 0,
@@ -11841,7 +11300,6 @@
     "symbol": "COINA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://coinascan.com",
    "documentation_url": "https://coinafrica.tech",
    "simulate_endpoints": 0,
@@ -11862,7 +11320,6 @@
     "symbol": "QGOV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.q.org",
    "documentation_url": "https://q.org",
    "simulate_endpoints": 0,
@@ -11883,7 +11340,6 @@
     "symbol": "Q",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.qtestnet.org",
    "documentation_url": "https://q.org/",
    "simulate_endpoints": 0,
@@ -11904,7 +11360,6 @@
     "symbol": "AB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.core.ab.org",
    "documentation_url": "https://ab.org",
    "simulate_endpoints": 0,
@@ -11926,7 +11381,6 @@
     "symbol": "ADI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.adifoundation.ai",
    "documentation_url": "https://adifoundation.ai",
    "simulate_endpoints": 0,
@@ -11948,7 +11402,6 @@
     "symbol": "GRASS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://block-explorer.testnet.lens.dev",
    "documentation_url": "https://www.lens.xyz",
    "simulate_endpoints": 0,
@@ -11970,7 +11423,6 @@
     "symbol": "iKAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.igralabs.com",
    "documentation_url": "https://igralabs.com",
    "simulate_endpoints": 0,
@@ -11991,7 +11443,6 @@
     "symbol": "iKAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.galleon-testnet.igralabs.com",
    "documentation_url": "https://igralabs.com",
    "simulate_endpoints": 0,
@@ -12012,7 +11463,6 @@
     "symbol": "NRG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.energi.world/",
    "simulate_endpoints": 0,
@@ -12033,7 +11483,6 @@
     "symbol": "OHO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ohoscan.com",
    "documentation_url": "https://oho.ai",
    "simulate_endpoints": 3,
@@ -12056,7 +11505,6 @@
     "symbol": "SALT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://citrate.ai",
    "simulate_endpoints": 0,
@@ -12077,7 +11525,6 @@
     "symbol": "HLS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.helioschainlabs.org",
    "documentation_url": "https://hub.helioschain.network",
    "simulate_endpoints": 0,
@@ -12102,7 +11549,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "32000000",
    "block_explorer_url": "https://arbiscan.io",
    "documentation_url": "https://support.arbitrum.io/hc/en-gb/articles/19479729907483-How-can-I-add-Arbitrum-network-to-my-wallet",
    "simulate_endpoints": 6,
@@ -12128,7 +11574,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://nova-explorer.arbitrum.io",
    "documentation_url": "https://arbitrum.io",
    "simulate_endpoints": 3,
@@ -12152,7 +11597,6 @@
     "symbol": "CELO",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://celoscan.io",
    "documentation_url": "https://docs.celo.org/",
    "simulate_endpoints": 2,
@@ -12175,7 +11619,6 @@
     "symbol": "TEST",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.oasis.io/testnet/emerald",
    "documentation_url": "https://docs.oasis.io/dapp/emerald",
    "simulate_endpoints": 0,
@@ -12196,7 +11639,6 @@
     "symbol": "ROSE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.oasis.io/mainnet/emerald",
    "documentation_url": "https://docs.oasis.io/dapp/emerald",
    "simulate_endpoints": 0,
@@ -12217,7 +11659,6 @@
     "symbol": "RWA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.assetchain.org",
    "documentation_url": "https://docs.assetchain.org",
    "simulate_endpoints": 0,
@@ -12238,7 +11679,6 @@
     "symbol": "RWA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan-testnet.assetchain.org",
    "documentation_url": "https://docs.assetchain.org",
    "simulate_endpoints": 0,
@@ -12259,7 +11699,6 @@
     "symbol": "USD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore.testnet.tempo.xyz",
    "documentation_url": "https://tempo.xyz",
    "simulate_endpoints": 0,
@@ -12280,7 +11719,6 @@
     "symbol": "USDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.zkfair.io",
    "documentation_url": "https://zkfair.io",
    "simulate_endpoints": 0,
@@ -12301,7 +11739,6 @@
     "symbol": "XTZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.etherlink.com",
    "documentation_url": "https://etherlink.com",
    "simulate_endpoints": 0,
@@ -12323,7 +11760,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.hemi.xyz",
    "documentation_url": "https://hemi.xyz",
    "simulate_endpoints": 1,
@@ -12345,7 +11781,6 @@
     "symbol": "AVAX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.snowscan.xyz",
    "documentation_url": "https://cchain.explorer.avax-test.network",
    "simulate_endpoints": 0,
@@ -12370,7 +11805,6 @@
     "symbol": "AVAX",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://snowscan.xyz",
    "documentation_url": "https://www.avax.network/",
    "simulate_endpoints": 0,
@@ -12396,7 +11830,6 @@
     "symbol": "M",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://insectarium.memecorescan.io",
    "documentation_url": "https://memecore.com",
    "simulate_endpoints": 1,
@@ -12420,7 +11853,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "32000000",
    "block_explorer_url": "https://explorer.testnet.chain.robinhood.com",
    "documentation_url": "https://docs.robinhood.com/chain/connecting/",
    "simulate_endpoints": 3,
@@ -12444,7 +11876,6 @@
     "symbol": "GNOD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://evm.gnodiscanner.com",
    "documentation_url": "https://gnodi.info",
    "simulate_endpoints": 0,
@@ -12465,7 +11896,6 @@
     "symbol": "GAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://xexplorer.neo.org",
    "documentation_url": "https://neo.org/",
    "simulate_endpoints": 2,
@@ -12487,7 +11917,6 @@
     "symbol": "REI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.rei.network",
    "documentation_url": "https://rei.network/",
    "simulate_endpoints": 0,
@@ -12508,7 +11937,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.zircuit.com",
    "documentation_url": "https://www.zircuit.com/",
    "simulate_endpoints": 2,
@@ -12530,7 +11958,6 @@
     "symbol": "BFC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.bifrostnetwork.com",
    "documentation_url": "https://bifrostnetwork.com",
    "simulate_endpoints": 0,
@@ -12552,7 +11979,6 @@
     "symbol": "NRG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.energi.world/",
    "simulate_endpoints": 0,
@@ -12573,7 +11999,6 @@
     "symbol": "CITRO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.citronus.com",
    "documentation_url": "https://citronus.com",
    "simulate_endpoints": 1,
@@ -12594,7 +12019,6 @@
     "symbol": "MNT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.hoodi.mantle.xyz",
    "documentation_url": "https://mantle.xyz",
    "simulate_endpoints": 0,
@@ -12615,7 +12039,6 @@
     "symbol": "SOPH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.sophon.xyz",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -12637,7 +12060,6 @@
     "symbol": "STT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://somnia-testnet.socialscan.io",
    "documentation_url": "https://somnia.network",
    "simulate_endpoints": 0,
@@ -12658,7 +12080,6 @@
     "symbol": "ETN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockexplorer.electroneum.com",
    "documentation_url": "https://electroneum.com",
    "simulate_endpoints": 0,
@@ -12680,7 +12101,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia-explorer.superseed.xyz",
    "documentation_url": "https://www.superseed.xyz",
    "simulate_endpoints": 1,
@@ -12701,7 +12121,6 @@
     "symbol": "JEWEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.dfkchain.com",
    "documentation_url": "https://defikingdoms.com",
    "simulate_endpoints": 0,
@@ -12722,7 +12141,6 @@
     "symbol": "ISLMT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testedge2.haqq.network",
    "documentation_url": "https://islamiccoin.net",
    "simulate_endpoints": 0,
@@ -12744,7 +12162,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.superposition.so",
    "documentation_url": "https://superposition.so",
    "simulate_endpoints": 1,
@@ -12765,7 +12182,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.dustproject.org",
    "documentation_url": "https://dustproject.org",
    "simulate_endpoints": 1,
@@ -12786,7 +12202,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.dustproject.org",
    "documentation_url": "https://dustproject.org",
    "simulate_endpoints": 1,
@@ -12807,7 +12222,6 @@
     "symbol": "NOVA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://novascan.velo.org",
    "documentation_url": "https://velo.org",
    "simulate_endpoints": 0,
@@ -12830,7 +12244,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.inkonchain.com",
    "documentation_url": "https://docs.inkonchain.com/general/network-information",
    "simulate_endpoints": 3,
@@ -12854,7 +12267,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.lineascan.build",
    "documentation_url": "https://linea.build",
    "simulate_endpoints": 1,
@@ -12877,7 +12289,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://lineascan.build",
    "documentation_url": "https://linea.build",
    "simulate_endpoints": 3,
@@ -12902,7 +12313,6 @@
     "symbol": "tMETIS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia-explorer.metisdevops.link",
    "documentation_url": "https://www.metis.io",
    "simulate_endpoints": 0,
@@ -12925,7 +12335,6 @@
     "symbol": "POT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan-testnet.potos.hk",
    "documentation_url": "https://potos.hk",
    "simulate_endpoints": 0,
@@ -12946,7 +12355,6 @@
     "symbol": "POT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.potos.hk",
    "documentation_url": "https://potos.hk",
    "simulate_endpoints": 0,
@@ -12967,7 +12375,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.gobob.xyz",
    "documentation_url": "https://gobob.xyz",
    "simulate_endpoints": 2,
@@ -12991,7 +12398,6 @@
     "symbol": "JELLO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.pine.ink",
    "documentation_url": "https://gelatine.pine.ink",
    "simulate_endpoints": 1,
@@ -13012,7 +12418,6 @@
     "symbol": "EGAZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://eticascan.org",
    "documentation_url": "https://eticaprotocol.org",
    "simulate_endpoints": 0,
@@ -13034,7 +12439,6 @@
     "symbol": "APOLLO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://apolloscan.io",
    "documentation_url": "https://docs.apolloscan.io",
    "simulate_endpoints": 0,
@@ -13055,7 +12459,6 @@
     "symbol": "MTV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://e.mtv.ac",
    "documentation_url": "https://mtv.ac",
    "simulate_endpoints": 0,
@@ -13076,7 +12479,6 @@
     "symbol": "SCOL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.scolcoin.com",
    "documentation_url": "https://scolcoin.com",
    "simulate_endpoints": 0,
@@ -13097,7 +12499,6 @@
     "symbol": "XCC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.cyberchain.xyz",
    "documentation_url": "https://cyberchain.xyz",
    "simulate_endpoints": 0,
@@ -13118,7 +12519,6 @@
     "symbol": "BAC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ploutos.bacscan.net",
    "documentation_url": "https://bitassetchain.io",
    "simulate_endpoints": 1,
@@ -13139,7 +12539,6 @@
     "symbol": "NXPC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://msu-explorer.xangle.io",
    "documentation_url": "https://nexpace.io",
    "simulate_endpoints": 0,
@@ -13160,7 +12559,6 @@
     "symbol": "ILYt",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.testnet.ility.xyz",
    "documentation_url": "https://ility.xyz",
    "simulate_endpoints": 1,
@@ -13181,7 +12579,6 @@
     "symbol": "SEVEN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://theseven.meme/blockchain/explorer",
    "documentation_url": "https://theseven.meme",
    "simulate_endpoints": 0,
@@ -13202,7 +12599,6 @@
     "symbol": "GuapX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://guapcoin.org/",
    "simulate_endpoints": 3,
@@ -13225,7 +12621,6 @@
     "symbol": "tNXRA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://testnet.nexera.network",
    "simulate_endpoints": 1,
@@ -13246,7 +12641,6 @@
     "symbol": "RUSD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.radiustech.xyz",
    "documentation_url": "https://testnet.radiustech.xyz",
    "simulate_endpoints": 0,
@@ -13267,7 +12661,6 @@
     "symbol": "USDr",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.rayls.com",
    "documentation_url": "https://rayls.com",
    "simulate_endpoints": 1,
@@ -13288,7 +12681,6 @@
     "symbol": "ICBX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://icbscan.io",
    "documentation_url": "https://icb.network",
    "simulate_endpoints": 0,
@@ -13313,7 +12705,6 @@
     "symbol": "NEBX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://nebxscan.nebula-chain.com",
    "documentation_url": "https://nebula-chain.com",
    "simulate_endpoints": 0,
@@ -13334,7 +12725,6 @@
     "symbol": "NVC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.neurovatic.ai",
    "documentation_url": "https://neurovatic.ai",
    "simulate_endpoints": 0,
@@ -13358,7 +12748,6 @@
     "symbol": "OAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.geekout-pte.com",
    "documentation_url": "https://www.geekout-pte.com",
    "simulate_endpoints": 0,
@@ -13379,7 +12768,6 @@
     "symbol": "OAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.geekout-pte.com",
    "documentation_url": "https://www.geekout-pte.com",
    "simulate_endpoints": 0,
@@ -13400,7 +12788,6 @@
     "symbol": "CARR",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.carrscan.io",
    "documentation_url": "https://carrchain.io",
    "simulate_endpoints": 0,
@@ -13421,7 +12808,6 @@
     "symbol": "BORA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scope.boraportal.com",
    "documentation_url": "https://www.boraportal.com",
    "simulate_endpoints": 0,
@@ -13443,7 +12829,6 @@
     "symbol": "SD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://chain.streetdog.me",
    "documentation_url": "https://chain.streetdog.me",
    "simulate_endpoints": 1,
@@ -13464,7 +12849,6 @@
     "symbol": "FIN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://primusmoney.com",
    "simulate_endpoints": 0,
@@ -13485,7 +12869,6 @@
     "symbol": "DFLY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.dragonfly.hexapod.network",
    "documentation_url": "https://hexapod.network",
    "simulate_endpoints": 0,
@@ -13508,7 +12891,6 @@
     "symbol": "VANRY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-vanguard.vanarchain.com",
    "documentation_url": "https://vanarchain.com",
    "simulate_endpoints": 0,
@@ -13529,7 +12911,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.nillion.network",
    "documentation_url": "https://nillion.com/",
    "simulate_endpoints": 1,
@@ -13550,7 +12931,6 @@
     "symbol": "POL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://amoy.polygonscan.com",
    "documentation_url": "https://polygon.technology/",
    "simulate_endpoints": 3,
@@ -13577,7 +12957,6 @@
     "symbol": "BERA",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://bepolia.beratrail.io",
    "documentation_url": "https://docs.berachain.com/general/introduction/connect-to-berachain",
    "simulate_endpoints": 1,
@@ -13600,7 +12979,6 @@
     "symbol": "BERA",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://berascan.com",
    "documentation_url": "https://docs.berachain.com/general/introduction/connect-to-berachain",
    "simulate_endpoints": 5,
@@ -13626,7 +13004,6 @@
     "symbol": "HZC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://hizoco.net:38443",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -13647,7 +13024,6 @@
     "symbol": "GRT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://geobrowser.io",
    "simulate_endpoints": 1,
@@ -13668,7 +13044,6 @@
     "symbol": "ZRN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zorinscan.org",
    "documentation_url": "https://zorinscan.org",
    "simulate_endpoints": 0,
@@ -13689,7 +13064,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.codex.xyz",
    "documentation_url": "https://www.codex.xyz/",
    "simulate_endpoints": 1,
@@ -13710,7 +13084,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://blastscan.io",
    "documentation_url": "https://blast.io/",
    "simulate_endpoints": 0,
@@ -13735,7 +13108,6 @@
     "symbol": "PYLUN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.pylun.network",
    "documentation_url": "https://pylun.network",
    "simulate_endpoints": 0,
@@ -13756,7 +13128,6 @@
     "symbol": "KTN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ktnscan.katronai.com",
    "documentation_url": "https://network.katronai.com",
    "simulate_endpoints": 0,
@@ -13779,7 +13150,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://sepolia.basescan.org",
    "documentation_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
    "simulate_endpoints": 5,
@@ -13805,7 +13175,6 @@
     "symbol": "CP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.cpchain.com",
    "documentation_url": "https://cpchain.com",
    "simulate_endpoints": 1,
@@ -13826,7 +13195,6 @@
     "symbol": "CP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.cpchain.com",
    "documentation_url": "https://cpchain.com",
    "simulate_endpoints": 1,
@@ -13847,7 +13215,6 @@
     "symbol": "XOM",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.omnicoin.net",
    "documentation_url": "https://app.omnibazaar.com",
    "simulate_endpoints": 0,
@@ -13868,7 +13235,6 @@
     "symbol": "PTEK",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.ptekcoin.com",
    "documentation_url": "https://ptek.ai",
    "simulate_endpoints": 0,
@@ -13889,7 +13255,6 @@
     "symbol": "UNIT0",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://units.network",
    "simulate_endpoints": 1,
@@ -13910,7 +13275,6 @@
     "symbol": "UNIT0",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.unit0.dev",
    "documentation_url": "https://units.network",
    "simulate_endpoints": 1,
@@ -13931,7 +13295,6 @@
     "symbol": "CHZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.chiliscan.com",
    "documentation_url": "https://www.chiliz.com/en/chain",
    "simulate_endpoints": 1,
@@ -13952,7 +13315,6 @@
     "symbol": "CHZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://chiliscan.com",
    "documentation_url": "https://chiliz.com",
    "simulate_endpoints": 3,
@@ -13975,7 +13337,6 @@
     "symbol": "DAP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.chain.metadap.io",
    "documentation_url": "https://metadap.io/",
    "simulate_endpoints": 0,
@@ -13996,7 +13357,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia-explorer.giwa.io",
    "documentation_url": "https://giwa.io",
    "simulate_endpoints": 1,
@@ -14017,7 +13377,6 @@
     "symbol": "tLUX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore.lux.network",
    "documentation_url": "https://lux.network",
    "simulate_endpoints": 0,
@@ -14038,7 +13397,6 @@
     "symbol": "LUX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explore.lux.network",
    "documentation_url": "https://lux.network",
    "simulate_endpoints": 0,
@@ -14059,7 +13417,6 @@
     "symbol": "MOZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.lumoz.info",
    "documentation_url": "https://lumoz.org",
    "simulate_endpoints": 0,
@@ -14080,7 +13437,6 @@
     "symbol": "MANTIS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.mantis.hexapod.network",
    "documentation_url": "https://hexapod.network",
    "simulate_endpoints": 0,
@@ -14102,7 +13458,6 @@
     "symbol": "SDA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ledger.sidrachain.com",
    "documentation_url": "https://www.sidrachain.com",
    "simulate_endpoints": 0,
@@ -14123,7 +13478,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.doma.xyz",
    "documentation_url": "https://doma.xyz",
    "simulate_endpoints": 1,
@@ -14144,7 +13498,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.doma.xyz",
    "documentation_url": "https://doma.xyz",
    "simulate_endpoints": 1,
@@ -14166,7 +13519,6 @@
     "symbol": "PEPU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://pepuscan.com",
    "documentation_url": "https://pepeunchained.com/",
    "simulate_endpoints": 1,
@@ -14187,7 +13539,6 @@
     "symbol": "PLUME",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.plume.org",
    "documentation_url": "https://plume.org",
    "simulate_endpoints": 1,
@@ -14209,7 +13560,6 @@
     "symbol": "PLUME",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.plume.org",
    "documentation_url": "https://plume.org",
    "simulate_endpoints": 1,
@@ -14230,7 +13580,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.nillion.network",
    "documentation_url": "https://nillion.com/",
    "simulate_endpoints": 1,
@@ -14251,7 +13600,6 @@
     "symbol": "SPN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.superposition.so",
    "documentation_url": "https://superposition.so",
    "simulate_endpoints": 1,
@@ -14272,7 +13620,6 @@
     "symbol": "DC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dorsenscan.io",
    "documentation_url": "https://docs.dorsenscan.io",
    "simulate_endpoints": 1,
@@ -14293,7 +13640,6 @@
     "symbol": "ADI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.ab.testnet.adifoundation.ai",
    "documentation_url": "https://docs.adi.foundation",
    "simulate_endpoints": 0,
@@ -14314,7 +13660,6 @@
     "symbol": "CTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://creditcoin.blockscout.com",
    "documentation_url": "https://creditcoin.org",
    "simulate_endpoints": 0,
@@ -14336,7 +13681,6 @@
     "symbol": "tCTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://creditcoin-testnet.blockscout.com",
    "documentation_url": "https://creditcoin.org",
    "simulate_endpoints": 0,
@@ -14358,7 +13702,6 @@
     "symbol": "devCTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://creditcoin-devnet.blockscout.com",
    "documentation_url": "https://creditcoin.org",
    "simulate_endpoints": 0,
@@ -14379,7 +13722,6 @@
     "symbol": "STRAX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.xertra.com",
    "documentation_url": "https://www.xertra.com/",
    "simulate_endpoints": 0,
@@ -14400,7 +13742,6 @@
     "symbol": "GAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://via-esquiline.devnet.romeprotocol.xyz",
    "documentation_url": "https://rome.builders",
    "simulate_endpoints": 0,
@@ -14421,7 +13762,6 @@
     "symbol": "USDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://via-subura.devnet.romeprotocol.xyz",
    "documentation_url": "https://rome.builders",
    "simulate_endpoints": 0,
@@ -14442,7 +13782,6 @@
     "symbol": "USDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://via-martius.testnet.romeprotocol.xyz",
    "documentation_url": "https://rome.builders",
    "simulate_endpoints": 0,
@@ -14463,7 +13802,6 @@
     "symbol": "FUMA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://fumascan.com",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -14484,7 +13822,6 @@
     "symbol": "NOVA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.ethnova.net",
    "documentation_url": "https://ethnova.net",
    "simulate_endpoints": 0,
@@ -14505,7 +13842,6 @@
     "symbol": "SWSS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://swssscan.swss.io",
    "documentation_url": "https://swss.io",
    "simulate_endpoints": 0,
@@ -14526,7 +13862,6 @@
     "symbol": "ADIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://devnet.adilchain-scan.io",
    "documentation_url": "https://adilchain.io",
    "simulate_endpoints": 0,
@@ -14547,7 +13882,6 @@
     "symbol": "G",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet-explorer.gravity.xyz",
    "documentation_url": "https://gravity.xyz",
    "simulate_endpoints": 0,
@@ -14568,7 +13902,6 @@
     "symbol": "XTZ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://shadownet.explorer.etherlink.com",
    "documentation_url": "https://etherlink.com",
    "simulate_endpoints": 0,
@@ -14589,7 +13922,6 @@
     "symbol": "BEX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.bexchain.com",
    "documentation_url": "https://bexchain.com",
    "simulate_endpoints": 0,
@@ -14610,7 +13942,6 @@
     "symbol": "USD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://orquscan.io",
    "documentation_url": "https://orqus.io",
    "simulate_endpoints": 1,
@@ -14631,7 +13962,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://taikoscan.io",
    "documentation_url": "https://taiko.xyz",
    "simulate_endpoints": 3,
@@ -14657,7 +13987,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.hoodi.taiko.xyz",
    "documentation_url": "https://taiko.xyz",
    "simulate_endpoints": 1,
@@ -14678,7 +14007,6 @@
     "symbol": "MUD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.mud.network",
    "documentation_url": "https://mud.network",
    "simulate_endpoints": 0,
@@ -14699,7 +14027,6 @@
     "symbol": "CLT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockchain.transparency.solutions",
    "documentation_url": "https://transparency.solutions",
    "simulate_endpoints": 1,
@@ -14720,7 +14047,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia-explorer.hpp.io",
    "documentation_url": "https://www.hpp.io",
    "simulate_endpoints": 1,
@@ -14741,7 +14067,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.hpp.io",
    "documentation_url": "https://www.hpp.io",
    "simulate_endpoints": 1,
@@ -14762,7 +14087,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.btrscan.com",
    "documentation_url": "https://docs.bitlayer.org/",
    "simulate_endpoints": 0,
@@ -14784,7 +14108,6 @@
     "symbol": "BTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.btrscan.com",
    "documentation_url": "https://docs.bitlayer.org/",
    "simulate_endpoints": 0,
@@ -14808,7 +14131,6 @@
     "symbol": "tDEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.decimalchain.com",
    "documentation_url": "https://decimalchain.com",
    "simulate_endpoints": 0,
@@ -14829,7 +14151,6 @@
     "symbol": "RON",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://saigon-explorer.roninchain.com",
    "documentation_url": "https://roninchain.com",
    "simulate_endpoints": 0,
@@ -14851,7 +14172,6 @@
     "symbol": "tSTRAX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://auroria.explorer.xertra.com",
    "documentation_url": "https://xertra.com",
    "simulate_endpoints": 0,
@@ -14872,7 +14192,6 @@
     "symbol": "lat",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.platon.network",
    "documentation_url": "https://www.platon.network",
    "simulate_endpoints": 0,
@@ -14893,7 +14212,6 @@
     "symbol": "HEI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://heima.statescan.io",
    "documentation_url": "https://heima.network",
    "simulate_endpoints": 0,
@@ -14914,7 +14232,6 @@
     "symbol": "WETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.evm.hydration.cloud",
    "documentation_url": "https://hydration.net/",
    "simulate_endpoints": 0,
@@ -14938,7 +14255,6 @@
     "symbol": "CONET",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.conet.network",
    "documentation_url": "https://conet.network",
    "simulate_endpoints": 1,
@@ -14959,7 +14275,6 @@
     "symbol": "STO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://studio-scan.com",
    "documentation_url": "https://studio-blockchain.com",
    "simulate_endpoints": 2,
@@ -14981,7 +14296,6 @@
     "symbol": "HIP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.hipercapitalfinance.com",
    "documentation_url": "https://hipercapitalfinance.com",
    "simulate_endpoints": 0,
@@ -15002,7 +14316,6 @@
     "symbol": "PTH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.plasticherokorea.com",
    "documentation_url": "https://www.plasticherocoin.com",
    "simulate_endpoints": 0,
@@ -15023,7 +14336,6 @@
     "symbol": "STC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.strmchain.com",
    "documentation_url": "https://strmchain.com",
    "simulate_endpoints": 0,
@@ -15044,7 +14356,6 @@
     "symbol": "ALTHEA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mintscan.io/althea",
    "documentation_url": "https://althea.net",
    "simulate_endpoints": 0,
@@ -15065,7 +14376,6 @@
     "symbol": "MPCQ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://moneypoolscash.com",
    "simulate_endpoints": 0,
@@ -15086,7 +14396,6 @@
     "symbol": "GZN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://token.gearzero.ca/testnet",
    "simulate_endpoints": 0,
@@ -15107,7 +14416,6 @@
     "symbol": "FAT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dcscan.io",
    "documentation_url": "https://datachain.network",
    "simulate_endpoints": 2,
@@ -15129,7 +14437,6 @@
     "symbol": "PBX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.betaxchain.org",
    "documentation_url": "https://betaxchain.com",
    "simulate_endpoints": 0,
@@ -15150,7 +14457,6 @@
     "symbol": "OWCT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.oneworldchain.org",
    "documentation_url": "https://oneworldchain.org",
    "simulate_endpoints": 1,
@@ -15171,7 +14477,6 @@
     "symbol": "SAHARA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.saharalabs.ai",
    "documentation_url": "https://saharalabs.ai",
    "simulate_endpoints": 0,
@@ -15192,7 +14497,6 @@
     "symbol": "tFIL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://calibration.filscan.io",
    "documentation_url": "https://filecoin.io",
    "simulate_endpoints": 0,
@@ -15216,7 +14520,6 @@
     "symbol": "WOMOX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer.worldmobile.net",
    "documentation_url": "https://worldmobile.io/the-chain",
    "simulate_endpoints": 0,
@@ -15237,7 +14540,6 @@
     "symbol": "WABA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.wabaworld.com",
    "documentation_url": "https://www.wabanetwork.org",
    "simulate_endpoints": 0,
@@ -15258,7 +14560,6 @@
     "symbol": "TC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://tscscan.com",
    "documentation_url": "https://ttcoin.info/",
    "simulate_endpoints": 0,
@@ -15279,7 +14580,6 @@
     "symbol": "BTF",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.mainnet.bitfinity.network",
    "documentation_url": "https://bitfinity.network",
    "simulate_endpoints": 0,
@@ -15300,7 +14600,6 @@
     "symbol": "vTFUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://tsub360890-explorer.thetatoken.org",
    "documentation_url": "https://www.lavita.ai",
    "simulate_endpoints": 0,
@@ -15321,7 +14620,6 @@
     "symbol": "DGC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://dgs-exp.digitsoul.co.th",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -15342,7 +14640,6 @@
     "symbol": "METAL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://metalscan.io",
    "documentation_url": "https://www.metalblockchain.org/",
    "simulate_endpoints": 0,
@@ -15363,7 +14660,6 @@
     "symbol": "METAL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://tahoe.metalscan.io",
    "documentation_url": "https://www.metalblockchain.org/",
    "simulate_endpoints": 0,
@@ -15384,7 +14680,6 @@
     "symbol": "VSG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.vscblockchain.org",
    "documentation_url": "https://vsgofficial.com",
    "simulate_endpoints": 0,
@@ -15408,7 +14703,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "32000000",
    "block_explorer_url": "https://sepolia.arbiscan.io",
    "documentation_url": "https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info",
    "simulate_endpoints": 3,
@@ -15433,7 +14727,6 @@
     "symbol": "ALOT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://subnets-test.avax.network/dexalot",
    "documentation_url": "https://dexalot.com",
    "simulate_endpoints": 0,
@@ -15454,7 +14747,6 @@
     "symbol": "ALOT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://subnets.avax.network/dexalot",
    "documentation_url": "https://dexalot.com",
    "simulate_endpoints": 0,
@@ -15475,7 +14767,6 @@
     "symbol": "tOKRW",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.maroo.io",
    "documentation_url": "https://maroo.io",
    "simulate_endpoints": 0,
@@ -15496,7 +14787,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-scan.goalpha.org",
    "documentation_url": "https://docs.alphatoken.com/AlphaChain/about-alpha-chain",
    "simulate_endpoints": 1,
@@ -15517,7 +14807,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.scrollscan.com",
    "documentation_url": "https://scroll.io",
    "simulate_endpoints": 0,
@@ -15541,7 +14830,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://scrollscan.com",
    "documentation_url": "https://scroll.io",
    "simulate_endpoints": 1,
@@ -15567,7 +14855,6 @@
     "symbol": "OWCT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.oneworldchain.org",
    "documentation_url": "https://oneworldchain.org",
    "simulate_endpoints": 1,
@@ -15588,7 +14875,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://light-hoodi.beaconcha.in",
    "documentation_url": "https://hoodi.ethpandaops.io",
    "simulate_endpoints": 2,
@@ -15611,7 +14897,6 @@
     "symbol": "tONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.onechain.nexus/612044",
    "documentation_url": "https://onechain.nexus",
    "simulate_endpoints": 1,
@@ -15632,7 +14917,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.onechain.nexus/612055",
    "documentation_url": "https://onechain.nexus",
    "simulate_endpoints": 1,
@@ -15653,7 +14937,6 @@
     "symbol": "BRNKC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://brnkscan.bearnetwork.net",
    "documentation_url": "https://bearnetwork.net",
    "simulate_endpoints": 0,
@@ -15675,7 +14958,6 @@
     "symbol": "ALL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://alltra.global",
    "documentation_url": "https://alltra.world",
    "simulate_endpoints": 1,
@@ -15696,7 +14978,6 @@
     "symbol": "EDU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://edu-chain-testnet.blockscout.com",
    "documentation_url": "https://raas.gelato.network/rollups/details/public/open-campus-codex",
    "simulate_endpoints": 1,
@@ -15718,7 +14999,6 @@
     "symbol": "XAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.xai-chain.net",
    "documentation_url": "https://xai.games",
    "simulate_endpoints": 2,
@@ -15740,7 +15020,6 @@
     "symbol": "HLUSD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-blockexplorer.helachain.com",
    "documentation_url": "https://helalabs.com",
    "simulate_endpoints": 0,
@@ -15761,7 +15040,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://gensyn-testnet.explorer.alchemy.com",
    "documentation_url": "https://gensyn.network/",
    "simulate_endpoints": 0,
@@ -15782,7 +15060,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://gensyn-mainnet.explorer.alchemy.com",
    "documentation_url": "https://gensyn.network/",
    "simulate_endpoints": 0,
@@ -15803,7 +15080,6 @@
     "symbol": "GOLDPN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://primeanetwork.com",
    "simulate_endpoints": 0,
@@ -15824,7 +15100,6 @@
     "symbol": "TIX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://subnets-test.avax.network/tixchain",
    "documentation_url": "https://subnets-test.avax.network/tixchain/details",
    "simulate_endpoints": 0,
@@ -15845,7 +15120,6 @@
     "symbol": "RUSD",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://network.radiustech.xyz",
    "documentation_url": "https://network.radiustech.xyz/",
    "simulate_endpoints": 0,
@@ -15866,7 +15140,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bokuto.katanascan.com",
    "documentation_url": "https://katana.network",
    "simulate_endpoints": 1,
@@ -15887,7 +15160,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.explorer.hemi.xyz",
    "documentation_url": "https://hemi.xyz",
    "simulate_endpoints": 1,
@@ -15908,7 +15180,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://katanascan.com",
    "documentation_url": "https://katana.network",
    "simulate_endpoints": 3,
@@ -15933,7 +15204,6 @@
     "symbol": "MIX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://miexs.com",
    "documentation_url": "https://miexs.com",
    "simulate_endpoints": 1,
@@ -15956,7 +15226,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer-sepolia.inkonchain.com",
    "documentation_url": "https://docs.inkonchain.com/general/connect-wallet",
    "simulate_endpoints": 1,
@@ -15978,7 +15247,6 @@
     "symbol": "OCTA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.octa.space",
    "documentation_url": "https://octa.space",
    "simulate_endpoints": 0,
@@ -15999,7 +15267,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://bob-sepolia.explorer.gobob.xyz",
    "documentation_url": "https://gobob.xyz",
    "simulate_endpoints": 1,
@@ -16021,7 +15288,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.codex-stg.xyz",
    "documentation_url": "https://www.codex.xyz/",
    "simulate_endpoints": 1,
@@ -16042,7 +15308,6 @@
     "symbol": "GMB",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.gembascan.io",
    "documentation_url": "https://gembachain.io",
    "simulate_endpoints": 0,
@@ -16065,7 +15330,6 @@
     "symbol": "HYPEC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.hypercluster.org",
    "documentation_url": "https://www.hypercluster.org/",
    "simulate_endpoints": 0,
@@ -16086,7 +15350,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.ethiq.network",
    "documentation_url": "https://www.ethiq.network",
    "simulate_endpoints": 0,
@@ -16107,7 +15370,6 @@
     "symbol": "ELV",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.eluv.io",
    "documentation_url": "https://eluv.io",
    "simulate_endpoints": 0,
@@ -16133,7 +15395,6 @@
     "symbol": "AVI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.avicoin.org",
    "documentation_url": "https://www.avicoin.org",
    "simulate_endpoints": 0,
@@ -16154,7 +15415,6 @@
     "symbol": "TIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.forma.art",
    "documentation_url": "https://forma.art",
    "simulate_endpoints": 0,
@@ -16175,7 +15435,6 @@
     "symbol": "AMC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.amchain.net",
    "documentation_url": "https://hewe.io/",
    "simulate_endpoints": 0,
@@ -16196,7 +15455,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-dev.wirexpaychain.com",
    "documentation_url": "https://docs.wirexpaychain.com/tech/wirex-pay-chain",
    "simulate_endpoints": 0,
@@ -16217,7 +15475,6 @@
     "symbol": "NMT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testbrower.protago-dev.com",
    "documentation_url": "https://netmind.ai",
    "simulate_endpoints": 0,
@@ -16238,7 +15495,6 @@
     "symbol": "FREE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.1moneynetwork.com",
    "simulate_endpoints": 3,
@@ -16261,7 +15517,6 @@
     "symbol": "XRP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.xrplevm.org",
    "documentation_url": "https://xrplevm.org",
    "simulate_endpoints": 0,
@@ -16282,7 +15537,6 @@
     "symbol": "XRP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.xrplevm.org",
    "documentation_url": "https://xrplevm.org",
    "simulate_endpoints": 0,
@@ -16303,7 +15557,6 @@
     "symbol": "XPT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://x-phere.com/",
    "simulate_endpoints": 0,
@@ -16324,7 +15577,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia-explorer.jovay.io/l2",
    "documentation_url": "https://jovay.io",
    "simulate_endpoints": 0,
@@ -16345,7 +15597,6 @@
     "symbol": "GG",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.gghyper.net",
    "documentation_url": "https://gghyper.net",
    "simulate_endpoints": 0,
@@ -16366,7 +15617,6 @@
     "symbol": "DGC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -16387,7 +15637,6 @@
     "symbol": "COTI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet.cotiscan.io",
    "documentation_url": "https://coti.io/",
    "simulate_endpoints": 0,
@@ -16412,7 +15661,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://horizen-testnet.explorer.caldera.xyz",
    "documentation_url": "https://horizen-testnet.hub.caldera.xyz",
    "simulate_endpoints": 1,
@@ -16433,7 +15681,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://pacific-explorer.sepolia-testnet.manta.network",
    "documentation_url": "https://manta-testnet.caldera.dev/",
    "simulate_endpoints": 2,
@@ -16456,7 +15703,6 @@
     "symbol": "AIP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.arcadia.khalani.network",
    "documentation_url": "https://khalani.network",
    "simulate_endpoints": 0,
@@ -16477,7 +15723,6 @@
     "symbol": "USDC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.arcscan.app",
    "documentation_url": "https://arc.network",
    "simulate_endpoints": 1,
@@ -16501,7 +15746,6 @@
     "symbol": "ETN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-blockexplorer.electroneum.com",
    "documentation_url": "https://electroneum.com",
    "simulate_endpoints": 0,
@@ -16522,7 +15766,6 @@
     "symbol": "lREACT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://lasna.reactscan.net",
    "documentation_url": "https://reactive.network",
    "simulate_endpoints": 1,
@@ -16543,7 +15786,6 @@
     "symbol": "PXP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.pointpay.io",
    "documentation_url": "https://pointpay.io",
    "simulate_endpoints": 0,
@@ -16564,7 +15806,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.jovay.io/l2",
    "documentation_url": "https://jovay.io",
    "simulate_endpoints": 0,
@@ -16586,7 +15827,6 @@
     "symbol": "SAFE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://safe4.anwang.com",
    "documentation_url": "https://www.anwang.com",
    "simulate_endpoints": 0,
@@ -16607,7 +15847,6 @@
     "symbol": "SAFE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://safe4testnet.anwang.com",
    "documentation_url": "https://www.anwang.com",
    "simulate_endpoints": 0,
@@ -16628,7 +15867,6 @@
     "symbol": "TING",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.tingscan.com",
    "documentation_url": "https://tingscan.com",
    "simulate_endpoints": 1,
@@ -16649,7 +15887,6 @@
     "symbol": "H",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://humanity-mainnet.explorer.alchemy.com",
    "documentation_url": "https://humanity.org",
    "simulate_endpoints": 0,
@@ -16670,7 +15907,6 @@
     "symbol": "tHP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://humanity-testnet.explorer.alchemy.com",
    "documentation_url": "https://testnet.humanity.org",
    "simulate_endpoints": 0,
@@ -16691,7 +15927,6 @@
     "symbol": "COTI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.cotiscan.io",
    "documentation_url": "https://coti.io/",
    "simulate_endpoints": 0,
@@ -16713,7 +15948,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.zora.energy",
    "documentation_url": "https://zora.energy",
    "simulate_endpoints": 1,
@@ -16735,7 +15969,6 @@
     "symbol": "STU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://stuscan.com",
    "documentation_url": "https://satuchain.com",
    "simulate_endpoints": 2,
@@ -16757,7 +15990,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.alienxchain.io",
    "documentation_url": "https://alienxchain.io/home",
    "simulate_endpoints": 0,
@@ -16778,7 +16010,6 @@
     "symbol": "CC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://clawcoin.com",
    "simulate_endpoints": 0,
@@ -16799,7 +16030,6 @@
     "symbol": "CELO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://celo-sepolia.blockscout.com",
    "documentation_url": "https://docs.celo.org",
    "simulate_endpoints": 1,
@@ -16822,7 +16052,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.etherscan.io",
    "documentation_url": "https://sepolia.otterscan.io",
    "simulate_endpoints": 5,
@@ -16851,7 +16080,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": "16777216",
    "block_explorer_url": "https://sepolia-optimism.etherscan.io",
    "documentation_url": "https://docs.optimism.io/op-mainnet/network-information/connecting-to-op",
    "simulate_endpoints": 3,
@@ -16876,7 +16104,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.riselabs.xyz",
    "documentation_url": "https://risechain.com/",
    "simulate_endpoints": 1,
@@ -16897,7 +16124,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.r0arscan.io",
    "documentation_url": "https://testnet.r0arscan.io",
    "simulate_endpoints": 1,
@@ -16918,7 +16144,6 @@
     "symbol": "OFC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://onfascan.io",
    "documentation_url": "https://onfachain.com",
    "simulate_endpoints": 0,
@@ -16941,7 +16166,6 @@
     "symbol": "GAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://xt4scan.ngd.network",
    "documentation_url": "https://neo.org/",
    "simulate_endpoints": 1,
@@ -16962,7 +16186,6 @@
     "symbol": "SIS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://symbiosis.calderaexplorer.xyz",
    "documentation_url": "https://symbiosis.hub.caldera.xyz",
    "simulate_endpoints": 1,
@@ -16983,7 +16206,6 @@
     "symbol": "tSTU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.satuchain.com",
    "documentation_url": "https://satuchain.com",
    "simulate_endpoints": 0,
@@ -17004,7 +16226,6 @@
     "symbol": "CNX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://crynux.io",
    "simulate_endpoints": 1,
@@ -17025,7 +16246,6 @@
     "symbol": "DBC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://www.dbcscan.io",
    "documentation_url": "https://www.deepbrainchain.org",
    "simulate_endpoints": 0,
@@ -17046,7 +16266,6 @@
     "symbol": "QKI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://qkiscan.io",
    "documentation_url": "https://quarkblockchain.org/",
    "simulate_endpoints": 6,
@@ -17072,7 +16291,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scan.dbkchain.io",
    "documentation_url": "https://docs.dbkchain.io",
    "simulate_endpoints": 0,
@@ -17093,7 +16311,6 @@
     "symbol": "sETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://proxima-explorer.swanchain.io",
    "documentation_url": "https://swanchain.io/",
    "simulate_endpoints": 1,
@@ -17114,7 +16331,6 @@
     "symbol": "XP",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://xp.tamsa.io",
    "documentation_url": "https://x-phere.com/",
    "simulate_endpoints": 0,
@@ -17136,7 +16352,6 @@
     "symbol": "lat",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://devnet3scan.platon.network",
    "documentation_url": "https://www.platon.network",
    "simulate_endpoints": 0,
@@ -17157,7 +16372,6 @@
     "symbol": "VCITY",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockchain.vcity.app",
    "documentation_url": "https://vcity.app",
    "simulate_endpoints": 0,
@@ -17178,7 +16392,6 @@
     "symbol": "MA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://ma-chain.xyz",
    "documentation_url": "https://ma-chain.xyz",
    "simulate_endpoints": 0,
@@ -17201,7 +16414,6 @@
     "symbol": "xlon",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.excelon.io",
    "documentation_url": "https://xlon.org",
    "simulate_endpoints": 1,
@@ -17222,7 +16434,6 @@
     "symbol": "6DO-T",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.6dochain.com",
    "documentation_url": "https://6do.world",
    "simulate_endpoints": 1,
@@ -17243,7 +16454,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://scanv2-testnet.ancient8.gg",
    "documentation_url": "https://ancient8.gg/",
    "simulate_endpoints": 1,
@@ -17264,7 +16474,6 @@
     "symbol": "DKA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://dkargo.io",
    "simulate_endpoints": 1,
@@ -17285,7 +16494,6 @@
     "symbol": "AQUA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://aquachain.github.io",
    "simulate_endpoints": 0,
@@ -17306,7 +16514,6 @@
     "symbol": "ATN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://autonityscan.org",
    "documentation_url": "https://autonity.org/",
    "simulate_endpoints": 0,
@@ -17327,7 +16534,6 @@
     "symbol": "CRPTOS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-beta.cryptos.com",
    "documentation_url": "https://cryptos.com",
    "simulate_endpoints": 0,
@@ -17348,7 +16554,6 @@
     "symbol": "KROWN",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer-testnet.krown.network",
    "documentation_url": "https://krown.network",
    "simulate_endpoints": 2,
@@ -17370,7 +16575,6 @@
     "symbol": "tMSTC",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.mstscan.com",
    "documentation_url": "https://mstblockchain.com",
    "simulate_endpoints": 1,
@@ -17391,7 +16595,6 @@
     "symbol": "ORAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://orai.io",
    "simulate_endpoints": 0,
@@ -17413,7 +16616,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet.blastscan.io",
    "documentation_url": "https://blast.io/",
    "simulate_endpoints": 0,
@@ -17435,7 +16637,6 @@
     "symbol": "CNX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://crynux.io",
    "simulate_endpoints": 1,
@@ -17456,7 +16657,6 @@
     "symbol": "NEON",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://neonscan.org",
    "documentation_url": "https://neonevm.org",
    "simulate_endpoints": 0,
@@ -17478,7 +16678,6 @@
     "symbol": "OLT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://mainnet-explorer.oneledger.network",
    "documentation_url": "https://oneledger.io",
    "simulate_endpoints": 0,
@@ -17499,7 +16698,6 @@
     "symbol": "CREDIT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://base-sepolia-testnet-explorer.skalenodes.com",
    "documentation_url": "https://docs.skale.space/welcome/skale-on-base",
    "simulate_endpoints": 0,
@@ -17520,7 +16718,6 @@
     "symbol": "PAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout-testnet.polkadot.io",
    "documentation_url": "https://polkadot.com",
    "simulate_endpoints": 0,
@@ -17542,7 +16739,6 @@
     "symbol": "DOT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.polkadot.io",
    "documentation_url": "https://polkadot.com",
    "simulate_endpoints": 0,
@@ -17563,7 +16759,6 @@
     "symbol": "TAU",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.tau.gateway.fm",
    "documentation_url": "https://presto.gateway.fm/rollups/8bd8406f-a64f-484f-b299-046dd5f24a0f",
    "simulate_endpoints": 0,
@@ -17584,7 +16779,6 @@
     "symbol": "LUMIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.lumia.org",
    "documentation_url": "https://lumia.org",
    "simulate_endpoints": 0,
@@ -17605,7 +16799,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://sepolia.explorer.zora.energy",
    "documentation_url": "https://zora.energy",
    "simulate_endpoints": 1,
@@ -17627,7 +16820,6 @@
     "symbol": "CREDIT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://skale-base-explorer.skalenodes.com",
    "documentation_url": "https://docs.skale.space/welcome/skale-on-base",
    "simulate_endpoints": 0,
@@ -17648,7 +16840,6 @@
     "symbol": "GAS",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://blockscout.evm.mirasmanda.uz",
    "documentation_url": "https://asterium.uz/",
    "simulate_endpoints": 1,
@@ -17669,7 +16860,6 @@
     "symbol": "ITANI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.itaninetworkchain.com",
    "documentation_url": "https://www.itaninetworkchain.com",
    "simulate_endpoints": 0,
@@ -17691,7 +16881,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.aurora.dev",
    "documentation_url": "https://aurora.dev",
    "simulate_endpoints": 0,
@@ -17713,7 +16902,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.aurora.dev",
    "documentation_url": "https://aurora.dev",
    "simulate_endpoints": 0,
@@ -17735,7 +16923,6 @@
     "symbol": "TURBO",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.turbo.aurora.dev",
    "documentation_url": "https://turbotoken.io",
    "simulate_endpoints": 0,
@@ -17756,7 +16943,6 @@
     "symbol": "TUXA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.tuxa.aurora.dev",
    "documentation_url": "https://x.com/tuxapp_coin",
    "simulate_endpoints": 0,
@@ -17777,7 +16963,6 @@
     "symbol": "CNX",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://crynux.io",
    "simulate_endpoints": 0,
@@ -17798,7 +16983,6 @@
     "symbol": "sFUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://parallel-stormy-spica.explorer.mainnet.skalenodes.com",
    "documentation_url": null,
    "simulate_endpoints": 0,
@@ -17819,7 +17003,6 @@
     "symbol": "Z",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zephyr-blockscout.eu-north-2.gateway.fm",
    "documentation_url": "https://zero.tech",
    "simulate_endpoints": 0,
@@ -17840,7 +17023,6 @@
     "symbol": "sFUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://green-giddy-denebola.explorer.mainnet.skalenodes.com",
    "documentation_url": "https://nebulachain.io/",
    "simulate_endpoints": 0,
@@ -17861,7 +17043,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.harmony.one",
    "documentation_url": "https://www.harmony.one/",
    "simulate_endpoints": 0,
@@ -17885,7 +17066,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.harmony.one/blocks/shard/1",
    "documentation_url": "https://www.harmony.one/",
    "simulate_endpoints": 0,
@@ -17908,7 +17088,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.harmony.one",
    "documentation_url": "https://www.harmony.one/",
    "simulate_endpoints": 0,
@@ -17929,7 +17108,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.testnet.harmony.one",
    "documentation_url": "https://www.harmony.one/",
    "simulate_endpoints": 0,
@@ -17950,7 +17128,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.harmony.one/",
    "simulate_endpoints": 0,
@@ -17971,7 +17148,6 @@
     "symbol": "ONE",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.harmony.one/",
    "simulate_endpoints": 0,
@@ -17992,7 +17168,6 @@
     "symbol": "LUMIA",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://beam-explorer.lumia.org",
    "documentation_url": "https://lumia.org",
    "simulate_endpoints": 0,
@@ -18013,7 +17188,6 @@
     "symbol": "sFUEL",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://elated-tan-skat.explorer.mainnet.skalenodes.com",
    "documentation_url": "https://europahub.network/",
    "simulate_endpoints": 0,
@@ -18034,7 +17208,6 @@
     "symbol": "sXAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://testnet-explorer-v2.xai-chain.net",
    "documentation_url": "https://xai.games",
    "simulate_endpoints": 1,
@@ -18055,7 +17228,6 @@
     "symbol": "NTT",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.ntity.io",
    "documentation_url": "https://ntity.io",
    "simulate_endpoints": 0,
@@ -18076,7 +17248,6 @@
     "symbol": "NTTH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://explorer.haradev.com",
    "documentation_url": "https://ntity.io",
    "simulate_endpoints": 0,
@@ -18097,7 +17268,6 @@
     "symbol": "ZENIQ",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": "https://zeniqscan.com",
    "documentation_url": "https://www.zeniq.dev/",
    "simulate_endpoints": 0,
@@ -18118,7 +17288,6 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
    "block_explorer_url": null,
    "documentation_url": "https://www.kamigotchi.io/",
    "simulate_endpoints": 0,

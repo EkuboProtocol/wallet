@@ -86,6 +86,25 @@ Policy cannot reveal raw key
 material or grant exports, settings mutation, review decisions, owner
 authorization, or other owner capabilities.
 
+Fee liability on the automatic path is a policy question and only a policy
+question. `gas_limit`, `max_fee_per_gas`, and `max_priority_fee_per_gas` are
+prepared-envelope matchers, so a rule bounds `gas_limit × max_fee_per_gas`
+behind a revision and an owner approval. Network profiles carry no fee or gas
+ceiling: a duplicate bound in unreviewed configuration was deleted by routine
+profile edits, said nothing about what an owner's transactions are worth, and
+is not a property of a chain. The wallet still refuses an envelope a block
+could not accept or one below intrinsic gas, which are facts rather than
+preferences.
+
+An automatic-allow rule that omits the fee matchers therefore accepts the fee
+fields the selected endpoint prepared, and no bound is mandatory before signing.
+That residual is accepted deliberately: it requires an endpoint the owner
+configured to be dishonest and to name fees that pass simulation, which is both
+unlikely and awkward to arrange, and a mandatory ceiling would refuse ordinary
+transactions on every chain whose fee scale it was not written for. Owners
+running automatic policies against a single public endpoint should carry the
+bound as a rule; `docs/policy-authoring.md` spells it.
+
 ## Updates and release supply chain
 
 Update metadata and hosting are untrusted. `latest.json` and artifacts are

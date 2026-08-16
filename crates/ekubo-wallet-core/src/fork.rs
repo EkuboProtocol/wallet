@@ -456,7 +456,7 @@ pub async fn execute_reads(
         network.chain_id
     );
     let _permit = simulation_slot().await?;
-    let gas_limit = effective_gas_limit(network, preface.parent.gas_limit)?;
+    let gas_limit = effective_gas_limit(preface.parent.gas_limit)?;
     let per_call = gas_limit / u64::try_from(calls.len()).unwrap_or(1).max(1);
     ensure!(
         per_call >= 21_000,

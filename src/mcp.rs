@@ -505,10 +505,6 @@ struct AddNetworkInput {
     /// slot. Omit for the conservative default of 12.
     #[serde(default = "default_network_finality_confirmations")]
     finality_confirmations: u16,
-    /// The largest gas limit this network will ever be asked for, as a
-    /// canonical decimal integer of at least 21000 — a cap below the
-    /// intrinsic cost of a transaction would refuse every transaction here.
-    max_gas_limit: String,
     native_currency: NativeCurrency,
     #[schemars(with = "String")]
     block_explorer_url: Url,
@@ -2082,9 +2078,6 @@ impl WalletMcpServer {
                 .map_err(|error: anyhow::Error| tool_error(&error))?
                 .unwrap_or_default(),
             finality_confirmations: input.finality_confirmations,
-            max_gas_limit: Some(input.max_gas_limit),
-            // An agent does not choose the owner's fee ceiling.
-            max_fee_per_gas: None,
             native_currency: Some(input.native_currency),
             block_explorer_url: Some(input.block_explorer_url),
             documentation_url: Some(input.documentation_url),

@@ -1709,8 +1709,6 @@ pub struct WalletWindow {
     network_aliases_input: Option<Entity<InputState>>,
     network_chain_id_input: Option<Entity<InputState>>,
     network_rpc_urls_input: Option<Entity<InputState>>,
-    network_max_gas_limit_input: Option<Entity<InputState>>,
-    network_max_fee_per_gas_input: Option<Entity<InputState>>,
     network_native_name_input: Option<Entity<InputState>>,
     network_native_symbol_input: Option<Entity<InputState>>,
     network_native_decimals_input: Option<Entity<InputState>>,
@@ -2301,8 +2299,6 @@ struct NetworkEditorErrors {
     aliases: Option<String>,
     chain_id: Option<String>,
     rpc_urls: Option<String>,
-    max_gas_limit: Option<String>,
-    max_fee_per_gas: Option<String>,
     native_currency: Option<String>,
     block_explorer_url: Option<String>,
     documentation_url: Option<String>,
@@ -2316,8 +2312,6 @@ struct NetworkEditorDraft {
     aliases: String,
     chain_id: String,
     rpc_urls: String,
-    max_gas_limit: String,
-    max_fee_per_gas: String,
     native_currency_name: String,
     native_currency_symbol: String,
     native_currency_decimals: String,
@@ -3520,38 +3514,6 @@ fn parse_network_editor_draft(
         ));
     }
 
-    let max_gas_limit = draft.max_gas_limit.trim();
-    let max_gas_limit = if max_gas_limit.is_empty() {
-        None
-    } else if max_gas_limit.starts_with('0')
-        || !max_gas_limit.bytes().all(|byte| byte.is_ascii_digit())
-        || max_gas_limit.parse::<u64>().is_err()
-        || max_gas_limit
-            .parse::<u64>()
-            .is_ok_and(|value| value < ekubo_wallet_core::config::INTRINSIC_GAS)
-    {
-        errors.max_gas_limit = Some(format!(
-            "Enter a canonical integer of at least {} gas.",
-            ekubo_wallet_core::config::INTRINSIC_GAS
-        ));
-        None
-    } else {
-        Some(max_gas_limit.to_owned())
-    };
-    let max_fee_per_gas = draft.max_fee_per_gas.trim();
-    let max_fee_per_gas = if max_fee_per_gas.is_empty() {
-        None
-    } else if max_fee_per_gas.starts_with('0')
-        || !max_fee_per_gas.bytes().all(|byte| byte.is_ascii_digit())
-        || max_fee_per_gas.parse::<u128>().is_err()
-    {
-        errors.max_fee_per_gas =
-            Some("Enter a canonical positive decimal wei amount that fits uint128.".into());
-        None
-    } else {
-        Some(max_fee_per_gas.to_owned())
-    };
-
     let native_values = [
         draft.native_currency_name.trim(),
         draft.native_currency_symbol.trim(),
@@ -3636,8 +3598,6 @@ fn parse_network_editor_draft(
         rpc_urls,
         rpc_strategy,
         finality_confirmations,
-        max_gas_limit,
-        max_fee_per_gas,
         native_currency,
         block_explorer_url,
         documentation_url,
@@ -4418,8 +4378,6 @@ impl WalletWindow {
             network_aliases_input: None,
             network_chain_id_input: None,
             network_rpc_urls_input: None,
-            network_max_gas_limit_input: None,
-            network_max_fee_per_gas_input: None,
             network_native_name_input: None,
             network_native_symbol_input: None,
             network_native_decimals_input: None,
@@ -4696,14 +4654,6 @@ impl WalletWindow {
                     .placeholder(RPC_URLS_PLACEHOLDER)
             }));
         }
-        if self.network_max_gas_limit_input.is_none() {
-            self.network_max_gas_limit_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder("30000000")));
-        }
-        if self.network_max_fee_per_gas_input.is_none() {
-            self.network_max_fee_per_gas_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder("100000000000")));
-        }
         if self.network_native_name_input.is_none() {
             self.network_native_name_input =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("Ether")));
@@ -4773,8 +4723,6 @@ impl WalletWindow {
         self.network_aliases_input = None;
         self.network_chain_id_input = None;
         self.network_rpc_urls_input = None;
-        self.network_max_gas_limit_input = None;
-        self.network_max_fee_per_gas_input = None;
         self.network_native_name_input = None;
         self.network_native_symbol_input = None;
         self.network_native_decimals_input = None;
@@ -6537,18 +6485,6 @@ impl WalletWindow {
                 .read(cx)
                 .value()
                 .to_string(),
-            max_gas_limit: self
-                .network_max_gas_limit_input
-                .as_ref()?
-                .read(cx)
-                .value()
-                .to_string(),
-            max_fee_per_gas: self
-                .network_max_fee_per_gas_input
-                .as_ref()?
-                .read(cx)
-                .value()
-                .to_string(),
             native_currency_name: self
                 .network_native_name_input
                 .as_ref()?
@@ -6592,8 +6528,6 @@ impl WalletWindow {
             self.network_aliases_input.as_ref(),
             self.network_chain_id_input.as_ref(),
             self.network_rpc_urls_input.as_ref(),
-            self.network_max_gas_limit_input.as_ref(),
-            self.network_max_fee_per_gas_input.as_ref(),
             self.network_native_name_input.as_ref(),
             self.network_native_symbol_input.as_ref(),
             self.network_native_decimals_input.as_ref(),
@@ -6773,18 +6707,6 @@ impl WalletWindow {
             cx,
         );
         replace_input_value(
-            self.network_max_gas_limit_input.as_ref(),
-            network.max_gas_limit.clone().unwrap_or_default(),
-            window,
-            cx,
-        );
-        replace_input_value(
-            self.network_max_fee_per_gas_input.as_ref(),
-            network.max_fee_per_gas.clone().unwrap_or_default(),
-            window,
-            cx,
-        );
-        replace_input_value(
             self.network_native_name_input.as_ref(),
             network
                 .native_currency
@@ -6842,9 +6764,7 @@ impl WalletWindow {
         self.network_editor_disabled = network.disabled;
         self.network_editor_testnet = network.testnet;
         self.network_editor_rpc_strategy = network.rpc_strategy;
-        self.network_editor_advanced_open = !network.aliases.is_empty()
-            || network.max_gas_limit.is_some()
-            || network.max_fee_per_gas.is_some();
+        self.network_editor_advanced_open = !network.aliases.is_empty();
         self.network_editor_errors = NetworkEditorErrors::default();
         focus.update(cx, |input, cx| {
             input.set_selected_range(0..input.value().len(), cx);
@@ -6872,9 +6792,7 @@ impl WalletWindow {
         );
         // An error under a collapsed disclosure is invisible, so a rejected
         // save always reveals the field it is complaining about.
-        self.network_editor_advanced_open |= errors.aliases.is_some()
-            || errors.max_gas_limit.is_some()
-            || errors.max_fee_per_gas.is_some();
+        self.network_editor_advanced_open |= errors.aliases.is_some();
         self.network_editor_errors = errors;
         let Some(network) = network else {
             cx.notify();
@@ -11125,12 +11043,6 @@ impl WalletWindow {
         let Some(rpc_urls) = self.network_rpc_urls_input.as_ref() else {
             return div();
         };
-        let Some(max_gas_limit) = self.network_max_gas_limit_input.as_ref() else {
-            return div();
-        };
-        let Some(max_fee_per_gas) = self.network_max_fee_per_gas_input.as_ref() else {
-            return div();
-        };
         let Some(native_name) = self.network_native_name_input.as_ref() else {
             return div();
         };
@@ -11436,25 +11348,6 @@ impl WalletWindow {
                                 .description(
                                     "Other names this network answers to, separated by commas.",
                                 ),
-                            )
-                            .child(text_field(
-                                "Max gas limit",
-                                max_gas_limit,
-                                self.network_editor_errors.max_gas_limit.clone(),
-                                false,
-                                false,
-                                3,
-                            ))
-                            .child(
-                                text_field(
-                                    "Max fee per gas",
-                                    max_fee_per_gas,
-                                    self.network_editor_errors.max_fee_per_gas.clone(),
-                                    false,
-                                    false,
-                                    3,
-                                )
-                                .description("In wei."),
                             ),
                     ),
             )

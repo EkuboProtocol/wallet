@@ -170,8 +170,6 @@ fn network_with(chain_id: u64, rpc_urls: Vec<Url>) -> NetworkConfig {
         rpc_urls,
         rpc_strategy: crate::config::RpcStrategy::Ordered,
         finality_confirmations: crate::config::DEFAULT_FINALITY_CONFIRMATIONS,
-        max_gas_limit: None,
-        max_fee_per_gas: None,
         native_currency: None,
         block_explorer_url: None,
         documentation_url: None,

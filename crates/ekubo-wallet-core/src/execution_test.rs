@@ -23,18 +23,18 @@ const ALREADY_KNOWN: &[&str] = &[
 #[test]
 fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
     // A quiet market: the incumbent's bumped fees decide both fields.
-    let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 100, 10, None).unwrap();
+    let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 100, 10).unwrap();
     assert_eq!(max_fee, 900);
     assert_eq!(priority, 90);
 
     // A hot market: current estimates already clear the floor.
-    let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 2_000, 200, None).unwrap();
+    let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 2_000, 200).unwrap();
     assert_eq!(max_fee, 2_000);
     assert_eq!(priority, 200);
 
     // Repricing outbids the newest incumbent but keeps the original as the
     // immutable cap anchor.
-    let (max_fee, priority) = cancellation_fees((800, 80), (1_600, 160), 100, 10, None).unwrap();
+    let (max_fee, priority) = cancellation_fees((800, 80), (1_600, 160), 100, 10).unwrap();
     assert_eq!(max_fee, 1_800);
     assert_eq!(priority, 180);
 
@@ -44,7 +44,7 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
 
     // The pair stays EIP-1559-consistent when the priority floor passes
     // the market maximum fee.
-    let (max_fee, priority) = cancellation_fees((100, 100), (100, 100), 50, 5, None).unwrap();
+    let (max_fee, priority) = cancellation_fees((100, 100), (100, 100), 50, 5).unwrap();
     assert_eq!(priority, 113);
     assert!(max_fee >= priority);
 
@@ -54,7 +54,7 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
     // every M it could name passed -- the one signing path with no policy and
     // no approval screen behind it, taking a builder tip from a stranger.
     let (max_fee, priority) =
-        cancellation_fees((800, 80), (800, 80), 10_000_000, 9_000_000, None).unwrap();
+        cancellation_fees((800, 80), (800, 80), 10_000_000, 9_000_000).unwrap();
     assert_eq!(max_fee, 3_200, "four times the fee the owner committed to");
     assert_eq!(priority, 3_200);
 
@@ -65,46 +65,27 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
 }
 
 #[test]
-fn cancellation_retries_never_ratchet_the_original_or_configured_cap() {
+fn cancellation_retries_never_ratchet_the_originals_cap() {
     let original = (800, 80);
-    let mut incumbent = original;
-    let absolute_cap = 2_000;
+    let absolute_cap = 3_200;
 
     // Feed every selected cancellation back as the newest incumbent, exactly
-    // as all eight agent-callable retries do. The first replacement reaches
-    // the owner's configured cap. The next needs 12.5% more, so the core says
-    // to rebroadcast instead of treating its own unauthenticated signature as
-    // a new, wider authorization.
-    let first = cancellation_fees(
-        original,
-        incumbent,
-        u128::MAX,
-        u128::MAX,
-        Some(absolute_cap),
-    )
-    .expect("the first bounded cancellation exists");
+    // as all eight agent-callable retries do. The first replacement reaches the
+    // cap the original envelope set, which is the only cap there is now that a
+    // network profile carries none: an owner's own ceiling is a policy rule,
+    // and a cancellation asks no policy question. The next retry needs 12.5%
+    // more, so the core says to rebroadcast rather than treat its own
+    // unauthenticated signature as a new, wider authorization.
+    let first = cancellation_fees(original, original, u128::MAX, u128::MAX)
+        .expect("the first bounded cancellation exists");
     assert_eq!(first, (absolute_cap, absolute_cap));
-    incumbent = first;
 
     for _ in 1..crate::pending::MAX_CANCELLATION_ATTEMPTS {
         assert!(
-            cancellation_fees(
-                original,
-                incumbent,
-                u128::MAX,
-                u128::MAX,
-                Some(absolute_cap),
-            )
-            .is_none(),
+            cancellation_fees(original, first, u128::MAX, u128::MAX).is_none(),
             "a retry above the immutable cap must rebroadcast, not sign"
         );
     }
-
-    // Without a configured ceiling, the original's fourfold bound is still
-    // immutable across retries.
-    let first = cancellation_fees(original, original, u128::MAX, u128::MAX, None).unwrap();
-    assert_eq!(first.0, 3_200);
-    assert!(cancellation_fees(original, first, u128::MAX, u128::MAX, None).is_none());
 }
 
 #[test]
@@ -219,9 +200,7 @@ fn wallet(signer: &PrivateKeySigner) -> WalletMetadata {
 }
 
 fn network() -> NetworkConfig {
-    let mut network = crate::config::default_networks().remove(0);
-    network.max_gas_limit = Some("1000000".into());
-    network
+    crate::config::default_networks().remove(0)
 }
 
 fn plan(sender: Address, steps: usize) -> ExecutionPlan {
@@ -420,101 +399,32 @@ fn signed_envelope_must_match_reviewed_preparation() {
 }
 
 #[test]
-fn the_gas_ceiling_falls_back_to_the_block_when_nothing_is_configured() {
+fn the_gas_ceiling_is_the_block_the_endpoint_reported() {
     // Run 6251, finding 186999. Signing after a simulation always had this
-    // fallback; cancellation bounded nothing at all unless the network carried
-    // a configured maximum — which most shipped profiles do not, so on an
+    // bound; cancellation used to have none unless the network carried a
+    // configured maximum, which most shipped profiles did not — so on an
     // ordinary network one endpoint's `estimate_gas` decided the signed gas
     // limit by itself. A cancellation cannot be simulated and is asked for
     // exactly when something is already stuck, so an absurd estimate produced
     // an envelope every honest peer rejects while spending one of the eight
     // attempts this wallet will ever make.
-    let mut network = network();
-
-    network.max_gas_limit = None;
-    assert_eq!(
-        usable_gas_ceiling(&network, 30_000_000).unwrap(),
-        30_000_000,
-        "with nothing configured the block's own limit is the ceiling"
-    );
-
-    // A configured maximum narrows it.
-    network.max_gas_limit = Some("1000000".into());
-    assert_eq!(usable_gas_ceiling(&network, 30_000_000).unwrap(), 1_000_000);
-
-    // And never widens it past what the block will accept, however the owner
-    // wrote it.
-    assert_eq!(usable_gas_ceiling(&network, 500_000).unwrap(), 500_000);
-
-    network.max_gas_limit = Some("not a number".into());
-    assert!(usable_gas_ceiling(&network, 30_000_000).is_err());
+    //
+    // Narrower ceilings are the owner's to write as a policy rule on
+    // `gas_limit`, which no longer leaves this path unbounded when they do not.
+    assert_eq!(usable_gas_ceiling(30_000_000).unwrap(), 30_000_000);
+    assert_eq!(usable_gas_ceiling(500_000).unwrap(), 500_000);
 
     // A ceiling below what every transaction costs before it does anything is
-    // not a bound, it is a refusal to sign at all -- and `block_maximum` comes
+    // not a bound, it is a refusal to sign at all -- and the block limit comes
     // from whichever endpoint answered, so a small enough answer would
     // otherwise disqualify the plain self-send a cancellation is while looking
     // like an ordinary limit.
-    network.max_gas_limit = None;
-    assert!(usable_gas_ceiling(&network, 20_999).is_err());
-    assert_eq!(usable_gas_ceiling(&network, 21_000).unwrap(), 21_000);
-    network.max_gas_limit = Some("20999".into());
-    assert!(usable_gas_ceiling(&network, 30_000_000).is_err());
+    assert!(usable_gas_ceiling(20_999).is_err());
+    assert_eq!(usable_gas_ceiling(21_000).unwrap(), 21_000);
 }
 
 #[test]
-fn a_configured_fee_ceiling_refuses_an_endpoint_that_names_more() {
-    // The one field on the automatic path with nothing behind it: no policy
-    // rule speaks about fees, and nobody reviews an automatic transaction, so
-    // `gas_limit × max_fee_per_gas` used to be whatever one endpoint said.
-    let mut network = network();
-
-    network.max_fee_per_gas = None;
-    assert_eq!(capped_fee(&network, u128::MAX).unwrap(), u128::MAX);
-
-    network.max_fee_per_gas = Some("1000000000".into());
-    assert_eq!(capped_fee(&network, 999_999_999).unwrap(), 999_999_999);
-    assert_eq!(capped_fee(&network, 1_000_000_000).unwrap(), 1_000_000_000);
-
-    // Refused rather than clamped: a clamped fee is an envelope that may never
-    // mine, holding the wallet's one in-flight slot for the chain. The error
-    // says what to change.
-    let error = capped_fee(&network, 1_000_000_001).unwrap_err().to_string();
-    assert!(error.contains("1000000000"), "{error}");
-    assert!(error.contains("max_fee_per_gas"), "{error}");
-
-    network.max_fee_per_gas = Some("not a number".into());
-    assert!(capped_fee(&network, 1).is_err());
-}
-
-#[test]
-fn signed_envelope_is_revalidated_against_the_current_fee_ceiling() {
-    let signer = PrivateKeySigner::from_slice(&[12; 32]).unwrap();
-    let wallet = wallet(&signer);
-    let plan = plan(wallet.address, 1);
-    let signed_envelope = finalize_digest(
-        sign_prepared(
-            &signer,
-            1,
-            1,
-            100_000,
-            101,
-            1,
-            &planned_call(&plan, wallet.address),
-            false,
-        )
-        .unwrap(),
-        &plan,
-    );
-    let mut network = network();
-    network.max_fee_per_gas = Some("100".into());
-    let error = validate_signed_execution(&signed_envelope, &wallet, &network, &plan)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("maximum fee per gas"), "{error}");
-}
-
-#[test]
-fn cancellation_is_revalidated_against_live_fee_and_gas_ceilings() {
+fn cancellation_is_bounded_by_the_original_envelope_it_replaces() {
     let signer = PrivateKeySigner::from_slice(&[13; 32]).unwrap();
     let wallet = wallet(&signer);
     let original = sign_prepared(
@@ -567,8 +477,11 @@ fn cancellation_is_revalidated_against_live_fee_and_gas_ceilings() {
     )
     .unwrap();
 
-    let mut network = network();
-    network.max_fee_per_gas = None;
+    // The original envelope's fourfold bound is what a cancellation is checked
+    // against. It is the one cap a network profile never supplied and cannot
+    // now: the owner authorized this nonce at that price, and no later
+    // signature of the wallet's own widens it.
+    let network = network();
     let error = validate_signed_cancellation(
         &above_original_bound,
         &wallet,
@@ -582,30 +495,6 @@ fn cancellation_is_revalidated_against_live_fee_and_gas_ceilings() {
         "{error}"
     );
 
-    network.max_fee_per_gas = Some("100".into());
-    let error = validate_signed_cancellation(
-        &cancellation,
-        &wallet,
-        &network,
-        &original.serialized_transaction,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("maximum fee per gas"), "{error}");
-
-    network.max_fee_per_gas = Some("101".into());
-    network.max_gas_limit = Some("99999".into());
-    let error = validate_signed_cancellation(
-        &cancellation,
-        &wallet,
-        &network,
-        &original.serialized_transaction,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("maximum gas limit"), "{error}");
-
-    network.max_gas_limit = Some("100000".into());
     validate_signed_cancellation(
         &cancellation,
         &wallet,
@@ -721,12 +610,8 @@ mod cancellation_gas_tests {
     /// is what makes raising safe rather than a second guess about the bound.
     #[test]
     fn the_floor_cannot_exceed_a_ceiling_that_was_admitted() {
-        let network = crate::config::default_networks()
-            .into_iter()
-            .find(|network| network.chain_id == 1)
-            .expect("mainnet preset");
-        assert!(usable_gas_ceiling(&network, INTRINSIC_TRANSACTION_GAS - 1).is_err());
-        let admitted = usable_gas_ceiling(&network, INTRINSIC_TRANSACTION_GAS).unwrap();
+        assert!(usable_gas_ceiling(INTRINSIC_TRANSACTION_GAS - 1).is_err());
+        let admitted = usable_gas_ceiling(INTRINSIC_TRANSACTION_GAS).unwrap();
         assert!(cancellation_gas_limit(0, admitted) <= admitted);
     }
 }
@@ -767,13 +652,6 @@ mod automatic_gas_floor_tests {
         result
     }
 
-    fn mainnet() -> crate::config::NetworkConfig {
-        crate::config::default_networks()
-            .into_iter()
-            .find(|network| network.chain_id == 1)
-            .expect("mainnet preset")
-    }
-
     /// `execution_output` copies `max_used_gas` or `gas_used` through
     /// untouched, so a successful simulation claiming `0` multiplied to `0`
     /// and was signed. Nodes reject an envelope under the intrinsic cost
@@ -782,9 +660,8 @@ mod automatic_gas_floor_tests {
     /// the sequence to notice.
     #[test]
     fn a_simulation_reporting_no_gas_still_signs_a_mineable_limit() {
-        let network = mainnet();
         for reported in ["0", "1", "10499"] {
-            let limit = signing_gas_limit(&network, &simulation(reported, "30000000", false))
+            let limit = signing_gas_limit(&simulation(reported, "30000000", false))
                 .expect("an endpoint's number is not a reason to refuse to sign");
             assert!(
                 limit >= INTRINSIC_TRANSACTION_GAS,
@@ -803,7 +680,7 @@ mod automatic_gas_floor_tests {
     #[test]
     fn a_delegating_transaction_floors_above_the_bare_intrinsic_cost() {
         let floor = INTRINSIC_TRANSACTION_GAS + EIP7702_AUTHORIZATION_INTRINSIC_COST;
-        let limit = signing_gas_limit(&mainnet(), &simulation("0", "30000000", true)).unwrap();
+        let limit = signing_gas_limit(&simulation("0", "30000000", true)).unwrap();
         assert!(
             limit >= floor,
             "{limit} is below the {floor} this transaction costs"
@@ -818,17 +695,15 @@ mod automatic_gas_floor_tests {
     /// replacement for the estimate.
     #[test]
     fn an_ordinary_simulation_is_unchanged() {
-        let limit = signing_gas_limit(&mainnet(), &simulation("50000", "30000000", false)).unwrap();
+        let limit = signing_gas_limit(&simulation("50000", "30000000", false)).unwrap();
         assert_eq!(limit, 100_000);
     }
 
     /// And a ceiling that cannot hold the floor is refused rather than
     /// silently clamped past it -- the one case where raising would otherwise
-    /// breach a bound the owner set.
+    /// breach the bound a block itself imposes.
     #[test]
     fn a_ceiling_below_the_floor_is_refused() {
-        let mut network = mainnet();
-        network.max_gas_limit = Some("21000".into());
-        assert!(signing_gas_limit(&network, &simulation("0", "30000000", true)).is_err());
+        assert!(signing_gas_limit(&simulation("0", "21000", true)).is_err());
     }
 }
