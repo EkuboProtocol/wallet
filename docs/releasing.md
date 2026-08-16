@@ -11,21 +11,28 @@ First, manually run **Build unsigned release artifacts** with any branch, tag,
 or exact commit SHA. The workflow resolves that reference and computes the
 build identity itself: an exact `v<package-version>` tag produces that package
 version, while any other reference produces `<package-version>+<short-sha>`.
-Its macOS, Windows, and Linux jobs have only repository read permission,
-receive no secret or OIDC token, and build the resolved commit. Each artifact
-set includes a manifest binding the requested reference, computed version,
-commit, platform, filename, byte count, and SHA-256 digest. The embedded updater
-verification key is a public repository variable. Each platform restores and
-saves its own release-mode Rust cache; failed builds never populate it.
+Its macOS, Windows, and Linux jobs have only repository read permission, receive
+no secret or OIDC token, and build the resolved commit. Each artifact set
+includes a manifest binding the requested reference, computed version, commit,
+platform, filename, byte count, and SHA-256 digest. A separate final job checks
+out and executes no candidate source; it alone receives an OIDC token and uses
+GitHub's artifact attestation service to sign the provenance of every staged
+file and manifest. The embedded updater verification key is a public repository
+variable. Each platform restores and saves its own release-mode Rust cache;
+failed builds never populate it.
 
 Second, manually run **Sign and publish release** with that exact build run ID
 and the existing `v<computed-version>` tag. The protected release environment
-verifies the run used the trusted workflow on `main`, succeeded, produced three
-mutually consistent manifests whose bytes still hash exactly, and resolved the
-tag to the manifested commit. Only after that check do isolated trusted jobs
-receive Apple, Azure, or Minisign credentials. The publishing job creates the
-release at the verified commit SHA and uploads only the strict native-asset
-allowlist. No trusted job checks out or executes build-run source.
+is reached only after an unprivileged verifier proves that every downloaded byte
+has a valid GitHub attestation from the exact trusted build workflow revision on
+`main`, the run succeeded, the three manifests are mutually consistent, their
+bytes still hash exactly, and the tag resolves to the manifested commit. That
+manifested commit must be on protected `main` history. CI results are not a
+release prerequisite. Only then do isolated trusted jobs receive Apple, Azure,
+or Minisign credentials. The publishing job creates the release at the verified
+commit SHA and uploads only the strict native-asset allowlist. The verifier
+checks out only its trusted workflow revision; no trusted job checks out or
+executes build-run source.
 
 When the protected `AZURE_TRUSTED_SIGNING_ENABLED` environment variable is
 `true`, Windows signing exchanges GitHub's short-lived OIDC token with Azure
