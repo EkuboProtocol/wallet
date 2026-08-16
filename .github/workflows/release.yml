@@ -21,13 +21,21 @@ concurrency:
 jobs:
   verify-build:
     runs-on: ubuntu-24.04
-    environment: release
     permissions:
       actions: read
+      attestations: read
       contents: read
     outputs:
       commit_sha: ${{ steps.verify.outputs.commit_sha }}
     steps:
+      # This is the trusted signing-workflow source, never the source selected
+      # by the unsigned build. The verifier below therefore executes no bytes
+      # from the candidate artifact before establishing its provenance.
+      - name: Check out trusted release verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Download the exact build run artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -36,7 +44,7 @@ jobs:
           pattern: unsigned-*
           path: unsigned
       - id: verify
-        name: Verify build workflow identity and every manifest
+        name: Verify attestations, build identity, and every manifest
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,6 +63,17 @@ jobs:
           [[ "$workflow_sha" =~ ^[0-9a-f]{40}$ ]]
           comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$workflow_sha...main" --jq .status)"
           [[ "$comparison" == ahead || "$comparison" == identical ]]
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/build-release-artifacts.yml"
+          mapfile -d '' attested_files < <(find unsigned -type f -print0)
+          test "${#attested_files[@]}" -gt 3
+          for file in "${attested_files[@]}"; do
+            gh attestation verify "$file" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --signer-digest "$workflow_sha" \
+              --source-digest "$workflow_sha" \
+              --source-ref refs/heads/main >/dev/null
+          done
           manifests=(unsigned/*/manifest.json)
           test "${#manifests[@]}" -eq 3
           platforms="$(jq -r .platform "${manifests[@]}" | sort | paste -sd, -)"
@@ -68,6 +87,8 @@ jobs:
           test "$RELEASE_TAG" = "v$build_version"
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$build_sha" --jq .sha)" = "$build_sha"
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$build_sha"
+          comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$build_sha...main" --jq .status)"
+          [[ "$comparison" == ahead || "$comparison" == identical ]]
           for manifest in "${manifests[@]}"; do
             jq -e --arg version "$build_version" --arg sha "$build_sha" --arg source_ref "$source_ref" \
               '.schema == 2 and .version == $version and .commit_sha == $sha and .source_ref == $source_ref and (.files | length > 0)' \

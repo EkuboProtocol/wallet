@@ -91,7 +91,14 @@ authorization, or other owner capabilities.
 Update metadata and hosting are untrusted. `latest.json` and artifacts are
 Minisign-verified; core checks the bundled version marker and repeats checks
 immediately before installation. Platform signing precedes final updater
-signing when configured. While Azure public-trust validation is pending, a
+signing when configured. Unsigned artifacts may be built from any requested
+reference. The arbitrary-source build jobs receive neither OIDC nor release
+credentials; an isolated job that executes no candidate source attests the
+resulting bytes. Before any credential-bearing job, every byte must have a
+GitHub attestation from the exact trusted build workflow revision on `main`, and
+the manifested artifact SHA and release tag must resolve to protected `main`
+history. CI results are deliberately not release authority. While Azure
+public-trust validation is pending, a
 protected release variable may require Windows to remain Authenticode-unsigned;
 the workflow verifies that state and still requires the detached updater
 signature. Apple and enabled Windows signing services and release keys remain
