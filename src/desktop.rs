@@ -7046,6 +7046,12 @@ impl WalletWindow {
                 }
                 if changed {
                     view.invalidate_portfolio();
+                    // The cards are drawn from the snapshot, and this write
+                    // raises no domain event, so nothing else was going to
+                    // reload it: the network the reader had just switched off
+                    // went on being listed under Enabled until some unrelated
+                    // refresh happened by.
+                    view.reload_desktop_snapshot(cx);
                 }
                 cx.notify();
             });

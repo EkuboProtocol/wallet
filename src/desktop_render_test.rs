@@ -144,6 +144,21 @@ fn release(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
     cx.run_until_parked();
 }
 
+/// Wait for whatever snapshot read is in flight to land.
+///
+/// `DesktopSnapshot::capture` runs on a blocking thread this scheduler does not
+/// drive, so a test that acts while one is in flight is racing it.
+fn settle_snapshot(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.update_entity(view, |wallet, _| !wallet.desktop_snapshot_loading) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    cx.run_until_parked();
+}
+
 /// Lay out and paint the whole view tree, then let what it spawned settle.
 ///
 /// Marking the window dirty is not enough — nothing in a test drives the
@@ -838,6 +853,67 @@ fn the_network_editor_takes_the_height_a_tall_window_offers(cx: &mut gpui::TestA
         layout.save.bottom(),
         viewport.height
     );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn disabling_a_network_moves_the_card_out_of_enabled(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    draw(cx, window, &view);
+
+    // The window asks for a snapshot as it attaches. Let that one finish
+    // first: a capture still in flight can read the store after the write and
+    // report the new state by luck, which would pass this test with the reload
+    // it is about missing entirely.
+    settle_snapshot(cx, &view);
+    let ethereum = cx.update_entity(&view, |wallet, _| {
+        wallet
+            .cached_networks()
+            .expect("the shipped networks must be listed")
+            .iter()
+            .find(|network| network.chain_id == 1)
+            .expect("Ethereum is one of the shipped networks")
+            .clone()
+    });
+    assert!(!ethereum.disabled, "Ethereum starts enabled");
+    let before = cx.update_entity(&view, |wallet, _| wallet.desktop_snapshot_generation);
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_network_disabled(ethereum.clone(), true, cx);
+    });
+    // The write goes out over the tokio bridge this scheduler does not drive,
+    // so settling means waiting rather than draining a queue.
+    for _ in 0..200 {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if cx.update_entity(&view, |wallet, _| wallet.network_action_busy.is_empty()) {
+            break;
+        }
+    }
+
+    // The page draws its cards from the snapshot, so a write that does not
+    // reload it is a network that goes on being listed under Enabled after the
+    // reader switched it off — until something unrelated refreshes and it
+    // silently corrects itself.
+    let after = cx.update_entity(&view, |wallet, _| wallet.desktop_snapshot_generation);
+    assert_ne!(
+        after, before,
+        "switching a network off must reload the snapshot the page draws from"
+    );
+    settle_snapshot(cx, &view);
+    assert!(
+        cx.update_entity(&view, |wallet, _| {
+            wallet.cached_networks().is_ok_and(|networks| {
+                networks
+                    .iter()
+                    .any(|network| network.chain_id == 1 && network.disabled)
+            })
+        }),
+        "the reloaded snapshot must show the network as disabled"
+    );
+    draw(cx, window, &view);
 
     release(cx, &view);
 }
