@@ -168,11 +168,17 @@ automations add no separate fee cap.
 
 ## Serialization
 
-A tick never overlaps a send from the same wallet and chain. That is not new
-machinery: `PendingStore`'s in-flight unique index already permits one live row
-per wallet and chain, and a receipt keeps the signing slot until it is
-`finality_confirmations` blocks deep. A tick that fires while that slot is held
-is skipped, and the next scheduled tick recomputes.
+A tick is skipped whenever the automation's own last transaction is still
+pending — submitted, broadcast, or mined but not yet `finality_confirmations`
+blocks deep — and whenever any other send holds the wallet and chain's signing
+slot. It is skipped, not deferred: the next scheduled tick recomputes from live
+state rather than replaying an intent formed against a chain that has since
+moved.
+
+That is not new machinery. `PendingStore`'s in-flight unique index already
+permits one live row per wallet and chain, and a receipt keeps the signing slot
+until it reaches the configured depth; the scheduler reads that state rather
+than tracking its own.
 
 For per-block cadence, set `finality_confirmations: 1` on the automated network.
 It is an existing supported value (1–1000). The exposure it accepts is that a
