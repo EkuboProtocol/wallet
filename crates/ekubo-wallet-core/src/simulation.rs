@@ -478,7 +478,7 @@ async fn simulate_execution_through(
         ));
     }
     let block_number = parent.number;
-    let gas_limit = match effective_gas_limit(network, parent.gas_limit) {
+    let gas_limit = match effective_gas_limit(parent.gas_limit) {
         Ok(limit) => limit,
         Err(error) => {
             return Ok(setup_failure_result_at_block(
@@ -1006,20 +1006,12 @@ fn token_balance_results(
         .collect()
 }
 
-pub(crate) fn effective_gas_limit(network: &NetworkConfig, block_limit: u64) -> Result<u64> {
-    let configured = network
-        .max_gas_limit
-        .as_deref()
-        .map(str::parse::<u64>)
-        .transpose()
-        .context("configured max gas limit is invalid")?
-        .unwrap_or(block_limit);
-    let limit = configured.min(block_limit);
+pub(crate) fn effective_gas_limit(block_limit: u64) -> Result<u64> {
     ensure!(
-        limit >= 21_000,
+        block_limit >= 21_000,
         "effective simulation gas limit is below intrinsic gas"
     );
-    Ok(limit)
+    Ok(block_limit)
 }
 
 fn tracked_tokens(policy: &crate::core::policy::WalletPolicy, chain_id: &str) -> Vec<Address> {

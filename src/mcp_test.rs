@@ -847,7 +847,6 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
             rpc_urls: vec!["http://127.0.0.1:9".parse().unwrap()],
             rpc_strategy: None,
             finality_confirmations: 12,
-            max_gas_limit: "30000000".into(),
             native_currency: NativeCurrency {
                 name: "Test Ether".into(),
                 symbol: "TETH".into(),
@@ -879,7 +878,6 @@ fn proposing_a_network_tolerates_a_call_that_omits_aliases() {
         "chain_id": "999999",
         "testnet": true,
         "rpc_urls": ["http://127.0.0.1:9"],
-        "max_gas_limit": "30000000",
         "native_currency": {
             "name": "Test Ether",
             "symbol": "TETH",
@@ -903,7 +901,6 @@ fn add_network_input(rpc_url: &str) -> AddNetworkInput {
         rpc_urls: vec![rpc_url.parse().unwrap()],
         rpc_strategy: None,
         finality_confirmations: 12,
-        max_gas_limit: "30000000".into(),
         native_currency: NativeCurrency {
             name: "Test Ether".into(),
             symbol: "TETH".into(),

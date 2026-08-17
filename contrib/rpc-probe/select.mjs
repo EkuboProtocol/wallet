@@ -241,7 +241,6 @@ for (const chain of candidates) {
           decimals: meta.nativeCurrency.decimals,
         }
       : null,
-    max_gas_limit: overlay.max_gas_limit ?? null,
     // The registry lists explorers in no particular order, and its first entry
     // for a chain is not always the one that chain's own users read. An
     // overlay entry names the explorer a person should be sent to; without one

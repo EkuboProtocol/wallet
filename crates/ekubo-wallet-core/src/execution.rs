@@ -314,7 +314,7 @@ pub(crate) async fn prepare_execution_for_policy(
 ) -> Result<PreparedExecution> {
     validate_preparation_binding(wallet, network, plan, simulation)?;
     let planned = planned_call(plan, wallet.address);
-    let gas_limit = signing_gas_limit(network, simulation)?;
+    let gas_limit = signing_gas_limit(simulation)?;
     let prepared = crate::rpc::try_clients(network, |client| async move {
         let prepared = tokio::time::timeout(RPC_TIMEOUT, async {
             tokio::try_join!(
@@ -338,11 +338,11 @@ pub(crate) async fn prepare_execution_for_policy(
         prepared.2.max_fee_per_gas >= prepared.2.max_priority_fee_per_gas,
         "RPC returned invalid EIP-1559 fee fields"
     );
-    // And the ceiling the owner set, if they set one. Nothing else bounds this
-    // on the automatic path: no policy rule speaks about fees and no reviewer
-    // sees them, so `gas_limit × max_fee_per_gas` was whatever an endpoint
-    // cared to name.
-    let max_fee_per_gas = capped_fee(network, prepared.2.max_fee_per_gas)?;
+    // What an owner is willing to pay is a policy rule, not a property of the
+    // endpoint or the chain. These fields reach the policy engine as the
+    // `max_fee_per_gas`, `max_priority_fee_per_gas`, and `gas_limit` slots of
+    // the prepared transaction, so a rule bounds them before anything signs.
+    let max_fee_per_gas = prepared.2.max_fee_per_gas;
     let max_priority_fee_per_gas = prepared.2.max_priority_fee_per_gas.min(max_fee_per_gas);
     // The delegation the authorization is decided against is read here, not
     // taken from the simulation.
@@ -503,18 +503,13 @@ pub(crate) fn sign_prepared_execution<K: KeyStore + ?Sized>(
         "prepared delegation choice mismatch"
     );
     ensure!(
-        prepared.gas_limit == signing_gas_limit(network, simulation)?,
+        prepared.gas_limit == signing_gas_limit(simulation)?,
         "prepared gas limit mismatch"
     );
     ensure!(
         prepared.max_fee_per_gas >= prepared.max_priority_fee_per_gas,
         "prepared EIP-1559 fee fields are invalid"
     );
-    // Preparation may outlive a security-sensitive network update. Reapply
-    // the current ceiling immediately before key use instead of trusting the
-    // configuration that happened to be active when fees were fetched.
-    capped_fee(network, prepared.max_fee_per_gas)?;
-
     // All RPC preparation completed before this function loads key material.
     let local_signer = load_matching_signer(keys, wallet)?;
     let mut signed_execution = sign_prepared(
@@ -583,17 +578,6 @@ fn validate_preflight(
     Ok(())
 }
 
-/// The highest gas limit this network will let a transaction carry.
-///
-/// The configured maximum when the owner set one, the block's own limit
-/// otherwise, and never more than the block's limit either way — an envelope
-/// above that is one no honest peer will accept.
-///
-/// Shared by the two paths that sign, because they had drifted: signing after
-/// a simulation always fell back to the block limit, while cancellation
-/// bounded nothing at all unless the network carried a configured maximum,
-/// which most shipped profiles do not. On an ordinary network that left one
-/// endpoint's `estimate_gas` deciding the signed gas limit by itself.
 /// The gas limit a cancellation is signed with, from an endpoint's estimate.
 ///
 /// Bounded above by the usable ceiling, as before, and now bounded below by
@@ -610,12 +594,11 @@ fn validate_preflight(
 /// the owner permanently unable to cancel, resending an invalid envelope
 /// forever while the transaction they were trying to stop mines.
 ///
-/// Raised rather than refused, which is the opposite of `capped_fee` and for
-/// the reason that function's comment gives: there, not signing is the safe
-/// answer; here, not producing an envelope is the failure. Raising is exact
-/// rather than a guess -- the floor is what the chain charges, not a number
-/// chosen here -- and `usable_gas_ceiling` has already established the ceiling
-/// is at least the intrinsic cost, so this can never exceed it.
+/// Raised rather than refused: not producing an envelope is the failure here,
+/// where the owner is trying to stop a transaction that is already live.
+/// Raising is exact rather than a guess -- the floor is what the chain charges,
+/// not a number chosen here -- and `usable_gas_ceiling` has already established
+/// the ceiling is at least the intrinsic cost, so this can never exceed it.
 fn cancellation_gas_limit(estimated_gas: u64, maximum: u64) -> u64 {
     estimated_gas
         .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
@@ -623,55 +606,28 @@ fn cancellation_gas_limit(estimated_gas: u64, maximum: u64) -> u64 {
         .max(INTRINSIC_TRANSACTION_GAS)
 }
 
-fn usable_gas_ceiling(network: &NetworkConfig, block_maximum: u64) -> Result<u64> {
-    let configured = network
-        .max_gas_limit
-        .as_deref()
-        .map(str::parse::<u64>)
-        .transpose()
-        .context("configured maximum gas limit does not fit uint64")?
-        .unwrap_or(block_maximum);
-    let ceiling = configured.min(block_maximum);
+/// The most gas an envelope this wallet signs may carry: what a block on this
+/// chain would actually accept.
+///
+/// An owner's own ceiling is a policy rule — `gas_limit` and the two fee slots
+/// are predicates a rule can constrain, so a deny rule matching a chain and a
+/// threshold expresses the bound that used to be a per-network setting, with a
+/// revision and an approval behind it. What remains here is not a preference.
+fn usable_gas_ceiling(block_maximum: u64) -> Result<u64> {
     // A ceiling below the intrinsic cost of the simplest possible transaction
     // is not a ceiling, it is a refusal to sign anything. `block_maximum`
     // comes from whichever endpoint answered, and a small enough answer would
     // otherwise disqualify a plain value transfer — including the self-send a
     // cancellation is — while looking like an ordinary bound.
     ensure!(
-        ceiling >= INTRINSIC_TRANSACTION_GAS,
-        "the usable gas ceiling {ceiling} is below the {INTRINSIC_TRANSACTION_GAS} gas every \
-         transaction costs before it does anything"
+        block_maximum >= INTRINSIC_TRANSACTION_GAS,
+        "the usable gas ceiling {block_maximum} is below the {INTRINSIC_TRANSACTION_GAS} gas \
+         every transaction costs before it does anything"
     );
-    Ok(ceiling)
+    Ok(block_maximum)
 }
 
-/// The owner's absolute ceiling on `maxFeePerGas`, applied to an
-/// endpoint-supplied estimate.
-///
-/// Refusing rather than clamping. A clamped fee is an envelope that may never
-/// mine, signed anyway and occupying the wallet's one in-flight slot for that
-/// chain; the honest answer to "the market is above what you said you would
-/// pay" is to say so and let the owner raise the ceiling or wait. That is the
-/// opposite of the cancellation path's choice, and for the opposite reason:
-/// there, not producing an envelope is the failure.
-fn capped_fee(network: &NetworkConfig, max_fee_per_gas: u128) -> Result<u128> {
-    let Some(ceiling) = network.max_fee_per_gas.as_deref() else {
-        return Ok(max_fee_per_gas);
-    };
-    let ceiling: u128 = ceiling
-        .parse()
-        .context("configured maximum fee per gas does not fit uint128")?;
-    ensure!(
-        max_fee_per_gas <= ceiling,
-        "the RPC's maximum fee of {max_fee_per_gas} wei per gas is above the {ceiling} wei \
-         ceiling configured for {}; raise max_fee_per_gas for this network, or wait for the \
-         market to come down",
-        network.name
-    );
-    Ok(max_fee_per_gas)
-}
-
-fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> Result<u64> {
+fn signing_gas_limit(simulation: &SimulationResult) -> Result<u64> {
     let used = simulation
         .simulation
         .gas_used
@@ -686,7 +642,7 @@ fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> 
         .context("simulation did not provide a block gas limit")?
         .parse::<u64>()
         .context("simulated block gas limit does not fit uint64")?;
-    let maximum = usable_gas_ceiling(network, block_maximum)?;
+    let maximum = usable_gas_ceiling(block_maximum)?;
     let authorization_cost = if simulation.will_authorize_delegation {
         EIP7702_AUTHORIZATION_INTRINSIC_COST
     } else {
@@ -845,19 +801,7 @@ pub fn validate_signed_execution(
         envelope.input() == &planned.data,
         "signed transaction calldata does not match pending plan"
     );
-    if let Some(maximum) = network.max_gas_limit.as_deref() {
-        ensure!(
-            envelope.gas_limit() <= maximum.parse::<u64>()?,
-            "signed transaction exceeds configured maximum gas limit"
-        );
-    }
-    if let Some(maximum) = network.max_fee_per_gas.as_deref() {
-        ensure!(
-            envelope.max_fee_per_gas() <= maximum.parse::<u128>()?,
-            "signed transaction exceeds configured maximum fee per gas"
-        );
-    }
-    // And from below. This function is the last thing between a freshly signed
+    // From below. This function is the last thing between a freshly signed
     // envelope and the row that records it, and it checked every field except
     // whether the transaction can execute at all. The bound belongs here as
     // well as in `signing_gas_limit`, because this is what a caller reaches
@@ -980,8 +924,8 @@ fn bumped_fee(fee: u128) -> u128 {
 /// Fee selection for a cancellation, split from the RPC calls so the one
 /// policy-free pricing decision is directly testable: outbid the newest
 /// envelope at the replacement floor, never price under the current market,
-/// never above the cap set by the original envelope and current owner
-/// configuration, and keep the pair EIP-1559-consistent.
+/// never above the cap the original envelope set, and keep the pair
+/// EIP-1559-consistent.
 ///
 /// Nothing reviews this. There is no policy question a cancellation asks and
 /// no approval screen it draws, so `market_max_fee` and `market_priority_fee`
@@ -1002,14 +946,10 @@ fn cancellation_fees(
     incumbent: (u128, u128),
     market_max_fee: u128,
     market_priority_fee: u128,
-    configured_cap: Option<u128>,
 ) -> Option<(u128, u128)> {
     let floor_max = bumped_fee(incumbent.0);
     let floor_priority = bumped_fee(incumbent.1);
-    let mut cap = original.0.saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER);
-    if let Some(configured_cap) = configured_cap {
-        cap = cap.min(configured_cap);
-    }
+    let cap = original.0.saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER);
     if floor_max > cap || floor_priority > cap {
         return None;
     }
@@ -1084,17 +1024,11 @@ pub(crate) async fn sign_cancellation<K: KeyStore + ?Sized>(
     }
     let original_fees = original_fees.expect("the original envelope is always visited");
     let incumbent_fees = incumbent_fees.expect("the original envelope is always visited");
-    let configured_cap = network
-        .max_fee_per_gas
-        .as_deref()
-        .map(str::parse::<u128>)
-        .transpose()
-        .context("configured maximum fee per gas does not fit uint128")?;
-    if cancellation_fees(original_fees, incumbent_fees, 0, 0, configured_cap).is_none() {
+    if cancellation_fees(original_fees, incumbent_fees, 0, 0).is_none() {
         return newest_signed
             .map(CancellationPreparation::Rebroadcast)
             .context(
-                "the replacement fee floor is above the original transaction's cancellation fee cap or the configured max_fee_per_gas; no bounded cancellation exists",
+                "the replacement fee floor is above the original transaction's cancellation fee cap; no bounded cancellation exists",
             );
     }
 
@@ -1141,14 +1075,12 @@ pub(crate) async fn sign_cancellation<K: KeyStore + ?Sized>(
             .header
             .gas_limit;
         // The same ceiling `signing_gas_limit` computes, and for the same
-        // reason. This bound used to exist only when the network carried a
-        // configured maximum, which most shipped profiles do not — so on
-        // an ordinary network an endpoint's `estimate_gas` was the whole
-        // of what decided the signed gas limit. A cancellation cannot be
-        // simulated, so an endpoint that returns an absurd estimate
-        // produces an envelope every honest peer rejects while spending
-        // one of the eight attempts this wallet will ever make.
-        let maximum = usable_gas_ceiling(network, block_maximum)?;
+        // reason. A cancellation cannot be simulated, so without it an
+        // endpoint's `estimate_gas` would be the whole of what decides the
+        // signed gas limit — and an absurd estimate produces an envelope every
+        // honest peer rejects while spending one of the eight attempts this
+        // wallet will ever make.
+        let maximum = usable_gas_ceiling(block_maximum)?;
         ensure!(
             estimated_gas <= maximum,
             "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas \
@@ -1166,7 +1098,6 @@ pub(crate) async fn sign_cancellation<K: KeyStore + ?Sized>(
         incumbent_fees,
         market.max_fee_per_gas,
         market.max_priority_fee_per_gas,
-        configured_cap,
     )
     .expect("the replacement floor was checked against the same immutable cap before RPC");
 
@@ -1271,18 +1202,6 @@ fn validate_signed_cancellation(
         envelope.max_fee_per_gas() <= immutable_cap,
         "cancellation exceeds the original transaction's fee bound"
     );
-    if let Some(maximum) = network.max_gas_limit.as_deref() {
-        ensure!(
-            envelope.gas_limit() <= maximum.parse::<u64>()?,
-            "cancellation exceeds configured maximum gas limit"
-        );
-    }
-    if let Some(maximum) = network.max_fee_per_gas.as_deref() {
-        ensure!(
-            envelope.max_fee_per_gas() <= maximum.parse::<u128>()?,
-            "cancellation exceeds configured maximum fee per gas"
-        );
-    }
     ensure!(
         envelope.gas_limit() >= INTRINSIC_TRANSACTION_GAS,
         "cancellation carries {} gas, below the {INTRINSIC_TRANSACTION_GAS} every transaction costs before it does anything",

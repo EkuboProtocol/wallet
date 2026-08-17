@@ -76,7 +76,28 @@ every tuple level. The explicit `"any_value"` predicate remains valid, but
 Prefer the narrowest rule that expresses the operation. For example, put a
 matcherless `review` rule first to review every transaction, or constrain
 `envelope_native_value` with `gt` to review any prepared transaction moving
-more than a threshold from the wallet. Put exceptions before
+more than a threshold from the wallet.
+
+The fee a transaction pays is a matcher like any other, and it is the only
+bound on it. A network profile carries no fee or gas ceiling: what an owner is
+willing to pay is a judgement about their own transactions, not a property of a
+chain, and expressing it here puts it behind a policy revision and an owner
+approval instead of an unreviewed configuration field. Nothing else bounds the
+fee fields an RPC prepares, so an automatic-allow rule that omits them accepts
+whatever the endpoint named. A deny rule above the allow rules is the direct
+spelling:
+
+```json
+{
+  "effect": "deny",
+  "chain_id": { "eq": "1" },
+  "max_fee_per_gas": { "gt": "50000000000" }
+}
+```
+
+`gas_limit` takes the same treatment, and the two together bound
+`gas_limit × max_fee_per_gas`, which is the whole of what a dishonest endpoint
+can cost a wallet that signs without asking. Put exceptions before
 broad rules: order is authority, and installation rejects a later rule that is
 provably shadowed by an earlier one. There is no `from` matcher, chain map,
 batch-count limit, or cumulative budget. `native_value` is per call;

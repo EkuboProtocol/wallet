@@ -204,8 +204,6 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
         aliases: "owner, owner_test".into(),
         chain_id: "9999991".into(),
         rpc_urls: "https://rpc-one.example,\nhttps://rpc-two.example".into(),
-        max_gas_limit: "30000000".into(),
-        max_fee_per_gas: "100000000000".into(),
         native_currency_name: "Ether".into(),
         native_currency_symbol: "ETH".into(),
         native_currency_decimals: "18".into(),
@@ -285,7 +283,6 @@ fn structured_network_editor_reports_errors_beside_the_relevant_fields() {
         name: "not valid".into(),
         chain_id: "zero".into(),
         rpc_urls: "https://user:secret@rpc.example\nhttps://user:secret@rpc.example".into(),
-        max_gas_limit: "12".into(),
         native_currency_name: "Ether".into(),
         ..NetworkEditorDraft::default()
     };
@@ -296,7 +293,6 @@ fn structured_network_editor_reports_errors_beside_the_relevant_fields() {
     assert!(errors.name.is_some());
     assert!(errors.chain_id.is_some());
     assert!(errors.rpc_urls.is_some());
-    assert!(errors.max_gas_limit.is_some());
     assert!(errors.native_currency.is_some());
 }
 
@@ -1694,8 +1690,6 @@ fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
         aliases: String::new(),
         chain_id: "9999991".into(),
         rpc_urls: seeded,
-        max_gas_limit: "30000000".into(),
-        max_fee_per_gas: "100000000000".into(),
         native_currency_name: "Ether".into(),
         native_currency_symbol: "ETH".into(),
         native_currency_decimals: "18".into(),

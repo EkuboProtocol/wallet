@@ -75,7 +75,6 @@ struct RegistryChain {
     is_default: bool,
     testnet: bool,
     native_currency: Option<NativeCurrency>,
-    max_gas_limit: Option<String>,
     block_explorer_url: Option<String>,
     documentation_url: Option<String>,
     simulate_endpoints: usize,
@@ -125,11 +124,6 @@ pub(crate) fn parse(document: &str) -> Result<Vec<NetworkProfile>> {
                     // is theirs to make.
                     rpc_strategy: crate::config::RpcStrategy::default(),
                     finality_confirmations: crate::config::DEFAULT_FINALITY_CONFIRMATIONS,
-                    max_gas_limit: chain.max_gas_limit,
-                    // The registry never ships one, for the same reason it
-                    // ships no strategy: what a fee is worth is the owner's
-                    // judgement, not a chain's property.
-                    max_fee_per_gas: None,
                     native_currency: chain.native_currency,
                     block_explorer_url: chain
                         .block_explorer_url
