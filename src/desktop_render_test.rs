@@ -1370,7 +1370,7 @@ fn the_policy_editor_scrolls_inside_its_frame_rather_than_moving_it(cx: &mut gpu
         width: px(760.0),
         height: px(900.0),
     };
-    let (panel, control) = {
+    let (panel, control, description) = {
         let mut visual = gpui::VisualTestContext::from_window(window, cx);
         // The window has to actually be this narrow. Drawing into a space of
         // this size is a different claim, and the layout reads the window.
@@ -1385,10 +1385,26 @@ fn the_policy_editor_scrolls_inside_its_frame_rather_than_moving_it(cx: &mut gpu
         let control = visual
             .debug_bounds("policy-full-screen-json-control")
             .expect("the policy JSON control must be laid out");
+        let description = visual
+            .debug_bounds("policy-editor-description")
+            .expect("the policy editor description must be laid out");
         visual.run_until_parked();
-        (panel, control)
+        (panel, control, description)
     };
 
+    // The header band does not scroll, so the description has to fold rather
+    // than run off the edge. One line of this text size measures about 22px,
+    // so a height past 40 is the sentence actually on two lines — a clipped
+    // single line would still report one line's height.
+    assert!(
+        description.size.height >= px(40.0),
+        "the description must wrap onto a second line in a narrow window: \
+         {description:?}"
+    );
+    assert!(
+        description.origin.x + description.size.width <= viewport.width,
+        "the wrapped description must stay inside the window: {description:?}"
+    );
     assert!(
         control.size.width <= panel.size.width,
         "the control must stay inside its panel rather than overflowing into a \
