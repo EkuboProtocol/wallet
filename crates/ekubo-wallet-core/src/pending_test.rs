@@ -1295,9 +1295,21 @@ fn clearing_history_leaves_every_row_that_can_still_reach_the_chain() {
     assert_eq!(store.list(None, 10).unwrap().len(), 3);
 
     assert_eq!(store.clear_terminal_history(None).unwrap(), 1);
+    // Hidden from the list, not destroyed. An automation's run log names the
+    // transaction each tick produced, and those have to stay openable however
+    // long ago they ran and however often the owner tidies up.
     assert!(
-        store.get(settled.request_id).is_err(),
-        "a finished record is what clearing forgets"
+        !store
+            .list(None, 10)
+            .unwrap()
+            .iter()
+            .any(|record| record.request_id == settled.request_id),
+        "a cleared record is gone from the list"
+    );
+    assert_eq!(
+        store.get(settled.request_id).unwrap().status,
+        PendingStatus::Confirmed,
+        "and is still openable by id, which is what the run log depends on"
     );
     assert_eq!(
         store.get(awaiting.request_id).unwrap().status,

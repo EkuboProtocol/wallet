@@ -493,6 +493,7 @@ file follows in the appendix. Regenerate this document with
 - phf_codegen 0.11.3 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf_generator 0.11.3 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf_generator 0.13.1 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
+- phf_macros 0.11.3 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf_macros 0.13.1 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf_shared 0.11.3 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
 - phf_shared 0.13.1 — Steven Fackler <sfackler@gmail.com> — https://github.com/rust-phf/rust-phf
@@ -753,6 +754,7 @@ file follows in the appendix. Regenerate this document with
 - crc 3.4.0 — Rui Hu <code@mrhooray.com>, Akhil Velagapudi <4@4khil.com> — https://github.com/mrhooray/crc-rs.git
 - crc-catalog 2.5.0 — Akhil Velagapudi <akhilvelagapudi@gmail.com> — https://github.com/akhilles/crc-catalog.git
 - crc32fast 1.5.0 — Sam Rijs <srijs@airpost.net>, Alex Crichton <alex@alexcrichton.com> — https://github.com/srijs/rust-crc32fast
+- cron 0.17.0 — Zack Slayton <zack.slayton@gmail.com> — https://github.com/zslayton/cron
 - crossbeam-channel 0.5.16 — https://github.com/crossbeam-rs/crossbeam
 - crossbeam-deque 0.8.7 — https://github.com/crossbeam-rs/crossbeam
 - crossbeam-epoch 0.9.20 — https://github.com/crossbeam-rs/crossbeam
@@ -5618,6 +5620,38 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## License text for: cron 0.17.0
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2015 Zack Slayton
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: crossbeam-channel 0.5.16, crossbeam-deque 0.8.7, crossbeam-epoch 0.9.20, crossbeam-queue 0.3.13, crossbeam-utils 0.8.22
@@ -11405,7 +11439,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: phf 0.11.3, phf 0.13.1, phf 0.14.0, phf_codegen 0.11.3, phf_generator 0.11.3, phf_generator 0.13.1, phf_macros 0.13.1, phf_shared 0.11.3, phf_shared 0.13.1, phf_shared 0.14.0
+## License text for: phf 0.11.3, phf 0.13.1, phf 0.14.0, phf_codegen 0.11.3, phf_generator 0.11.3, phf_generator 0.13.1, phf_macros 0.11.3, phf_macros 0.13.1, phf_shared 0.11.3, phf_shared 0.13.1, phf_shared 0.14.0
 
 ```text
 The MIT License (MIT)

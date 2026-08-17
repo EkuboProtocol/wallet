@@ -177,6 +177,13 @@ fn prune_terminal_history(
                        AND settlement_transaction_hash IS NOT NULL
                        AND finalized_at IS NULL
                    )
+                   -- A transaction an automation produced is reachable from
+                   -- that automation's run log forever, so the per-wallet
+                   -- history cap must not be what makes the link dangle.
+                   AND request_id NOT IN (
+                       SELECT request_id FROM automation_runs
+                       WHERE request_id IS NOT NULL
+                   )
                  ORDER BY created_at DESC, request_id DESC
                  LIMIT -1 OFFSET ?2
              )"
@@ -582,14 +589,23 @@ impl PendingStore {
     /// history, not spending counters or reservations, and the partial unique
     /// indexes that enforce one in-flight envelope and one pending plan per
     /// wallet and chain cover only the statuses this leaves alone.
+    /// Hides finished rows rather than deleting them.
+    ///
+    /// Clearing history is a request about what the activity list shows, and
+    /// answering it by destroying records costs more than it saves. An
+    /// automation's run log names the transaction each tick produced, and
+    /// someone auditing what their wallet did unattended has to be able to open
+    /// any of them — including ones from before they last tidied up. A hidden
+    /// row is absent from every list and still resolves by id.
     pub fn clear_terminal_history(&mut self, wallet_id: Option<&str>) -> Result<usize> {
         if let Some(wallet_id) = wallet_id {
             validate_wallet_id(wallet_id)?;
         }
         Ok(self.database.connection.execute(
             &format!(
-                "DELETE FROM pending_transactions
+                "UPDATE pending_transactions SET hidden_at = ?2
                  WHERE status IN ({TERMINAL_STATUS_LIST})
+                   AND hidden_at IS NULL
                    AND NOT (
                        status IN ('confirmed', 'reverted', 'cancelled')
                        AND settlement_transaction_hash IS NOT NULL
@@ -597,7 +613,7 @@ impl PendingStore {
                    )
                    AND (?1 IS NULL OR wallet_id = ?1)"
             ),
-            [wallet_id],
+            params![wallet_id, Millis(sql::now())],
         )?)
     }
 
@@ -1209,7 +1225,7 @@ impl PendingStore {
         );
         let mut statement = self.database.connection.prepare(
             "SELECT request_id FROM pending_transactions
-             WHERE (?1 IS NULL OR wallet_id = ?1)
+             WHERE (?1 IS NULL OR wallet_id = ?1) AND hidden_at IS NULL
              ORDER BY created_at DESC LIMIT ?2",
         )?;
         let request_ids = statement

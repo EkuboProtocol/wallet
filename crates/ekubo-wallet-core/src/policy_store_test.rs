@@ -321,9 +321,100 @@ fn core_requires_authorization_only_when_a_policy_transition_can_widen_authority
 }
 
 #[test]
+fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
+    // The wallet is installed software: a schema addition that refused every
+    // existing database would take a working wallet away from whoever already
+    // had one. Forward migration is additive, so the rows that were there
+    // before are the rows that are there after.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let address = Address::repeat_byte(0x22);
+    let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
+        id: "primary".into(),
+        address,
+        created_at: Utc::now(),
+        source: crate::config::WalletSource::Imported,
+        exported_at: None,
+    };
+    {
+        let mut store = PolicyStore::open(&path, &key(21)).unwrap();
+        store
+            .initialize_policy(&wallet, &WalletPolicy::require_approval_for_everything())
+            .unwrap();
+        // Wind the database back to the schema that shipped before
+        // automations existed.
+        // Wind the database all the way back to the schema that shipped
+        // before automations existed, undoing every migration in order so the
+        // forward path is exercised end to end rather than from its last step.
+        store
+            .connection
+            .execute_batch(
+                "DROP INDEX automation_runs_by_automation;
+                 DROP TABLE automation_runs;
+                 ALTER TABLE pending_transactions DROP COLUMN hidden_at;
+                 DROP INDEX automations_wallet_key;
+                 DROP INDEX automations_wallet_chain;
+                 DROP TABLE automations;
+                 UPDATE schema_metadata SET version = 3 WHERE singleton = 1;",
+            )
+            .unwrap();
+    }
+
+    let store = PolicyStore::open(&path, &key(21)).unwrap();
+    store.assert_schema_current().unwrap();
+    let table: String = store
+        .connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automations'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the migration created the automations table");
+    assert_eq!(table, "automations");
+    // And the column the run log depends on: clearing history hides rows, so
+    // an automation-produced transaction stays openable.
+    let hidden: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('pending_transactions')
+             WHERE name = 'hidden_at'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hidden, 1, "the migration added the hidden_at column");
+    assert_eq!(
+        store
+            .get("primary")
+            .unwrap()
+            .expect("policy survived")
+            .revision,
+        1
+    );
+}
+
+#[test]
+fn a_schema_too_old_to_have_a_migration_is_refused() {
+    // A gap in the path is not something to guess across: there is no step to
+    // 2, so the database is left exactly as it was found.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    write_unknown_schema(&path, &key(12), 2);
+    let before = std::fs::read(&path).unwrap();
+
+    let error = PolicyStore::open(&path, &key(12))
+        .err()
+        .expect("a schema with no migration path must be refused")
+        .to_string();
+    assert!(error.contains("no migration path"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
 fn any_other_schema_is_refused_and_left_untouched() {
-    // There is one schema. A database carrying any other version is refused,
-    // and the refusal writes nothing.
+    // There is one schema this build creates. A database carrying a version it
+    // cannot reach by migration is refused, and the refusal writes nothing.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
     write_unknown_schema(&path, &key(11), 9);

@@ -102,6 +102,11 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
         &DatabaseKey::new([4; 32]),
     )
     .unwrap();
+    let automation_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
     let server = WalletMcpServer::new(
         config,
         policies,
@@ -110,6 +115,7 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
         MessageStore::new(message_database),
         LegalStore::new(legal_database),
         TokenStore::new(token_database),
+        AutomationStore::new(automation_database),
         Arc::new(crate::custody::MemoryKeyStore::default()),
     )
     .unwrap();
@@ -626,6 +632,8 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_create_fork",
             "wallet_decode_abi_result",
             "wallet_discard_fork",
+            "wallet_disable_automation",
+            "wallet_dry_run_automation",
             "wallet_get_balances",
             "wallet_get_legal",
             "wallet_get_policy",
@@ -633,7 +641,9 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_get_status",
             "wallet_get_execution_status",
             "wallet_import_token_list",
+            "wallet_install_automation",
             "wallet_list",
+            "wallet_list_automations",
             "wallet_list_tokens",
             "wallet_propose_policy",
             "wallet_propose_tokens",
@@ -1015,6 +1025,11 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
         &DatabaseKey::new([5; 32]),
     )
     .unwrap();
+    let automation_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
     let result = WalletMcpServer::new(
         config,
         policies,
@@ -1023,6 +1038,7 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
         MessageStore::new(message_database),
         LegalStore::new(legal_database),
         TokenStore::new(token_database),
+        AutomationStore::new(automation_database),
         std::sync::Arc::new(crate::custody::MemoryKeyStore::default()),
     );
     assert!(result.is_err());
@@ -1988,4 +2004,167 @@ fn global_ephemeral_quotas_span_authenticated_clients_and_prune_expiry() {
     }
     quota.prune(now);
     assert_eq!(quota.simulations.len(), MAX_RECORDED_SIMULATIONS);
+}
+
+#[test]
+fn the_automation_authoring_skill_is_served_and_names_the_tool_it_depends_on() {
+    let resources = serde_json::to_string(&wallet_resources()).unwrap();
+    assert!(resources.contains(AUTOMATION_SKILL_RESOURCE_URI));
+
+    assert!(WRITE_AUTOMATION_SKILL.starts_with("---\nname: write-ekubo-automation\n"));
+    // The compile-test-fix loop is the whole point of publishing this, so the
+    // skill must name the tool that provides it — and that tool must exist.
+    assert!(WRITE_AUTOMATION_SKILL.contains("wallet_dry_run_automation"));
+    // The three rules that produce silent, baffling bugs when broken.
+    assert!(WRITE_AUTOMATION_SKILL.contains("Declare no state variables"));
+    assert!(WRITE_AUTOMATION_SKILL.contains("deployedBytecode"));
+    assert!(WRITE_AUTOMATION_SKILL.contains("evm_version"));
+    // Installing needs no approval, so the skill has to carry the rule that
+    // replaces it: an automation the policy does not permit stops rather than
+    // queuing, and an agent that does not know this ships one that never runs.
+    assert!(WRITE_AUTOMATION_SKILL.contains("stops on that tick"));
+    assert!(WRITE_AUTOMATION_SKILL.contains("wallet_install_automation"));
+    assert!(WRITE_AUTOMATION_SKILL.contains("automation_key"));
+}
+
+#[test]
+fn the_dry_run_tool_is_advertised_as_read_only() {
+    let tools = WalletMcpServer::sanitized_tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| (tool.name.to_string(), tool))
+        .collect::<std::collections::HashMap<_, _>>();
+    let dry_run = tools
+        .get("wallet_dry_run_automation")
+        .expect("the dry-run tool is registered");
+    let annotations = dry_run
+        .annotations
+        .as_ref()
+        .expect("the tool carries annotations");
+    // It installs nothing, signs nothing, and persists nothing; an agent that
+    // reads annotations to decide what it may call freely must see that.
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert!(
+        dry_run.description.as_ref().is_some_and(|description| {
+            description.contains("without installing, scheduling, signing, or storing")
+        }),
+        "the description must promise what the annotations claim"
+    );
+}
+
+/// The hex of a trivial runtime blob. Its behavior is irrelevant here: these
+/// tests exercise the install gate, which decides before any chain call.
+const STUB_BYTECODE: &str = "0x60006000f3";
+
+fn install_input(key: &str, revision: u64) -> InstallAutomationInput {
+    InstallAutomationInput {
+        wallet_id: "primary".into(),
+        chain_id: "1".into(),
+        automation_key: key.into(),
+        name: "claim rewards".into(),
+        bytecode: STUB_BYTECODE.into(),
+        config: None,
+        cron: "0 0 * * * *".into(),
+        policy_revision: revision,
+    }
+}
+
+#[test]
+fn installing_an_automation_needs_no_approval_but_must_name_the_active_policy() {
+    let (_directory, server) = server();
+
+    // An automation only suggests transactions; the policy decides whether any
+    // of them send. So installing one is not an approval-gated act — but it
+    // binds to a revision, and naming one the agent has not read is refused.
+    let Err(stale) = server.wallet_install_automation(Parameters(install_input("claim", 99)))
+    else {
+        panic!("a stale revision must be refused")
+    };
+    let message = format!("{stale:?}");
+    assert!(message.contains("active revision"), "{message}");
+
+    let installed = server
+        .wallet_install_automation(Parameters(install_input("claim", 1)))
+        .expect("installing under the active revision needs no approval")
+        .0;
+    assert_eq!(installed.policy_revision, 1);
+    assert!(!installed.replaced_existing);
+    assert_eq!(
+        installed.state,
+        ekubo_wallet_core::automation::AutomationState::Enabled
+    );
+    assert_eq!(installed.upcoming.len(), 3);
+}
+
+#[test]
+fn installing_twice_under_one_key_is_a_safe_retry_rather_than_two_automations() {
+    let (_directory, server) = server();
+    server
+        .wallet_install_automation(Parameters(install_input("claim", 1)))
+        .unwrap();
+    let again = server
+        .wallet_install_automation(Parameters(install_input("claim", 1)))
+        .expect("the same call again")
+        .0;
+    assert!(
+        again.replaced_existing,
+        "a retry must say it replaced rather than silently adding a second"
+    );
+
+    let listed = server
+        .wallet_list_automations(Parameters(ListAutomationsInput {
+            wallet_id: "primary".into(),
+        }))
+        .unwrap()
+        .0;
+    assert_eq!(listed.automations.len(), 1);
+    assert_eq!(listed.automations[0].automation_key, "claim");
+}
+
+#[test]
+fn disabling_records_the_reason_the_user_will_read() {
+    let (_directory, server) = server();
+    server
+        .wallet_install_automation(Parameters(install_input("claim", 1)))
+        .unwrap();
+    let stopped = server
+        .wallet_disable_automation(Parameters(DisableAutomationInput {
+            wallet_id: "primary".into(),
+            automation_key: "claim".into(),
+            reason: "superseded by the v2 blob".into(),
+        }))
+        .unwrap()
+        .0;
+    assert_eq!(
+        stopped.state,
+        ekubo_wallet_core::automation::AutomationState::Disabled
+    );
+    assert_eq!(
+        stopped.stopped_reason.as_deref(),
+        Some("superseded by the v2 blob")
+    );
+
+    // And the list says how many stopped, so an agent debugging one is told to
+    // read the reason rather than left to guess.
+    let listed = server
+        .wallet_list_automations(Parameters(ListAutomationsInput {
+            wallet_id: "primary".into(),
+        }))
+        .unwrap()
+        .0;
+    assert!(
+        listed.instruction.contains("stopped_reason"),
+        "{}",
+        listed.instruction
+    );
+
+    let Err(missing) = server.wallet_disable_automation(Parameters(DisableAutomationInput {
+        wallet_id: "primary".into(),
+        automation_key: "nothing-here".into(),
+        reason: "x".into(),
+    })) else {
+        panic!("an unknown key must be refused rather than silently succeeding")
+    };
+    assert!(format!("{missing:?}").contains("no automation with key"));
 }

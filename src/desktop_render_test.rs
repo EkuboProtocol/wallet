@@ -18,15 +18,48 @@ use super::*;
 use crate::authority::OwnerApi;
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 
+/// Serializes the render tests against each other.
+///
+/// Each one stands up a real GPUI application, a window, and the tokio bridge,
+/// and then tears all three down. Two of those overlapping in one process
+/// crashed it on exit — reliably when this file's tests were the only ones
+/// running, and intermittently in a full suite run, where more surrounding work
+/// changed the timing. One alone never crashed, and `--test-threads=1` never
+/// crashed, which is what named the cause.
+///
+/// So the fixture hands out a lock rather than the tests each remembering to
+/// take one: a render test that forgets is a flake nobody can reproduce on
+/// demand, and the whole point of these tests is to be the thing that catches
+/// layout regressions rather than the thing people learn to re-run.
+static RENDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Held for the life of one render test.
+///
+/// Poisoning is ignored on purpose. The mutex guards a process, not data: an
+/// earlier test panicking says nothing about whether this one may run, and
+/// failing every subsequent test with "poisoned" would hide the first real
+/// failure behind twenty-five spurious ones.
+fn render_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    RENDER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A wallet window over a throwaway database, with the component library, the
 /// tokio bridge, and the embedded fonts initialised the way `run_desktop` does.
+///
+/// The first element of the returned tuple is the test's scope guard: the
+/// temporary directory that outlives the window, and the serialization lock
+/// above. Tests bind it as `_directory` and never touch it; dropping it at the
+/// end of the test is the whole contract.
 fn wallet(
     cx: &mut gpui::TestAppContext,
 ) -> (
-    tempfile::TempDir,
+    (tempfile::TempDir, std::sync::MutexGuard<'static, ()>),
     Entity<WalletWindow>,
     gpui::AnyWindowHandle,
 ) {
+    let lock = render_test_lock();
     // The wallet reads its database and detects agents through `gpui_tokio`,
     // so completions arrive from a real tokio thread. The deterministic test
     // scheduler calls that non-determinism and fails the test at the end
@@ -57,7 +90,7 @@ fn wallet(
         )
     });
     let view = window.root(cx).expect("root view");
-    (directory, view, window.into())
+    ((directory, lock), view, window.into())
 }
 
 /// Wait for the background snapshot to arrive.
@@ -106,6 +139,8 @@ fn quiet_snapshot() -> DesktopSnapshot {
         activity: Ok(Arc::from(Vec::new())),
         activity_sources: BTreeMap::new(),
         accounts: Ok(Vec::new()),
+        automations: Ok(Vec::new()),
+        automation_runs: BTreeMap::new(),
         policies: BTreeMap::new(),
         legal_status: Ok(LegalStatus {
             signing_allowed: true,
@@ -1579,5 +1614,135 @@ fn screenshots() {
         let path = directory.join(format!("{}.png", route.label().to_lowercase()));
         image.save(&path).expect("write png");
         println!("wrote {}", path.display());
+    }
+}
+
+#[gpui::test]
+fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let running = automation_fixture(AutomationState::Enabled, None);
+    let stopped = automation_fixture(
+        AutomationState::AwaitingRelink,
+        Some("the signing policy changed to revision 4".to_owned()),
+    );
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automations = Ok(vec![running, stopped]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+
+    let laid_out = measure(
+        cx,
+        window,
+        &view,
+        &["automation-list", "stop-automation", "relink-automation"],
+    );
+    assert!(laid_out[0].is_some(), "the list must draw");
+    // The running one offers Stop; the stopped one offers Run again. Both are
+    // on screen at once, which is the case that matters — an owner reading
+    // this screen is deciding about one of several.
+    assert!(laid_out[1].is_some(), "a running automation can be stopped");
+    assert!(
+        laid_out[2].is_some(),
+        "a stopped automation must offer a way back, not just an explanation"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn an_empty_automations_tab_says_what_one_would_be(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+    });
+    // No list at all rather than an empty frame, so the screen is never a
+    // blank box the reader has to interpret.
+    assert!(measure(cx, window, &view, &["automation-list"])[0].is_none());
+    release(cx, &view);
+}
+
+fn automation_fixture(state: AutomationState, stopped_reason: Option<String>) -> Automation {
+    Automation {
+        id: uuid::Uuid::new_v4(),
+        wallet_instance_id: uuid::Uuid::new_v4(),
+        wallet_id: "primary".into(),
+        wallet_address: alloy::primitives::Address::repeat_byte(0x11),
+        chain_id: 1,
+        key: "rebalance".into(),
+        name: "rebalance the vault".into(),
+        bytecode: alloy::primitives::Bytes::from_static(&[0x60, 0x00, 0xF3]),
+        config: alloy::primitives::Bytes::new(),
+        schedule: ekubo_wallet_core::automation::CronSchedule::parse("0 0 * * * *").unwrap(),
+        policy_revision: 1,
+        state,
+        stopped_reason,
+        consecutive_failures: 0,
+        last_tick_at: None,
+        last_outcome: None,
+        last_request_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[gpui::test]
+fn every_run_is_listed_and_the_ones_that_sent_link_to_their_transaction(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let automation = automation_fixture(AutomationState::Enabled, None);
+    let sent = uuid::Uuid::new_v4();
+    let runs = vec![
+        run_fixture(automation.id, RunOutcome::Idle, None),
+        run_fixture(automation.id, RunOutcome::Sent, Some(sent)),
+    ];
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automation_runs = BTreeMap::from([(automation.id, runs)]);
+            replacement.automations = Ok(vec![automation]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+
+    let laid_out = measure(
+        cx,
+        window,
+        &view,
+        &["automation-runs", "open-automation-transaction"],
+    );
+    assert!(
+        laid_out[0].is_some(),
+        "the run history is what the screen is for"
+    );
+    assert!(
+        laid_out[1].is_some(),
+        "a run that produced a transaction must offer a way into its details"
+    );
+    release(cx, &view);
+}
+
+fn run_fixture(
+    automation_id: uuid::Uuid,
+    outcome: RunOutcome,
+    request_id: Option<uuid::Uuid>,
+) -> ekubo_wallet_core::automation_store::AutomationRun {
+    ekubo_wallet_core::automation_store::AutomationRun {
+        run_id: uuid::Uuid::new_v4(),
+        automation_id,
+        ran_at: chrono::Utc::now(),
+        outcome,
+        detail: "ran".into(),
+        request_id,
+        calls: u32::from(request_id.is_some()),
     }
 }

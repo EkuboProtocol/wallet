@@ -32,6 +32,12 @@ pub enum DomainEventKind {
     PolicyProposalChanged {
         wallet_id: String,
     },
+    /// An automation was installed, replaced, or stopped. Carries the wallet
+    /// rather than the automation because the Automations tab redraws the
+    /// wallet's whole list either way.
+    AutomationsChanged {
+        wallet_id: String,
+    },
     McpStatusChanged {
         online: bool,
     },

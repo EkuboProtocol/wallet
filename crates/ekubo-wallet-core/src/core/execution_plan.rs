@@ -6,8 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{fmt, str::FromStr};
 
-const MAX_EXECUTION_STEPS: usize = 4_096;
-const MAX_TOTAL_CALLDATA_BYTES: usize = 8 * 1024 * 1024;
+/// Public so a plan *producer* inside this crate can refuse an oversized input
+/// as what it is. `automation` bounds a blob's returned call list against these
+/// before synthesizing a plan from it, so an over-long list is reported as a
+/// blob that returned too much rather than, one step later, as a malformed plan.
+pub const MAX_EXECUTION_STEPS: usize = 4_096;
+pub const MAX_TOTAL_CALLDATA_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SERIALIZED_PLAN_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema)]

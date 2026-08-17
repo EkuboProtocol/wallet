@@ -12,6 +12,8 @@ use ekubo_wallet_core::{
         ApprovalKind, ApprovalRequest, ApprovalSectionKind, ReviewDocument, ReviewPresenter,
     },
     approval_summary::{TokenMetadataMap, format_fixed_point, interpret_steps, plan_token_targets},
+    automation::Automation,
+    automation_store::{AutomationRun, AutomationStore},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
@@ -795,6 +797,76 @@ impl OwnerApi {
             wallet.instance_id,
             wallet.address,
         )
+    }
+
+    /// The configuration this API reads, for a caller that needs to keep
+    /// reading it — the automation scheduler re-reads accounts and networks
+    /// every pass rather than capturing them at startup.
+    #[must_use]
+    pub const fn config(&self) -> &ConfigStore {
+        &self.config
+    }
+
+    /// Every automation installed on every configured account, newest first
+    /// within each account.
+    ///
+    /// The Automations tab is a list of what this wallet does on its own, and
+    /// that question is not per-account for the person reading it: they want to
+    /// know what runs, and an automation names the account it runs as.
+    pub fn automations(&self) -> Result<Vec<Automation>> {
+        let store = AutomationStore::production(self.config.data_dir())?;
+        let mut found = Vec::new();
+        for wallet in self.config.load()?.wallets {
+            found.extend(store.list_for_wallet(wallet.instance_id)?);
+        }
+        Ok(found)
+    }
+
+    /// One automation's run history, newest first.
+    ///
+    /// Every tick is in here, including the ones that did nothing, because the
+    /// question this screen answers is "what has this thing been doing" and a
+    /// log of only the eventful runs cannot tell a quiet automation from a
+    /// stopped one.
+    pub fn automation_runs(&self, automation_id: Uuid, limit: usize) -> Result<Vec<AutomationRun>> {
+        AutomationStore::production(self.config.data_dir())?.runs(automation_id, limit)
+    }
+
+    /// Stop one automation and record why, from the tab.
+    ///
+    /// Owner-driven, so the reason it stores says so: a stopped automation's
+    /// only account of itself is that string, and "disabled" with no author
+    /// leaves the reader wondering whether the wallet or the person did it.
+    pub fn disable_automation(&self, automation_id: uuid::Uuid) -> Result<Automation> {
+        let stopped = AutomationStore::production(self.config.data_dir())?
+            .disable(automation_id, "you stopped this automation")?;
+        self.events.publish(DomainEventKind::AutomationsChanged {
+            wallet_id: stopped.wallet_id.clone(),
+        });
+        Ok(stopped)
+    }
+
+    /// Start one again, rebinding it to the policy that is active now.
+    ///
+    /// One operation for both "it broke and I fixed the cause" and "I changed
+    /// my policy and this needs to run under the new one", because they are the
+    /// same act: the owner saying yes, run this, under what my policy says
+    /// today. Rebinding is the whole point — re-enabling while still bound to a
+    /// revision that no longer exists would stop it again on its next tick.
+    pub fn relink_automation(&self, automation_id: uuid::Uuid) -> Result<Automation> {
+        let mut store = AutomationStore::production(self.config.data_dir())?;
+        let automation = store
+            .get(automation_id)?
+            .context("that automation is no longer installed")?;
+        let wallet = self.account(&automation.wallet_id)?;
+        let policy = PolicyStore::production(self.config.data_dir())?
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+            .context("wallet has no active policy")?;
+        let relinked = store.relink(automation_id, policy.revision)?;
+        self.events.publish(DomainEventKind::AutomationsChanged {
+            wallet_id: relinked.wallet_id.clone(),
+        });
+        Ok(relinked)
     }
 
     pub fn policy_history(&self, wallet_id: &str) -> Result<Vec<StoredPolicy>> {
