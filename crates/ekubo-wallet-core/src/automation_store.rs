@@ -202,6 +202,35 @@ impl AutomationStore {
         self.write_tick(id, reason, at, ClearFailures::No)
     }
 
+    /// Record that a tick's calls became a transaction, and which one.
+    ///
+    /// The pointer is how a later tick learns what became of it: whether it
+    /// confirmed, reverted, or is still sitting in the mempool holding the
+    /// signing slot. Without it an automation would have to guess from the
+    /// wallet's in-flight row, which any other sender could also own.
+    pub fn record_send(
+        &mut self,
+        id: Uuid,
+        request_id: Uuid,
+        outcome: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        let changed = self.database.connection.execute(
+            "UPDATE automations
+             SET last_tick_at = ?2, last_outcome = ?3, last_request_id = ?4,
+                 consecutive_failures = 0, updated_at = ?2
+             WHERE automation_id = ?1",
+            params![
+                Blob(*id.as_bytes()),
+                Millis(at),
+                outcome,
+                Blob(*request_id.as_bytes()),
+            ],
+        )?;
+        ensure!(changed == 1, "automation {id} is not installed");
+        Ok(())
+    }
+
     fn write_tick(
         &mut self,
         id: Uuid,
@@ -356,7 +385,7 @@ impl AutomationStore {
 
 const COLUMNS: &str = "automation_id, wallet_instance_id, wallet_id, wallet_address, chain_id, \
      name, bytecode, config, cron_expression, policy_revision, state, stopped_reason, \
-     consecutive_failures, last_tick_at, last_outcome, created_at, updated_at";
+     consecutive_failures, last_tick_at, last_outcome, last_request_id, created_at, updated_at";
 
 /// Rebuild one row.
 ///
@@ -381,8 +410,9 @@ fn read_automation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Automatio
     let consecutive_failures: i64 = row.get(12)?;
     let last_tick_at = row.time_opt(13)?;
     let last_outcome: Option<String> = row.get(14)?;
-    let created_at = row.time(15)?;
-    let updated_at = row.time(16)?;
+    let last_request_id: Option<[u8; 16]> = row.blob_opt(15)?;
+    let created_at = row.time(16)?;
+    let updated_at = row.time(17)?;
     Ok((|| {
         Ok(Automation {
             id: Uuid::from_bytes(id),
@@ -406,6 +436,7 @@ fn read_automation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Automatio
                 .context("stored automation failure count is invalid")?,
             last_tick_at,
             last_outcome,
+            last_request_id: last_request_id.map(Uuid::from_bytes),
             created_at,
             updated_at,
         })

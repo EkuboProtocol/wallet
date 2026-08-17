@@ -1991,6 +1991,13 @@ const AUTOMATIONS_TABLE: &str = "CREATE TABLE automations (
      consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
      last_tick_at INTEGER,
      last_outcome TEXT,
+     -- The transaction the last tick sent, if it sent one. Deliberately not a
+     -- foreign key into pending_transactions: that table's rows are purged
+     -- with their wallet and pruned by history, and an automation losing its
+     -- pointer must not delete the automation. An id with no row left reads
+     -- as no record, which is what a caller does with it anyway.
+     last_request_id BLOB
+         CHECK (last_request_id IS NULL OR length(last_request_id) = 16),
      created_at INTEGER NOT NULL,
      updated_at INTEGER NOT NULL,
      -- An enabled automation is one nothing has stopped, so it carries no

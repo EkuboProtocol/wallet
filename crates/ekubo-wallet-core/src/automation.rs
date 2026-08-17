@@ -260,6 +260,10 @@ pub struct Automation {
     pub consecutive_failures: u32,
     pub last_tick_at: Option<DateTime<Utc>>,
     pub last_outcome: Option<String>,
+    /// The transaction the last tick sent, when it sent one. How a later tick
+    /// learns whether that batch confirmed, reverted, or is still holding the
+    /// wallet and chain's signing slot.
+    pub last_request_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
