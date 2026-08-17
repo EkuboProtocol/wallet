@@ -479,9 +479,17 @@ pub fn sleep_for(next_fire: Option<DateTime<Utc>>, at: DateTime<Utc>) -> Duratio
 /// it names.
 ///
 /// A pass that fails outright — the policy database is locked, the wallet has
-/// no policy — is reported and slept past rather than ending the loop. The
-/// alternative is a scheduler that dies quietly on a transient error and
-/// leaves every automation stopped with nothing on screen to say so.
+/// no policy, the network was disabled — is reported and slept past rather than
+/// ending the loop. The alternative is a scheduler that dies quietly on a
+/// transient error and leaves every automation stopped with nothing on screen
+/// to say so.
+///
+/// The network is named by chain ID and re-resolved every pass rather than
+/// captured once. A long-lived loop holding a `NetworkConfig` from startup
+/// would keep polling endpoints the owner has since replaced, and would keep
+/// running against a network they have since disabled — the loop would be the
+/// one component of the wallet for which editing a network did nothing until
+/// restart.
 pub async fn drive(
     scheduler: &AutomationScheduler,
     config: &ConfigStore,
@@ -489,18 +497,37 @@ pub async fn drive(
     pending: &Mutex<PendingStore>,
     policies: &Mutex<PolicyStore>,
     wallet: &WalletMetadata,
-    network: &NetworkConfig,
+    chain_id: u64,
     mut observe: impl FnMut(Result<Vec<TickReport>>),
 ) -> ! {
     loop {
         let at = tick_moment();
-        let outcome = scheduler
-            .run_due(config, automations, pending, policies, wallet, network, at)
-            .await;
+        let outcome = match current_network(config, chain_id) {
+            Err(error) => Err(error),
+            Ok(network) => {
+                scheduler
+                    .run_due(config, automations, pending, policies, wallet, &network, at)
+                    .await
+            }
+        };
         observe(outcome);
         let next = next_fire_time(automations, wallet, at);
         tokio::time::sleep(sleep_for(next, at)).await;
     }
+}
+
+/// This pass's view of the network, refusing one the owner has disabled.
+///
+/// Disabled is not an error state to recover from, it is an instruction: a
+/// network the owner switched off must not keep receiving automated
+/// transactions because a loop started before they switched it off.
+fn current_network(config: &ConfigStore, chain_id: u64) -> Result<NetworkConfig> {
+    let network = config.network_by_chain_id(&chain_id.to_string())?;
+    anyhow::ensure!(
+        !network.disabled,
+        "network {chain_id} is disabled, so its automations do not run"
+    );
+    Ok(network)
 }
 
 /// The earliest moment any enabled automation of this wallet is next due.

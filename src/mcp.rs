@@ -2457,20 +2457,35 @@ impl WalletMcpServer {
             .map(|_| schedule.preview(chrono::Utc::now(), 3))
             .unwrap_or_default();
 
+        // Failover across endpoints, exactly as a scheduled tick does. Without
+        // it one flaky endpoint reports to the agent as "your bytecode failed",
+        // and the compile-test-fix loop this tool exists for starts chasing a
+        // bug that is not in the bytecode. Only an RPC failure moves on: a
+        // revert or an undecodable return is a fact about the blob, and the
+        // next endpoint returns it again more slowly.
         let clients = ekubo_wallet_core::rpc::clients_for(&network)
             .await
             .map_err(|error| tool_error(&error))?;
-        let client = clients
-            .first()
-            .ok_or_else(|| tool_error(&anyhow::anyhow!("network has no RPC endpoints")))?;
-        let outcome = ekubo_wallet_core::automation::poll(
-            client.as_ref(),
-            wallet.address,
-            definition.bytecode(),
-            definition.config(),
-        )
-        .await
-        .map_err(|error| tool_error(&error))?;
+        let mut last = None;
+        let mut remaining = clients.len();
+        for client in clients {
+            remaining -= 1;
+            let attempt = ekubo_wallet_core::automation::poll(
+                client.as_ref(),
+                wallet.address,
+                definition.bytecode(),
+                definition.config(),
+            )
+            .await
+            .map_err(|error| tool_error(&error))?;
+            let retryable = matches!(attempt, Err(PollFailure::Rpc(_))) && remaining > 0;
+            last = Some(attempt);
+            if !retryable {
+                break;
+            }
+        }
+        let outcome =
+            last.ok_or_else(|| tool_error(&anyhow::anyhow!("network has no RPC endpoints")))?;
 
         let mut output = DryRunAutomationOutput {
             wallet_id: wallet.id.clone(),
