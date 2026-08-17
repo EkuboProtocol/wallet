@@ -68,3 +68,79 @@ fn live_status_updates_preserve_the_dapp_name() {
     assert_eq!(current.active_requests, 0);
     assert_eq!(current.expires_at, Some(1_900_000_000));
 }
+
+fn paired(manager: &mut WalletConnectManager, byte: &str) -> Uuid {
+    let uri = format!(
+        "wc:{}@2?relay-protocol=irn&symKey={}",
+        byte.repeat(32),
+        "22".repeat(32)
+    );
+    manager.begin_uri(&uri).unwrap().1.id
+}
+
+#[test]
+fn a_pairing_becomes_a_connection_only_once_it_settles() {
+    let mut manager = WalletConnectManager::default();
+    let id = paired(&mut manager, "11");
+    // Paired, then waiting on the dapp: nothing about this has been shown to
+    // the owner, let alone approved by them.
+    assert!(!manager.sessions()[0].settled);
+    manager.update(id, SessionStatus::AwaitingProposal, None, 0, None);
+    assert!(!manager.sessions()[0].settled);
+
+    manager.update(
+        id,
+        SessionStatus::Connected,
+        Some("Example".into()),
+        0,
+        None,
+    );
+    assert!(manager.sessions()[0].settled);
+
+    // A dapp that walks away does not un-approve itself. The row stays so the
+    // owner can see what happened to something they did let in.
+    manager.update(id, SessionStatus::Disconnecting, None, 0, None);
+    assert!(manager.sessions()[0].settled);
+}
+
+#[test]
+fn a_pairing_that_fails_before_settling_frees_its_slot() {
+    let mut manager = WalletConnectManager::default();
+    let unsettled = paired(&mut manager, "33");
+    let connected = paired(&mut manager, "44");
+    manager.update(connected, SessionStatus::Connected, None, 0, None);
+
+    // Nothing draws an unsettled pairing, so an error left on one would be
+    // invisible — and the entry would hold a slot against the session cap
+    // that no button on screen could ever free. The connect panel reports
+    // that failure instead.
+    manager.fail(unsettled, "relay refused the subscription".into());
+    let sessions = manager.sessions();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, connected);
+
+    // A settled one keeps its row, because there the error belongs beside a
+    // dapp the owner recognizes.
+    manager.fail(connected, "the relay dropped".into());
+    let sessions = manager.sessions();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].last_error.as_deref(), Some("the relay dropped"));
+    assert_eq!(sessions[0].status, SessionStatus::Disconnecting);
+}
+
+#[test]
+fn a_session_that_ends_cleanly_leaves_nothing_behind() {
+    let mut manager = WalletConnectManager::default();
+    // A declined proposal ends its pairing at the protocol layer, which comes
+    // back here as an ordinary clean finish. Nothing about the dapp the owner
+    // said no to should survive it — not a row, and not a session slot.
+    let declined = paired(&mut manager, "55");
+    manager.update(declined, SessionStatus::AwaitingProposal, None, 0, None);
+    manager.finish(declined);
+    assert!(manager.sessions().is_empty());
+
+    let connected = paired(&mut manager, "66");
+    manager.update(connected, SessionStatus::Connected, None, 0, None);
+    manager.finish(connected);
+    assert!(manager.sessions().is_empty());
+}

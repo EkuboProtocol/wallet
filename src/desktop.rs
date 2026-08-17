@@ -1732,6 +1732,15 @@ pub struct WalletWindow {
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_sessions: Vec<SessionSummary>,
+    /// The pairing started by the last press of Connect, until it produces a
+    /// proposal, settles, or ends.
+    ///
+    /// A pairing URI is good for one session, and pressing Connect took the
+    /// whole round trip to the relay before anything on screen changed — so
+    /// the second half of a double click landed on a button that still looked
+    /// idle and burned the URI on a second pairing that could never settle.
+    /// While this is set the button is busy and the press is refused.
+    walletconnect_connecting: Option<uuid::Uuid>,
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
     network_editor_open: bool,
@@ -2051,6 +2060,10 @@ impl ActiveReview {
         review
     }
 
+    fn selection_is_complete(&self) -> bool {
+        review_selection_is_complete(self.completion.as_ref())
+    }
+
     fn rebuild_detail_list(&mut self) {
         self.wallet_connect_accounts = self.completion.as_ref().and_then(|completion| {
             let ActiveReviewCompletion::WalletConnect { choices, .. } = completion else {
@@ -2198,7 +2211,14 @@ enum ActiveReviewCompletion {
     },
     WalletConnect {
         choices: Vec<crate::walletconnect::ProposalChoice>,
-        selected_account: usize,
+        /// Which account the owner chose to expose, once they have chosen.
+        ///
+        /// It used to start at the first account, which meant the default
+        /// answer to "which account may this dapp see" was whichever one
+        /// happened to sort first — and a connection can go on to propose
+        /// transactions that a policy signs without a second review. Nothing
+        /// is exposed until this is `Some`.
+        selected_account: Option<usize>,
         response: oneshot::Sender<ProposalCommand>,
     },
     AccountRemoval {
@@ -2211,6 +2231,32 @@ struct ReviewDecisionLabels {
     reject: &'static str,
     approve: &'static str,
     approve_is_destructive: bool,
+}
+
+/// Whether the pairing the connect button is waiting on has yet to arrive
+/// anywhere.
+///
+/// Gone from the manager means it ended — by failing before it settled, or by
+/// being cancelled. Settled means it became a connection. Either way the
+/// button has its answer and stops spinning.
+fn walletconnect_pairing_is_in_flight(sessions: &[SessionSummary], connecting: uuid::Uuid) -> bool {
+    sessions
+        .iter()
+        .any(|session| session.id == connecting && !session.settled)
+}
+
+/// Whether the review is missing an answer the owner still has to give.
+///
+/// Only a dapp connection asks for one: which account it may see. Having read
+/// a document to the end is not the same as having chosen, so this is checked
+/// alongside `approve_enabled` rather than folded into it.
+const fn review_selection_is_complete(completion: Option<&ActiveReviewCompletion>) -> bool {
+    match completion {
+        Some(ActiveReviewCompletion::WalletConnect {
+            selected_account, ..
+        }) => selected_account.is_some(),
+        _ => true,
+    }
 }
 
 const fn review_decision_labels(
@@ -2237,7 +2283,7 @@ const fn review_decision_labels(
 
 enum QueuedReview {
     Transaction(Box<GuiReviewPrompt>),
-    WalletConnect(ProposalPrompt),
+    WalletConnect(Box<ProposalPrompt>),
 }
 
 struct SerialQueue<T> {
@@ -4420,6 +4466,7 @@ impl WalletWindow {
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_sessions: Vec::new(),
+            walletconnect_connecting: None,
             walletconnect_presenter,
             walletconnect_uri_input: None,
             network_editor_open: false,
@@ -5389,6 +5436,12 @@ impl WalletWindow {
         let Some(input) = self.walletconnect_uri_input.clone() else {
             return;
         };
+        // The button renders disabled while a pairing is in flight, but a
+        // render-time property is not what decides this: refuse the press
+        // here, where the second click of a double click arrives.
+        if self.walletconnect_connecting.is_some() {
+            return;
+        }
         match self.cached_accounts() {
             Ok([]) => {
                 self.set_route_error(
@@ -5432,6 +5485,8 @@ impl WalletWindow {
             .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))?
             .begin_uri(uri)?
             .0;
+        let session_id = start.id;
+        self.walletconnect_connecting = Some(session_id);
         self.clear_route_error(Route::WalletConnect);
         self.owner
             .event_bus()
@@ -5453,6 +5508,7 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
+                view.finish_walletconnect_connecting(session_id);
                 match result {
                     Ok(()) => view.clear_route_error(Route::WalletConnect),
                     Err(error) => view.set_route_error(
@@ -5468,12 +5524,45 @@ impl WalletWindow {
         Ok(())
     }
 
+    /// Stop showing Connect as busy, if it was busy on this pairing.
+    ///
+    /// Called from every way a pairing can stop being in flight, so a spinner
+    /// cannot outlive the thing it describes.
+    fn finish_walletconnect_connecting(&mut self, session_id: uuid::Uuid) {
+        if self.walletconnect_connecting == Some(session_id) {
+            self.walletconnect_connecting = None;
+        }
+    }
+
+    /// Take a fresh session list, and let it settle the connect button.
+    ///
+    /// The list holds unsettled pairings too, which the connection list does
+    /// not draw. They are what tells the button whether its pairing is still
+    /// on its way: gone, or settled, means the wait is over.
+    fn set_walletconnect_sessions(&mut self, sessions: Vec<SessionSummary>) {
+        if self
+            .walletconnect_connecting
+            .is_some_and(|connecting| !walletconnect_pairing_is_in_flight(&sessions, connecting))
+        {
+            self.walletconnect_connecting = None;
+        }
+        self.walletconnect_sessions = sessions;
+    }
+
+    /// The dapps the owner let in — the only ones the connection list draws.
+    fn approved_walletconnect_sessions(&self) -> impl Iterator<Item = &SessionSummary> {
+        self.walletconnect_sessions
+            .iter()
+            .filter(|session| session.settled)
+    }
+
     fn disconnect_walletconnect(&mut self, session_id: uuid::Uuid, cx: &mut Context<Self>) {
         let result = self
             .walletconnect
             .lock()
             .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))
             .and_then(|mut manager| manager.disconnect(session_id).map(|_| ()));
+        self.finish_walletconnect_connecting(session_id);
         match result {
             Ok(()) => self.clear_route_error(Route::WalletConnect),
             Err(error) => self.set_route_error(
@@ -5496,26 +5585,30 @@ impl WalletWindow {
             .all(|choice| self.review_document_is_visible(&choice.document))
         {
             self.queued_reviews
-                .push(QueuedReview::WalletConnect(prompt));
+                .push(QueuedReview::WalletConnect(Box::new(prompt)));
             return;
         }
         let Some(QueuedReview::WalletConnect(prompt)) = self.queued_reviews.receive(
             self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress(),
-            QueuedReview::WalletConnect(prompt),
+            QueuedReview::WalletConnect(Box::new(prompt)),
         ) else {
             return;
         };
-        self.activate_walletconnect_prompt(prompt);
+        self.activate_walletconnect_prompt(*prompt);
     }
 
     fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
-        let document = prompt.choices[0].document.clone();
+        // The connect button stays busy through the review rather than
+        // stopping when the proposal lands: a proposal under review is not a
+        // connection, and nothing else on the screen behind stands for it.
+        // Both endings clear it — approving settles the session into the list
+        // below, declining ends the pairing outright.
         self.active_review = Some(ActiveReview::new(
-            document,
+            prompt.unselected_document,
             None,
             Some(ActiveReviewCompletion::WalletConnect {
                 choices: prompt.choices,
-                selected_account: 0,
+                selected_account: None,
                 response: prompt.response,
             }),
         ));
@@ -5538,7 +5631,7 @@ impl WalletWindow {
         match next {
             Some(QueuedReview::Transaction(prompt)) => self.activate_transaction_prompt(*prompt),
             Some(QueuedReview::WalletConnect(prompt)) => {
-                self.activate_walletconnect_prompt(prompt);
+                self.activate_walletconnect_prompt(*prompt);
             }
             None => {}
         }
@@ -5602,7 +5695,7 @@ impl WalletWindow {
         let Some(choice) = choices.get(index) else {
             return;
         };
-        *selected_account = index;
+        *selected_account = Some(index);
         active.state = ReviewState::new(choice.document.clone());
         active.rebuild_detail_list();
         cx.notify();
@@ -7831,6 +7924,7 @@ impl WalletWindow {
                 !self.legal_gate
                     && active.state.selected() == ReviewDecision::Approve
                     && active.state.approve_enabled()
+                    && active.selection_is_complete()
             }
             GuiReviewCommand::Reject => active.state.selected() == ReviewDecision::Reject,
             GuiReviewCommand::Refresh | GuiReviewCommand::Close => true,
@@ -8013,7 +8107,9 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let Some(choice) = choices.get(selected_account) else {
+                let Some((index, choice)) = selected_account
+                    .and_then(|index| choices.get(index).map(|choice| (index, choice)))
+                else {
                     let _ = response.send(ProposalCommand::Reject);
                     self.set_route_error(
                         Route::WalletConnect,
@@ -8034,7 +8130,7 @@ impl WalletWindow {
                             Ok(authorization) => {
                                 if response
                                     .send(ProposalCommand::Approve {
-                                        index: selected_account,
+                                        index,
                                         authorization,
                                     })
                                     .is_err()
@@ -10898,6 +10994,7 @@ impl WalletWindow {
             Ok(_) => None,
         };
         let account_unavailable = account_error.is_some();
+        let connecting = self.walletconnect_connecting;
         let mut panel = div()
             .p_4()
             .rounded(cx.theme().radius_lg)
@@ -10942,14 +11039,41 @@ impl WalletWindow {
                         )
                         .child(
                             app_button("connect-walletconnect")
-                                .label("Connect")
+                                .label(if connecting.is_some() {
+                                    "Connecting"
+                                } else {
+                                    "Connect"
+                                })
                                 .primary()
-                                .disabled(account_unavailable)
+                                .loading(connecting.is_some())
+                                .disabled(account_unavailable || connecting.is_some())
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.connect_walletconnect(window, cx);
                                 })),
-                        ),
+                        )
+                        // A pairing that is not drawn in the list below has no
+                        // Disconnect button of its own, and a dapp that never
+                        // proposes would otherwise leave the wallet waiting
+                        // with no way out but quitting.
+                        .when_some(connecting, |row, session_id| {
+                            row.child(app_button("cancel-walletconnect").label("Cancel").on_click(
+                                cx.listener(move |view, _, _, cx| {
+                                    view.disconnect_walletconnect(session_id, cx);
+                                }),
+                            ))
+                        }),
                 );
+            if connecting.is_some() {
+                panel = panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_label(
+                            "Paired. The review window opens when the dapp proposes a \
+                             connection; Cancel drops the pairing.",
+                        )),
+                );
+            }
             if let Some(error) = account_error {
                 panel = panel.child(
                     div()
@@ -10960,7 +11084,14 @@ impl WalletWindow {
             }
         }
         let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
-        if self.walletconnect_sessions.is_empty() {
+        // Only dapps the owner approved. A pairing that has not been through
+        // the review window is a stranger on a relay, and listing it beside
+        // the real connections would read as though it had been let in.
+        let approved: Vec<SessionSummary> = self
+            .approved_walletconnect_sessions()
+            .cloned()
+            .collect::<Vec<_>>();
+        if approved.is_empty() {
             return div().flex().flex_col().gap_4().child(panel).child(
                 sessions.child(
                     div()
@@ -10985,7 +11116,7 @@ impl WalletWindow {
                 ),
             );
         }
-        sessions = sessions.children(self.walletconnect_sessions.iter().cloned().map(|session| {
+        sessions = sessions.children(approved.into_iter().map(|session| {
             let session_id = session.id;
             div()
                 .w_full()
@@ -12741,7 +12872,17 @@ impl WalletWindow {
         };
         let generation = active.state.generation();
         let document = active.state.document_arc();
-        let approve_enabled = active.state.approve_enabled() && !active.awaiting_refresh;
+        let selection_is_complete = active.selection_is_complete();
+        let approve_enabled =
+            active.state.approve_enabled() && !active.awaiting_refresh && selection_is_complete;
+        // Two different things hold approval back, and one instruction for
+        // both would send a reader who has already scrolled to the end back to
+        // scroll again.
+        let approve_blocked_reason = if selection_is_complete {
+            "Scroll to the end to enable approval"
+        } else {
+            "Choose an account to enable approval"
+        };
         let can_refresh = matches!(
             active.completion,
             Some(ActiveReviewCompletion::Transaction(_))
@@ -12767,7 +12908,7 @@ impl WalletWindow {
             else {
                 return None;
             };
-            Some(*selected_account)
+            *selected_account
         });
         let wallet_connect_accounts = active.wallet_connect_accounts.clone();
         let editor = cx.entity().downgrade();
@@ -12861,12 +13002,10 @@ impl WalletWindow {
                         .into_any_element()
                 }
                 SecurityReviewDetailRow::WalletConnectAccounts => {
-                    let (Some(accounts), Some(selected_account)) = (
-                        wallet_connect_accounts.as_ref(),
-                        selected_wallet_connect_account,
-                    ) else {
+                    let Some(accounts) = wallet_connect_accounts.as_ref() else {
                         return div().into_any_element();
                     };
+                    let selected_account = selected_wallet_connect_account;
                     let account_editor = editor.clone();
                     div()
                         .w_full()
@@ -12874,13 +13013,29 @@ impl WalletWindow {
                         .flex_col()
                         .gap_2()
                         .child(div().font_semibold().child("Account to expose"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(if selected_account.is_none() {
+                                    cx.theme().warning
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(if selected_account.is_none() {
+                                    "Choose which account this dapp may see. Nothing is exposed \
+                                     until you pick one."
+                                } else {
+                                    "Only the account below is exposed to this dapp."
+                                }),
+                        )
                         .child(div().flex().flex_wrap().gap_2().children(
                             accounts.iter().enumerate().map(move |(index, account_id)| {
                                 let account_editor = account_editor.clone();
+                                let chosen = selected_account == Some(index);
                                 app_button(SharedString::from(format!("wc-account-{index}")))
                                     .label(account_id.clone())
-                                    .toggled(index == selected_account)
-                                    .when(index == selected_account, ButtonVariants::primary)
+                                    .toggled(chosen)
+                                    .when(chosen, ButtonVariants::primary)
                                     .on_click(move |_, _, cx| {
                                         let _ = account_editor.update(cx, |view, cx| {
                                             view.select_walletconnect_account(
@@ -13080,7 +13235,7 @@ impl WalletWindow {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("Scroll to the end to enable approval"),
+                                        .child(approve_blocked_reason),
                                 )
                             })
                             .child(
@@ -15026,11 +15181,15 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             tray.update(&TraySnapshot {
                                 pending_reviews: counts.0,
                                 mcp_online,
-                                walletconnect_sessions: counts.1.len(),
+                                walletconnect_sessions: counts
+                                    .1
+                                    .iter()
+                                    .filter(|session| session.settled)
+                                    .count(),
                             });
                         }
                         event_view.update(cx, |view, cx| {
-                            view.walletconnect_sessions = counts.1;
+                            view.set_walletconnect_sessions(counts.1);
                             cx.notify();
                         });
                     } else {
