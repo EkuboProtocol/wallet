@@ -668,6 +668,159 @@ fn portfolio_refresh_uses_the_button_label_without_a_second_spinner(cx: &mut gpu
     release(cx, &view);
 }
 
+/// What the open add/edit network dialog measured to in a window this size.
+struct NetworkEditorLayout {
+    /// The scrolling form, between the title bar and the footer.
+    form: gpui::Bounds<gpui::Pixels>,
+    /// Save, which is the lowest thing in the dialog.
+    save: gpui::Bounds<gpui::Pixels>,
+    /// How tall the form's contents are, whether or not they fit.
+    content: gpui::Pixels,
+}
+
+/// Draws the add/edit network dialog the way `Root` would.
+///
+/// `overlay(false)` is the one departure, and it is not about layout: the
+/// overlay's mouse handling reads the window's `Root`, which a test window has
+/// none of. The backdrop it drops is behind the dialog and the size of the
+/// window either way.
+struct NetworkEditorDialogTestView {
+    wallet: Entity<WalletWindow>,
+}
+
+impl Render for NetworkEditorDialogTestView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        WalletWindow::build_network_editor_dialog(
+            Dialog::new(cx),
+            &self.wallet.downgrade(),
+            window,
+            cx,
+        )
+        .overlay(false)
+    }
+}
+
+/// Draw the add/edit network dialog in a window of the given size.
+fn draw_network_editor(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    viewport: gpui::Size<gpui::Pixels>,
+) -> NetworkEditorLayout {
+    // The wallet has to draw once before the dialog can: the form's twenty-odd
+    // inputs are built on the wallet's first render, and the dialog renders
+    // nothing without them.
+    draw(cx, window, view);
+    let dialog_view = cx.new(|_| NetworkEditorDialogTestView {
+        wallet: view.clone(),
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    // The dialog sizes itself against `window.viewport_size()`, so the window
+    // has to actually be this size — drawing into a space of the size is a
+    // different claim, and not the one the dialog reads.
+    visual.simulate_resize(viewport);
+    visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
+        gpui::AnyView::from(dialog_view.clone()).into_any_element()
+    });
+    visual.run_until_parked();
+
+    let form = visual
+        .debug_bounds("network-editor-body")
+        .expect("the network editor form must be laid out");
+    let save = visual
+        .debug_bounds("network-editor-save")
+        .expect("the network editor's Save button must be laid out");
+    let content = visual.update(|_, cx| {
+        view.read(cx)
+            .network_editor_scroll_handle
+            .content_size()
+            .height
+    });
+    drop(dialog_view);
+    NetworkEditorLayout {
+        form,
+        save,
+        content,
+    }
+}
+
+#[gpui::test]
+fn the_network_editor_scrolls_and_keeps_its_footer_in_a_short_window(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let viewport = gpui::size(px(1400.0), px(650.0));
+    let layout = draw_network_editor(cx, window, &view, viewport);
+
+    assert!(
+        layout.form.size.height > px(300.0),
+        "the form must take the height the dialog has for it, not collapse to \
+         nothing: {:?}",
+        layout.form.size.height
+    );
+    assert!(
+        layout.content > layout.form.size.height,
+        "this window is too short for the whole form, so the form must scroll \
+         inside it: {:?} of content in {:?}",
+        layout.content,
+        layout.form.size.height
+    );
+    assert!(
+        layout.save.bottom() <= viewport.height,
+        "Save must stay above the bottom of the window: {:?} of {:?}",
+        layout.save.bottom(),
+        viewport.height
+    );
+    assert!(
+        layout.save.top() >= layout.form.bottom(),
+        "Save must sit under the form rather than over it: {:?} against {:?}",
+        layout.save.top(),
+        layout.form.bottom()
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn the_network_editor_takes_the_height_a_tall_window_offers(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    // Taller than the 640px the dialog was once pinned to, and taller than the
+    // form: nothing here should be scrolling, and nothing should be padded out
+    // to a size the content did not ask for.
+    let viewport = gpui::size(px(1400.0), px(2160.0));
+    let layout = draw_network_editor(cx, window, &view, viewport);
+
+    assert!(
+        layout.form.size.height >= layout.content,
+        "a window with the room for the whole form must show the whole form: \
+         {:?} of content in {:?}",
+        layout.content,
+        layout.form.size.height
+    );
+    assert!(
+        layout.form.size.height > px(640.0),
+        "the form must not be held to the height a small window would give it: \
+         {:?}",
+        layout.form.size.height
+    );
+    assert!(
+        layout.save.top() >= layout.form.bottom(),
+        "Save must sit under the form rather than over it: {:?} against {:?}",
+        layout.save.top(),
+        layout.form.bottom()
+    );
+    assert!(
+        layout.save.bottom() <= viewport.height,
+        "Save must stay above the bottom of the window: {:?} of {:?}",
+        layout.save.bottom(),
+        viewport.height
+    );
+
+    release(cx, &view);
+}
+
 #[gpui::test]
 fn network_editor_shows_rpc_endpoints_as_a_multiline_field(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);

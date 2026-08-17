@@ -894,8 +894,8 @@ fn embedded_suisse_fonts_are_true_type_and_name_both_application_families() {
 }
 
 #[test]
-fn the_network_editor_never_runs_the_height_of_the_window() {
-    for height in [600.0, 900.0, 1440.0, 2160.0] {
+fn the_network_editor_stops_an_inset_short_of_both_edges() {
+    for height in [420.0, 600.0, 900.0, 1440.0, 2160.0] {
         let viewport = gpui::size(px(1400.0), px(height));
         let metrics = network_editor_metrics(viewport);
 
@@ -904,35 +904,35 @@ fn the_network_editor_never_runs_the_height_of_the_window() {
             "the dialog must not start at the top edge in a {height}px window"
         );
         assert!(
-            metrics.top + metrics.height < viewport.height,
+            metrics.top + metrics.max_height < viewport.height,
             "the dialog must end above the bottom edge in a {height}px window: \
              {:?} + {:?}",
             metrics.top,
-            metrics.height
+            metrics.max_height
         );
-        assert!(
-            metrics.height <= MAX_NETWORK_EDITOR_HEIGHT,
-            "a taller window must not make a taller dialog: {:?}",
-            metrics.height
-        );
-        assert!(
-            metrics.form_height < metrics.height,
-            "the form must leave room for the title and the footer: {:?} of {:?}",
-            metrics.form_height,
-            metrics.height
+        assert_eq!(
+            viewport.height - (metrics.top + metrics.max_height),
+            metrics.top,
+            "what is left under the dialog must match the inset above it in a \
+             {height}px window"
         );
     }
 }
 
 #[test]
-fn a_short_window_still_fits_the_whole_network_editor() {
-    // The cap must not become a floor: on a window shorter than the cap the
-    // dialog goes back to shrinking, which is what keeps the footer on screen.
-    let viewport = gpui::size(px(1400.0), px(420.0));
-    let metrics = network_editor_metrics(viewport);
+fn a_taller_window_lets_the_network_editor_grow() {
+    // The ceiling is the window, not a number: whatever height the form comes
+    // to, a display with the room for it must be allowed to show it.
+    let short = network_editor_metrics(gpui::size(px(1400.0), px(900.0)));
+    let tall = network_editor_metrics(gpui::size(px(1400.0), px(2160.0)));
 
-    assert!(metrics.height < MAX_NETWORK_EDITOR_HEIGHT);
-    assert!(metrics.top + metrics.height <= viewport.height);
+    assert!(
+        tall.max_height > short.max_height + px(1000.0),
+        "a window 1260px taller must raise the ceiling by about as much: \
+         {:?} against {:?}",
+        tall.max_height,
+        short.max_height
+    );
 }
 
 #[test]

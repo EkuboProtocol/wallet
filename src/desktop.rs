@@ -52,7 +52,7 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonGroup, ButtonVariant, ButtonVariants},
     collapsible::Collapsible,
-    dialog::{DialogButtonProps, DialogFooter},
+    dialog::{Dialog, DialogButtonProps, DialogFooter},
     form::{field, v_form},
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
@@ -955,15 +955,11 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&Leg
 /// rather than the pane keeps the rows where the platform puts them.
 const PROSE_MEASURE: gpui::Pixels = px(520.0);
 
-/// The tallest the add/edit network dialog may grow, however tall the window is.
-const MAX_NETWORK_EDITOR_HEIGHT: gpui::Pixels = px(640.0);
-
-/// Where the add/edit network dialog sits, and how much of it is the form.
+/// Where the add/edit network dialog sits, and how tall it may grow.
 struct NetworkEditorMetrics {
     width: gpui::Pixels,
     top: gpui::Pixels,
-    height: gpui::Pixels,
-    form_height: gpui::Pixels,
+    max_height: gpui::Pixels,
 }
 
 /// Size the network editor against the window it opens in.
@@ -975,26 +971,22 @@ struct NetworkEditorMetrics {
 /// the top and subtracting the inset twice makes the cap real: the dialog stops
 /// inside the window, the footer stays put, and the form scrolls within it.
 ///
-/// [`MAX_NETWORK_EDITOR_HEIGHT`] then keeps it off both edges of a tall window,
-/// where a modal running the full height reads as a page and leaves nothing of
-/// the wallet behind it to say otherwise. The form is longer than that on any
-/// window, so it scrolls either way and the extra height bought nothing but a
-/// taller dialog. What is left over is split above and below rather than left
-/// under it, so the dialog sits in the window instead of hanging from the top.
+/// [`NetworkEditorMetrics::max_height`] is a ceiling and nothing else. The
+/// dialog is as tall as its form and stops growing an inset short of the
+/// bottom of the window, so a window tall enough to hold the whole form holds
+/// it without a scrollbar, and a window that is not scrolls the form inside a
+/// dialog that still ends on screen. A fixed height did neither: it was too
+/// short to ever show the whole form on a large display and it left a short
+/// form padded out to a size nothing had asked for.
 fn network_editor_metrics(viewport: gpui::Size<gpui::Pixels>) -> NetworkEditorMetrics {
     // Preserve breathing room where possible without ever making the modal
     // larger than the window that contains it.
     let horizontal_inset = viewport.width.min(px(32.0));
     let vertical_inset = (viewport.height / 8.0).min(px(24.0));
-    let height = (viewport.height - vertical_inset * 2.0)
-        .max(px(120.0))
-        .min(MAX_NETWORK_EDITOR_HEIGHT);
     NetworkEditorMetrics {
         width: (viewport.width - horizontal_inset).min(px(760.0)),
-        top: ((viewport.height - height) / 2.0).max(vertical_inset),
-        height,
-        // The title bar and the footer take the rest of the dialog.
-        form_height: (height - px(180.0)).max(px(100.0)),
+        top: vertical_inset,
+        max_height: (viewport.height - vertical_inset * 2.0).max(px(120.0)),
     }
 }
 
@@ -6730,73 +6722,118 @@ impl WalletWindow {
             }
             let view = cx.entity().downgrade();
             window.open_dialog(cx, move |dialog, window, cx| {
-                let Some(entity) = view.upgrade() else {
-                    return dialog.title("Network").child("Network form unavailable.");
-                };
-                let metrics = network_editor_metrics(window.viewport_size());
-                let (busy, editing, form, footer, scroll_handle, overflow_indicator) = {
-                    let wallet = entity.read(cx);
-                    (
-                        wallet.network_editor_busy,
-                        wallet.network_editor_original.is_some(),
-                        wallet.render_network_editor_form(&view, cx),
-                        wallet.render_network_editor_footer(&view),
-                        wallet.network_editor_scroll_handle.clone(),
-                        wallet.network_editor_overflow_indicator.element(),
-                    )
-                };
-                let on_close_view = view.clone();
-                let on_ok_view = view.clone();
-                dialog
-                    .w(metrics.width)
-                    .max_w(metrics.width)
-                    .margin_top(metrics.top)
-                    .max_h(metrics.height)
-                    .title(if editing {
-                        "Edit network"
-                    } else {
-                        "Add custom network"
-                    })
-                    .overlay_closable(!busy)
-                    .keyboard(!busy)
-                    .close_button(!busy)
-                    // Enter in a single-line input propagates to the dialog,
-                    // whose default confirmation closes it. That discarded a
-                    // filled-in form. Route it to the same save the footer
-                    // runs and never let it close the dialog itself: the save
-                    // task closes on success and leaves it open on failure so
-                    // the field errors are still on screen.
-                    .on_ok(move |_, _, cx| {
-                        let _ = on_ok_view.update(cx, |view, cx| {
-                            view.save_network_editor(cx);
-                        });
-                        false
-                    })
-                    .on_close(move |_, _, cx| {
-                        let _ = on_close_view.update(cx, |view, cx| {
-                            view.close_network_editor(cx);
-                        });
-                    })
-                    .child(
-                        div()
-                            .relative()
-                            .w_full()
-                            .h(metrics.form_height)
-                            .min_h_0()
-                            .child(
-                                div()
-                                    .id("network-editor-scroll")
-                                    .size_full()
-                                    .track_scroll(&scroll_handle)
-                                    .overflow_y_scroll()
-                                    .child(form),
-                            )
-                            .child(overflow_indicator),
-                    )
-                    .footer(footer)
+                Self::build_network_editor_dialog(dialog, &view, window, cx)
             });
             focus.update(cx, |input, cx| input.focus(window, cx));
         });
+    }
+
+    /// Lay the network editor into the dialog the component library hands it.
+    ///
+    /// Named rather than written inline in the `open_dialog` builder so a
+    /// render test can draw the dialog itself. It cannot open one: `Root`
+    /// installs a macOS hit-test forwarder over the platform window, which a
+    /// test window does not have, so a test that opened the dialog the way a
+    /// click does would abort before it drew anything.
+    fn build_network_editor_dialog(
+        dialog: Dialog,
+        view: &WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Dialog {
+        let view = view.clone();
+        let Some(entity) = view.upgrade() else {
+            return dialog.title("Network").child("Network form unavailable.");
+        };
+        let metrics = network_editor_metrics(window.viewport_size());
+        let (busy, editing, footer) = {
+            let wallet = entity.read(cx);
+            (
+                wallet.network_editor_busy,
+                wallet.network_editor_original.is_some(),
+                wallet.render_network_editor_footer(&view),
+            )
+        };
+        let on_close_view = view.clone();
+        let on_ok_view = view.clone();
+        dialog
+            .w(metrics.width)
+            .max_w(metrics.width)
+            .margin_top(metrics.top)
+            .max_h(metrics.max_height)
+            .title(if editing {
+                "Edit network"
+            } else {
+                "Add custom network"
+            })
+            .overlay_closable(!busy)
+            .keyboard(!busy)
+            .close_button(!busy)
+            // Enter in a single-line input propagates to the dialog,
+            // whose default confirmation closes it. That discarded a
+            // filled-in form. Route it to the same save the footer
+            // runs and never let it close the dialog itself: the save
+            // task closes on success and leaves it open on failure so
+            // the field errors are still on screen.
+            .on_ok(move |_, _, cx| {
+                let _ = on_ok_view.update(cx, |view, cx| {
+                    view.save_network_editor(cx);
+                });
+                false
+            })
+            .on_close(move |_, _, cx| {
+                let _ = on_close_view.update(cx, |view, cx| {
+                    view.close_network_editor(cx);
+                });
+            })
+            // `content` rather than `child`. A dialog's children are laid
+            // into a scroll area of the library's own, which refuses to
+            // shrink and scrolls the form under this dialog's footer
+            // instead. `content` is a plain flex child, so the form's
+            // height is the dialog's height until `max_height` stops it
+            // and then, being allowed to shrink, the form gives the rest
+            // back and scrolls in the space it has.
+            .content({
+                let view = view.clone();
+                move |content, _, cx| {
+                    let Some(entity) = view.upgrade() else {
+                        return content;
+                    };
+                    let wallet = entity.read(cx);
+                    // Without `min_h_0` the content container's automatic
+                    // minimum height is its content's, and that is a floor no
+                    // shrinking gets under: the form kept its full height and
+                    // ran under the footer instead of scrolling.
+                    content.min_h_0().child(
+                        // No height of its own, and no `flex_1` either: a
+                        // flex basis of zero, which is what `flex_1` sets,
+                        // would tell the dialog its body is nothing and
+                        // collapse it to the minimum.
+                        div()
+                            .relative()
+                            .w_full()
+                            .flex_shrink_1()
+                            .min_h_0()
+                            .debug_selector(|| "network-editor-body".to_owned())
+                            .child(
+                                // `w_full` and not `size_full`: a height
+                                // of 100% against a body that has not been
+                                // given one measures zero, which takes the
+                                // form's height out of the dialog's. Left
+                                // to stretch, this fills whatever height
+                                // the body ends up with.
+                                div()
+                                    .id("network-editor-scroll")
+                                    .w_full()
+                                    .track_scroll(&wallet.network_editor_scroll_handle)
+                                    .overflow_y_scroll()
+                                    .child(wallet.render_network_editor_form(&view, cx)),
+                            )
+                            .child(wallet.network_editor_overflow_indicator.element()),
+                    )
+                }
+            })
+            .footer(footer)
     }
 
     fn set_network_editor_strategy(&mut self, strategy: RpcStrategy, cx: &mut Context<Self>) {
@@ -11572,6 +11609,7 @@ impl WalletWindow {
             )
             .child(
                 app_button("save-guided-network")
+                    .debug_selector(|| "network-editor-save".to_owned())
                     .label(if busy { "Saving…" } else { "Save network" })
                     .primary()
                     .loading(busy)
