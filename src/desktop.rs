@@ -7037,27 +7037,50 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.network_action_busy.remove(&action_name);
-                let changed = result.is_ok();
-                if let Err(error) = result {
-                    view.network_action_errors.insert(
-                        action_name,
-                        format!("Could not update network: {error:#}").into(),
-                    );
-                }
-                if changed {
-                    view.invalidate_portfolio();
-                    // The cards are drawn from the snapshot, and this write
-                    // raises no domain event, so nothing else was going to
-                    // reload it: the network the reader had just switched off
-                    // went on being listed under Enabled until some unrelated
-                    // refresh happened by.
-                    view.reload_desktop_snapshot(cx);
+                match result {
+                    Ok(updated) => {
+                        // The write publishes `ConfigurationChanged`, so a
+                        // reload is already on its way — but it is a capture of
+                        // everything the wallet knows, and until it lands the
+                        // page is drawing from a snapshot taken before the
+                        // toggle. The card came out of its busy state saying
+                        // Enabled about a network that had just been switched
+                        // off. The one row that changed is known here, so it is
+                        // written into the cached snapshot now and the reload
+                        // reconciles the rest whenever it arrives.
+                        view.apply_network_update(updated);
+                        view.invalidate_portfolio();
+                    }
+                    Err(error) => {
+                        view.network_action_errors.insert(
+                            action_name,
+                            format!("Could not update network: {error:#}").into(),
+                        );
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    /// Write one network back into the snapshot the pages draw from.
+    ///
+    /// Networks are keyed by name — the same key `network_action_busy` uses —
+    /// so a rename is a different network here and simply finds no row, which
+    /// leaves the reload to do the work.
+    fn apply_network_update(&mut self, updated: NetworkConfig) {
+        let Some(snapshot) = self.desktop_snapshot.as_mut() else {
+            return;
+        };
+        if let Ok(networks) = Arc::make_mut(snapshot).networks.as_mut()
+            && let Some(slot) = networks
+                .iter_mut()
+                .find(|network| network.name == updated.name)
+        {
+            *slot = updated;
+        }
     }
 
     fn accept_network_proposal(&mut self, proposal: NetworkConfig, cx: &mut Context<Self>) {

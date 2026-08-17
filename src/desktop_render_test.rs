@@ -878,7 +878,6 @@ fn disabling_a_network_moves_the_card_out_of_enabled(cx: &mut gpui::TestAppConte
             .clone()
     });
     assert!(!ethereum.disabled, "Ethereum starts enabled");
-    let before = cx.update_entity(&view, |wallet, _| wallet.desktop_snapshot_generation);
 
     cx.update_entity(&view, |wallet, cx| {
         wallet.set_network_disabled(ethereum.clone(), true, cx);
@@ -893,16 +892,10 @@ fn disabling_a_network_moves_the_card_out_of_enabled(cx: &mut gpui::TestAppConte
         }
     }
 
-    // The page draws its cards from the snapshot, so a write that does not
-    // reload it is a network that goes on being listed under Enabled after the
-    // reader switched it off — until something unrelated refreshes and it
-    // silently corrects itself.
-    let after = cx.update_entity(&view, |wallet, _| wallet.desktop_snapshot_generation);
-    assert_ne!(
-        after, before,
-        "switching a network off must reload the snapshot the page draws from"
-    );
-    settle_snapshot(cx, &view);
+    // Asserted the moment the action is done and before any capture is waited
+    // on, because that is the moment the reader is looking at: the card leaves
+    // its busy state here, and a snapshot still describing the network as
+    // enabled is a card that says Enabled about a network that is not.
     assert!(
         cx.update_entity(&view, |wallet, _| {
             wallet.cached_networks().is_ok_and(|networks| {
@@ -911,7 +904,9 @@ fn disabling_a_network_moves_the_card_out_of_enabled(cx: &mut gpui::TestAppConte
                     .any(|network| network.chain_id == 1 && network.disabled)
             })
         }),
-        "the reloaded snapshot must show the network as disabled"
+        "the snapshot the networks page draws from must show the network as \
+         disabled as soon as the write is done, without waiting on a capture \
+         of everything else"
     );
     draw(cx, window, &view);
 
