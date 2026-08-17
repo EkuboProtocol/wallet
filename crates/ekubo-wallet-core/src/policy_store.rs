@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -366,7 +366,7 @@ impl PolicyStore {
                 }
                 SCHEMA_VERSION
             }
-            Some(version) => version,
+            Some(version) => migrate(&connection, version)?,
         };
         ensure!(
             version == SCHEMA_VERSION,
@@ -1572,6 +1572,66 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
     Ok(Some(version))
 }
 
+/// One step from the schema version below it to the version it names.
+///
+/// Every step is additive — a new table, a new index, a new column with a
+/// default — and that is a rule rather than a coincidence of the steps written
+/// so far. A migration that dropped or rewrote a column would be a migration
+/// that can lose signing history or, worse, silently reinterpret it, on a
+/// database whose only copy is the owner's. Anything genuinely destructive
+/// belongs in an explicit, owner-visible operation, not in a startup path that
+/// runs before the window opens.
+struct Migration {
+    to_version: i64,
+    statements: &'static [&'static str],
+}
+
+/// The ordered path from any schema this build can upgrade to the current one.
+///
+/// Before this existed, a version other than the current one was refused
+/// outright, which is the correct answer for a *newer* database — this build
+/// cannot know what a later schema means — and the wrong one for an older
+/// database, where refusing bricks a wallet whose keys are fine.
+const MIGRATIONS: &[Migration] = &[Migration {
+    to_version: 4,
+    statements: &[AUTOMATIONS_TABLE, AUTOMATIONS_WALLET_INDEX],
+}];
+
+/// Brings an existing database up to [`SCHEMA_VERSION`], returning the version
+/// it ends at.
+///
+/// A newer database is returned untouched for the caller's check to refuse: it
+/// is not this build's to interpret, and writing to it would be worse than
+/// failing to open it. Each step commits with its own version bump, so an
+/// interruption between two steps leaves a database that is consistently at the
+/// earlier version and resumes from there on the next start.
+fn migrate(connection: &Connection, from_version: i64) -> Result<i64> {
+    let mut version = from_version;
+    for migration in MIGRATIONS {
+        if migration.to_version <= version {
+            continue;
+        }
+        ensure!(
+            migration.to_version == version + 1,
+            "no migration path from policy database schema {version}"
+        );
+        let record_version = format!(
+            "UPDATE schema_metadata SET version = {} WHERE singleton = 1",
+            migration.to_version
+        );
+        let mut statements = migration.statements.to_vec();
+        statements.push(record_version.as_str());
+        run_transaction(connection, &statements).with_context(|| {
+            format!(
+                "failed to migrate the policy database from schema {version} to {}",
+                migration.to_version
+            )
+        })?;
+        version = migration.to_version;
+    }
+    Ok(version)
+}
+
 /// Creates the complete current schema in one transaction on an empty
 /// database. Every statement runs individually: passing one multi-statement
 /// string to `execute_batch` overflows the stack on Windows against the
@@ -1885,10 +1945,64 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
              ) STRICT",
             TOKEN_PROPOSALS_TABLE,
             NETWORK_PROPOSALS_TABLE,
+            AUTOMATIONS_TABLE,
+            AUTOMATIONS_WALLET_INDEX,
             record_version.as_str(),
         ],
     )
 }
+
+/// Owner-installed bytecode the scheduler polls, and the bookkeeping one tick
+/// leaves behind.
+///
+/// `policy_revision` is the load-bearing column. An automation is authorized
+/// against the policy that was active when the owner installed or relinked it,
+/// and a tick reads this before it reads anything else: if the wallet's current
+/// revision differs, the automation moves to `awaiting_relink` and does not
+/// run. Send-time policy evaluation cannot replace that check, because it
+/// answers a different question. It says whether a call may proceed; this says
+/// whether the owner meant this job to keep running under a policy they have
+/// since replaced. Without it, widening a policy for an unrelated reason
+/// silently re-arms every automation that policy had previously stopped.
+///
+/// `bytecode` is a `BLOB` for the same reason every other byte string here is:
+/// a column of bytes is bytes, where hex `TEXT` would be a claim the schema
+/// cannot check. It is bounded by `automation::MAX_BYTECODE_BYTES` before it
+/// arrives; the CHECK here restates the floor, not the ceiling, because a
+/// limit that lives in two places drifts.
+///
+/// No deadline column and no time-derived state, matching every other table:
+/// `last_tick_at` records what happened, and nothing about whether an
+/// automation may run is decided by reading this machine's clock. The schedule
+/// picks *when* the scheduler looks; the policy decides what it may do.
+const AUTOMATIONS_TABLE: &str = "CREATE TABLE automations (
+     automation_id BLOB PRIMARY KEY NOT NULL CHECK (length(automation_id) = 16),
+     wallet_instance_id TEXT NOT NULL CHECK (length(wallet_instance_id) = 36),
+     wallet_id TEXT NOT NULL,
+     wallet_address TEXT NOT NULL,
+     chain_id INTEGER NOT NULL CHECK (chain_id > 0),
+     name TEXT NOT NULL CHECK (length(name) > 0),
+     bytecode BLOB NOT NULL CHECK (length(bytecode) > 0),
+     config BLOB NOT NULL,
+     cron_expression TEXT NOT NULL CHECK (length(cron_expression) > 0),
+     policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+     state TEXT NOT NULL CHECK (state IN ('enabled', 'disabled', 'awaiting_relink')),
+     stopped_reason TEXT,
+     consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+     last_tick_at INTEGER,
+     last_outcome TEXT,
+     created_at INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL,
+     -- An enabled automation is one nothing has stopped, so it carries no
+     -- reason. Anything stopped carries one, because 'it is not running and
+     -- the wallet will not say why' is the state this feature most has to
+     -- avoid.
+     CHECK ((state = 'enabled') = (stopped_reason IS NULL)),
+     FOREIGN KEY (wallet_instance_id) REFERENCES wallet_instances(instance_id)
+ ) STRICT";
+
+const AUTOMATIONS_WALLET_INDEX: &str = "CREATE INDEX automations_wallet_chain
+     ON automations(wallet_instance_id, chain_id)";
 
 /// Network profiles an agent has suggested, held apart from active configuration
 /// until the owner confirms them.

@@ -15,6 +15,7 @@ pub mod agent_authority;
 pub mod approval;
 pub mod approval_summary;
 pub mod automation;
+pub mod automation_store;
 pub mod chain_client;
 pub mod clear_signing;
 pub mod config;
