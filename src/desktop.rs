@@ -43,11 +43,11 @@ use gpui::{
     Anchor, AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity,
     FocusHandle, HitboxBehavior, Interactivity, KeyBinding, ListAlignment,
     ListState as VariableListState, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
-    Pixels, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions,
-    anchored, canvas, deferred, div, fill, font, img, list as variable_list, point, prelude::*, px,
-    size, uniform_list,
+    Pixels, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, anchored, canvas,
+    deferred, div, fill, font, img, list as variable_list, point, prelude::*, px, size,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -849,18 +849,6 @@ fn selectable_error_alert(id: impl Into<SharedString>, message: impl Into<Shared
     let id = id.into();
     let message = message.into();
     Alert::error(
-        id.clone(),
-        selectable_text(format!("{id}-message"), &message),
-    )
-}
-
-fn selectable_warning_alert(
-    id: impl Into<SharedString>,
-    message: impl Into<SharedString>,
-) -> Alert {
-    let id = id.into();
-    let message = message.into();
-    Alert::warning(
         id.clone(),
         selectable_text(format!("{id}-message"), &message),
     )
@@ -1795,7 +1783,6 @@ pub struct WalletWindow {
     portfolio_clock_task: Option<Task<()>>,
     route_scroll_handle: ScrollHandle,
     route_overflow_indicator: ScrollOverflowIndicator,
-    policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_sessions: Vec<SessionSummary>,
@@ -4562,7 +4549,6 @@ impl WalletWindow {
             portfolio_account_index: 0,
             portfolio_refreshed_at: BTreeMap::new(),
             portfolio_clock_task: None,
-            policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             route_scroll_handle,
             route_overflow_indicator,
             modal_focus: cx.focus_handle(),
@@ -6174,7 +6160,6 @@ impl WalletWindow {
                             validation: None,
                         });
                         self.policy_action_error = None;
-                        self.policy_editor_anchor.scroll_to(window, cx);
                     }
                     Err(error) => {
                         self.policy_action_error =
@@ -10742,7 +10727,7 @@ impl WalletWindow {
     }
 
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut content = div()
+        let content = div()
             .debug_selector(|| "policies-content".to_owned())
             .w_full()
             .min_w_0()
@@ -10776,412 +10761,22 @@ impl WalletWindow {
             ));
         }
 
-        // The account selector lives in the fixed page header, so the body is
-        // only the policy for whichever account it names.
-        let (Some(editor), Some(input)) =
-            (self.policy_editor.as_ref(), self.policy_json_input.as_ref())
-        else {
-            return content.child(
-                div()
-                    .p_5()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(
-                        "Select an account to inspect its exact policy document.",
-                    )),
-            );
-        };
-
-        content = content.child(
-            h_flex()
-                .id("policy-agent-tip")
-                .debug_selector(|| "policy-agent-tip".to_owned())
-                .w_full()
-                .min_w_0()
-                .flex_shrink_0()
-                .gap_3()
-                .p_3()
-                .rounded(cx.theme().radius)
+        // The account selector lives in the fixed page header, and the editor
+        // itself is a layout of its own: whenever there is a policy to show,
+        // `render_policy_editor` replaces this whole page rather than sitting
+        // inside it. So the only thing left for this route to render is the
+        // state where there is nothing to edit yet.
+        content.child(
+            div()
+                .p_5()
+                .rounded(cx.theme().radius_lg)
                 .border_1()
-                .border_color(cx.theme().info.opacity(0.35))
-                .bg(cx.theme().info.opacity(0.10))
-                .text_sm()
-                .font_medium()
-                .text_color(cx.theme().info)
-                .child(Icon::new(IconName::Info).flex_none())
-                .child(div().min_w_0().child(selectable_label(
-                    "Try asking your connected agent to construct a policy for you",
-                ))),
-        );
-
-        match self.cached_reviews().map(|reviews| {
-            policy_proposal_for_account(&reviews.policy_proposals, &editor.wallet_id)
-        }) {
-            Ok(Some(proposal)) => {
-                let current_result = self.cached_policy(&editor.wallet_id);
-                let current_error = current_result
-                    .as_ref()
-                    .err()
-                    .map(|error| format!("Could not read active policy: {error:#}"));
-                let applicable = current_result
-                    .ok()
-                    .flatten()
-                    .is_some_and(|policy| policy.revision == proposal.source_revision);
-                let review_proposal = proposal.clone();
-                let reject_proposal = proposal.clone();
-                let proposal_card =
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(div().text_sm().child(selectable_text(
-                            format!("policy-proposal-rationale-{}", proposal.wallet_id),
-                            &ekubo_wallet_core::sanitize::terminal_safe_multiline(
-                                &proposal.rationale,
-                            ),
-                        )))
-                        .when(!applicable && current_error.is_none(), |card| {
-                            card.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(selectable_label("Superseded by a policy change")),
-                            )
-                        })
-                        .when_some(current_error, |card, error| {
-                            card.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(selectable_label(error)),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_2()
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "review-policy-proposal-{}",
-                                        proposal.wallet_id
-                                    )))
-                                    .label("Review in editor")
-                                    .primary()
-                                    .disabled(!applicable)
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.open_policy_proposal(
-                                            review_proposal.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                                )
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "reject-policy-proposal-{}",
-                                        proposal.wallet_id
-                                    )))
-                                    .label("Reject proposal")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.reject_policy_proposal(&reject_proposal, cx);
-                                    })),
-                                ),
-                        );
-                content = content.child(
-                    GroupBox::new()
-                        .id("policy-proposal")
-                        .title("Agent proposal")
-                        .child(proposal_card),
-                );
-            }
-            Ok(None) => {}
-            Err(error) => {
-                content = content.child(selectable_error_alert(
-                    "policy-proposal-error",
-                    format!("Policy proposal unavailable: {error:#}"),
-                ));
-            }
-        }
-
-        let current_document = input.read(cx).value();
-        let allow_anything_draft = serde_json::from_str(current_document.as_ref())
-            .ok()
-            .and_then(|value| WalletPolicy::parse(value).ok())
-            .is_some_and(|policy| policy == WalletPolicy::allow_anything());
-        let validated = editor
-            .validation
-            .as_ref()
-            .and_then(|result| result.as_ref().ok());
-        let reviewed_exact_document =
-            validated.is_some_and(|review| current_document.as_ref() == review.document.as_str());
-        let mut editor_panel = div()
-            .id("policy-json-editor")
-            .debug_selector(|| "policy-json-editor".to_owned())
-            .anchor_scroll(Some(self.policy_editor_anchor.clone()))
-            .w_full()
-            .min_w_0()
-            .min_h(px(420.0))
-            .flex_shrink_0()
-            .p_4()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .flex()
-            .flex_col()
-            .gap_3()
-            // No account name here: the header already names the account this
-            // document belongs to, and repeating it pushed the policy itself
-            // further down the page.
-            .when(editor.source_revision.is_none(), |panel| {
-                panel.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(selectable_text(
-                            format!("policy-editor-revision-{}", editor.wallet_id),
-                            "No installed policy · signing disabled",
-                        )),
-                )
-            })
-            .when_some(
-                editor
-                    .validation
-                    .as_ref()
-                    .and_then(|validation| validation.as_ref().err().cloned()),
-                |panel, error| {
-                    panel.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(selectable_label(error)),
-                    )
-                },
-            );
-        editor_panel = editor_panel
-            .child(
-                div()
-                    .id("policy-json-editor-input")
-                    .debug_selector(|| "policy-json-editor-input".to_owned())
-                    .w_full()
-                    .min_w_0()
-                    .flex_1()
-                    .min_h(px(320.0))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_sm()
-                            .font_medium()
-                            .child(selectable_label("Policy JSON")),
-                    )
-                    // The input's `h_full` is relative to this remaining-space
-                    // wrapper, not to the column that also contains its label.
-                    // Otherwise the label and gap are added above a 100%-high
-                    // editor and push it through the panel's bottom border.
-                    //
-                    // The viewport is what makes the column floor affordable:
-                    // the control below it may be wider than the panel, and
-                    // this is where that overflow turns into a scroll rather
-                    // than a clip. The editor swallows vertical wheel events
-                    // for its own scrolling but leaves horizontal ones to
-                    // propagate, so the two axes do not fight.
-                    .child(
-                        div()
-                            .id("policy-json-viewport")
-                            .debug_selector(|| "policy-json-viewport".to_owned())
-                            .overflow_x_scroll()
-                            .w_full()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex_1()
-                            .flex()
-                            .child(
-                                div()
-                                    .debug_selector(|| "policy-json-control".to_owned())
-                                    .flex_1()
-                                    .min_w(policy_editor_min_width(cx))
-                                    .min_h_0()
-                                    .h_full()
-                                    .child(
-                                        app_input(input, cx)
-                                            .aria_label("Policy JSON")
-                                            .font_family(MONO_FONT_FAMILY)
-                                            .w_full()
-                                            .min_w_0()
-                                            .h_full(),
-                                    ),
-                            ),
-                    ),
-            )
-            .when(allow_anything_draft, |panel| {
-                panel.child(
-                    div()
-                        .id("policy-unrestricted-warning")
-                        .role(Role::Alert)
-                        .p_3()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().danger)
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
-                )
-            })
-            .child(
-                GroupBox::new()
-                    .id("policy-presets")
-                    .title("Policy presets")
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                app_button("reset-policy-draft")
-                                    .label("Review every transaction")
-                                    .disabled(self.policy_installing)
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.reset_policy_editor(window, cx);
-                                    })),
-                            )
-                            .child(
-                                app_button("disable-signing-policy-draft")
-                                    .label("Disable transaction signing")
-                                    .disabled(self.policy_installing)
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.apply_disable_signing_policy(window, cx);
-                                    })),
-                            )
-                            .child(
-                                app_button("allow-anything-policy-draft")
-                                    .icon(IconName::TriangleAlert)
-                                    .label("Allow anything")
-                                    .disabled(self.policy_installing)
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.apply_allow_anything_policy(window, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .debug_selector(|| "policy-preview-workflow".to_owned())
-                    .w_full()
-                    .min_w_0()
-                    .child(
-                        GroupBox::new()
-                            .id("policy-preview-workflow")
-                            .title("Review changes")
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .child(selectable_label("Preview and review the computed permission changes before installation. Install remains unavailable until the preview matches this exact JSON document.")),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_label(match editor.validation.as_ref() {
-                                        Some(Ok(_)) if reviewed_exact_document => {
-                                            "The computed permission changes below match this draft."
-                                        }
-                                        Some(Ok(_)) => {
-                                            "This draft changed after its last preview. Refresh the computed changes."
-                                        }
-                                        Some(Err(_)) => {
-                                            "Fix the JSON validation error, then preview its permission changes."
-                                        }
-                                        None => "Review the computed permission changes before you can install this policy.",
-                                    })),
-                            )
-                            .child(
-                                app_button("validate-policy-draft")
-                                    .self_start()
-                                    .label(if reviewed_exact_document {
-                                        "Refresh preview"
-                                    } else {
-                                        "Preview changes"
-                                    })
-                                    .when(!reviewed_exact_document, ButtonVariants::primary)
-                                    .disabled(self.policy_installing)
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.validate_policy_editor(window, cx);
-                                    })),
-                            ),
-                    ),
-            );
-        content = content.child(editor_panel);
-
-        match editor.validation.as_ref() {
-            Some(Ok(review)) if reviewed_exact_document => {
-                let mut changes = div().flex().flex_col().gap_2();
-                for (index, line) in review.diff.iter().enumerate() {
-                    changes = changes.child(
-                        div()
-                            .id(SharedString::from(format!("policy-diff-{index}")))
-                            .p_2()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().secondary)
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_sm()
-                            .child(selectable_text(
-                                ("policy-diff-line", index),
-                                line,
-                            )),
-                    );
-                }
-                content.child(
-                    div()
-                        .debug_selector(|| "policy-permission-diff".to_owned())
-                        .w_full()
-                        .min_w_0()
-                        // This card contributes its complete intrinsic height to
-                        // the route scroller. Letting the flex column shrink it
-                        // made the child rows overflow while the scrollbar still
-                        // believed the page ended above the install action.
-                        .flex_shrink_0()
-                        .child(
-                            GroupBox::new()
-                                .id("policy-permission-diff")
-                                .title("Computed permission changes")
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(selectable_label("Installing requires operating-system authentication and rechecks the policy revision immediately before the write.")),
-                                )
-                                .child(changes)
-                                .child(
-                                    app_button("install-policy-draft")
-                                        .debug_selector(|| "install-policy-draft".to_owned())
-                                        .self_start()
-                                        .label(if self.policy_installing {
-                                            "Authenticating…"
-                                        } else {
-                                            "Authenticate & install"
-                                        })
-                                        .primary()
-                                        .loading(self.policy_installing)
-                                        .disabled(self.policy_installing)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.install_policy_editor(cx);
-                                        })),
-                                ),
-                        ),
-                )
-            }
-            Some(Ok(_)) => content.child(selectable_warning_alert(
-                "policy-diff-stale",
-                "The document changed after validation. Validate it again to refresh the permission diff.",
-            )),
-            Some(Err(_)) | None => content,
-        }
+                .border_color(cx.theme().border)
+                .text_color(cx.theme().muted_foreground)
+                .child(selectable_label(
+                    "Select an account to inspect its exact policy document.",
+                )),
+        )
     }
 
     fn render_legal(&self, cx: &mut Context<Self>) -> gpui::Div {
