@@ -86,3 +86,25 @@ fn the_timeout_only_ever_stops_and_never_authorizes() {
     let sent = record(PendingStatus::Broadcast, moment(30));
     assert!(stuck_reason(&sent, moment(0)).is_none());
 }
+
+#[test]
+fn the_driver_sleeps_until_the_next_fire_time() {
+    let at = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+    let next = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 30).unwrap();
+    assert_eq!(sleep_for(Some(next), at), Duration::from_secs(30));
+}
+
+#[test]
+fn the_driver_never_spins_and_never_sleeps_past_its_ceiling() {
+    // A fire time already past — an automation that has never ticked — must
+    // not become a zero-length sleep and a hot loop.
+    assert_eq!(sleep_for(Some(moment(0)), moment(5)), MIN_SLEEP);
+    // Nothing due at all still wakes within the ceiling, so an automation
+    // installed while the driver sleeps starts within a minute rather than
+    // whenever the last plan happened to expire...
+    assert_eq!(sleep_for(None, moment(0)), MAX_IDLE_SLEEP);
+    // ...and so does a schedule whose next fire is hours away, for the same
+    // reason: the plan can be made stale by an install the driver cannot see.
+    let hours_away = Utc.with_ymd_and_hms(2026, 6, 1, 20, 0, 0).unwrap();
+    assert_eq!(sleep_for(Some(hours_away), moment(0)), MAX_IDLE_SLEEP);
+}

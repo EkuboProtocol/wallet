@@ -37,7 +37,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, TimeDelta, Utc};
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 use uuid::Uuid;
 
 /// How long a tick's transaction may stay unmined before the automation stops.
@@ -429,6 +429,102 @@ fn lock_pending(pending: &Mutex<PendingStore>) -> Result<std::sync::MutexGuard<'
 #[must_use]
 pub fn tick_moment() -> DateTime<Utc> {
     now()
+}
+
+/// The longest the driver sleeps between passes.
+///
+/// A ceiling rather than a period. The driver normally sleeps until the
+/// earliest next fire time it can see, and this bounds how stale that plan may
+/// get: an automation installed, relinked, or removed while the driver sleeps
+/// changes the answer, and waking every minute regardless means a newly
+/// installed hourly job starts within a minute rather than within an hour.
+pub const MAX_IDLE_SLEEP: Duration = Duration::from_mins(1);
+
+/// The shortest the driver sleeps between passes.
+///
+/// A floor on RPC pressure, and the answer to `* * * * * *`: an expression
+/// that fires every second gets polled once a second at most and is otherwise
+/// left to the serialization rule, which will skip most of those ticks anyway
+/// while a send is in flight.
+pub const MIN_SLEEP: Duration = Duration::from_secs(1);
+
+/// How long to wait before the next pass, given when the soonest automation is
+/// scheduled to fire.
+///
+/// Separated from the loop so the arithmetic is testable without a clock: the
+/// loop is a `sleep` and a call, and every decision worth checking is here.
+#[must_use]
+pub fn sleep_for(next_fire: Option<DateTime<Utc>>, at: DateTime<Utc>) -> Duration {
+    let Some(next) = next_fire else {
+        // Nothing scheduled. Wait the ceiling, not forever: an automation
+        // installed while the driver sleeps is not something the last plan
+        // knew about.
+        return MAX_IDLE_SLEEP;
+    };
+    // A fire time already past means something is due now — a just-installed
+    // automation, or a pass that ran long. `to_std` fails on a negative
+    // duration, and treating that failure as "nothing to do" would idle for a
+    // minute over work that is already late.
+    next.signed_duration_since(at)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+        .clamp(MIN_SLEEP, MAX_IDLE_SLEEP)
+}
+
+/// Run every due automation for one wallet and network, forever.
+///
+/// The loop itself is deliberately thin: sleep, run the due ones, hand the
+/// reports to `observe`, repeat. Everything that decides anything is in
+/// [`AutomationScheduler::run_due`], which a test can call directly at a moment
+/// it names.
+///
+/// A pass that fails outright — the policy database is locked, the wallet has
+/// no policy — is reported and slept past rather than ending the loop. The
+/// alternative is a scheduler that dies quietly on a transient error and
+/// leaves every automation stopped with nothing on screen to say so.
+pub async fn drive(
+    scheduler: &AutomationScheduler,
+    config: &ConfigStore,
+    automations: &Mutex<AutomationStore>,
+    pending: &Mutex<PendingStore>,
+    policies: &Mutex<PolicyStore>,
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    mut observe: impl FnMut(Result<Vec<TickReport>>),
+) -> ! {
+    loop {
+        let at = tick_moment();
+        let outcome = scheduler
+            .run_due(config, automations, pending, policies, wallet, network, at)
+            .await;
+        observe(outcome);
+        let next = next_fire_time(automations, wallet, at);
+        tokio::time::sleep(sleep_for(next, at)).await;
+    }
+}
+
+/// The earliest moment any enabled automation of this wallet is next due.
+///
+/// A failure to read is not a failure to schedule: the driver falls back to its
+/// idle ceiling and tries again, because a database that is briefly busy should
+/// cost a wake-up, not the loop.
+fn next_fire_time(
+    automations: &Mutex<AutomationStore>,
+    wallet: &WalletMetadata,
+    at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let installed = lock(automations)
+        .ok()?
+        .list_for_wallet(wallet.instance_id)
+        .ok()?;
+    installed
+        .iter()
+        .filter(|automation| automation.state == crate::automation::AutomationState::Enabled)
+        .filter_map(|automation| match automation.last_tick_at {
+            None => Some(at),
+            Some(last) => automation.schedule.next_after(last),
+        })
+        .min()
 }
 
 #[cfg(test)]
