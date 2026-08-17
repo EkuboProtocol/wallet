@@ -4638,6 +4638,15 @@ impl WalletWindow {
             }));
         }
         if self.portfolio_clock_task.is_none() {
+            // Reopening the window onto the Portfolio tab is an opening too.
+            // Closing it keeps both the route and the balances, and no
+            // navigation happens on the way back in, so without this the tab
+            // would show whatever it held when the window went away until the
+            // user clicked off it and back. This block runs once per window
+            // attach, which is what keeps it from becoming a per-render poll.
+            if self.route == Route::Overview {
+                self.refresh_portfolio_if_stale(cx);
+            }
             self.portfolio_clock_task = Some(cx.spawn(async move |view, cx| {
                 loop {
                     cx.background_executor()

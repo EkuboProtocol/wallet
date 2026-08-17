@@ -1471,6 +1471,37 @@ fn opening_the_portfolio_tab_reads_balances_at_most_once_a_minute(cx: &mut gpui:
 }
 
 #[gpui::test]
+fn reopening_the_window_onto_the_portfolio_tab_reads_stale_balances(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    portfolio_at_rest(cx, &view);
+
+    // A window put away on the Portfolio tab, over balances read an hour ago.
+    // Nothing navigates on the way back in, so the tab's own reopening is the
+    // only thing that can notice they are stale.
+    let generation = cx.update_entity(&view, |wallet, cx| {
+        wallet.portfolio_refreshed_at.insert(
+            "primary".to_owned(),
+            chrono::Utc::now() - chrono::TimeDelta::hours(1),
+        );
+        wallet.set_route(Route::Overview);
+        wallet.release_window_state(cx);
+        wallet.portfolio_generation
+    });
+
+    draw(cx, window, &view);
+
+    cx.read_entity(&view, |wallet, _| {
+        assert_ne!(
+            wallet.portfolio_generation, generation,
+            "reopening the window onto the tab must read balances an hour old"
+        );
+    });
+
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn the_portfolio_refresh_interval_is_kept_per_account(cx: &mut gpui::TestAppContext) {
     let (_directory, view, _window) = wallet(cx);
     settle(cx, &view);
