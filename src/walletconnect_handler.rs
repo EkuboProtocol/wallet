@@ -191,22 +191,36 @@ impl DesktopSession {
         }
     }
 
+    /// The review a dapp connection is decided from.
+    ///
+    /// `account` is `None` for the state the window opens in, before the owner
+    /// has picked one. Everything else in the document — the dapp, the chains,
+    /// the methods, the grants — is the same whichever account is chosen, so
+    /// the blank form is the real review with one answer missing rather than a
+    /// different screen. Only the identity of a document naming an account is
+    /// ever authorized against; the blank one is drawn and nothing else.
     fn proposal_document(
         review_id: uuid::Uuid,
         proposal: &ProposalSummary,
-        account: &ekubo_wallet_core::config::WalletMetadata,
+        account: Option<&ekubo_wallet_core::config::WalletMetadata>,
         scope: &ApprovedScope,
     ) -> ReviewDocument {
         let dapp = DappIdentity::of(&proposal.metadata);
         let mut request = ApprovalRequest::new(
             ApprovalKind::PolicyException,
             "Approve a dapp connection",
-            "Expose this account to the dapp. Signing requests still pass through wallet policy and owner review.",
+            "Expose one of your accounts to the dapp. Signing requests still pass through wallet policy and owner review.",
         )
         .fact("Site", dapp.host_or_unknown())
         .fact("Claimed name", dapp.name.clone().unwrap_or_else(|| "not stated".into()))
-        .fact("Account", &account.id)
-        .fact("Address", &scope.address)
+        .fact("Account", account.map_or("not chosen yet", |account| account.id.as_str()))
+        .fact(
+            "Address",
+            account.map_or_else(
+                || "not chosen yet".to_owned(),
+                |account| account.address.to_checksum(None),
+            ),
+        )
         .section("Granted chains and methods");
         for chain in &scope.chains {
             request = request.fact("Chain", chain);
@@ -822,7 +836,7 @@ impl SessionHandler for DesktopSession {
             })
             .map(|method| (*method).to_owned())
             .collect();
-        let choices = self
+        let choices: Vec<ProposalChoice> = self
             .accounts
             .iter()
             .map(|account| {
@@ -834,11 +848,18 @@ impl SessionHandler for DesktopSession {
                 );
                 ProposalChoice {
                     account: account.clone(),
-                    document: Self::proposal_document(self.id, proposal, account, &scope),
+                    document: Self::proposal_document(self.id, proposal, Some(account), &scope),
                     scope,
                 }
             })
             .collect();
+        // Any choice's scope will do for the blank form: the chains, methods
+        // and grants are identical across accounts, and the one field that is
+        // not — the address — is the one the blank form leaves unanswered.
+        let unselected_document = choices
+            .first()
+            .map(|choice| Self::proposal_document(self.id, proposal, None, &choice.scope))
+            .context("this wallet has no account to expose")?;
         let command = tokio::select! {
             () = self.shutdown.cancelled() => {
                 return Ok(ProposalDecision::Reject {
@@ -846,7 +867,7 @@ impl SessionHandler for DesktopSession {
                     message: "The WalletConnect pairing was disconnected.".into(),
                 });
             }
-            result = self.presenter.review(self.id, choices) => result?,
+            result = self.presenter.review(self.id, unselected_document, choices) => result?,
         };
         if self.shutdown.is_cancelled() {
             return Ok(ProposalDecision::Reject {
@@ -888,7 +909,7 @@ impl SessionHandler for DesktopSession {
                 let fresh_scope =
                     Self::scope_for(&account, fresh_chains, methods, &proposal.requested_grants);
                 let fresh_document =
-                    Self::proposal_document(self.id, proposal, &account, &fresh_scope);
+                    Self::proposal_document(self.id, proposal, Some(&account), &fresh_scope);
                 authorization.verify(&fresh_document.identity, &account.id)?;
                 self.selected.set(index);
                 Ok(ProposalDecision::Approve(fresh_scope))

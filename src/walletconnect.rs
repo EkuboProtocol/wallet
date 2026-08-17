@@ -47,6 +47,15 @@ pub struct SessionSummary {
     pub last_error: Option<String>,
     /// The controller-selected settlement deadline. Peers cannot extend it.
     pub expires_at: Option<i64>,
+    /// Whether the owner has approved this dapp and the session settled.
+    ///
+    /// Everything before that point is a pairing with a stranger: the relay
+    /// carries nothing but a proposal, and the only thing the wallet knows
+    /// about the peer is whatever the proposal will claim. A connection list
+    /// that draws those rows invites the reader to treat "it is in the list"
+    /// as "I let it in". The review window is where a dapp is met; the list is
+    /// what came out of that decision.
+    pub settled: bool,
 }
 
 #[derive(Default)]
@@ -81,6 +90,7 @@ impl WalletConnectManager {
             dapp_name: None,
             last_error: None,
             expires_at: None,
+            settled: false,
         };
         self.sessions.insert(
             id,
@@ -99,6 +109,12 @@ impl WalletConnectManager {
         ))
     }
 
+    /// Every session, settled or not.
+    ///
+    /// A caller drawing the connection list keeps only the settled ones. The
+    /// unsettled rows are still returned because something has to know a
+    /// pairing is in flight: the concurrency cap, and the connect button
+    /// waiting to learn what became of the pairing it started.
     #[must_use]
     pub fn sessions(&self) -> Vec<SessionSummary> {
         self.sessions
@@ -132,6 +148,12 @@ impl WalletConnectManager {
         expires_at: Option<i64>,
     ) {
         if let Some(session) = self.sessions.get_mut(&id) {
+            // `Connected` is only ever reported for a session the owner
+            // approved and the protocol then settled, so it is what promotes a
+            // pairing into the connection list. Nothing demotes it: a settled
+            // dapp that later fails or disconnects stays visible, because by
+            // then the owner has something to act on.
+            session.summary.settled |= status == SessionStatus::Connected;
             session.summary.status = status;
             if dapp_name.is_some() {
                 session.summary.dapp_name = dapp_name;
@@ -143,11 +165,24 @@ impl WalletConnectManager {
         }
     }
 
+    /// Record that a session ended badly.
+    ///
+    /// A settled session keeps its row so the owner can read the error beside
+    /// the dapp it belongs to. One that failed before it ever settled has no
+    /// row to keep — it was never in the list — so it is dropped rather than
+    /// left holding a slot against [`MAX_WALLETCONNECT_SESSIONS`] that nothing
+    /// on screen could ever free. The caller reports that failure beside the
+    /// connect button, which is where the owner was waiting for it.
     pub fn fail(&mut self, id: Uuid, error: String) {
-        if let Some(session) = self.sessions.get_mut(&id) {
-            session.summary.last_error = Some(error);
-            session.summary.status = SessionStatus::Disconnecting;
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if !session.summary.settled {
+            self.sessions.remove(&id);
+            return;
         }
+        session.summary.last_error = Some(error);
+        session.summary.status = SessionStatus::Disconnecting;
     }
 
     pub fn finish(&mut self, id: Uuid) {
@@ -163,6 +198,11 @@ pub struct ProposalChoice {
 
 pub struct ProposalPrompt {
     pub session_id: Uuid,
+    /// The same review with the account left blank, for the state the window
+    /// opens in. Drawing one of the `choices` instead would name an account the
+    /// owner has not chosen, on the screen whose entire question is which
+    /// account to expose.
+    pub unselected_document: ReviewDocument,
     pub choices: Vec<ProposalChoice>,
     pub response: oneshot::Sender<ProposalCommand>,
 }
@@ -191,6 +231,7 @@ impl ProposalPresenter {
     pub async fn review(
         &self,
         session_id: Uuid,
+        unselected_document: ReviewDocument,
         choices: Vec<ProposalChoice>,
     ) -> Result<ProposalCommand> {
         ensure!(
@@ -201,6 +242,7 @@ impl ProposalPresenter {
         self.sender
             .send(ProposalPrompt {
                 session_id,
+                unselected_document,
                 choices,
                 response,
             })

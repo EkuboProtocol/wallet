@@ -43,13 +43,27 @@ fn dapp_review_identity_is_stable_for_exactly_the_same_proposal_and_account() {
         proposal.required_methods.clone(),
         &proposal.requested_grants,
     );
-    let first = DesktopSession::proposal_document(review_id, &proposal, &account, &scope);
-    let second = DesktopSession::proposal_document(review_id, &proposal, &account, &scope);
+    let first = DesktopSession::proposal_document(review_id, &proposal, Some(&account), &scope);
+    let second = DesktopSession::proposal_document(review_id, &proposal, Some(&account), &scope);
     assert_eq!(first.identity, second.identity);
+
+    // The form the review window opens in names no account, because the owner
+    // has not chosen one. Drawing the first account's document there would
+    // put an answer in front of the only question this screen asks.
+    let unchosen = DesktopSession::proposal_document(review_id, &proposal, None, &scope);
+    let named: Vec<&str> = unchosen
+        .request
+        .facts
+        .iter()
+        .filter(|fact| fact.label == "Account" || fact.label == "Address")
+        .map(|fact| fact.value.as_str())
+        .collect();
+    assert_eq!(named, ["not chosen yet", "not chosen yet"]);
+    assert_ne!(unchosen.identity, first.identity);
 
     let mut changed = scope;
     changed.chains.push("eip155:10".into());
-    let stale = DesktopSession::proposal_document(review_id, &proposal, &account, &changed);
+    let stale = DesktopSession::proposal_document(review_id, &proposal, Some(&account), &changed);
     assert_ne!(first.identity, stale.identity);
 }
 

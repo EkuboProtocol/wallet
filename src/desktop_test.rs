@@ -1808,3 +1808,74 @@ fn removing_an_account_puts_the_danger_on_the_button_that_destroys_the_key() {
     assert_eq!(transaction.approve, "Authenticate & approve");
     assert_eq!(transaction.reject, "Reject request");
 }
+
+/// A session summary in whichever state a test needs, with the fields it does
+/// not care about left at what `begin_uri` produces.
+fn walletconnect_summary(id: uuid::Uuid, settled: bool) -> SessionSummary {
+    SessionSummary {
+        id,
+        status: if settled {
+            crate::walletconnect::SessionStatus::Connected
+        } else {
+            crate::walletconnect::SessionStatus::AwaitingProposal
+        },
+        active_requests: 0,
+        dapp_name: None,
+        last_error: None,
+        expires_at: None,
+        settled,
+    }
+}
+
+#[test]
+fn the_connect_button_spins_only_while_its_own_pairing_is_still_unsettled() {
+    let pairing = uuid::Uuid::new_v4();
+    let other = uuid::Uuid::new_v4();
+
+    // Still waiting on the dapp: the URI has been spent and a second press
+    // would spend it again, so the button stays busy.
+    assert!(walletconnect_pairing_is_in_flight(
+        &[walletconnect_summary(pairing, false)],
+        pairing
+    ));
+    // Settled — it is a connection now, and the list below draws it.
+    assert!(!walletconnect_pairing_is_in_flight(
+        &[walletconnect_summary(pairing, true)],
+        pairing
+    ));
+    // Failed before settling, so the manager dropped it entirely. A spinner
+    // that outlived this would never stop.
+    assert!(!walletconnect_pairing_is_in_flight(&[], pairing));
+    // Somebody else's unsettled pairing is not this button's business.
+    assert!(!walletconnect_pairing_is_in_flight(
+        &[walletconnect_summary(other, false)],
+        pairing
+    ));
+}
+
+#[test]
+fn a_dapp_connection_cannot_be_approved_before_an_account_is_chosen() {
+    // A connection can go on to propose transactions that policy signs
+    // without a second review, so "which account" is not a question with a
+    // sensible default.
+    let (response, _receiver) = oneshot::channel();
+    assert!(!review_selection_is_complete(Some(
+        &ActiveReviewCompletion::WalletConnect {
+            choices: Vec::new(),
+            selected_account: None,
+            response,
+        }
+    )));
+
+    let (response, _receiver) = oneshot::channel();
+    assert!(review_selection_is_complete(Some(
+        &ActiveReviewCompletion::WalletConnect {
+            choices: Vec::new(),
+            selected_account: Some(0),
+            response,
+        }
+    )));
+
+    // Every other review answers its own question by existing.
+    assert!(review_selection_is_complete(None));
+}
