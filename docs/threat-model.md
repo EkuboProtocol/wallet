@@ -126,7 +126,7 @@ through a trusted channel, and an audit of released bytes and workflow logs.
 
 The signed native package covers the separately bundled MCP helper during
 distribution. The wallet atomically installs a copy at a fixed path in its
-private `0700` per-user directory, replacing it by rename on each launch whose
+private per-user directory (`0700` on Unix), replacing it by rename on each launch whose
 bytes differ, and collects the superseded images. It does not treat the
 helper's hash or code signature as
 authorization: any process already running as the same user can connect to the

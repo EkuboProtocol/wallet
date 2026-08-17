@@ -14598,13 +14598,18 @@ fn close_active_window(_: &CloseWindow, cx: &mut App) {
 
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
-    crate::agent_config::install_bridge_helper()?;
     let config = crate::config::ConfigStore::production()?;
     let (activation_tx, activation_rx) = std::sync::mpsc::channel();
     let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
         InstanceOutcome::Primary(instance) => instance,
         InstanceOutcome::ActivatedExisting => return Ok(()),
     };
+    // Only after winning the instance lock, because the helper now lives at
+    // one fixed path. A second launch of a *different* build would otherwise
+    // overwrite the helper, hand the user off to the running primary, and
+    // exit — leaving every bridge to version-mismatch against a wallet whose
+    // bytes no longer match the installed helper.
+    crate::agent_config::install_bridge_helper()?;
     let data_dir = config.data_dir().to_path_buf();
     let _ = crate::release_check::record_update_diagnostic(&data_dir, "wallet process started");
     let authority = ApplicationAuthority::open(config)?;
