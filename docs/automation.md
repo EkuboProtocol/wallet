@@ -166,6 +166,40 @@ Owners running automations should also set the network's `max_fee_per_gas`
 unreviewed automatic send). It is an existing knob and it is the right one;
 automations add no separate fee cap.
 
+## An automation is bound to a wallet and a policy revision
+
+Every automation records the policy revision that was active when the owner
+installed it. A tick reads the current revision first: if it does not match, the
+automation does not run, and it does not fail either — it moves to
+`awaiting_relink` and waits for the owner to look at it again in the Automations
+tab.
+
+The threat this closes is the one that only appears later. An automation whose
+calls the policy rejects stops, which is correct and visible. But the owner then
+widens the policy for some unrelated reason — a new protocol, a raised limit —
+and under a design that only checks the policy at send time, the stopped
+automation silently becomes live again, now authorized by a rule written for
+something else entirely. Nobody decided that. The policy edit was about the new
+protocol, and its side effect was to re-arm a job the owner may not have thought
+about in weeks.
+
+Binding makes that re-arming an explicit act. Relinking shows the same review as
+the original install — bytecode hash, cron, config, network — against the new
+policy, and rebinds to the current revision. The check is cheap: one comparison
+against `PolicyStore`'s revision at the top of every tick.
+
+This is deliberately stricter than "the policy is re-evaluated at send anyway".
+Send-time evaluation answers "may this call proceed"; the binding answers "did
+the owner intend this job to run under this policy", and no amount of
+per-call checking answers the second question. It is also why the binding is to
+the revision rather than to a hash of the rules an automation happens to touch:
+a narrower rule would be a guess about which edits matter, and the whole point
+is that the owner decides.
+
+An automation is likewise bound to one wallet. It does not follow a key that is
+imported elsewhere, and there is no operation that moves one between wallets —
+install it again if that is what you meant.
+
 ## Serialization
 
 A tick is skipped whenever the automation's own last transaction is still
@@ -212,8 +246,11 @@ does not burn gas in a loop.
 
 Automations live in their own SQLCipher-backed typed store, keyed by wallet and
 chain. Stored fields: name, bytecode, config bytes, cron expression, network,
-wallet, enabled flag, last fire time, next fire time, last result, and the
-reason it was disabled if it was.
+wallet, the bound policy revision, state, last fire time, next fire time, last
+result, and the reason it stopped if it did.
+
+State is one of `enabled`, `disabled` (it failed; the reason says how), or
+`awaiting_relink` (the policy revision moved). Only `enabled` ticks.
 
 An agent may **propose** an automation over MCP; the owner confirms it in the
 Automations tab. No OS challenge: the proposal cannot widen authority past the
