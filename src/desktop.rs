@@ -10415,13 +10415,20 @@ impl WalletWindow {
         // card on the page that is a form, and at the list card's `p_4`/`gap_3`
         // the tab bar, the explanation, the labelled field, and the primary
         // button were all the same distance apart and read as one dense block.
+        //
+        // Filled with the app background rather than `secondary`, the way the
+        // inbox's tabbed panel is: a tab bar over a `secondary` fill reads as a
+        // card sitting on the page, and the list cards below — which really are
+        // cards — then had the same fill as the frame they sat under. Keeping
+        // the frame at page level leaves `secondary` to mean "an item in a
+        // list", which is the distinction the account rows depend on.
         let mut form = div()
             .p_5()
             .pb_6()
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+            .bg(cx.theme().background)
             .flex()
             .flex_col()
             .gap_4()
