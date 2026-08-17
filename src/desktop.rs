@@ -955,6 +955,49 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&Leg
 /// rather than the pane keeps the rows where the platform puts them.
 const PROSE_MEASURE: gpui::Pixels = px(520.0);
 
+/// The tallest the add/edit network dialog may grow, however tall the window is.
+const MAX_NETWORK_EDITOR_HEIGHT: gpui::Pixels = px(640.0);
+
+/// Where the add/edit network dialog sits, and how much of it is the form.
+struct NetworkEditorMetrics {
+    width: gpui::Pixels,
+    top: gpui::Pixels,
+    height: gpui::Pixels,
+    form_height: gpui::Pixels,
+}
+
+/// Size the network editor against the window it opens in.
+///
+/// `Dialog` places its own top at a tenth of the viewport unless it is told
+/// otherwise, so a height capped at the viewport once put the footer — Cancel
+/// and Save — below the bottom of the window, and the body's scroll never
+/// engaged because the dialog was never the thing that ran out of room. Pinning
+/// the top and subtracting the inset twice makes the cap real: the dialog stops
+/// inside the window, the footer stays put, and the form scrolls within it.
+///
+/// [`MAX_NETWORK_EDITOR_HEIGHT`] then keeps it off both edges of a tall window,
+/// where a modal running the full height reads as a page and leaves nothing of
+/// the wallet behind it to say otherwise. The form is longer than that on any
+/// window, so it scrolls either way and the extra height bought nothing but a
+/// taller dialog. What is left over is split above and below rather than left
+/// under it, so the dialog sits in the window instead of hanging from the top.
+fn network_editor_metrics(viewport: gpui::Size<gpui::Pixels>) -> NetworkEditorMetrics {
+    // Preserve breathing room where possible without ever making the modal
+    // larger than the window that contains it.
+    let horizontal_inset = viewport.width.min(px(32.0));
+    let vertical_inset = (viewport.height / 8.0).min(px(24.0));
+    let height = (viewport.height - vertical_inset * 2.0)
+        .max(px(120.0))
+        .min(MAX_NETWORK_EDITOR_HEIGHT);
+    NetworkEditorMetrics {
+        width: (viewport.width - horizontal_inset).min(px(760.0)),
+        top: ((viewport.height - height) / 2.0).max(vertical_inset),
+        height,
+        // The title bar and the footer take the rest of the dialog.
+        form_height: (height - px(180.0)).max(px(100.0)),
+    }
+}
+
 fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
     div().w_full().child(content.title(title))
 }
@@ -3385,12 +3428,28 @@ fn legal_list_reached_end(state: &UniformListScrollHandle, end_rendered: &Atomic
     end_rendered.load(Ordering::Acquire) || state.is_scrolled_to_end() == Some(true)
 }
 
+/// The name the network card shows for a network.
+fn network_display_label(network: &NetworkConfig) -> &str {
+    network.display_name.as_deref().unwrap_or(&network.name)
+}
+
+/// Enabled networks first, then each group alphabetically by the label the card
+/// shows, ignoring case. Chain ID is the tiebreak so two networks that share a
+/// label keep a stable order. Numeric chain-id order was an accident of how the
+/// defaults were written down; nobody scanning this list knows a chain by its
+/// number, and the networks that are actually signed for belong at the top.
 fn networks_for_display(networks: &[NetworkConfig], testnet_mode: bool) -> Vec<&NetworkConfig> {
     let mut networks = networks
         .iter()
         .filter(|network| testnet_mode || !network.testnet)
         .collect::<Vec<_>>();
-    networks.sort_by_key(|network| (network.chain_id, network.name.as_str()));
+    networks.sort_by_cached_key(|network| {
+        (
+            network.disabled,
+            network_display_label(network).to_lowercase(),
+            network.chain_id,
+        )
+    });
     networks
 }
 
@@ -6581,22 +6640,7 @@ impl WalletWindow {
                 let Some(entity) = view.upgrade() else {
                     return dialog.title("Network").child("Network form unavailable.");
                 };
-                let viewport = window.viewport_size();
-                // Preserve breathing room where possible without ever making
-                // the modal larger than the window that contains it.
-                let horizontal_inset = viewport.width.min(px(32.0));
-                let vertical_inset = (viewport.height / 8.0).min(px(24.0));
-                let dialog_width = (viewport.width - horizontal_inset).min(px(760.0));
-                // `Dialog` places its own top at a tenth of the viewport unless
-                // it is told otherwise, so a height capped at the viewport put
-                // the footer — Cancel and Save — below the bottom of the
-                // window, and the body's scroll never engaged because the
-                // dialog was never the thing that ran out of room. Pinning the
-                // top and subtracting both insets makes the cap real: the
-                // dialog stops inside the window, the footer stays put, and the
-                // form scrolls within it.
-                let dialog_height = (viewport.height - vertical_inset * 2.0).max(px(120.0));
-                let form_height = (dialog_height - px(180.0)).max(px(100.0));
+                let metrics = network_editor_metrics(window.viewport_size());
                 let (busy, editing, form, footer, scroll_handle, overflow_indicator) = {
                     let wallet = entity.read(cx);
                     (
@@ -6611,10 +6655,10 @@ impl WalletWindow {
                 let on_close_view = view.clone();
                 let on_ok_view = view.clone();
                 dialog
-                    .w(dialog_width)
-                    .max_w(dialog_width)
-                    .margin_top(vertical_inset)
-                    .max_h(dialog_height)
+                    .w(metrics.width)
+                    .max_w(metrics.width)
+                    .margin_top(metrics.top)
+                    .max_h(metrics.height)
                     .title(if editing {
                         "Edit network"
                     } else {
@@ -6644,7 +6688,7 @@ impl WalletWindow {
                         div()
                             .relative()
                             .w_full()
-                            .h(form_height)
+                            .h(metrics.form_height)
                             .min_h_0()
                             .child(
                                 div()
@@ -11552,150 +11596,174 @@ impl WalletWindow {
                             }),
                         )),
                 ),
-            Ok(networks) => content.children(
-                networks_for_display(networks, self.testnet_mode)
-                    .into_iter()
-                    .map(|network| {
-                        let name = network.name.clone();
-                        let edit = network.clone();
-                        let toggle_network = network.clone();
-                        let disabled = network.disabled;
-                        let busy = self.network_action_busy.contains(&name);
-                        let action_error = self.network_action_errors.get(&name).cloned();
-                        div()
-                            .p_4()
-                            .rounded(cx.theme().radius_lg)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .w_full()
-                                    .justify_between()
-                                    .gap_3()
-                                    .child(
-                                        div().min_w_0().flex_1().flex().flex_col().gap_2().child(
-                                            div()
-                                                .flex()
-                                                .flex_wrap()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .font_semibold()
-                                                        .truncate()
-                                                        .child(selectable_text(
-                                                            format!("network-title-{name}"),
-                                                            network
-                                                                .display_name
-                                                                .as_deref()
-                                                                .unwrap_or(&name),
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(selectable_text(
-                                                            format!("network-metadata-{name}"),
-                                                            &format!(
-                                                                "{} · chain {}{}",
-                                                                name,
-                                                                network.chain_id,
-                                                                if network.testnet {
-                                                                    " · testnet"
-                                                                } else {
-                                                                    ""
-                                                                },
-                                                            ),
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .px_2()
-                                                        .py_0p5()
-                                                        .rounded_full()
-                                                        .border_1()
-                                                        .border_color(if disabled {
-                                                            cx.theme().border
-                                                        } else {
-                                                            cx.theme().primary
-                                                        })
-                                                        .when(!disabled, |badge| {
-                                                            badge.bg(cx.theme().primary)
-                                                        })
-                                                        .text_xs()
-                                                        .text_color(if disabled {
-                                                            cx.theme().muted_foreground
-                                                        } else {
-                                                            cx.theme().primary_foreground
-                                                        })
-                                                        .child(selectable_text(
-                                                            format!("network-status-{name}"),
-                                                            if disabled {
-                                                                "Disabled"
-                                                            } else {
-                                                                "Enabled"
-                                                            },
-                                                        )),
-                                                ),
-                                        ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .flex_none()
+            Ok(networks) => {
+                // Enabled and disabled cards used to run together in one list,
+                // so learning what this wallet will actually sign for meant
+                // reading every badge on the page. They are two sections now,
+                // and the networks in force come first.
+                let (enabled, disabled_networks): (Vec<_>, Vec<_>) =
+                    networks_for_display(networks, self.testnet_mode)
+                        .into_iter()
+                        .partition(|network| !network.disabled);
+                let network_card = |network: &NetworkConfig, cx: &mut Context<Self>| {
+                    let name = network.name.clone();
+                    let edit = network.clone();
+                    let toggle_network = network.clone();
+                    let disabled = network.disabled;
+                    let busy = self.network_action_busy.contains(&name);
+                    let action_error = self.network_action_errors.get(&name).cloned();
+                    div()
+                        .p_4()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div().min_w_0().flex_1().flex().flex_col().gap_2().child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .items_center()
                                             .gap_2()
-                                            .child(accessible_button(
-                                                app_button(SharedString::from(format!(
-                                                    "edit-network-{name}"
-                                                )))
-                                                .icon(Icon::default().path(PENCIL_ICON))
-                                                .label("Edit")
-                                                .tooltip("Edit network")
-                                                .disabled(busy)
-                                                .on_click(cx.listener(
-                                                    move |view, _, window, cx| {
-                                                        cx.stop_propagation();
-                                                        view.edit_network(&edit, window, cx);
-                                                    },
-                                                )),
-                                                "Edit network",
-                                            ))
                                             .child(
-                                                app_button(SharedString::from(format!(
-                                                    "toggle-network-{name}"
-                                                )))
-                                                .label(if busy {
-                                                    "Authenticating…"
-                                                } else if disabled {
-                                                    "Enable"
-                                                } else {
-                                                    "Disable"
-                                                })
-                                                .disabled(busy)
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.set_network_disabled(
-                                                        toggle_network.clone(),
-                                                        !disabled,
-                                                        cx,
-                                                    );
-                                                })),
+                                                div()
+                                                    .min_w_0()
+                                                    .font_semibold()
+                                                    .truncate()
+                                                    .child(selectable_text(
+                                                        format!("network-title-{name}"),
+                                                        network
+                                                            .display_name
+                                                            .as_deref()
+                                                            .unwrap_or(&name),
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(selectable_text(
+                                                        format!("network-metadata-{name}"),
+                                                        &format!(
+                                                            "{} · chain {}{}",
+                                                            name,
+                                                            network.chain_id,
+                                                            if network.testnet {
+                                                                " · testnet"
+                                                            } else {
+                                                                ""
+                                                            },
+                                                        ),
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(if disabled {
+                                                        cx.theme().border
+                                                    } else {
+                                                        cx.theme().primary
+                                                    })
+                                                    .when(!disabled, |badge| {
+                                                        badge.bg(cx.theme().primary)
+                                                    })
+                                                    .text_xs()
+                                                    .text_color(if disabled {
+                                                        cx.theme().muted_foreground
+                                                    } else {
+                                                        cx.theme().primary_foreground
+                                                    })
+                                                    .child(selectable_text(
+                                                        format!("network-status-{name}"),
+                                                        if disabled {
+                                                            "Disabled"
+                                                        } else {
+                                                            "Enabled"
+                                                        },
+                                                    )),
                                             ),
                                     ),
-                            )
-                            .when_some(action_error, |card, error| {
-                                card.child(div().text_sm().text_color(cx.theme().danger).child(
-                                    selectable_text(format!("network-action-error-{name}"), &error),
-                                ))
-                            })
-                    }),
-            ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .flex_none()
+                                        .gap_2()
+                                        .child(accessible_button(
+                                            app_button(SharedString::from(format!(
+                                                "edit-network-{name}"
+                                            )))
+                                            .icon(Icon::default().path(PENCIL_ICON))
+                                            .label("Edit")
+                                            .tooltip("Edit network")
+                                            .disabled(busy)
+                                            .on_click(cx.listener(
+                                                move |view, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    view.edit_network(&edit, window, cx);
+                                                },
+                                            )),
+                                            "Edit network",
+                                        ))
+                                        .child(
+                                            app_button(SharedString::from(format!(
+                                                "toggle-network-{name}"
+                                            )))
+                                            .label(if busy {
+                                                "Authenticating…"
+                                            } else if disabled {
+                                                "Enable"
+                                            } else {
+                                                "Disable"
+                                            })
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.set_network_disabled(
+                                                    toggle_network.clone(),
+                                                    !disabled,
+                                                    cx,
+                                                );
+                                            })),
+                                        ),
+                                ),
+                        )
+                        .when_some(action_error, |card, error| {
+                            card.child(div().text_sm().text_color(cx.theme().danger).child(
+                                selectable_text(format!("network-action-error-{name}"), &error),
+                            ))
+                        })
+            };
+                let mut sections = content;
+                for (id, title, group) in [
+                    ("networks-enabled", "Enabled", enabled),
+                    ("networks-disabled", "Disabled", disabled_networks),
+                ] {
+                    if group.is_empty() {
+                        continue;
+                    }
+                    sections = sections.child(
+                        GroupBox::new().id(id).title(title).children(
+                            group
+                                .into_iter()
+                                .map(|network| network_card(network, cx))
+                                .collect::<Vec<_>>(),
+                        ),
+                    );
+                }
+                sections
+            }
             Err(error) => content.child(selectable_error_alert(
                 "network-list-error",
                 format!("Networks unavailable: {error:#}"),

@@ -894,18 +894,87 @@ fn embedded_suisse_fonts_are_true_type_and_name_both_application_families() {
 }
 
 #[test]
-fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
+fn the_network_editor_never_runs_the_height_of_the_window() {
+    for height in [600.0, 900.0, 1440.0, 2160.0] {
+        let viewport = gpui::size(px(1400.0), px(height));
+        let metrics = network_editor_metrics(viewport);
+
+        assert!(
+            metrics.top > px(0.0),
+            "the dialog must not start at the top edge in a {height}px window"
+        );
+        assert!(
+            metrics.top + metrics.height < viewport.height,
+            "the dialog must end above the bottom edge in a {height}px window: \
+             {:?} + {:?}",
+            metrics.top,
+            metrics.height
+        );
+        assert!(
+            metrics.height <= MAX_NETWORK_EDITOR_HEIGHT,
+            "a taller window must not make a taller dialog: {:?}",
+            metrics.height
+        );
+        assert!(
+            metrics.form_height < metrics.height,
+            "the form must leave room for the title and the footer: {:?} of {:?}",
+            metrics.form_height,
+            metrics.height
+        );
+    }
+}
+
+#[test]
+fn a_short_window_still_fits_the_whole_network_editor() {
+    // The cap must not become a floor: on a window shorter than the cap the
+    // dialog goes back to shrinking, which is what keeps the footer on screen.
+    let viewport = gpui::size(px(1400.0), px(420.0));
+    let metrics = network_editor_metrics(viewport);
+
+    assert!(metrics.height < MAX_NETWORK_EDITOR_HEIGHT);
+    assert!(metrics.top + metrics.height <= viewport.height);
+}
+
+#[test]
+fn networks_list_enabled_first_then_alphabetically_ignoring_case() {
     let mut networks = ekubo_wallet_core::networks::default_networks();
     for network in &mut networks {
         network.disabled = network.chain_id != 42_161;
     }
+    // A byte comparison puts every capital ahead of every lowercase letter, so
+    // these two labels are ordered one way by case and the other way by
+    // alphabet. Only the alphabet may decide it.
+    let mut visible_disabled = networks
+        .iter_mut()
+        .filter(|network| network.disabled && !network.testnet);
+    visible_disabled.next().unwrap().display_name = Some("Zebra network".to_owned());
+    visible_disabled.next().unwrap().display_name = Some("alpha network".to_owned());
     networks.reverse();
 
     let sorted = networks_for_display(&networks, false);
+    let labels = sorted
+        .iter()
+        .map(|network| network_display_label(network).to_owned())
+        .collect::<Vec<_>>();
+
     assert!(
         sorted
             .windows(2)
-            .all(|pair| pair[0].chain_id <= pair[1].chain_id)
+            .all(|pair| pair[0].disabled <= pair[1].disabled),
+        "enabled networks come before disabled ones: {labels:?}"
+    );
+    assert!(
+        sorted.windows(2).all(|pair| {
+            pair[0].disabled != pair[1].disabled
+                || network_display_label(pair[0]).to_lowercase()
+                    <= network_display_label(pair[1]).to_lowercase()
+        }),
+        "each group is alphabetical ignoring case: {labels:?}"
+    );
+    assert!(
+        labels.iter().position(|label| label == "alpha network")
+            < labels.iter().position(|label| label == "Zebra network"),
+        "case does not decide the order: {labels:?}"
     );
 }
 
