@@ -1304,6 +1304,85 @@ fn policy_editor_is_the_only_policy_layout_and_sits_flush_with_navigation(
     release(cx, &view);
 }
 
+#[gpui::test]
+fn policy_json_keeps_its_column_floor_and_overflows_into_a_scroll(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, _| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        let policy = WalletPolicy::require_approval_for_everything();
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(1),
+            current_policy: Some(policy.clone()),
+            history: vec![StoredPolicy {
+                wallet_instance_id: uuid::Uuid::nil(),
+                wallet_id: "primary".into(),
+                wallet_address: alloy::primitives::Address::ZERO,
+                policy,
+                revision: 1,
+                updated_at: chrono::Utc::now(),
+            }],
+            history_selection: Some(0),
+            proposal: None,
+            validation: None,
+        });
+    });
+
+    // Narrow enough that the editor cannot simply take the panel's width. A
+    // window this size is exactly where the old layout folded policy JSON into
+    // unreadable stubs, so it is where the floor has to be measured.
+    let viewport = gpui::Size {
+        width: px(760.0),
+        height: px(900.0),
+    };
+    let (scroll, control) = {
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        // The window has to actually be this narrow. Drawing into a space of
+        // this size is a different claim, and the layout reads the window —
+        // which is what left the first version of this test measuring a
+        // comfortably wide editor and passing for the wrong reason.
+        visual.simulate_resize(viewport);
+        let drawn = view.clone();
+        visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
+            gpui::AnyView::from(drawn).into_any_element()
+        });
+        let scroll = visual
+            .debug_bounds("policy-full-screen-json-viewport")
+            .expect("the policy JSON viewport must be laid out");
+        let control = visual
+            .debug_bounds("policy-full-screen-json-control")
+            .expect("the policy JSON control must be laid out");
+        visual.run_until_parked();
+        (scroll, control)
+    };
+    let floor = cx.update(|cx| policy_editor_min_width(cx));
+
+    assert!(
+        control.size.width >= floor,
+        "the control must hold its column floor in a narrow window: control {control:?}, floor {floor:?}"
+    );
+    assert!(
+        control.size.width > scroll.size.width,
+        "holding the floor must overflow the viewport, which is what turns into \
+         a horizontal scroll: control {control:?}, viewport {scroll:?}"
+    );
+
+    release(cx, &view);
+}
+
 /// A review document with the shape a real one has: a summary, effects, and
 /// exact bytes to disclose.
 fn review_document() -> ReviewDocument {

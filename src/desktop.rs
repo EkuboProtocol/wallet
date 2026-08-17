@@ -43,10 +43,11 @@ use gpui::{
     Anchor, AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity,
     FocusHandle, HitboxBehavior, Interactivity, KeyBinding, ListAlignment,
     ListState as VariableListState, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
-    QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
-    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, anchored, canvas,
-    deferred, div, fill, img, list as variable_list, point, prelude::*, px, size, uniform_list,
+    Pixels, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions,
+    anchored, canvas, deferred, div, fill, font, img, list as variable_list, point, prelude::*, px,
+    size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -491,6 +492,44 @@ fn app_input(state: &Entity<InputState>, cx: &App) -> Input {
     // 44px interaction target; the surface override matches the Figma field
     // fill while leaving the component's focus border intact.
     Input::new(state).large().bg(cx.theme().secondary)
+}
+
+/// Columns of policy JSON that stay on one display line no matter how narrow
+/// the window gets.
+const POLICY_EDITOR_MIN_COLUMNS: f32 = 120.0;
+
+/// Columns of slack added on top of [`POLICY_EDITOR_MIN_COLUMNS`] to cover the
+/// editor's line-number gutter, which it subtracts from its own wrap width.
+/// Five digits is more line numbers than a policy document will ever have.
+const POLICY_EDITOR_GUTTER_COLUMNS: f32 = 5.0;
+
+/// The two fixed margins the code editor takes off its wrap width alongside the
+/// gutter: `LINE_NUMBER_RIGHT_MARGIN` and `RIGHT_MARGIN`, both 10px upstream.
+const POLICY_EDITOR_FIXED_MARGINS: Pixels = px(20.0);
+
+/// The narrowest the policy JSON control is allowed to be laid out.
+///
+/// The code editor soft-wraps at whatever width it is handed, so in a narrow
+/// window a policy folds at a few dozen columns and stops reading as JSON.
+/// Floor the control here and let the pane scroll horizontally underneath,
+/// rather than letting the window dictate how short a line may get.
+///
+/// The floor is on the *text*, so it has to out-cover the chrome the editor
+/// subtracts from its own wrap width before wrapping the remainder.
+fn policy_editor_min_width(cx: &App) -> Pixels {
+    // `app_input` builds every input `.large()`, which resolves to `text_base`
+    // — one rem — and gpui-component pins the window's rem size to the theme
+    // font size. Measuring at that size keeps the floor correct if either moves.
+    let font_size = cx.theme().font_size;
+    let text_system = cx.text_system();
+    let font_id = text_system.resolve_font(&font(MONO_FONT_FAMILY));
+    // Suisse Intl Mono ships embedded, so the measurement only misses if font
+    // loading itself did; 0.6em is the usual advance for a monospace face.
+    let column = text_system
+        .advance(font_id, font_size, '0')
+        .map_or(font_size * 0.6, |advance| advance.width);
+    column * (POLICY_EDITOR_MIN_COLUMNS + POLICY_EDITOR_GUTTER_COLUMNS)
+        + POLICY_EDITOR_FIXED_MARGINS
 }
 
 fn field_error(
@@ -10844,20 +10883,38 @@ impl WalletWindow {
                     // wrapper, not to the column that also contains its label.
                     // Otherwise the label and gap are added above a 100%-high
                     // editor and push it through the panel's bottom border.
+                    //
+                    // The viewport is what makes the column floor affordable:
+                    // the control below it may be wider than the panel, and
+                    // this is where that overflow turns into a scroll rather
+                    // than a clip. The editor swallows vertical wheel events
+                    // for its own scrolling but leaves horizontal ones to
+                    // propagate, so the two axes do not fight.
                     .child(
                         div()
-                            .debug_selector(|| "policy-json-control".to_owned())
+                            .id("policy-json-viewport")
+                            .debug_selector(|| "policy-json-viewport".to_owned())
+                            .overflow_x_scroll()
                             .w_full()
                             .min_w_0()
                             .min_h_0()
                             .flex_1()
+                            .flex()
                             .child(
-                                app_input(input, cx)
-                                    .aria_label("Policy JSON")
-                                    .font_family(MONO_FONT_FAMILY)
-                                    .w_full()
-                                    .min_w_0()
-                                    .h_full(),
+                                div()
+                                    .debug_selector(|| "policy-json-control".to_owned())
+                                    .flex_1()
+                                    .min_w(policy_editor_min_width(cx))
+                                    .min_h_0()
+                                    .h_full()
+                                    .child(
+                                        app_input(input, cx)
+                                            .aria_label("Policy JSON")
+                                            .font_family(MONO_FONT_FAMILY)
+                                            .w_full()
+                                            .min_w_0()
+                                            .h_full(),
+                                    ),
                             ),
                     ),
             )
@@ -14528,22 +14585,39 @@ impl WalletWindow {
                                         .child(selectable_label("Danger: this policy automatically signs every call on every chain.")),
                                 )
                             })
+                            // Same column floor and scrolling viewport as the
+                            // settings-page editor; both drive the one
+                            // `policy_json_input`, so a line that wraps in one
+                            // and not the other would be the surprise.
                             .child(
                                 div()
+                                    .id("policy-full-screen-json-viewport")
                                     .debug_selector(|| {
-                                        "policy-full-screen-json-control".to_owned()
+                                        "policy-full-screen-json-viewport".to_owned()
                                     })
+                                    .overflow_x_scroll()
                                     .w_full()
                                     .min_w_0()
                                     .min_h_0()
                                     .flex_1()
+                                    .flex()
                                     .child(
-                                        app_input(input, cx)
-                                            .aria_label("Policy JSON")
-                                            .font_family(MONO_FONT_FAMILY)
-                                            .size_full()
-                                            .min_w_0()
-                                            .min_h_0(),
+                                        div()
+                                            .debug_selector(|| {
+                                                "policy-full-screen-json-control".to_owned()
+                                            })
+                                            .flex_1()
+                                            .min_w(policy_editor_min_width(cx))
+                                            .min_h_0()
+                                            .h_full()
+                                            .child(
+                                                app_input(input, cx)
+                                                    .aria_label("Policy JSON")
+                                                    .font_family(MONO_FONT_FAMILY)
+                                                    .size_full()
+                                                    .min_w_0()
+                                                    .min_h_0(),
+                                            ),
                                     ),
                             ),
                     )
