@@ -14,6 +14,7 @@ pub mod abi_decoder;
 pub mod agent_authority;
 pub mod approval;
 pub mod approval_summary;
+pub mod automation;
 pub mod chain_client;
 pub mod clear_signing;
 pub mod config;
