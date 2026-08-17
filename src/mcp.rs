@@ -3,6 +3,7 @@ use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
     agent_authority::AgentExecutionAuthority,
     automation::{AutomationDefinition, CronSchedule, PollFailure},
+    automation_store::AutomationStore,
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
     config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
@@ -144,6 +145,7 @@ pub(crate) struct WalletMcpServer {
     messages: Arc<Mutex<MessageStore>>,
     legal: Arc<Mutex<LegalStore>>,
     tokens: Arc<Mutex<TokenStore>>,
+    automations: Arc<Mutex<AutomationStore>>,
     /// Temporary simulation forks. Deliberately in-process only: fork state
     /// is never persisted, never shown at approval time, and never survives a
     /// restart.
@@ -192,6 +194,7 @@ impl WalletMcpServer {
         let messages = MessageStore::production(config.data_dir())?;
         let legal = LegalStore::production(config.data_dir())?;
         let tokens = TokenStore::production(config.data_dir())?;
+        let automations = AutomationStore::production(config.data_dir())?;
         let mut server = Self::new(
             config,
             policies,
@@ -200,6 +203,7 @@ impl WalletMcpServer {
             messages,
             legal,
             tokens,
+            automations,
             Arc::new(ekubo_wallet_core::custody::OsKeyStore),
         )?;
         server.requesting_client = Some((harness, desktop));
@@ -218,6 +222,7 @@ impl WalletMcpServer {
         messages: MessageStore,
         legal: LegalStore,
         tokens: TokenStore,
+        automations: AutomationStore,
         keys: Arc<dyn KeyStore>,
     ) -> Result<Self> {
         for wallet in config.load()?.wallets {
@@ -239,6 +244,7 @@ impl WalletMcpServer {
             messages: Arc::new(Mutex::new(messages)),
             legal: Arc::new(Mutex::new(legal)),
             tokens: Arc::new(Mutex::new(tokens)),
+            automations: Arc::new(Mutex::new(automations)),
             forks: Arc::new(Mutex::new(ForkStore::new())),
             simulations: Arc::new(Mutex::new(SimulationStore::new())),
             client_namespace: uuid::Uuid::nil(),
@@ -823,6 +829,102 @@ where
             "policy must be a JSON object, not JSON encoded as a string",
         ))
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InstallAutomationInput {
+    wallet_id: String,
+    chain_id: String,
+    /// Your own identifier for this automation, unique per wallet. Installing
+    /// again with the same key replaces that automation instead of adding a
+    /// second one, which is what makes retrying this call safe. Reuse the key
+    /// to update bytecode, config, or schedule; choose a new one for a
+    /// genuinely different job.
+    automation_key: String,
+    /// Short label the user sees in the Automations tab.
+    name: String,
+    /// Deployed runtime bytecode as hex — solc's `deployedBytecode`, not
+    /// `bytecode`. Test it with `wallet_dry_run_automation` first.
+    bytecode: String,
+    /// The `config` bytes `automate(bytes config)` receives, as hex. Omitted
+    /// means empty.
+    #[serde(default)]
+    config: Option<String>,
+    /// Six-field cron expression, seconds first, in UTC. `*/12 * * * * *` is
+    /// roughly per block on a twelve-second chain.
+    cron: String,
+    /// The policy revision this automation was written for, from
+    /// `wallet_get_policy`. Must be the active revision: an automation is bound
+    /// to it, and a later policy change moves the automation to
+    /// `awaiting_relink` rather than letting it run under authority the user
+    /// granted for something else.
+    policy_revision: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct InstallAutomationOutput {
+    automation_id: uuid::Uuid,
+    automation_key: String,
+    wallet_id: String,
+    chain_id: String,
+    name: String,
+    bytecode_hash: String,
+    cron: String,
+    policy_revision: u64,
+    state: ekubo_wallet_core::automation::AutomationState,
+    /// True when this call replaced an automation that already held the key,
+    /// which is also what a safe retry of the same call reports.
+    replaced_existing: bool,
+    /// The next few times it will fire, in UTC.
+    upcoming: Vec<DateTime<Utc>>,
+    instruction: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListAutomationsInput {
+    wallet_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ListAutomationsOutput {
+    automations: Vec<AutomationSummary>,
+    instruction: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct AutomationSummary {
+    automation_id: uuid::Uuid,
+    automation_key: String,
+    name: String,
+    chain_id: u64,
+    cron: String,
+    bytecode_hash: String,
+    policy_revision: u64,
+    state: ekubo_wallet_core::automation::AutomationState,
+    /// Why it stopped, when it is not enabled. This is the whole account of
+    /// what went wrong; read it before reinstalling anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped_reason: Option<String>,
+    consecutive_failures: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_tick_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_request_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_fire_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DisableAutomationInput {
+    wallet_id: String,
+    automation_key: String,
+    /// Why, recorded and shown to the user in the Automations tab.
+    reason: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2406,6 +2508,212 @@ impl WalletMcpServer {
                 text: document.text(),
             }),
             instruction,
+        }))
+    }
+
+    #[tool(
+        name = "wallet_install_automation",
+        description = "Install EVM bytecode the wallet polls on a cron schedule, whose returned calls go through the ordinary signing policy. No user approval is needed to install one: an automation only suggests transactions, and the policy decides whether any of them may send. IMPORTANT: unless the active policy already allows every call the bytecode emits to send automatically, the automation stops on its first tick and reports why — so dry-run it with wallet_dry_run_automation first, and propose a policy with wallet_propose_policy if the batch is not allowed. Read wallet://skills/write-ekubo-automation/SKILL.md before writing bytecode. Installing with an automation_key that already exists replaces that automation, so retrying this call is safe.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_install_automation(
+        &self,
+        Parameters(input): Parameters<InstallAutomationInput>,
+    ) -> Result<Json<InstallAutomationOutput>, ErrorData> {
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let network = self
+            .config
+            .network_by_chain_id(&input.chain_id)
+            .map_err(|error| tool_error(&error))?;
+        let bytecode = parse_hex_bytes(&input.bytecode, "bytecode")?;
+        let config_bytes = match &input.config {
+            None => alloy::primitives::Bytes::new(),
+            Some(value) => parse_hex_bytes(value, "config")?,
+        };
+        let schedule = CronSchedule::parse(&input.cron)
+            .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+        let definition = AutomationDefinition::new(
+            &input.name,
+            bytecode,
+            config_bytes,
+            schedule.clone(),
+            network.chain_id,
+        )
+        .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+
+        // The caller states the revision it wrote this for, and it has to be
+        // the live one. Binding to whatever happens to be current instead would
+        // silently attach the automation to a policy the caller never read.
+        let active = self
+            .policies
+            .lock()
+            .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)
+            .map_err(|error| tool_error(&error))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("wallet {} has no local policy", wallet.id), None)
+            })?;
+        if active.revision != input.policy_revision {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "this automation names policy revision {} but the active revision is {}. Read                      wallet_get_policy again, confirm the policy still allows the calls this                      automation emits, and install it naming {}.",
+                    input.policy_revision, active.revision, active.revision
+                ),
+                None,
+            ));
+        }
+
+        let installed = self
+            .automations
+            .lock()
+            .map_err(|_| ErrorData::internal_error("automation database lock was poisoned", None))?
+            .install(&wallet, &input.automation_key, &definition, active.revision)
+            .map_err(|error| tool_error(&error))?;
+        self.events.publish(DomainEventKind::AutomationsChanged {
+            wallet_id: wallet.id.clone(),
+        });
+        let automation = installed.automation;
+        Ok(Json(InstallAutomationOutput {
+            automation_id: automation.id,
+            automation_key: automation.key.clone(),
+            wallet_id: wallet.id.clone(),
+            chain_id: input.chain_id.clone(),
+            name: automation.name.clone(),
+            bytecode_hash: format!("{:#x}", automation.bytecode_hash()),
+            cron: automation.schedule.expression().to_owned(),
+            policy_revision: automation.policy_revision,
+            state: automation.state,
+            replaced_existing: installed.replaced.is_some(),
+            upcoming: schedule.preview(chrono::Utc::now(), 3),
+            instruction: format!(
+                "The automation is installed and will run on its schedule while the wallet is unlocked. It stops on its own if policy revision {} stops allowing its calls, if a batch reverts on chain, or after repeated failures; check wallet_list_automations for `stopped_reason` before assuming it is still running. Tell the user it exists and what it does.",
+                automation.policy_revision
+            ),
+        }))
+    }
+
+    #[tool(
+        name = "wallet_list_automations",
+        description = "List this wallet's installed automations with their schedules, bound policy revision, state, and — for any that stopped — exactly why. Read this before reinstalling or debugging one: `stopped_reason` is the whole account of what went wrong, and an automation in `awaiting_relink` stopped because the signing policy changed rather than because anything is broken.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn wallet_list_automations(
+        &self,
+        Parameters(input): Parameters<ListAutomationsInput>,
+    ) -> Result<Json<ListAutomationsOutput>, ErrorData> {
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let installed = self
+            .automations
+            .lock()
+            .map_err(|_| ErrorData::internal_error("automation database lock was poisoned", None))?
+            .list_for_wallet(wallet.instance_id)
+            .map_err(|error| tool_error(&error))?;
+        let now = chrono::Utc::now();
+        let stopped = installed
+            .iter()
+            .filter(|automation| {
+                automation.state != ekubo_wallet_core::automation::AutomationState::Enabled
+            })
+            .count();
+        let automations = installed
+            .into_iter()
+            .map(|automation| AutomationSummary {
+                next_fire_at: automation
+                    .schedule
+                    .next_after(automation.last_tick_at.unwrap_or(now)),
+                automation_id: automation.id,
+                automation_key: automation.key,
+                name: automation.name,
+                chain_id: automation.chain_id,
+                cron: automation.schedule.expression().to_owned(),
+                bytecode_hash: format!("{:#x}", alloy::primitives::keccak256(&automation.bytecode)),
+                policy_revision: automation.policy_revision,
+                state: automation.state,
+                stopped_reason: automation.stopped_reason,
+                consecutive_failures: automation.consecutive_failures,
+                last_tick_at: automation.last_tick_at,
+                last_outcome: automation.last_outcome,
+                last_request_id: automation.last_request_id,
+            })
+            .collect::<Vec<_>>();
+        Ok(Json(ListAutomationsOutput {
+            instruction: if stopped == 0 {
+                "Every automation on this wallet is running.".into()
+            } else {
+                format!(
+                    "{stopped} automation(s) have stopped. Read each `stopped_reason`: one in `awaiting_relink` needs the user to review it again in the Automations tab because the signing policy changed, and one in `disabled` failed — fix the bytecode or the policy and install again under the same automation_key."
+                )
+            },
+            automations,
+        }))
+    }
+
+    #[tool(
+        name = "wallet_disable_automation",
+        description = "Stop one of this wallet's automations and record why. Reducing what the wallet does automatically, so no approval is needed; re-enabling is not something this tool can do, and reinstalling with wallet_install_automation under the same automation_key is how an automation starts again.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_disable_automation(
+        &self,
+        Parameters(input): Parameters<DisableAutomationInput>,
+    ) -> Result<Json<AutomationSummary>, ErrorData> {
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let mut automations = self.automations.lock().map_err(|_| {
+            ErrorData::internal_error("automation database lock was poisoned", None)
+        })?;
+        let existing = automations
+            .by_key(wallet.instance_id, input.automation_key.trim())
+            .map_err(|error| tool_error(&error))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(
+                    format!(
+                        "wallet {} has no automation with key {:?}",
+                        wallet.id, input.automation_key
+                    ),
+                    None,
+                )
+            })?;
+        let stopped = automations
+            .disable(existing.id, &input.reason)
+            .map_err(|error| tool_error(&error))?;
+        drop(automations);
+        self.events.publish(DomainEventKind::AutomationsChanged {
+            wallet_id: wallet.id.clone(),
+        });
+        Ok(Json(AutomationSummary {
+            next_fire_at: None,
+            automation_id: stopped.id,
+            automation_key: stopped.key,
+            name: stopped.name,
+            chain_id: stopped.chain_id,
+            cron: stopped.schedule.expression().to_owned(),
+            bytecode_hash: format!("{:#x}", alloy::primitives::keccak256(&stopped.bytecode)),
+            policy_revision: stopped.policy_revision,
+            state: stopped.state,
+            stopped_reason: stopped.stopped_reason,
+            consecutive_failures: stopped.consecutive_failures,
+            last_tick_at: stopped.last_tick_at,
+            last_outcome: stopped.last_outcome,
+            last_request_id: stopped.last_request_id,
         }))
     }
 

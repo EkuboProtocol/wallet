@@ -12,8 +12,9 @@ the condition once and lets the wallet watch for it.
 Automations get their own tab in the desktop shell, alongside activity,
 permissions, connections, reference data, and settings.
 
-This document is the design, not a description of shipped behavior. Nothing
-here is implemented yet.
+This document is the design. The core — poll, decode, plan synthesis, storage,
+scheduler, and the MCP tools an agent writes automations with — is implemented;
+the desktop tab and the wiring that starts the scheduler are not yet.
 
 ## An automation is a plan source, not an authority
 
@@ -74,8 +75,9 @@ Each tick, for one automation:
 3. **Produce the calls.** The blob returns the list, ABI-encoded.
 4. **Queue them.** A non-empty list is synthesized into an `ExecutionPlan` and
    handed to `execute_automatic`, which simulates, prepares exactly, evaluates
-   the policy, and writes a pending row — signed and ready for broadcast if the
-   policy allowed every call, awaiting approval if it did not.
+   the policy, and writes a pending row — signed and broadcast if the policy
+   allowed every call, and otherwise left as the one row that says which call it
+   did not.
 
 The bytecode is **deployed runtime code**, not initcode. The wallet does not run
 a constructor, and it never deploys anything.
@@ -245,27 +247,45 @@ does not burn gas in a loop.
 ## Install, storage, and review
 
 Automations live in their own SQLCipher-backed typed store, keyed by wallet and
-chain. Stored fields: name, bytecode, config bytes, cron expression, network,
-wallet, the bound policy revision, state, last fire time, next fire time, last
-result, and the reason it stopped if it did.
+chain. Stored fields: the caller's key, name, bytecode, config bytes, cron
+expression, network, wallet, the bound policy revision, state, last fire time,
+last result, the transaction the last tick sent, and the reason it stopped if it
+did. A unique index on (wallet, key) is what makes installing idempotent.
 
 State is one of `enabled`, `disabled` (it failed; the reason says how), or
 `awaiting_relink` (the policy revision moved). Only `enabled` ticks.
 
-An agent may **propose** an automation over MCP; the owner confirms it in the
-Automations tab. No OS challenge: the proposal cannot widen authority past the
-installed policy, and the policy install that grants that authority is where the
-challenge belongs. An agent may also disable an automation — authority-reducing
-— but never install or re-enable one.
+An agent installs an automation directly, with no owner confirmation step. An
+automation is another way to suggest transactions, and the policy is what
+decides whether a suggestion sends — the same arrangement, and the same
+authority, as an agent submitting a plan itself. A confirmation dialog here
+would be asking the owner to approve something that cannot exceed what they
+have already approved.
 
-The owner's review shows the wallet, network, cron expression with its next few
-fire times rendered in plain language, config bytes, and the bytecode's
-keccak256 and byte length. It cannot show what the bytecode *does*. That limit
-is the honest one to state in the UI rather than paper over; see the open
-questions.
+What an install *does* have to name is the policy revision it was written for.
+Naming one that is no longer active is refused outright, so an automation is
+never bound to a policy the agent did not read. That check plus the tick-time
+binding is what keeps installation honest without a dialog.
 
-The tab lists each automation with its schedule, next fire time, last result,
-last transaction, and — when it stopped — why.
+Installs are idempotent under a caller-chosen `automation_key`, unique per
+wallet. Installing again under an existing key replaces that automation rather
+than adding a second one. This is not a convenience: an agent whose tool call
+timed out after the write landed would otherwise retry into two identical
+automations on one wallet, contending for one signing slot and each reporting
+the other as the reason it skipped — a confusing way to discover you installed
+something twice. Replacement resets the failure count, stopped reason, and last
+transaction, because those describe bytecode that is no longer there.
+
+An agent may also disable an automation, which is authority-reducing. There is
+no re-enable: installing again under the same key is how one starts back up,
+which keeps "run this" and "here is exactly what it runs" a single operation.
+
+The owner comes in when transactions stop working, not to authorize the job.
+
+The tab lists each automation with its key, schedule, next fire time, last
+result, last transaction, and — when it stopped — why. It shows the bytecode's
+keccak256 and byte length and cannot show what the bytecode *does*; that limit
+is the honest one to state rather than paper over. See the open questions.
 
 ## The authoring surface
 
@@ -385,9 +405,9 @@ never fires.
 
 ## Open questions
 
-- **Unverified source display.** An owner reviewing 4 KB of hex has no way to
+- **Unverified source display.** An owner looking at 4 KB of hex has no way to
   understand it. The agent could attach the Solidity it compiled, shown clearly
-  labeled as unverified. This makes review more useful and also creates a place
+  labeled as unverified. This makes the tab more useful and also creates a place
   to display source that does not correspond to the bytecode. Not committed
   either way.
 - **Selector for `automate`.** Left to implementation; the interface above is

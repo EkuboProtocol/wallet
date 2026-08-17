@@ -245,6 +245,10 @@ pub struct Automation {
     pub wallet_id: String,
     pub wallet_address: Address,
     pub chain_id: u64,
+    /// The caller's own name for this automation, unique per wallet. What
+    /// makes installing idempotent, and how an agent addresses one later
+    /// without having stored the wallet's UUID for it.
+    pub key: String,
     /// Owner-facing label. Untrusted display text: it names the automation in
     /// lists and notifications and decides nothing.
     pub name: String,

@@ -52,8 +52,9 @@ fn an_installed_automation_round_trips() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
 
     assert_eq!(installed.state, AutomationState::Enabled);
     assert_eq!(installed.policy_revision, 1);
@@ -71,8 +72,9 @@ fn a_policy_revision_that_moved_unlinks_rather_than_running() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
 
     // Same revision: it runs.
     let due = store.due(wallet.instance_id, 1, at(12, 0)).unwrap();
@@ -107,8 +109,9 @@ fn relinking_rebinds_to_the_current_revision_and_starts_it_again() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
     store.due(wallet.instance_id, 4, at(12, 0)).unwrap();
 
     let relinked = store.relink(installed.id, 4).unwrap();
@@ -125,7 +128,7 @@ fn an_automation_that_has_never_ticked_is_due_immediately() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     store
-        .install(&wallet, &definition("hourly", "0 0 * * * *"), 1)
+        .install(&wallet, "job", &definition("hourly", "0 0 * * * *"), 1)
         .unwrap();
     // 12:01, so the next scheduled hour has not arrived. Waiting for it would
     // leave a just-installed automation idle with nothing on screen to say why.
@@ -138,8 +141,9 @@ fn a_schedule_that_has_not_come_round_yet_is_not_due() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("hourly", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("hourly", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
     store
         .record_tick(installed.id, "no calls", at(12, 0))
         .unwrap();
@@ -166,8 +170,9 @@ fn a_disabled_automation_never_becomes_due() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
     let disabled = store
         .disable(installed.id, "the batch reverted on chain")
         .unwrap();
@@ -190,8 +195,9 @@ fn consecutive_failures_disable_and_a_good_tick_forgets_them() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
 
     for count in 1..MAX_CONSECUTIVE_FAILURES {
         let current = store
@@ -237,8 +243,9 @@ fn a_skipped_tick_consumes_the_schedule_without_forgiving_failures() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
     store
         .record_failure(installed.id, "endpoint refused eth_simulateV1", at(11, 0))
         .unwrap();
@@ -280,13 +287,19 @@ fn the_per_wallet_chain_limit_holds() {
         store
             .install(
                 &wallet,
+                &format!("job-{index}"),
                 &definition(&format!("job {index}"), "0 0 * * * *"),
                 1,
             )
             .unwrap();
     }
     let error = store
-        .install(&wallet, &definition("one too many", "0 0 * * * *"), 1)
+        .install(
+            &wallet,
+            "overflow",
+            &definition("one too many", "0 0 * * * *"),
+            1,
+        )
         .expect_err("the limit holds");
     assert!(format!("{error:#}").contains("the limit is"), "{error:#}");
 }
@@ -296,8 +309,9 @@ fn removing_an_automation_reports_whether_there_was_one() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);
     let installed = store
-        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
-        .unwrap();
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
     assert!(store.remove(installed.id).unwrap());
     assert!(!store.remove(installed.id).unwrap());
     assert!(store.get(installed.id).unwrap().is_none());
@@ -312,4 +326,90 @@ fn an_unknown_automation_is_not_silently_updated() {
     assert!(store.disable(absent, "gone").is_err());
     assert!(store.relink(absent, 1).is_err());
     assert!(store.get(absent).unwrap().is_none());
+}
+
+#[test]
+fn installing_under_the_same_key_twice_replaces_rather_than_duplicates() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let first = store
+        .install(&wallet, "rebalance", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap();
+    assert!(first.replaced.is_none());
+
+    // The retry an agent makes after a tool call times out. One automation,
+    // not two contending for the same signing slot.
+    let again = store
+        .install(&wallet, "rebalance", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap();
+    assert_eq!(again.automation.id, first.automation.id);
+    assert!(again.replaced.is_some());
+    assert_eq!(store.list_for_wallet(wallet.instance_id).unwrap().len(), 1);
+
+    // A different key is a different automation.
+    store
+        .install(&wallet, "claim", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap();
+    assert_eq!(store.list_for_wallet(wallet.instance_id).unwrap().len(), 2);
+}
+
+#[test]
+fn replacing_bytecode_resets_the_history_that_described_the_old_bytecode() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, "rebalance", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
+    store
+        .record_failure(installed.id, "reverted", at(12, 0))
+        .unwrap();
+    let stopped = store.disable(installed.id, "gave up").unwrap();
+    assert_eq!(stopped.state, AutomationState::Disabled);
+
+    let replaced = store
+        .install(&wallet, "rebalance", &definition("v2", "*/12 * * * * *"), 3)
+        .unwrap()
+        .automation;
+
+    // New bytecode, so the counters describing the old bytecode's failures
+    // would be a lie, and the automation runs again under the revision the
+    // caller named.
+    assert_eq!(replaced.id, installed.id);
+    assert_eq!(replaced.state, AutomationState::Enabled);
+    assert_eq!(replaced.consecutive_failures, 0);
+    assert!(replaced.stopped_reason.is_none());
+    assert!(replaced.last_tick_at.is_none());
+    assert!(replaced.last_request_id.is_none());
+    assert_eq!(replaced.policy_revision, 3);
+    assert_eq!(replaced.schedule.expression(), "*/12 * * * * *");
+}
+
+#[test]
+fn a_key_is_scoped_to_its_wallet() {
+    let first = wallet();
+    let (_directory, mut store) = store_with(&first);
+    store
+        .install(&first, "claim", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap();
+    assert!(store.by_key(first.instance_id, "claim").unwrap().is_some());
+    // Another wallet's identical key names nothing here: the key is the
+    // caller's vocabulary, and two wallets automated by one agent will reuse
+    // the obvious names.
+    assert!(store.by_key(Uuid::new_v4(), "claim").unwrap().is_none());
+}
+
+#[test]
+fn a_key_with_a_control_character_is_refused() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let error = store
+        .install(
+            &wallet,
+            "claim\u{202E}",
+            &definition("v1", "0 0 * * * *"),
+            1,
+        )
+        .expect_err("a bidi override in a key is refused");
+    assert!(format!("{error:#}").contains("bidirectional"), "{error:#}");
 }

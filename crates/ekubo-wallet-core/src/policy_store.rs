@@ -1594,7 +1594,11 @@ struct Migration {
 /// database, where refusing bricks a wallet whose keys are fine.
 const MIGRATIONS: &[Migration] = &[Migration {
     to_version: 4,
-    statements: &[AUTOMATIONS_TABLE, AUTOMATIONS_WALLET_INDEX],
+    statements: &[
+        AUTOMATIONS_TABLE,
+        AUTOMATIONS_WALLET_INDEX,
+        AUTOMATIONS_KEY_INDEX,
+    ],
 }];
 
 /// Brings an existing database up to [`SCHEMA_VERSION`], returning the version
@@ -1947,6 +1951,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             NETWORK_PROPOSALS_TABLE,
             AUTOMATIONS_TABLE,
             AUTOMATIONS_WALLET_INDEX,
+            AUTOMATIONS_KEY_INDEX,
             record_version.as_str(),
         ],
     )
@@ -1981,6 +1986,13 @@ const AUTOMATIONS_TABLE: &str = "CREATE TABLE automations (
      wallet_id TEXT NOT NULL,
      wallet_address TEXT NOT NULL,
      chain_id INTEGER NOT NULL CHECK (chain_id > 0),
+     -- The caller's own name for this automation, and the whole of what makes
+     -- installing one idempotent. An agent that retries after a timeout, or
+     -- runs the same setup twice, must end up with one automation rather than
+     -- two identical ones both bidding for the signing slot. Unique per
+     -- wallet, so re-installing under a key that exists replaces that
+     -- automation instead of adding another.
+     automation_key TEXT NOT NULL CHECK (length(automation_key) > 0),
      name TEXT NOT NULL CHECK (length(name) > 0),
      bytecode BLOB NOT NULL CHECK (length(bytecode) > 0),
      config BLOB NOT NULL,
@@ -2010,6 +2022,15 @@ const AUTOMATIONS_TABLE: &str = "CREATE TABLE automations (
 
 const AUTOMATIONS_WALLET_INDEX: &str = "CREATE INDEX automations_wallet_chain
      ON automations(wallet_instance_id, chain_id)";
+
+/// One automation per caller-chosen key per wallet.
+///
+/// Scoped to the wallet rather than to the whole database because the key is
+/// the caller's vocabulary, not the wallet's: two wallets automated by the same
+/// agent will use the same obvious names, and making one of those installs fail
+/// would be a collision between things that share nothing.
+const AUTOMATIONS_KEY_INDEX: &str = "CREATE UNIQUE INDEX automations_wallet_key
+     ON automations(wallet_instance_id, automation_key)";
 
 /// Network profiles an agent has suggested, held apart from active configuration
 /// until the owner confirms them.

@@ -417,6 +417,7 @@ fn pipeline_server(
         MessageStore::new(open()),
         LegalStore::new(open()),
         TokenStore::new(open()),
+        AutomationStore::new(open()),
         keys,
     )
     .unwrap();

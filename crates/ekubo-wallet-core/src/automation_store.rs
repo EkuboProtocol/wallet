@@ -30,6 +30,10 @@ use uuid::Uuid;
 /// about storage. Small enough that the list stays a list a person reads.
 pub const MAX_AUTOMATIONS_PER_WALLET_CHAIN: usize = 32;
 
+/// The longest caller-chosen key an automation may carry. Long enough for a
+/// descriptive name or a UUID, short enough that it stays a label.
+pub const MAX_KEY_LEN: usize = 120;
+
 pub struct AutomationStore {
     database: PolicyStore,
 }
@@ -39,6 +43,18 @@ pub struct AutomationStore {
 enum ClearFailures {
     Yes,
     No,
+}
+
+/// The result of an install, which is the same operation whether it created
+/// something or replaced it.
+///
+/// `replaced` is what the caller reports back: an agent retrying a timed-out
+/// call wants to hear that nothing new happened, and one that meant to install
+/// a second automation wants to hear that it just overwrote its first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Installed {
+    pub automation: Automation,
+    pub replaced: Option<Automation>,
 }
 
 /// What [`AutomationStore::due`] found, kept apart from the automations
@@ -67,51 +83,117 @@ impl AutomationStore {
         Self { database }
     }
 
-    /// Install an automation the owner has approved, bound to the policy
-    /// revision they approved it under.
+    /// Install an automation under a caller-chosen key, replacing whatever that
+    /// key already named.
     ///
-    /// `policy_revision` is a parameter rather than something read here on
-    /// purpose: the caller has already shown the owner a review that named a
-    /// revision, and re-reading it at this line would bind to whatever is
-    /// current now, which is not necessarily what they were shown.
+    /// The key is what makes installing idempotent. An agent whose tool call
+    /// timed out after the write landed retries with the same key and gets the
+    /// same automation back rather than a second one — two identical
+    /// automations on one wallet would contend for one signing slot and each
+    /// report the other as the reason it skipped, which is a confusing way to
+    /// discover you installed something twice.
+    ///
+    /// Replacement is not an escalation. Every call an automation emits is
+    /// evaluated against the installed policy at send time, so swapping the
+    /// bytecode under a key buys no authority the policy does not already
+    /// grant. What it does do is reset the automation's history — the failure
+    /// count, the stopped reason, the pointer to the last transaction — because
+    /// those describe the bytecode that was there before, and reporting them
+    /// against different bytecode would be a lie.
+    ///
+    /// `policy_revision` is the revision the caller wrote this automation for.
+    /// The caller checks it against the active one; binding it here is what
+    /// later ticks compare against.
     pub fn install(
         &mut self,
         wallet: &WalletMetadata,
+        key: &str,
         definition: &AutomationDefinition,
         policy_revision: u64,
-    ) -> Result<Automation> {
+    ) -> Result<Installed> {
         ensure!(policy_revision > 0, "policy revision must be positive");
-        let existing = self.count_for(wallet.instance_id, definition.chain_id())?;
+        let key = key.trim();
+        ensure!(!key.is_empty(), "automation key is empty");
         ensure!(
-            existing < MAX_AUTOMATIONS_PER_WALLET_CHAIN,
-            "wallet already has {existing} automations on chain {}, the limit is \
-             {MAX_AUTOMATIONS_PER_WALLET_CHAIN}",
-            definition.chain_id()
+            key.chars().count() <= MAX_KEY_LEN,
+            "automation key exceeds {MAX_KEY_LEN} characters"
         );
-        let id = Uuid::new_v4();
-        let created_at = now();
+        ensure!(
+            !key.chars().any(crate::sanitize::is_disallowed),
+            "automation key contains a control, bidirectional, or invisible character"
+        );
+        let replaced = self.by_key(wallet.instance_id, key)?;
+        if replaced.is_none() {
+            let existing = self.count_for(wallet.instance_id, definition.chain_id())?;
+            ensure!(
+                existing < MAX_AUTOMATIONS_PER_WALLET_CHAIN,
+                "wallet already has {existing} automations on chain {}, the limit is \
+                 {MAX_AUTOMATIONS_PER_WALLET_CHAIN}",
+                definition.chain_id()
+            );
+        }
+        let id = replaced
+            .as_ref()
+            .map_or_else(Uuid::new_v4, |existing| existing.id);
+        let at = now();
         self.database.connection.execute(
             "INSERT INTO automations (
                  automation_id, wallet_instance_id, wallet_id, wallet_address, chain_id,
-                 name, bytecode, config, cron_expression, policy_revision, state,
-                 stopped_reason, consecutive_failures, last_tick_at, last_outcome,
-                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'enabled', NULL, 0, NULL, NULL, ?11, ?11)",
+                 automation_key, name, bytecode, config, cron_expression, policy_revision,
+                 state, stopped_reason, consecutive_failures, last_tick_at, last_outcome,
+                 last_request_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                       'enabled', NULL, 0, NULL, NULL, NULL, ?12, ?12)
+             ON CONFLICT(automation_id) DO UPDATE SET
+                 chain_id = excluded.chain_id,
+                 name = excluded.name,
+                 bytecode = excluded.bytecode,
+                 config = excluded.config,
+                 cron_expression = excluded.cron_expression,
+                 policy_revision = excluded.policy_revision,
+                 state = 'enabled',
+                 stopped_reason = NULL,
+                 consecutive_failures = 0,
+                 last_tick_at = NULL,
+                 last_outcome = NULL,
+                 last_request_id = NULL,
+                 updated_at = excluded.updated_at",
             params![
                 Blob(*id.as_bytes()),
                 wallet.instance_id.to_string(),
                 wallet.id,
                 format!("{:#x}", wallet.address),
                 i64::try_from(definition.chain_id()).context("chain id out of range")?,
+                key,
                 definition.name(),
                 Blob(definition.bytecode().clone()),
                 Blob(definition.config().clone()),
                 definition.schedule().expression(),
                 i64::try_from(policy_revision).context("policy revision out of range")?,
-                Millis(created_at),
+                Millis(at),
             ],
         )?;
-        self.get(id)?.context("installed automation missing")
+        let automation = self.get(id)?.context("installed automation missing")?;
+        Ok(Installed {
+            automation,
+            replaced,
+        })
+    }
+
+    /// The automation this wallet keeps under `key`, if any.
+    pub fn by_key(&self, wallet_instance_id: Uuid, key: &str) -> Result<Option<Automation>> {
+        self.database
+            .connection
+            .query_row(
+                &format!(
+                    "SELECT {COLUMNS} FROM automations
+                     WHERE wallet_instance_id = ?1 AND automation_key = ?2"
+                ),
+                params![wallet_instance_id.to_string(), key],
+                read_automation,
+            )
+            .optional()?
+            .transpose()
     }
 
     pub fn get(&self, id: Uuid) -> Result<Option<Automation>> {
@@ -384,7 +466,7 @@ impl AutomationStore {
 }
 
 const COLUMNS: &str = "automation_id, wallet_instance_id, wallet_id, wallet_address, chain_id, \
-     name, bytecode, config, cron_expression, policy_revision, state, stopped_reason, \
+     automation_key, name, bytecode, config, cron_expression, policy_revision, state, stopped_reason, \
      consecutive_failures, last_tick_at, last_outcome, last_request_id, created_at, updated_at";
 
 /// Rebuild one row.
@@ -400,19 +482,20 @@ fn read_automation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Automatio
     let wallet_id: String = row.get(2)?;
     let wallet_address: String = row.get(3)?;
     let chain_id: i64 = row.get(4)?;
-    let name: String = row.get(5)?;
-    let bytecode: Bytes = row.blob(6)?;
-    let config: Bytes = row.blob(7)?;
-    let cron_expression: String = row.get(8)?;
-    let policy_revision: i64 = row.get(9)?;
-    let state: String = row.get(10)?;
-    let stopped_reason: Option<String> = row.get(11)?;
-    let consecutive_failures: i64 = row.get(12)?;
-    let last_tick_at = row.time_opt(13)?;
-    let last_outcome: Option<String> = row.get(14)?;
-    let last_request_id: Option<[u8; 16]> = row.blob_opt(15)?;
-    let created_at = row.time(16)?;
-    let updated_at = row.time(17)?;
+    let key: String = row.get(5)?;
+    let name: String = row.get(6)?;
+    let bytecode: Bytes = row.blob(7)?;
+    let config: Bytes = row.blob(8)?;
+    let cron_expression: String = row.get(9)?;
+    let policy_revision: i64 = row.get(10)?;
+    let state: String = row.get(11)?;
+    let stopped_reason: Option<String> = row.get(12)?;
+    let consecutive_failures: i64 = row.get(13)?;
+    let last_tick_at = row.time_opt(14)?;
+    let last_outcome: Option<String> = row.get(15)?;
+    let last_request_id: Option<[u8; 16]> = row.blob_opt(16)?;
+    let created_at = row.time(17)?;
+    let updated_at = row.time(18)?;
     Ok((|| {
         Ok(Automation {
             id: Uuid::from_bytes(id),
@@ -424,6 +507,7 @@ fn read_automation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Automatio
                 .parse::<Address>()
                 .context("stored automation wallet address is not an address")?,
             chain_id: u64::try_from(chain_id).context("stored automation chain id is invalid")?,
+            key,
             name,
             bytecode,
             config,

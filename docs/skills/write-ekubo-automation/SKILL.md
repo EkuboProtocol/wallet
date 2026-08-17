@@ -98,10 +98,62 @@ Calibur. If you need to *probe* such a call, answer those selectors yourself or
 handle. This affects the poll only; the batch the wallet actually sends runs
 through the intact delegation.
 
-**Emit only calls the policy allows.** A batch that does not resolve to
-all-allow disables the automation and notifies the owner. Read the wallet's
-policy first, and if the automation needs authority it does not have, propose a
-policy change through the normal path before installing.
+**Emit only calls the policy allows.** This is the rule that decides whether
+your automation works at all, so it gets its own section below.
+
+## The policy decides whether any of this runs
+
+You do not need the user's approval to install an automation. You do need the
+user's *policy* to allow the calls it emits, and those are not the same thing.
+
+An automation is another way of suggesting transactions. The signing policy is
+what decides whether a suggestion sends, exactly as it does for a plan you
+submit yourself. So:
+
+- If the active policy allows every call in the batch, the automation sends it
+  and keeps running.
+- If **any** call resolves to `review`, to `deny`, or to no rule at all, the
+  batch does not send. The automation **stops on that tick** and records why.
+  It does not queue the batch for approval and try again next tick — a job
+  emitting a call the policy refuses would emit it every tick, and the approval
+  queue would fill with the same decision.
+
+So an automation installed against a policy that does not permit its calls does
+nothing except stop, once, with an explanation. That is the single most common
+way to install a broken automation, and it is entirely avoidable:
+
+1. `wallet_dry_run_automation` — it returns the policy verdict for every call
+   alongside the simulation, without installing anything.
+2. If the batch is not allowed, either change the bytecode to emit calls that
+   are, or `wallet_propose_policy` and wait for the user to install a policy
+   that permits them.
+3. Only then `wallet_install_automation`, naming the active `policy_revision`.
+
+The same rule applies afterwards. An automation is bound to the revision it was
+installed against; when the user changes their policy, the automation moves to
+`awaiting_relink` and stops until they look at it again. This is deliberate —
+otherwise a policy widened for some unrelated reason would silently re-arm jobs
+the user had forgotten about.
+
+Bring the user in when transactions stop working, not to install. Check
+`wallet_list_automations` and read `stopped_reason`.
+
+## Installing is idempotent
+
+`wallet_install_automation` takes an `automation_key` you choose. It is unique
+per wallet, and installing again under a key that exists **replaces** that
+automation rather than adding a second one.
+
+That makes retrying safe: a call that timed out after the write landed can be
+repeated verbatim, and you end up with one automation rather than two identical
+ones contending for the same signing slot and each reporting the other as the
+reason it skipped. The response says `replaced_existing` so you can tell which
+happened.
+
+Reuse the key to ship new bytecode, a new config, or a new schedule for the same
+job — replacement resets the failure count and the stopped reason, because those
+described the bytecode that is no longer there. Choose a new key for a genuinely
+different job.
 
 ## Examples
 
@@ -276,8 +328,14 @@ resulting batch, gas used by the poll, and — on failure — the revert selecto
 decoded `Error(string)` or `Panic(uint256)`, the raw return bytes, and why an
 ABI decode failed. Iterate there. It is the same poll the scheduler performs.
 
-Then `wallet_propose_automation` with the bytecode, config, cron expression,
-wallet, and network. The owner installs it from the Automations tab; you cannot.
+Then `wallet_install_automation` with your `automation_key`, the bytecode,
+config, cron expression, wallet, network, and the active `policy_revision` from
+`wallet_get_policy`. Naming a revision that is no longer active is refused, so
+that an automation is never bound to a policy you have not read.
+
+`wallet_disable_automation` stops one and records why. There is no re-enable:
+installing again under the same key is how an automation starts back up, which
+keeps "make this run" and "here is exactly what it runs" the same operation.
 
 ## Scheduling notes
 
