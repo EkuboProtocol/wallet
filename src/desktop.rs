@@ -6805,26 +6805,37 @@ impl WalletWindow {
                     // shrinking gets under: the form kept its full height and
                     // ran under the footer instead of scrolling.
                     content.min_h_0().child(
-                        // No height of its own, and no `flex_1` either: a
-                        // flex basis of zero, which is what `flex_1` sets,
-                        // would tell the dialog its body is nothing and
-                        // collapse it to the minimum.
-                        div()
+                        // Every box from here down is sized by the form and
+                        // may shrink, and none of them is given a height.
+                        // `flex_1` would set a flex basis of zero, which tells
+                        // the dialog its body is nothing and collapses it to
+                        // the minimum; a height of 100% measures zero against
+                        // a parent that has none, which does the same.
+                        // `flex_shrink` and `min_h_0` on each of them is what
+                        // turns the excess into scrolling once `max_height`
+                        // stops the dialog growing.
+                        v_flex()
                             .relative()
                             .w_full()
                             .flex_shrink_1()
                             .min_h_0()
                             .debug_selector(|| "network-editor-body".to_owned())
                             .child(
-                                // `w_full` and not `size_full`: a height
-                                // of 100% against a body that has not been
-                                // given one measures zero, which takes the
-                                // form's height out of the dialog's. Left
-                                // to stretch, this fills whatever height
-                                // the body ends up with.
+                                // The pane has to shrink with the body: one
+                                // still as tall as everything in it is not a
+                                // viewport, and the form was cut off at the
+                                // bottom of the dialog rather than scrolled
+                                // inside it. `v_flex` above is load-bearing
+                                // for that — a plain `div` displays as a
+                                // block, whose children are not flex items and
+                                // do not shrink, whatever is asked of them
+                                // here.
                                 div()
                                     .id("network-editor-scroll")
+                                    .debug_selector(|| "network-editor-scroll".to_owned())
                                     .w_full()
+                                    .flex_shrink_1()
+                                    .min_h_0()
                                     .track_scroll(&wallet.network_editor_scroll_handle)
                                     .overflow_y_scroll()
                                     .child(wallet.render_network_editor_form(&view, cx)),

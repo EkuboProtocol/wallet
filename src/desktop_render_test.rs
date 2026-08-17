@@ -670,8 +670,11 @@ fn portfolio_refresh_uses_the_button_label_without_a_second_spinner(cx: &mut gpu
 
 /// What the open add/edit network dialog measured to in a window this size.
 struct NetworkEditorLayout {
-    /// The scrolling form, between the title bar and the footer.
+    /// The form's place in the dialog, between the title bar and the footer.
     form: gpui::Bounds<gpui::Pixels>,
+    /// The pane the form scrolls in, which has to be the size of the space the
+    /// form was given and not the size of the form.
+    pane: gpui::Bounds<gpui::Pixels>,
     /// Save, which is the lowest thing in the dialog.
     save: gpui::Bounds<gpui::Pixels>,
     /// How tall the form's contents are, whether or not they fit.
@@ -736,9 +739,13 @@ fn draw_network_editor(
             .content_size()
             .height
     });
+    let pane = visual
+        .debug_bounds("network-editor-scroll")
+        .expect("the network editor's scroll pane must be laid out");
     drop(dialog_view);
     NetworkEditorLayout {
         form,
+        pane,
         save,
         content,
     }
@@ -765,6 +772,20 @@ fn the_network_editor_scrolls_and_keeps_its_footer_in_a_short_window(
          inside it: {:?} of content in {:?}",
         layout.content,
         layout.form.size.height
+    );
+    // A pane still as tall as everything in it is not a viewport, and nothing
+    // scrolls: the form is simply cut off at the bottom of the dialog. This is
+    // the assertion that says the scroll is real.
+    assert_eq!(
+        layout.pane.size.height, layout.form.size.height,
+        "the scroll pane must be the size of the space the form was given, \
+         not the size of the form"
+    );
+    assert!(
+        layout.pane.size.height < layout.content,
+        "the scroll pane must be shorter than what it scrolls: {:?} of {:?}",
+        layout.pane.size.height,
+        layout.content
     );
     assert!(
         layout.save.bottom() <= viewport.height,
