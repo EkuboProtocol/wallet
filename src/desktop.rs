@@ -102,6 +102,20 @@ const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
 const BUTTON_HEIGHT: gpui::Pixels = px(44.0);
 const PAGE_CONTENT_MAX_WIDTH: gpui::Pixels = px(720.0);
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// How long a balance read stays fresh enough that reopening the Portfolio tab
+/// reuses it instead of reading again.
+///
+/// Every network the account holds is read on each refresh, so opening the tab
+/// is not a free action to repeat. A minute is short enough that the balances
+/// on screen are the ones a person just acted on, and long enough that pacing
+/// between tabs does not turn into a request per click.
+const PORTFOLIO_REFRESH_INTERVAL: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
+/// How often the Portfolio tab redraws to keep its "refreshed …" line honest.
+///
+/// Nothing else redraws a tab that is merely being read, so without this the
+/// line would keep claiming the age it had when the balances landed. Half the
+/// label's own resolution keeps it from lagging a minute behind.
+const PORTFOLIO_CLOCK_INTERVAL: Duration = Duration::from_secs(30);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
@@ -1769,6 +1783,16 @@ pub struct WalletWindow {
     portfolio: PortfolioState,
     portfolio_generation: u64,
     portfolio_account_index: usize,
+    /// When the balances on screen were last read, per account.
+    ///
+    /// Keyed by account because the read is per account: that one account's
+    /// balances are a minute old says nothing about how stale another's are,
+    /// and the tab reopens onto whichever account was focused last.
+    ///
+    /// Only successful reads land here, so a failed refresh leaves the tab
+    /// eligible to try again the next time it is opened.
+    portfolio_refreshed_at: BTreeMap<String, chrono::DateTime<chrono::Utc>>,
+    portfolio_clock_task: Option<Task<()>>,
     route_scroll_handle: ScrollHandle,
     route_overflow_indicator: ScrollOverflowIndicator,
     policy_editor_anchor: ScrollAnchor,
@@ -4536,6 +4560,8 @@ impl WalletWindow {
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
             portfolio_account_index: 0,
+            portfolio_refreshed_at: BTreeMap::new(),
+            portfolio_clock_task: None,
             policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             route_scroll_handle,
             route_overflow_indicator,
@@ -4603,6 +4629,30 @@ impl WalletWindow {
                     if view
                         .update(cx, |view, cx| {
                             view.refresh_visible_pending_transactions(cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+        if self.portfolio_clock_task.is_none() {
+            self.portfolio_clock_task = Some(cx.spawn(async move |view, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(PORTFOLIO_CLOCK_INTERVAL)
+                        .await;
+                    if view
+                        .update(cx, |view, cx| {
+                            // Redraw only what the tick is for. Notifying while
+                            // another tab is open would rebuild that page every
+                            // half minute to age a line nobody is looking at.
+                            if view.route == Route::Overview
+                                && view.focused_portfolio_refreshed_at().is_some()
+                            {
+                                cx.notify();
+                            }
                         })
                         .is_err()
                     {
@@ -4883,6 +4933,7 @@ impl WalletWindow {
     fn release_window_state(&mut self, cx: &mut Context<Self>) {
         self.activity_refresh_task = None;
         self.activity_refreshing.clear();
+        self.portfolio_clock_task = None;
         self.command_palette = false;
         self.command_palette_list = None;
         self.command_palette_subscription = None;
@@ -6642,6 +6693,7 @@ impl WalletWindow {
         let generation = self.portfolio_generation;
         self.portfolio = PortfolioState::Loading;
         let owner = self.owner.clone();
+        let refreshed_account = wallet_id.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
                 cx,
@@ -6654,7 +6706,15 @@ impl WalletWindow {
                     return;
                 }
                 view.portfolio = match result {
-                    Ok(snapshot) => PortfolioState::Ready(snapshot),
+                    Ok(snapshot) => {
+                        // Stamped where the read lands rather than where it
+                        // starts, so both the age on screen and the interval
+                        // that throttles the next read describe the balances
+                        // rather than the intent to fetch them.
+                        view.portfolio_refreshed_at
+                            .insert(refreshed_account, chrono::Utc::now());
+                        PortfolioState::Ready(snapshot)
+                    }
                     Err(error) => PortfolioState::Failed(
                         format!("Could not load portfolio: {error:#}").into(),
                     ),
@@ -6663,6 +6723,33 @@ impl WalletWindow {
             });
         })
         .detach();
+    }
+
+    /// When the balances shown for the focused account were read.
+    fn focused_portfolio_refreshed_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let account = self.selected_portfolio_account()?;
+        self.portfolio_refreshed_at.get(&account.id).copied()
+    }
+
+    /// Read balances for the focused account unless a recent read still stands.
+    ///
+    /// This is the tab-open path, which is a navigation rather than a request
+    /// for fresh data — so it defers to [`PORTFOLIO_REFRESH_INTERVAL`] where
+    /// the header's Refresh button, being an explicit ask, does not.
+    fn refresh_portfolio_if_stale(&mut self, cx: &mut Context<Self>) {
+        // A reading from the future means the clock moved under us, which says
+        // nothing about the balances. Comparing the signed difference keeps
+        // that on the fresh side instead of reading on every tab open until
+        // the clock catches up.
+        let fresh = self
+            .focused_portfolio_refreshed_at()
+            .is_some_and(|refreshed_at| {
+                chrono::Utc::now().signed_duration_since(refreshed_at) < PORTFOLIO_REFRESH_INTERVAL
+            });
+        if fresh {
+            return;
+        }
+        self.refresh_portfolio(cx);
     }
 
     fn invalidate_portfolio(&mut self) {
@@ -8398,6 +8485,12 @@ impl WalletWindow {
             return;
         }
         self.set_route(route);
+        // Opening the tab is what asks for balances. The render-time trigger
+        // below only fires on `Idle`, so without this a tab left on `Ready`
+        // kept showing whatever was read the first time it was opened.
+        if route == Route::Overview {
+            self.refresh_portfolio_if_stale(cx);
+        }
         if route == Route::Activity && self.inbox_tab == InboxTab::Decided {
             self.refresh_visible_pending_transactions(cx);
         }
@@ -12437,7 +12530,7 @@ impl WalletWindow {
                 cx,
             ));
         }
-        match &self.portfolio {
+        let content = match &self.portfolio {
             // Placeholder rows shaped like balance rows, so the page shows
             // where the token list is about to appear instead of a spinner
             // that says only that something, somewhere, is happening.
@@ -12452,7 +12545,9 @@ impl WalletWindow {
             // the selected account.
             PortfolioState::Ready(snapshot) => {
                 let Some(account) = snapshot.accounts.first() else {
-                    return content.child(portfolio_loading_placeholder(cx));
+                    return content
+                        .child(portfolio_loading_placeholder(cx))
+                        .children(self.portfolio_refreshed_note(cx));
                 };
                 let rows = portfolio_balance_rows(account);
                 let failures = account
@@ -12687,7 +12782,33 @@ impl WalletWindow {
                         ),
                 )
             }
-        }
+        };
+        content.children(self.portfolio_refreshed_note(cx))
+    }
+
+    /// How old the balances on screen are, as the last line of the tab.
+    ///
+    /// Rendered in every state that has a reading behind it, not only the
+    /// one showing balances: while a refresh is in flight the age of what is
+    /// still on screen is the more useful fact, and after a failure it is the
+    /// only one. `None` until this account has been read once, when there is
+    /// no age to report.
+    fn portfolio_refreshed_note(&self, cx: &App) -> Option<gpui::Div> {
+        let refreshed_at = self.focused_portfolio_refreshed_at()?;
+        Some(
+            div()
+                .debug_selector(|| "portfolio-refreshed-at".to_owned())
+                .w_full()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(selectable_text(
+                    "portfolio-refreshed-at-text",
+                    &format!(
+                        "Refreshed {}",
+                        relative_time_label(refreshed_at, chrono::Utc::now())
+                    ),
+                )),
+        )
     }
 
     fn render_tokens(&self, cx: &mut Context<Self>) -> gpui::Div {

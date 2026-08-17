@@ -1383,6 +1383,166 @@ fn policy_json_keeps_its_column_floor_and_overflows_into_a_scroll(cx: &mut gpui:
     release(cx, &view);
 }
 
+fn portfolio_account(id: &str) -> WalletMetadata {
+    WalletMetadata {
+        instance_id: uuid::Uuid::nil(),
+        id: id.to_owned(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    }
+}
+
+/// Stand the Portfolio tab up on two accounts with balances already in hand,
+/// then leave the tab so the next navigation to it is an opening.
+fn portfolio_at_rest(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
+    cx.update_entity(view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![
+            portfolio_account("primary"),
+            portfolio_account("second"),
+        ]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.portfolio = PortfolioState::Ready(OwnerPortfolioSnapshot {
+            accounts: Vec::new(),
+        });
+        wallet.set_route(Route::Accounts);
+    });
+}
+
+/// Open the Portfolio tab the way every entry point does, and report whether
+/// that opening started a balance read.
+///
+/// The read is detected by the generation counter rather than by the state:
+/// `refresh_portfolio` bumps it before anything awaits, so this stays true
+/// without letting the spawned read land first and race the assertion.
+fn opening_portfolio_reads(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) -> bool {
+    let before = cx.update_entity(view, |wallet, cx| {
+        let before = wallet.portfolio_generation;
+        wallet.navigate_route(Route::Overview, cx);
+        before
+    });
+    cx.update_entity(view, |wallet, _| {
+        let read = wallet.portfolio_generation != before;
+        // Put the tab back the way it was found so one call does not decide
+        // what the next one measures.
+        wallet.portfolio = PortfolioState::Ready(OwnerPortfolioSnapshot {
+            accounts: Vec::new(),
+        });
+        wallet.set_route(Route::Accounts);
+        read
+    })
+}
+
+#[gpui::test]
+fn opening_the_portfolio_tab_reads_balances_at_most_once_a_minute(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    portfolio_at_rest(cx, &view);
+
+    assert!(
+        opening_portfolio_reads(cx, &view),
+        "an account with no reading behind it must be read on the first opening"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet
+            .portfolio_refreshed_at
+            .insert("primary".to_owned(), chrono::Utc::now());
+    });
+    assert!(
+        !opening_portfolio_reads(cx, &view),
+        "a reading under a minute old must be reused rather than read again"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        let stale = chrono::Utc::now() - chrono::TimeDelta::seconds(61);
+        wallet
+            .portfolio_refreshed_at
+            .insert("primary".to_owned(), stale);
+    });
+    assert!(
+        opening_portfolio_reads(cx, &view),
+        "a reading older than a minute must be read again on opening"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn the_portfolio_refresh_interval_is_kept_per_account(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    portfolio_at_rest(cx, &view);
+
+    // A reading that just landed for the account the tab is focused on.
+    cx.update_entity(&view, |wallet, _| {
+        wallet
+            .portfolio_refreshed_at
+            .insert("primary".to_owned(), chrono::Utc::now());
+    });
+    assert!(
+        !opening_portfolio_reads(cx, &view),
+        "the focused account's own reading must hold the interval shut"
+    );
+
+    // Focus the other account. Its balances have never been read, so the
+    // first account's recent reading must not speak for it.
+    cx.update_entity(&view, |wallet, _| {
+        wallet.portfolio_account_index = 1;
+    });
+    assert!(
+        opening_portfolio_reads(cx, &view),
+        "a second account must be read on its own schedule, not the first's"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn the_portfolio_tab_reports_how_old_its_balances_are(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    portfolio_at_rest(cx, &view);
+
+    cx.update_entity(&view, |wallet, _| {
+        let read_at = chrono::Utc::now() - chrono::TimeDelta::minutes(3);
+        wallet
+            .portfolio_refreshed_at
+            .insert("primary".to_owned(), read_at);
+        // The balances path rather than the placeholder: the line has to sit
+        // under a rendered list, which is where it was asked for.
+        wallet.portfolio = PortfolioState::Ready(OwnerPortfolioSnapshot {
+            accounts: vec![OwnerPortfolioAccount {
+                wallet: portfolio_account("primary"),
+                networks: Vec::new(),
+            }],
+        });
+        wallet.set_route(Route::Overview);
+    });
+
+    let bounds = measure(cx, window, &view, &["portfolio-refreshed-at"]);
+    assert!(
+        bounds[0].is_some(),
+        "the age of the balances must be laid out at the bottom of the tab"
+    );
+    cx.read_entity(&view, |wallet, _| {
+        let read_at = wallet
+            .focused_portfolio_refreshed_at()
+            .expect("the focused account's reading must be found");
+        assert_eq!(
+            format!(
+                "Refreshed {}",
+                relative_time_label(read_at, chrono::Utc::now())
+            ),
+            "Refreshed 3 minutes ago"
+        );
+    });
+
+    release(cx, &view);
+}
+
 /// A review document with the shape a real one has: a summary, effects, and
 /// exact bytes to disclose.
 fn review_document() -> ReviewDocument {
