@@ -18,15 +18,48 @@ use super::*;
 use crate::authority::OwnerApi;
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 
+/// Serializes the render tests against each other.
+///
+/// Each one stands up a real GPUI application, a window, and the tokio bridge,
+/// and then tears all three down. Two of those overlapping in one process
+/// crashed it on exit — reliably when this file's tests were the only ones
+/// running, and intermittently in a full suite run, where more surrounding work
+/// changed the timing. One alone never crashed, and `--test-threads=1` never
+/// crashed, which is what named the cause.
+///
+/// So the fixture hands out a lock rather than the tests each remembering to
+/// take one: a render test that forgets is a flake nobody can reproduce on
+/// demand, and the whole point of these tests is to be the thing that catches
+/// layout regressions rather than the thing people learn to re-run.
+static RENDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Held for the life of one render test.
+///
+/// Poisoning is ignored on purpose. The mutex guards a process, not data: an
+/// earlier test panicking says nothing about whether this one may run, and
+/// failing every subsequent test with "poisoned" would hide the first real
+/// failure behind twenty-five spurious ones.
+fn render_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    RENDER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A wallet window over a throwaway database, with the component library, the
 /// tokio bridge, and the embedded fonts initialised the way `run_desktop` does.
+///
+/// The first element of the returned tuple is the test's scope guard: the
+/// temporary directory that outlives the window, and the serialization lock
+/// above. Tests bind it as `_directory` and never touch it; dropping it at the
+/// end of the test is the whole contract.
 fn wallet(
     cx: &mut gpui::TestAppContext,
 ) -> (
-    tempfile::TempDir,
+    (tempfile::TempDir, std::sync::MutexGuard<'static, ()>),
     Entity<WalletWindow>,
     gpui::AnyWindowHandle,
 ) {
+    let lock = render_test_lock();
     // The wallet reads its database and detects agents through `gpui_tokio`,
     // so completions arrive from a real tokio thread. The deterministic test
     // scheduler calls that non-determinism and fails the test at the end
@@ -57,7 +90,7 @@ fn wallet(
         )
     });
     let view = window.root(cx).expect("root view");
-    (directory, view, window.into())
+    ((directory, lock), view, window.into())
 }
 
 /// Wait for the background snapshot to arrive.
