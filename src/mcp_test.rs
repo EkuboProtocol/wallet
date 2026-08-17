@@ -626,6 +626,7 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_create_fork",
             "wallet_decode_abi_result",
             "wallet_discard_fork",
+            "wallet_dry_run_automation",
             "wallet_get_balances",
             "wallet_get_legal",
             "wallet_get_policy",
@@ -1988,4 +1989,45 @@ fn global_ephemeral_quotas_span_authenticated_clients_and_prune_expiry() {
     }
     quota.prune(now);
     assert_eq!(quota.simulations.len(), MAX_RECORDED_SIMULATIONS);
+}
+
+#[test]
+fn the_automation_authoring_skill_is_served_and_names_the_tool_it_depends_on() {
+    let resources = serde_json::to_string(&wallet_resources()).unwrap();
+    assert!(resources.contains(AUTOMATION_SKILL_RESOURCE_URI));
+
+    assert!(WRITE_AUTOMATION_SKILL.starts_with("---\nname: write-ekubo-automation\n"));
+    // The compile-test-fix loop is the whole point of publishing this, so the
+    // skill must name the tool that provides it — and that tool must exist.
+    assert!(WRITE_AUTOMATION_SKILL.contains("wallet_dry_run_automation"));
+    // The three rules that produce silent, baffling bugs when broken.
+    assert!(WRITE_AUTOMATION_SKILL.contains("Declare no state variables"));
+    assert!(WRITE_AUTOMATION_SKILL.contains("deployedBytecode"));
+    assert!(WRITE_AUTOMATION_SKILL.contains("evm_version"));
+}
+
+#[test]
+fn the_dry_run_tool_is_advertised_as_read_only() {
+    let tools = WalletMcpServer::sanitized_tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| (tool.name.to_string(), tool))
+        .collect::<std::collections::HashMap<_, _>>();
+    let dry_run = tools
+        .get("wallet_dry_run_automation")
+        .expect("the dry-run tool is registered");
+    let annotations = dry_run
+        .annotations
+        .as_ref()
+        .expect("the tool carries annotations");
+    // It installs nothing, signs nothing, and persists nothing; an agent that
+    // reads annotations to decide what it may call freely must see that.
+    assert_eq!(annotations.read_only_hint, Some(true));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert!(
+        dry_run.description.as_ref().is_some_and(|description| {
+            description.contains("without installing, scheduling, signing, or storing")
+        }),
+        "the description must promise what the annotations claim"
+    );
 }

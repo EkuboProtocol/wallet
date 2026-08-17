@@ -278,11 +278,11 @@ agent cannot debug is bytecode an agent cannot write.
 ### 1. A published skill, with worked examples
 
 `docs/skills/write-ekubo-automation/SKILL.md`, bundled into the MCP server the
-way `use-ekubo-wallet` already is — `include_str!` plus a `wallet://skills/…`
-resource entry in `mcp.rs`. It is written but deliberately not yet wired up:
-advertising a skill for tools that do not exist would send an agent looking for
-`wallet_dry_run_automation` and find nothing. Wiring lands with the
-implementation.
+way `use-ekubo-wallet` is — `include_str!` plus a
+`wallet://skills/write-ekubo-automation/SKILL.md` resource entry in `mcp.rs`. A
+test holds the skill and the tool surface together: it asserts the skill names
+`wallet_dry_run_automation` and that the tool is registered, so the two cannot
+drift into a skill that teaches an agent to call something that is not there.
 
 It carries the interface, the hard rules, and four worked Solidity examples —
 the empty case, a threshold-gated claim that probes before emitting, a

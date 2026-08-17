@@ -2,6 +2,7 @@ use crate::events::{DomainEventKind, EventBus, TransactionStage};
 use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
     agent_authority::AgentExecutionAuthority,
+    automation::{AutomationDefinition, CronSchedule, PollFailure},
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
     config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
@@ -822,6 +823,78 @@ where
             "policy must be a JSON object, not JSON encoded as a string",
         ))
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DryRunAutomationInput {
+    wallet_id: String,
+    chain_id: String,
+    /// The automation's deployed runtime bytecode as hex — solc's
+    /// `deployedBytecode`, not `bytecode`. The wallet never runs a
+    /// constructor, so a creation-code artifact will not behave.
+    bytecode: String,
+    /// The opaque `config` bytes `automate(bytes config)` receives, as hex.
+    /// Omitted means empty.
+    #[serde(default)]
+    config: Option<String>,
+    /// A six-field cron expression, seconds first, validated and previewed but
+    /// not installed. Supplying it here is how to learn that `*/12 * * * *`
+    /// has five fields before proposing it.
+    #[serde(default)]
+    cron: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DryRunAutomationOutput {
+    wallet_id: String,
+    chain_id: String,
+    /// keccak256 of the bytecode, which is what the owner's review displays.
+    bytecode_hash: String,
+    bytecode_bytes: usize,
+    /// The block the poll observed, when it got that far.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_number: Option<u64>,
+    /// Gas the poll itself used. Not the batch's gas: that is in `simulation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poll_gas_used: Option<u64>,
+    /// The calls the blob asked for. Empty means it had nothing to do, which
+    /// is a healthy tick rather than a failure.
+    calls: Vec<DryRunCall>,
+    /// The full simulation of the batch those calls become, including the
+    /// policy findings that decide whether it could send automatically.
+    /// Absent when the blob returned no calls or the poll failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation: Option<SimulationResult>,
+    /// Present exactly when the poll failed, and verbose on purpose: an agent
+    /// iterating on bytecode needs the bytes, not a category.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<DryRunFailure>,
+    /// The next few moments the supplied schedule would fire, in UTC.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    upcoming: Vec<DateTime<Utc>>,
+    instruction: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DryRunCall {
+    to: String,
+    value: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DryRunFailure {
+    kind: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revert_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revert_selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoded_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_data: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2337,6 +2410,149 @@ impl WalletMcpServer {
     }
 
     #[tool(
+        name = "wallet_dry_run_automation",
+        description = "Run automation bytecode once against live chain state without installing, scheduling, signing, or storing anything, and report exactly what it would do: the calls it returned, the full simulation of the batch those calls become, the policy findings that decide whether that batch could send automatically, and — on failure — the revert selector, decoded Error/Panic, and raw bytes. This is the compile-test-fix loop for writing an automation; read wallet://skills/write-ekubo-automation/SKILL.md first for the interface, the storage and delegation rules, and worked examples. Supply `cron` to validate a schedule and see when it would fire.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_dry_run_automation(
+        &self,
+        Parameters(input): Parameters<DryRunAutomationInput>,
+    ) -> Result<Json<DryRunAutomationOutput>, ErrorData> {
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let network = self
+            .config
+            .network_by_chain_id(&input.chain_id)
+            .map_err(|error| tool_error(&error))?;
+        let bytecode = parse_hex_bytes(&input.bytecode, "bytecode")?;
+        let config_bytes = match &input.config {
+            None => alloy::primitives::Bytes::new(),
+            Some(value) => parse_hex_bytes(value, "config")?,
+        };
+        // Validated through the same constructor an install uses, so a dry run
+        // cannot succeed on bytecode the install would refuse.
+        let schedule = match &input.cron {
+            None => CronSchedule::parse("0 0 * * * *").map_err(|error| tool_error(&error))?,
+            Some(expression) => CronSchedule::parse(expression)
+                .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?,
+        };
+        let definition = AutomationDefinition::new(
+            "dry run",
+            bytecode.clone(),
+            config_bytes.clone(),
+            schedule.clone(),
+            network.chain_id,
+        )
+        .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+        let upcoming = input
+            .cron
+            .as_ref()
+            .map(|_| schedule.preview(chrono::Utc::now(), 3))
+            .unwrap_or_default();
+
+        let clients = ekubo_wallet_core::rpc::clients_for(&network)
+            .await
+            .map_err(|error| tool_error(&error))?;
+        let client = clients
+            .first()
+            .ok_or_else(|| tool_error(&anyhow::anyhow!("network has no RPC endpoints")))?;
+        let outcome = ekubo_wallet_core::automation::poll(
+            client.as_ref(),
+            wallet.address,
+            definition.bytecode(),
+            definition.config(),
+        )
+        .await
+        .map_err(|error| tool_error(&error))?;
+
+        let mut output = DryRunAutomationOutput {
+            wallet_id: wallet.id.clone(),
+            chain_id: input.chain_id.clone(),
+            bytecode_hash: format!("{:#x}", definition.bytecode_hash()),
+            bytecode_bytes: bytecode.len(),
+            block_number: None,
+            poll_gas_used: None,
+            calls: Vec::new(),
+            simulation: None,
+            failure: None,
+            upcoming,
+            instruction: String::new(),
+        };
+
+        let polled = match outcome {
+            Err(failure) => {
+                output.failure = Some(describe_poll_failure(&failure));
+                output.instruction = "The automation did not produce calls. Fix the bytecode and dry-run it again; nothing was installed or signed.".into();
+                return Ok(Json(output));
+            }
+            Ok(polled) => polled,
+        };
+        output.block_number = Some(polled.block_number);
+        output.poll_gas_used = Some(polled.gas_used);
+        output.calls = polled
+            .calls
+            .iter()
+            .map(|call| DryRunCall {
+                to: format!("{:#x}", call.to),
+                value: call.value.to_string(),
+                data: format!("0x{}", hex::encode(&call.data)),
+            })
+            .collect();
+        if polled.calls.is_empty() {
+            output.instruction = "The automation ran and asked for nothing, which is a healthy idle tick. Change the chain state it reads, or its config, to exercise the branch that emits calls.".into();
+            return Ok(Json(output));
+        }
+
+        let plan = ekubo_wallet_core::automation::synthesize_plan(
+            wallet.address,
+            network.chain_id,
+            &polled.calls,
+        )
+        .map_err(|error| tool_error(&error))?;
+        let stored_policy = self
+            .policies
+            .lock()
+            .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)
+            .map_err(|error| tool_error(&error))?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("wallet {} has no local policy", wallet.id), None)
+            })?;
+        let policy_context = Self::policy_context(&wallet);
+        let simulation = simulate_external_execution(
+            &wallet,
+            &network,
+            &plan,
+            &stored_policy,
+            &policy_context,
+            None,
+        )
+        .await
+        .map_err(|error| tool_error(&error))?;
+        output.instruction = if simulation.allowed {
+            format!(
+                "This batch of {} call(s) would send automatically under policy revision {}. Propose the automation for the user to install; nothing here was installed or signed.",
+                polled.calls.len(),
+                stored_policy.revision
+            )
+        } else {
+            format!(
+                "Policy revision {} would NOT allow this batch, so an installed automation emitting it would stop on its first tick. Read policy_findings to see which call, then either change the bytecode or propose a policy that permits it.",
+                stored_policy.revision
+            )
+        };
+        output.simulation = Some(simulation);
+        Ok(Json(output))
+    }
+
+    #[tool(
         name = "wallet_propose_policy",
         description = "Propose a complete replacement signing policy for human review — the way to adapt permissions to planned actions (automatic token spends to certain recipients, approvals to certain spenders, native value limits). Read wallet://docs/policy-authoring and wallet://schemas/policy first, and base the proposal on the exact document from wallet_get_policy: source_revision must be the active revision. One proposal exists per wallet; a newer proposal replaces it. The user reviews a minimized permission diff plus your rationale in the native wallet application and applies it there; this tool can never change the active policy.",
         annotations(
@@ -3012,6 +3228,7 @@ const SECURITY_RESOURCE_URI: &str = "wallet://docs/security-model";
 const POLICY_AUTHORING_RESOURCE_URI: &str = "wallet://docs/policy-authoring";
 const POLICY_SCHEMA_RESOURCE_URI: &str = "wallet://schemas/policy";
 const SKILL_RESOURCE_URI: &str = "wallet://skills/use-ekubo-wallet/SKILL.md";
+const AUTOMATION_SKILL_RESOURCE_URI: &str = "wallet://skills/write-ekubo-automation/SKILL.md";
 const TERMS_RESOURCE_URI: &str = "wallet://legal/terms-of-service";
 const PRIVACY_RESOURCE_URI: &str = "wallet://legal/privacy-policy";
 const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
@@ -3030,8 +3247,58 @@ const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 const SERVER_INSTRUCTIONS: &str = include_str!("../docs/mcp-server-instructions.md");
 const SECURITY_MODEL: &str = include_str!("../docs/mcp-security-model.md");
 const EKUBO_WALLET_SKILL: &str = include_str!("../docs/skills/use-ekubo-wallet/SKILL.md");
+const WRITE_AUTOMATION_SKILL: &str = include_str!("../docs/skills/write-ekubo-automation/SKILL.md");
 
 const POLICY_AUTHORING_GUIDE: &str = include_str!("../docs/policy-authoring.md");
+
+/// Hex in, bytes out, with an error that names the field rather than the codec.
+fn parse_hex_bytes(value: &str, field: &str) -> Result<alloy::primitives::Bytes, ErrorData> {
+    let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    hex::decode(trimmed)
+        .map(alloy::primitives::Bytes::from)
+        .map_err(|error| ErrorData::invalid_params(format!("{field} is not hex: {error}"), None))
+}
+
+/// Every byte a failed poll produced, in the shape an author debugs from.
+///
+/// Nothing here is summarized away. A terse category is what makes an agent
+/// guess, and guessing at bytecode is what the dry run exists to replace.
+fn describe_poll_failure(failure: &PollFailure) -> DryRunFailure {
+    match failure {
+        PollFailure::Rpc(message) => DryRunFailure {
+            kind: "rpc_error".into(),
+            message: message.clone(),
+            revert_data: None,
+            revert_selector: None,
+            decoded_error: None,
+            return_data: None,
+        },
+        PollFailure::Reverted {
+            message,
+            revert_data,
+            revert_selector,
+            decoded,
+        } => DryRunFailure {
+            kind: "reverted".into(),
+            message: message.clone(),
+            revert_data: Some(revert_data.clone()),
+            revert_selector: revert_selector.clone(),
+            decoded_error: decoded.clone(),
+            return_data: None,
+        },
+        PollFailure::Undecodable {
+            message,
+            return_data,
+        } => DryRunFailure {
+            kind: "undecodable_return".into(),
+            message: message.clone(),
+            revert_data: None,
+            revert_selector: None,
+            decoded_error: None,
+            return_data: Some(return_data.clone()),
+        },
+    }
+}
 
 fn wallet_resources() -> Vec<Resource> {
     vec![
@@ -3039,6 +3306,12 @@ fn wallet_resources() -> Vec<Resource> {
             .with_title("Use Ekubo Wallet")
             .with_description(
                 "Reusable agent instructions for onchain work on enabled EVM networks and requests where ‘wallet’ may mean a crypto wallet.",
+            )
+            .with_mime_type("text/markdown"),
+        Resource::new(AUTOMATION_SKILL_RESOURCE_URI, "write-ekubo-automation")
+            .with_title("Write an Ekubo Automation")
+            .with_description(
+                "How to write, compile, and test the EVM bytecode the wallet polls on a cron schedule, with worked Solidity examples.",
             )
             .with_mime_type("text/markdown"),
         Resource::new(SECURITY_RESOURCE_URI, "security-model")
@@ -3119,6 +3392,7 @@ impl ServerHandler for WalletMcpServer {
     ) -> Result<ReadResourceResponse, ErrorData> {
         let contents = match request.uri.as_ref() {
             SKILL_RESOURCE_URI => EKUBO_WALLET_SKILL.to_string(),
+            AUTOMATION_SKILL_RESOURCE_URI => WRITE_AUTOMATION_SKILL.to_string(),
             SECURITY_RESOURCE_URI => SECURITY_MODEL.to_string(),
             POLICY_AUTHORING_RESOURCE_URI => POLICY_AUTHORING_GUIDE.to_string(),
             POLICY_SCHEMA_RESOURCE_URI => {
