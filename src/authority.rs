@@ -1,7 +1,7 @@
 //! Long-lived application authority and compile-time capability surfaces.
 
 use crate::{
-    events::{DomainEventKind, EventBus},
+    events::{DomainEventKind, EventBus, SignatureKind, SignatureStage},
     mcp::{GlobalAgentQuota, WalletMcpServer},
 };
 use alloy::primitives::{Address, B256, U256, keccak256};
@@ -1225,6 +1225,14 @@ impl OwnerApi {
         PendingStore::production(self.config.data_dir())?.get(request_id)
     }
 
+    pub fn message(&self, request_id: Uuid) -> Result<PendingMessage> {
+        MessageStore::production(self.config.data_dir())?.get(request_id)
+    }
+
+    pub fn typed_data(&self, request_id: Uuid) -> Result<PendingTypedData> {
+        TypedDataStore::production(self.config.data_dir())?.get(request_id)
+    }
+
     /// Build the owner-facing transaction view from the encrypted lifecycle
     /// row and, when the chain has one, its complete mined receipt.
     pub async fn transaction_inspection(
@@ -1577,9 +1585,11 @@ impl OwnerApi {
             encoding,
             Some(requester),
         )?;
-        self.events.publish(DomainEventKind::ReviewChanged {
-            request_id: queued.request_id,
-        });
+        self.publish_signature(
+            queued.request_id,
+            SignatureKind::Message,
+            SignatureStage::Queued,
+        );
         Ok(queued)
     }
 
@@ -1634,9 +1644,11 @@ impl OwnerApi {
             digest,
             Some(requester),
         )?;
-        self.events.publish(DomainEventKind::ReviewChanged {
-            request_id: queued.request_id,
-        });
+        self.publish_signature(
+            queued.request_id,
+            SignatureKind::TypedData,
+            SignatureStage::Queued,
+        );
         Ok(queued)
     }
 
@@ -1646,6 +1658,24 @@ impl OwnerApi {
 
     pub(crate) fn event_bus(&self) -> EventBus {
         self.events.clone()
+    }
+
+    /// Announce one signature-request state change.
+    ///
+    /// Both events go out, and they are not redundant. `ReviewChanged` is what
+    /// redraws the queues and wakes the `WalletConnect` wait loops; `Signature`
+    /// carries the kind and stage a banner needs to say what happened. Sending
+    /// only the first is how an arriving message used to land in the inbox
+    /// without ever telling anyone, and every publisher goes through here so
+    /// the next one cannot repeat that.
+    fn publish_signature(&self, request_id: Uuid, kind: SignatureKind, stage: SignatureStage) {
+        self.events.publish(DomainEventKind::Signature {
+            request_id,
+            kind,
+            stage,
+        });
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
     }
 
     pub async fn sign_message(
@@ -1672,15 +1702,13 @@ impl OwnerApi {
             &OsKeyStore,
         )
         .await?;
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
+        self.publish_signature(request_id, SignatureKind::Message, SignatureStage::Signed);
         Ok(signed)
     }
 
     pub fn reject_message(&self, request_id: Uuid) -> Result<PendingMessage> {
         let rejected = MessageStore::production(self.config.data_dir())?.reject(request_id)?;
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
+        self.publish_signature(request_id, SignatureKind::Message, SignatureStage::Rejected);
         Ok(rejected)
     }
 
@@ -1708,15 +1736,17 @@ impl OwnerApi {
             &OsKeyStore,
         )
         .await?;
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
+        self.publish_signature(request_id, SignatureKind::TypedData, SignatureStage::Signed);
         Ok(signed)
     }
 
     pub fn reject_typed_data(&self, request_id: Uuid) -> Result<PendingTypedData> {
         let rejected = TypedDataStore::production(self.config.data_dir())?.reject(request_id)?;
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
+        self.publish_signature(
+            request_id,
+            SignatureKind::TypedData,
+            SignatureStage::Rejected,
+        );
         Ok(rejected)
     }
 

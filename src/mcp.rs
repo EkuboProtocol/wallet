@@ -1,4 +1,4 @@
-use crate::events::{DomainEventKind, EventBus, TransactionStage};
+use crate::events::{DomainEventKind, EventBus, SignatureKind, SignatureStage, TransactionStage};
 use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
     agent_authority::AgentExecutionAuthority,
@@ -321,6 +321,25 @@ impl WalletMcpServer {
                 stage,
             });
         }
+    }
+
+    /// Announce a signature request an agent has just queued.
+    ///
+    /// Everything the owner sees — the inbox, the tray count, the banner — is
+    /// driven off this bus. The two signing tools used to write straight to
+    /// their stores and return, so the request reached the database and
+    /// nothing else: no notification, and an inbox that only caught up the
+    /// next time some unrelated event happened to redraw it. A request nobody
+    /// is told about is a request that waits forever, since these two are the
+    /// one thing in the wallet that no policy can ever approve on its own.
+    fn publish_queued_signature(&self, request_id: uuid::Uuid, kind: SignatureKind) {
+        self.events.publish(DomainEventKind::Signature {
+            request_id,
+            kind,
+            stage: SignatureStage::Queued,
+        });
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
     }
 }
 
@@ -2995,6 +3014,7 @@ impl WalletMcpServer {
             desktop.attribute_typed_data(record.request_id, client_id)
         })
         .map_err(|error| tool_error(&error))?;
+        self.publish_queued_signature(record.request_id, SignatureKind::TypedData);
         let mut output = typed_data_output(record);
         output.permit_approvals = permit_approvals;
         Ok(Json(output))
@@ -3089,6 +3109,9 @@ impl WalletMcpServer {
             desktop.attribute_message(record.request_id, client_id)
         })
         .map_err(|error| tool_error(&error))?;
+        // After attribution, so the row the owner is sent to already names the
+        // agent that asked rather than filling that in a moment later.
+        self.publish_queued_signature(record.request_id, SignatureKind::Message);
         Ok(Json(
             message_output(record, &self.config).map_err(|error| tool_error(&error))?,
         ))

@@ -315,12 +315,18 @@ fn blocked_notification_navigation_retains_the_exact_clicked_destination() {
     let request_id = uuid::Uuid::new_v4();
     let mut navigation = NotificationNavigation::default();
 
-    navigation.receive(NotificationRoute::Review(request_id));
+    navigation.receive(NotificationRoute::Review {
+        subject: NotificationSubject::Transaction,
+        request_id,
+    });
 
     assert_eq!(navigation.take(true), None);
     assert_eq!(
         navigation.take(false),
-        Some(NotificationRoute::Review(request_id))
+        Some(NotificationRoute::Review {
+            subject: NotificationSubject::Transaction,
+            request_id,
+        })
     );
     assert_eq!(navigation.take(false), None);
 }
@@ -331,12 +337,21 @@ fn the_latest_notification_click_supersedes_an_unopened_destination() {
     let latest = uuid::Uuid::new_v4();
     let mut navigation = NotificationNavigation::default();
 
-    navigation.receive(NotificationRoute::Review(earlier));
-    navigation.receive(NotificationRoute::Activity(latest));
+    navigation.receive(NotificationRoute::Review {
+        subject: NotificationSubject::Transaction,
+        request_id: earlier,
+    });
+    navigation.receive(NotificationRoute::Activity {
+        subject: NotificationSubject::Message,
+        request_id: latest,
+    });
 
     assert_eq!(
         navigation.take(false),
-        Some(NotificationRoute::Activity(latest))
+        Some(NotificationRoute::Activity {
+            subject: NotificationSubject::Message,
+            request_id: latest,
+        })
     );
 }
 

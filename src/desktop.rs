@@ -12,9 +12,9 @@ use crate::{
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
-        NotificationPreferences, NotificationRoute, NotificationService as _,
-        PlatformNotificationService, TransactionContext, initialize_platform_notifications,
-        notification_for,
+        NotificationContext, NotificationPreferences, NotificationRoute, NotificationService as _,
+        NotificationSubject, PlatformNotificationService, WalletContext,
+        initialize_platform_notifications, notification_for,
     },
     release_check::ReleaseCheck,
     review::ReviewState,
@@ -2702,20 +2702,50 @@ fn review_document_is_visible(
         .all(|chain_id| chain_is_visible(Some(chain_id), &visible_chain_ids, &configured_chain_ids))
 }
 
-/// Decide whether this lifecycle change deserves a banner, and if so read the
-/// two facts the banner will name.
+/// Decide whether this event deserves a banner, and if so read the facts the
+/// banner will name.
 ///
-/// One lookup answers both questions: the record has to be fetched anyway to
-/// check that its chain is one the owner has chosen to see, and it is also
-/// where the account and network names live.
-fn transaction_notification_context(
+/// For anything the wallet holds a row for, one lookup answers both questions:
+/// the record has to be fetched anyway to check that its chain is one the
+/// owner has chosen to see, and it is also where the account and network names
+/// live. A pairing proposal has no row and no chain yet — nothing has been
+/// approved — so it is admitted on the strength of the event alone.
+fn notification_context(
     owner: &OwnerApi,
     event: &crate::events::DomainEvent,
-) -> Option<TransactionContext> {
-    let crate::events::DomainEventKind::Transaction { request_id, .. } = &event.kind else {
-        return None;
+) -> Option<NotificationContext> {
+    use crate::events::{DomainEventKind, SignatureKind};
+
+    let (account, chain_id) = match &event.kind {
+        DomainEventKind::Transaction { request_id, .. } => {
+            let record = owner.transaction(*request_id).ok()?;
+            let chain_id = record.chain_id.parse().ok();
+            (record.wallet_id, chain_id)
+        }
+        DomainEventKind::Signature {
+            request_id,
+            kind: SignatureKind::Message,
+            ..
+        } => {
+            let record = owner.message(*request_id).ok()?;
+            // An EIP-191 message binds no chain, so a request that declared
+            // none is not hidden by a network filter: there is no network to
+            // filter on, and the signature is just as usable either way.
+            let chain_id = record.chain_id.as_deref().and_then(|id| id.parse().ok());
+            (record.wallet_id, chain_id)
+        }
+        DomainEventKind::Signature {
+            request_id,
+            kind: SignatureKind::TypedData,
+            ..
+        } => {
+            let record = owner.typed_data(*request_id).ok()?;
+            let chain_id = record.chain_id.parse().ok();
+            (record.wallet_id, chain_id)
+        }
+        DomainEventKind::WalletConnectProposed { .. } => return Some(NotificationContext::Dapp),
+        _ => return None,
     };
-    let record = owner.transaction(*request_id).ok()?;
     let networks = owner.networks().ok()?;
     let testnet_mode = owner.testnet_mode().ok()?;
     let visible_chain_ids = visible_network_chain_ids(&networks, testnet_mode);
@@ -2723,18 +2753,18 @@ fn transaction_notification_context(
         .iter()
         .map(|network| network.chain_id)
         .collect::<BTreeSet<_>>();
-    let chain_id = record.chain_id.parse().ok();
     if !chain_is_visible(chain_id, &visible_chain_ids, &configured_chain_ids) {
         return None;
     }
-    Some(TransactionContext {
-        account: record.wallet_id,
+    Some(NotificationContext::Wallet(WalletContext {
+        account,
         // Not `record.network_name`. That is the internal handle an agent
         // types — "robinhood" — and aliases exist so a person can abbreviate
         // in conversation, not so the wallet can abbreviate back at them. A
         // banner says the name the network is actually called.
-        network: chain_label(chain_id, &token_network_names(&networks)),
-    })
+        network: chain_id
+            .map(|chain_id| chain_label(Some(chain_id), &token_network_names(&networks))),
+    }))
 }
 
 /// A coloured dot beside a plain word. It repeats the state in two channels so
@@ -8495,19 +8525,43 @@ impl WalletWindow {
         self.command_palette = false;
         self.set_route(Route::Activity);
         match route {
-            NotificationRoute::Review(request_id) => {
+            NotificationRoute::Review {
+                subject,
+                request_id,
+            } => {
                 self.inbox_tab = InboxTab::Waiting;
                 self.selected_record = None;
-                self.begin_transaction_review(request_id, cx);
+                // The subject decides which store the id is looked up in.
+                // Every route used to open a transaction review, so a message
+                // banner opened a review that could only fail to find its
+                // request.
+                match subject {
+                    NotificationSubject::Transaction => {
+                        self.begin_transaction_review(request_id, cx);
+                    }
+                    NotificationSubject::Message => self.begin_message_review(request_id, cx),
+                    NotificationSubject::TypedData => self.begin_typed_data_review(request_id, cx),
+                }
             }
-            NotificationRoute::Activity(request_id) => {
+            NotificationRoute::Activity {
+                subject,
+                request_id,
+            } => {
                 self.inbox_tab = InboxTab::Decided;
                 self.selected_record = Some(request_id);
-                if self.activity_inspections.contains_key(&request_id) {
-                    cx.notify();
-                } else {
+                // Only a transaction has a receipt to fetch. A decided
+                // signature is complete in the row the snapshot already holds.
+                if subject == NotificationSubject::Transaction
+                    && !self.activity_inspections.contains_key(&request_id)
+                {
                     self.load_transaction_inspection(request_id, cx);
                 }
+            }
+            NotificationRoute::WalletConnect => {
+                // The proposal presents itself as a modal the moment it
+                // arrives, so there is nothing to open — this lands the window
+                // on the screen the connection will show up on once settled.
+                self.set_route(Route::WalletConnect);
             }
         }
         cx.notify();
@@ -15531,7 +15585,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         Ok(event) => {
                             let owner = notification_owner.clone();
                             let described = tokio::task::spawn_blocking(move || {
-                                let context = transaction_notification_context(&owner, &event)?;
+                                let context = notification_context(&owner, &event)?;
                                 let preferences = NotificationPreferences {
                                     detailed_previews: owner
                                         .detailed_notification_previews()

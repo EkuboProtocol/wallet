@@ -1,4 +1,6 @@
-use crate::events::{DomainEvent, DomainEventKind, TransactionStage};
+use crate::events::{
+    DomainEvent, DomainEventKind, SignatureKind, SignatureStage, TransactionStage,
+};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
@@ -19,14 +21,39 @@ pub fn initialize_platform_notifications() {
     }
 }
 
+/// Which queue a routed request lives in.
+///
+/// A request id alone does not say which store holds it, and the three stores
+/// open three different review documents. A banner that could only ever mean
+/// "transaction" is how message signatures ended up routing into the
+/// transaction review and finding nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationSubject {
+    Transaction,
+    Message,
+    TypedData,
+}
+
 /// Where a click on the notification should land.
 ///
 /// The request UUID stays here because this is addressing, not prose: it is
 /// how the window finds the row again. It is never shown to the reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationRoute {
-    Review(Uuid),
-    Activity(Uuid),
+    /// Something is waiting on the owner: open its review.
+    Review {
+        subject: NotificationSubject,
+        request_id: Uuid,
+    },
+    /// Something already resolved: open its row in the decided list.
+    Activity {
+        subject: NotificationSubject,
+        request_id: Uuid,
+    },
+    /// A dapp is waiting to pair. The proposal is presented as a modal the
+    /// moment it arrives, so this only has to raise the window and land on the
+    /// screen the connection belongs to.
+    WalletConnect,
 }
 
 /// Deliberately has no action-button field. Approval and rejection are only
@@ -38,12 +65,27 @@ pub struct WalletNotification {
     pub route: NotificationRoute,
 }
 
-/// The two facts a person can act on when a banner appears: whose money moved
-/// and on which chain. Read from the lifecycle row the event points at.
+/// The facts a person can act on when a banner appears.
+///
+/// Transactions and signature requests name an account and a chain, both read
+/// from the row the event points at. A pairing proposal has neither yet — no
+/// account has been chosen and no chain approved — and the only thing it can
+/// name is the dapp, which the event already carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransactionContext {
+pub enum NotificationContext {
+    Wallet(WalletContext),
+    Dapp,
+}
+
+/// Whose money moved and on which chain.
+///
+/// `network` is optional because an EIP-191 message binds no chain at all: a
+/// login proof is valid wherever the address is. Naming a network there would
+/// mean inventing one, so the clause simply stops after the account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalletContext {
     pub account: String,
-    pub network: String,
+    pub network: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,17 +102,58 @@ pub struct NotificationPreferences {
 #[must_use]
 pub fn notification_for(
     event: &DomainEvent,
-    context: &TransactionContext,
+    context: &NotificationContext,
     preferences: NotificationPreferences,
 ) -> Option<WalletNotification> {
-    let DomainEventKind::Transaction { request_id, stage } = &event.kind else {
-        return None;
-    };
-    let where_from = if preferences.detailed_previews {
-        format!("{} on {}", context.account, context.network)
-    } else {
-        "Open Ekubo Wallet for details".to_owned()
-    };
+    match &event.kind {
+        DomainEventKind::Transaction { request_id, stage } => Some(transaction_notification(
+            *request_id,
+            *stage,
+            context,
+            preferences,
+        )),
+        DomainEventKind::Signature {
+            request_id,
+            kind,
+            stage,
+        } => Some(signature_notification(
+            *request_id,
+            *kind,
+            *stage,
+            context,
+            preferences,
+        )),
+        DomainEventKind::WalletConnectProposed { dapp, .. } => {
+            Some(pairing_notification(dapp, preferences))
+        }
+        _ => None,
+    }
+}
+
+/// The account-and-network clause every wallet banner opens with, or the
+/// stand-in that names nothing when previews are turned down.
+///
+/// A private preview still has to be a sentence, so callers append their own
+/// second clause to whichever of the two comes back.
+fn where_from(context: &NotificationContext, preferences: NotificationPreferences) -> String {
+    match context {
+        NotificationContext::Wallet(wallet) if preferences.detailed_previews => {
+            match &wallet.network {
+                Some(network) => format!("{} on {network}", wallet.account),
+                None => wallet.account.clone(),
+            }
+        }
+        _ => "Open Ekubo Wallet for details".to_owned(),
+    }
+}
+
+fn transaction_notification(
+    request_id: Uuid,
+    stage: TransactionStage,
+    context: &NotificationContext,
+    preferences: NotificationPreferences,
+) -> WalletNotification {
+    let where_from = where_from(context, preferences);
     let (title, body, review) = match stage {
         TransactionStage::Proposed => (
             "Approval needed",
@@ -104,15 +187,96 @@ pub fn notification_for(
             false,
         ),
     };
-    Some(WalletNotification {
+    WalletNotification {
         title: title.to_owned(),
         body,
-        route: if review {
-            NotificationRoute::Review(*request_id)
-        } else {
-            NotificationRoute::Activity(*request_id)
-        },
-    })
+        route: route_for(NotificationSubject::Transaction, request_id, review),
+    }
+}
+
+/// A signature request has no on-chain half, so its banners say what the
+/// signature itself did rather than where it got to. The two kinds are named
+/// apart because reviewing them asks for different things: a message is read,
+/// typed data is checked field by field.
+fn signature_notification(
+    request_id: Uuid,
+    kind: SignatureKind,
+    stage: SignatureStage,
+    context: &NotificationContext,
+    preferences: NotificationPreferences,
+) -> WalletNotification {
+    let where_from = where_from(context, preferences);
+    let subject = match kind {
+        SignatureKind::Message => NotificationSubject::Message,
+        SignatureKind::TypedData => NotificationSubject::TypedData,
+    };
+    let (title, body, review) = match (kind, stage) {
+        (SignatureKind::Message, SignatureStage::Queued) => (
+            "Message signature needed",
+            format!("{where_from}. Nothing is signed until you decide."),
+            true,
+        ),
+        (SignatureKind::TypedData, SignatureStage::Queued) => (
+            "Typed-data signature needed",
+            format!("{where_from}. Nothing is signed until you decide."),
+            true,
+        ),
+        (SignatureKind::Message, SignatureStage::Signed) => (
+            "Message signed",
+            format!("{where_from}. The signature went back to whoever asked."),
+            false,
+        ),
+        (SignatureKind::TypedData, SignatureStage::Signed) => (
+            "Typed data signed",
+            format!("{where_from}. The signature went back to whoever asked."),
+            false,
+        ),
+        (SignatureKind::Message, SignatureStage::Rejected) => (
+            "Message signature declined",
+            format!("{where_from}. Nothing was signed."),
+            false,
+        ),
+        (SignatureKind::TypedData, SignatureStage::Rejected) => (
+            "Typed-data signature declined",
+            format!("{where_from}. Nothing was signed."),
+            false,
+        ),
+    };
+    WalletNotification {
+        title: title.to_owned(),
+        body,
+        route: route_for(subject, request_id, review),
+    }
+}
+
+/// A pairing proposal names the dapp, because that is the only fact the owner
+/// has to judge and the wallet has nothing else to say yet. The name is
+/// dapp-authored, so it arrives already sanitized by `DappIdentity`.
+fn pairing_notification(dapp: &str, preferences: NotificationPreferences) -> WalletNotification {
+    let body = if preferences.detailed_previews {
+        format!("{dapp} wants to connect. Nothing is approved until you decide.")
+    } else {
+        "Open Ekubo Wallet for details. Nothing is approved until you decide.".to_owned()
+    };
+    WalletNotification {
+        title: "Connection request".to_owned(),
+        body,
+        route: NotificationRoute::WalletConnect,
+    }
+}
+
+fn route_for(subject: NotificationSubject, request_id: Uuid, review: bool) -> NotificationRoute {
+    if review {
+        NotificationRoute::Review {
+            subject,
+            request_id,
+        }
+    } else {
+        NotificationRoute::Activity {
+            subject,
+            request_id,
+        }
+    }
 }
 
 pub trait NotificationService: Send + Sync {

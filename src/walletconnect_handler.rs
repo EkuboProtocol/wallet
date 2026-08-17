@@ -860,6 +860,15 @@ impl SessionHandler for DesktopSession {
             .first()
             .map(|choice| Self::proposal_document(self.id, proposal, None, &choice.scope))
             .context("this wallet has no account to expose")?;
+        // Raising the window is not the same as telling the owner. A pairing
+        // arrives while they are looking at whatever asked them to scan the
+        // code, and every other decision this wallet puts in front of a person
+        // announces itself. `headline` is already sanitized dapp-authored
+        // text, which is the only form of it allowed into a banner.
+        self.events.publish(DomainEventKind::WalletConnectProposed {
+            session_id: self.id.to_string(),
+            dapp: DappIdentity::of(&proposal.metadata).headline(),
+        });
         let command = tokio::select! {
             () = self.shutdown.cancelled() => {
                 return Ok(ProposalDecision::Reject {
