@@ -8,6 +8,7 @@ use crate::{
         PRIVATE_KEY_REVEAL_DURATION,
     },
     automation::{Automation, AutomationState},
+    automation_store::{AutomationRun, RunOutcome},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
@@ -1749,6 +1750,13 @@ pub struct WalletWindow {
     update_data_dir: PathBuf,
 }
 
+/// How many of an automation's runs the tab shows.
+///
+/// The store keeps thousands; this screen answers "what has it been doing
+/// lately", and a page rendering a per-second automation's whole history is a
+/// page nobody scrolls to the end of.
+const AUTOMATION_RUNS_SHOWN: usize = 20;
+
 #[derive(Clone)]
 struct DesktopSnapshot {
     reviews: std::result::Result<OwnerReviewQueues, SharedString>,
@@ -1763,6 +1771,10 @@ struct DesktopSnapshot {
     legal_status: std::result::Result<LegalStatus, SharedString>,
     networks: std::result::Result<Vec<NetworkConfig>, SharedString>,
     automations: std::result::Result<Vec<Automation>, SharedString>,
+    /// The recent runs of each automation. Captured with the automations
+    /// themselves so the tab draws a complete row in one pass rather than
+    /// fetching per card while the reader watches.
+    automation_runs: BTreeMap<uuid::Uuid, Vec<AutomationRun>>,
     message_documents: BTreeMap<uuid::Uuid, std::result::Result<ReviewDocument, SharedString>>,
     typed_data_documents: BTreeMap<uuid::Uuid, std::result::Result<ReviewDocument, SharedString>>,
 }
@@ -1771,6 +1783,20 @@ impl DesktopSnapshot {
     fn capture(owner: &OwnerApi) -> Self {
         let reviews = cache_result(owner.reviews(None));
         let automations = cache_result(owner.automations());
+        let automation_runs = automations.as_ref().map_or_else(
+            |_| BTreeMap::new(),
+            |automations| {
+                automations
+                    .iter()
+                    .filter_map(|automation| {
+                        owner
+                            .automation_runs(automation.id, AUTOMATION_RUNS_SHOWN)
+                            .ok()
+                            .map(|runs| (automation.id, runs))
+                    })
+                    .collect()
+            },
+        );
         let activity =
             cache_result(owner.activity(None, 200)).map(Arc::<[OwnerActivityRecord]>::from);
         let activity_sources = owner
@@ -1827,6 +1853,7 @@ impl DesktopSnapshot {
             legal_status,
             networks,
             automations,
+            automation_runs,
             message_documents,
             typed_data_documents,
         }
@@ -11482,6 +11509,21 @@ impl WalletWindow {
         .detach();
     }
 
+    /// Open the transaction one automation run produced.
+    ///
+    /// Goes to the same activity detail any other transaction opens in: an
+    /// automation's transaction is an ordinary transaction, and giving it a
+    /// second, lesser viewer would be the wrong kind of special case.
+    fn open_automation_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.set_route(Route::Activity);
+        self.inbox_tab = InboxTab::Decided;
+        self.selected_record = Some(request_id);
+        if !self.activity_inspections.contains_key(&request_id) {
+            self.load_transaction_inspection(request_id, cx);
+        }
+        cx.notify();
+    }
+
     fn render_automations(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
         content = content.when_some(self.automation_error.clone(), |content, error| {
@@ -11659,6 +11701,70 @@ impl WalletWindow {
                         ),
                     )),
             );
+            // The run history, which is the answer to "what has this been
+            // doing" — and for every run that produced a transaction, a way
+            // straight to that transaction's details. Those records are hidden
+            // rather than deleted when history is cleared, so this link keeps
+            // working however long ago the run happened.
+            if let Some(runs) = self
+                .snapshot()
+                .ok()
+                .and_then(|snapshot| snapshot.automation_runs.get(&id))
+                .filter(|runs| !runs.is_empty())
+            {
+                let mut history = div()
+                    .debug_selector(|| "automation-runs".to_owned())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label("Runs")),
+                    );
+                for run in runs {
+                    let request_id = run.request_id;
+                    history = history.child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if run.outcome == RunOutcome::Failed {
+                                        cx.theme().danger
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .child(selectable_label(format!(
+                                        "{} · {} · {}",
+                                        relative_time_label(run.ran_at, now),
+                                        run.outcome.label(),
+                                        run.detail
+                                    ))),
+                            )
+                            .when_some(request_id, |row, request_id| {
+                                row.child(
+                                    app_button(SharedString::from(format!(
+                                        "open-automation-transaction-{}",
+                                        run.run_id
+                                    )))
+                                    .debug_selector(|| "open-automation-transaction".to_owned())
+                                    .label("Transaction")
+                                    .small()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.open_automation_transaction(request_id, cx);
+                                    })),
+                                )
+                            }),
+                    );
+                }
+                card = card.child(history);
+            }
             rows = rows.child(card);
         }
         content.child(rows)

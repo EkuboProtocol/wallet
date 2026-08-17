@@ -13,7 +13,7 @@ use ekubo_wallet_core::{
     },
     approval_summary::{TokenMetadataMap, format_fixed_point, interpret_steps, plan_token_targets},
     automation::Automation,
-    automation_store::AutomationStore,
+    automation_store::{AutomationRun, AutomationStore},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
@@ -820,6 +820,16 @@ impl OwnerApi {
             found.extend(store.list_for_wallet(wallet.instance_id)?);
         }
         Ok(found)
+    }
+
+    /// One automation's run history, newest first.
+    ///
+    /// Every tick is in here, including the ones that did nothing, because the
+    /// question this screen answers is "what has this thing been doing" and a
+    /// log of only the eventful runs cannot tell a quiet automation from a
+    /// stopped one.
+    pub fn automation_runs(&self, automation_id: Uuid, limit: usize) -> Result<Vec<AutomationRun>> {
+        AutomationStore::production(self.config.data_dir())?.runs(automation_id, limit)
     }
 
     /// Stop one automation and record why, from the tab.

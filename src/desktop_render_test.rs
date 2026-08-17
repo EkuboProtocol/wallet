@@ -107,6 +107,7 @@ fn quiet_snapshot() -> DesktopSnapshot {
         activity_sources: BTreeMap::new(),
         accounts: Ok(Vec::new()),
         automations: Ok(Vec::new()),
+        automation_runs: BTreeMap::new(),
         policies: BTreeMap::new(),
         legal_status: Ok(LegalStatus {
             signing_allowed: true,
@@ -1372,6 +1373,7 @@ fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui:
         laid_out[2].is_some(),
         "a stopped automation must offer a way back, not just an explanation"
     );
+    release(cx, &view);
 }
 
 #[gpui::test]
@@ -1408,5 +1410,61 @@ fn automation_fixture(state: AutomationState, stopped_reason: Option<String>) ->
         last_request_id: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+    }
+}
+
+#[gpui::test]
+fn every_run_is_listed_and_the_ones_that_sent_link_to_their_transaction(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let automation = automation_fixture(AutomationState::Enabled, None);
+    let sent = uuid::Uuid::new_v4();
+    let runs = vec![
+        run_fixture(automation.id, RunOutcome::Idle, None),
+        run_fixture(automation.id, RunOutcome::Sent, Some(sent)),
+    ];
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automation_runs = BTreeMap::from([(automation.id, runs)]);
+            replacement.automations = Ok(vec![automation]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+
+    let laid_out = measure(
+        cx,
+        window,
+        &view,
+        &["automation-runs", "open-automation-transaction"],
+    );
+    assert!(
+        laid_out[0].is_some(),
+        "the run history is what the screen is for"
+    );
+    assert!(
+        laid_out[1].is_some(),
+        "a run that produced a transaction must offer a way into its details"
+    );
+    release(cx, &view);
+}
+
+fn run_fixture(
+    automation_id: uuid::Uuid,
+    outcome: RunOutcome,
+    request_id: Option<uuid::Uuid>,
+) -> ekubo_wallet_core::automation_store::AutomationRun {
+    ekubo_wallet_core::automation_store::AutomationRun {
+        run_id: uuid::Uuid::new_v4(),
+        automation_id,
+        ran_at: chrono::Utc::now(),
+        outcome,
+        detail: "ran".into(),
+        request_id,
+        calls: u32::from(request_id.is_some()),
     }
 }

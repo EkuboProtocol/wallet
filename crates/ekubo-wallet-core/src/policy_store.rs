@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1592,14 +1592,24 @@ struct Migration {
 /// outright, which is the correct answer for a *newer* database — this build
 /// cannot know what a later schema means — and the wrong one for an older
 /// database, where refusing bricks a wallet whose keys are fine.
-const MIGRATIONS: &[Migration] = &[Migration {
-    to_version: 4,
-    statements: &[
-        AUTOMATIONS_TABLE,
-        AUTOMATIONS_WALLET_INDEX,
-        AUTOMATIONS_KEY_INDEX,
-    ],
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        to_version: 4,
+        statements: &[
+            AUTOMATIONS_TABLE,
+            AUTOMATIONS_WALLET_INDEX,
+            AUTOMATIONS_KEY_INDEX,
+        ],
+    },
+    Migration {
+        to_version: 5,
+        statements: &[
+            "ALTER TABLE pending_transactions ADD COLUMN hidden_at INTEGER",
+            AUTOMATION_RUNS_TABLE,
+            AUTOMATION_RUNS_INDEX,
+        ],
+    },
+];
 
 /// Brings an existing database up to [`SCHEMA_VERSION`], returning the version
 /// it ends at.
@@ -1755,6 +1765,16 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                          OR (length(cancel_transaction_hashes) > 0
                              AND length(cancel_transaction_hashes) % 32 = 0
                              AND length(cancel_transaction_hashes) <= 256)),
+                 -- When the owner cleared this row out of their activity list.
+                 --
+                 -- Hidden, never deleted. An automation's run history names the
+                 -- transaction each tick produced, and a person auditing what
+                 -- their wallet did on its own must be able to open any of them
+                 -- however long ago it ran. Clearing history is about what the
+                 -- inbox shows, and it would be a poor trade to answer it by
+                 -- destroying the only local record of a transaction nobody
+                 -- watched being made.
+                 hidden_at INTEGER,
                  gas_used INTEGER CHECK (gas_used IS NULL OR gas_used >= 0),
                  effective_gas_price BLOB
                      CHECK (effective_gas_price IS NULL
@@ -1952,6 +1972,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             AUTOMATIONS_TABLE,
             AUTOMATIONS_WALLET_INDEX,
             AUTOMATIONS_KEY_INDEX,
+            AUTOMATION_RUNS_TABLE,
+            AUTOMATION_RUNS_INDEX,
             record_version.as_str(),
         ],
     )
@@ -2031,6 +2053,34 @@ const AUTOMATIONS_WALLET_INDEX: &str = "CREATE INDEX automations_wallet_chain
 /// would be a collision between things that share nothing.
 const AUTOMATIONS_KEY_INDEX: &str = "CREATE UNIQUE INDEX automations_wallet_key
      ON automations(wallet_instance_id, automation_key)";
+
+/// Every tick an automation has ever run, and what came of it.
+///
+/// The automations table keeps only the latest outcome, which answers "is this
+/// working right now" and nothing else. A person deciding whether to keep
+/// trusting a job that runs unattended needs its whole record: how often it
+/// found nothing to do, when it last sent something, and which transaction that
+/// was. So each tick appends here.
+///
+/// `request_id` is not a foreign key, deliberately. The lifecycle table's rows
+/// are hidden rather than deleted precisely so this pointer keeps resolving,
+/// but a wallet purge does remove them, and a run losing its transaction must
+/// not take the run record with it — the history of what the automation *did*
+/// is worth keeping even where the transaction detail is gone.
+const AUTOMATION_RUNS_TABLE: &str = "CREATE TABLE automation_runs (
+     run_id BLOB PRIMARY KEY NOT NULL CHECK (length(run_id) = 16),
+     automation_id BLOB NOT NULL CHECK (length(automation_id) = 16),
+     ran_at INTEGER NOT NULL,
+     outcome TEXT NOT NULL
+         CHECK (outcome IN ('skipped', 'idle', 'sent', 'stopped', 'failed')),
+     detail TEXT NOT NULL,
+     request_id BLOB CHECK (request_id IS NULL OR length(request_id) = 16),
+     calls INTEGER NOT NULL DEFAULT 0 CHECK (calls >= 0),
+     FOREIGN KEY (automation_id) REFERENCES automations(automation_id) ON DELETE CASCADE
+ ) STRICT";
+
+const AUTOMATION_RUNS_INDEX: &str = "CREATE INDEX automation_runs_by_automation
+     ON automation_runs(automation_id, ran_at DESC)";
 
 /// Network profiles an agent has suggested, held apart from active configuration
 /// until the owner confirms them.

@@ -344,10 +344,17 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
             .unwrap();
         // Wind the database back to the schema that shipped before
         // automations existed.
+        // Wind the database all the way back to the schema that shipped
+        // before automations existed, undoing every migration in order so the
+        // forward path is exercised end to end rather than from its last step.
         store
             .connection
             .execute_batch(
-                "DROP INDEX automations_wallet_chain;
+                "DROP INDEX automation_runs_by_automation;
+                 DROP TABLE automation_runs;
+                 ALTER TABLE pending_transactions DROP COLUMN hidden_at;
+                 DROP INDEX automations_wallet_key;
+                 DROP INDEX automations_wallet_chain;
                  DROP TABLE automations;
                  UPDATE schema_metadata SET version = 3 WHERE singleton = 1;",
             )
@@ -365,6 +372,18 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         )
         .expect("the migration created the automations table");
     assert_eq!(table, "automations");
+    // And the column the run log depends on: clearing history hides rows, so
+    // an automation-produced transaction stays openable.
+    let hidden: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('pending_transactions')
+             WHERE name = 'hidden_at'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hidden, 1, "the migration added the hidden_at column");
     assert_eq!(
         store
             .get("primary")

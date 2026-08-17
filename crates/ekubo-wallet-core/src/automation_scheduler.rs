@@ -26,7 +26,7 @@
 use crate::{
     agent_authority::AgentExecutionAuthority,
     automation::{self, Automation, PollFailure},
-    automation_store::AutomationStore,
+    automation_store::{AutomationStore, RunOutcome},
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     core::predicate::PolicyContext,
     orchestrator::SendDisposition,
@@ -117,6 +117,12 @@ impl AutomationScheduler {
                 },
             })
             .collect();
+        // An unlink is a run too. It is the moment the automation stopped, and
+        // leaving it out of the log would make the history end without saying
+        // why.
+        for report in &reports {
+            log_run(automations, report, at)?;
+        }
 
         for automation in due.ready {
             if automation.chain_id != network.chain_id {
@@ -135,6 +141,7 @@ impl AutomationScheduler {
                     at,
                 )
                 .await?;
+            log_run(automations, &report, at)?;
             reports.push(report);
         }
         Ok(reports)
@@ -333,6 +340,44 @@ impl AutomationScheduler {
             _ => Ok(None),
         }
     }
+}
+
+/// Append one tick's outcome to the automation's history.
+///
+/// Every tick, including the ones that did nothing. A log that skipped the
+/// quiet runs could not tell a working automation apart from a stopped one,
+/// which is the distinction a person opening this screen is usually there to
+/// make.
+fn log_run(
+    automations: &Mutex<AutomationStore>,
+    report: &TickReport,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    let (outcome, detail, request_id, calls) = match &report.outcome {
+        TickOutcome::Skipped { reason } => (RunOutcome::Skipped, reason.clone(), None, 0),
+        TickOutcome::Idle => (
+            RunOutcome::Idle,
+            "the automation ran and asked for nothing".to_owned(),
+            None,
+            0,
+        ),
+        TickOutcome::Sent { request_id, calls } => (
+            RunOutcome::Sent,
+            format!("sent {calls} call(s)"),
+            Some(*request_id),
+            u32::try_from(*calls).unwrap_or(u32::MAX),
+        ),
+        TickOutcome::Stopped { reason } => (RunOutcome::Stopped, reason.clone(), None, 0),
+        TickOutcome::Failed { reason } => (RunOutcome::Failed, reason.clone(), None, 0),
+    };
+    lock(automations)?.record_run(
+        report.automation_id,
+        outcome,
+        &detail,
+        request_id,
+        calls,
+        at,
+    )
 }
 
 fn stop_automation(

@@ -282,8 +282,33 @@ which keeps "run this" and "here is exactly what it runs" a single operation.
 
 The owner comes in when transactions stop working, not to authorize the job.
 
-The tab lists each automation with its key, schedule, next fire time, last
-result, last transaction, and — when it stopped — why. It shows the bytecode's
+The tab lists each automation with its key, schedule, next fire time, and —
+when it stopped — why, above that automation's run history.
+
+## Every run is kept, and every transaction stays openable
+
+The automation row carries only the latest outcome, which answers "is this
+working right now". A person deciding whether to keep trusting something that
+runs unattended has a different question — what has it been doing — so every
+tick appends to `automation_runs`: the quiet ones that found nothing to do, the
+skips, the failures, and the sends. A log that kept only the eventful runs could
+not tell a quiet automation from a stopped one, which is usually the distinction
+the reader came for. The log is capped per automation and trimmed oldest-first
+on the way in, because a per-second schedule writes 86,400 rows a day.
+
+A run that produced a transaction names it, and the tab opens it in the same
+activity detail any other transaction opens in. That link has to keep working
+however long ago the run happened, which is why **clearing activity history
+hides rows rather than deleting them**. A hidden row is absent from every list
+and still resolves by id. The per-wallet history cap likewise skips any row an
+automation run points at: the cap exists to bound storage, not to break the
+audit trail of what the wallet did while nobody was watching.
+
+Clearing history was a delete before this feature. Making it a hide is the
+smaller change of the two available — the alternative, exempting only
+automation-produced rows from the delete, would have made "clear history" mean
+different things for different rows, which is worse to explain and worse to
+rely on. It shows the bytecode's
 keccak256 and byte length and cannot show what the bytecode *does*; that limit
 is the honest one to state rather than paper over. See the open questions.
 

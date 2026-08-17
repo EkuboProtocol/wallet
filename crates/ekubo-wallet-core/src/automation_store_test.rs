@@ -413,3 +413,115 @@ fn a_key_with_a_control_character_is_refused() {
         .expect_err("a bidi override in a key is refused");
     assert!(format!("{error:#}").contains("bidirectional"), "{error:#}");
 }
+
+#[test]
+fn every_tick_is_recorded_including_the_quiet_ones() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, "claim", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
+    let sent = Uuid::new_v4();
+
+    store
+        .record_run(
+            installed.id,
+            RunOutcome::Idle,
+            "nothing to do",
+            None,
+            0,
+            at(12, 0),
+        )
+        .unwrap();
+    store
+        .record_run(
+            installed.id,
+            RunOutcome::Sent,
+            "sent 2 call(s)",
+            Some(sent),
+            2,
+            at(13, 0),
+        )
+        .unwrap();
+    store
+        .record_run(
+            installed.id,
+            RunOutcome::Skipped,
+            "the slot was held",
+            None,
+            0,
+            at(14, 0),
+        )
+        .unwrap();
+
+    let runs = store.runs(installed.id, 10).unwrap();
+    assert_eq!(runs.len(), 3, "a quiet run is still a run");
+    // Newest first: the screen answers "what just happened" before "what has
+    // it been doing".
+    assert_eq!(runs[0].outcome, RunOutcome::Skipped);
+    assert_eq!(runs[1].outcome, RunOutcome::Sent);
+    assert_eq!(runs[2].outcome, RunOutcome::Idle);
+    // And the run that produced a transaction names it, which is the whole
+    // point of keeping the log.
+    assert_eq!(runs[1].request_id, Some(sent));
+    assert_eq!(runs[1].calls, 2);
+    assert!(runs[0].request_id.is_none());
+}
+
+#[test]
+fn the_run_log_is_bounded_and_drops_the_oldest_first() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, "chatty", &definition("v1", "* * * * * *"), 1)
+        .unwrap()
+        .automation;
+    // One over the cap, each a minute apart so the ordering is unambiguous.
+    for index in 0..=MAX_RUNS_PER_AUTOMATION {
+        let minute = u32::try_from(index % 60).unwrap();
+        let hour = u32::try_from(index / 60).unwrap();
+        store
+            .record_run(
+                installed.id,
+                RunOutcome::Idle,
+                &format!("run {index}"),
+                None,
+                0,
+                Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()
+                    + chrono::TimeDelta::hours(i64::from(hour))
+                    + chrono::TimeDelta::minutes(i64::from(minute)),
+            )
+            .unwrap();
+    }
+    let runs = store
+        .runs(installed.id, MAX_RUNS_PER_AUTOMATION * 2)
+        .unwrap();
+    assert_eq!(runs.len(), MAX_RUNS_PER_AUTOMATION);
+    // A per-second schedule would otherwise grow a log nobody reads, and the
+    // rows worth keeping are the recent ones.
+    assert_eq!(runs[0].detail, format!("run {MAX_RUNS_PER_AUTOMATION}"));
+    assert!(!runs.iter().any(|run| run.detail == "run 0"));
+}
+
+#[test]
+fn removing_an_automation_takes_its_runs_with_it() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, "claim", &definition("v1", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
+    store
+        .record_run(
+            installed.id,
+            RunOutcome::Idle,
+            "nothing",
+            None,
+            0,
+            at(12, 0),
+        )
+        .unwrap();
+    assert!(store.remove(installed.id).unwrap());
+    assert!(store.runs(installed.id, 10).unwrap().is_empty());
+}

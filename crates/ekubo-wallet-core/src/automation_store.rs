@@ -45,6 +45,81 @@ enum ClearFailures {
     No,
 }
 
+/// One tick that ran, and what came of it.
+///
+/// The automation row carries only the latest outcome, which answers "is it
+/// working right now". This answers the question a person actually has about
+/// something that runs unattended: what has it been doing, and which
+/// transactions did it make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomationRun {
+    pub run_id: Uuid,
+    pub automation_id: Uuid,
+    pub ran_at: DateTime<Utc>,
+    pub outcome: RunOutcome,
+    /// Owner-facing account of the tick, in the same words the tab shows.
+    pub detail: String,
+    /// The transaction this tick produced, when it produced one. Its
+    /// lifecycle row is hidden rather than deleted when history is cleared, so
+    /// this keeps resolving.
+    pub request_id: Option<Uuid>,
+    pub calls: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    Skipped,
+    Idle,
+    Sent,
+    Stopped,
+    Failed,
+}
+
+impl RunOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skipped => "skipped",
+            Self::Idle => "idle",
+            Self::Sent => "sent",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// What the tab writes on the row, so every run reads as a sentence
+    /// rather than as a status word the reader has to decode.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Skipped => "Skipped",
+            Self::Idle => "Nothing to do",
+            Self::Sent => "Sent",
+            Self::Stopped => "Stopped",
+            Self::Failed => "Failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "skipped" => Ok(Self::Skipped),
+            "idle" => Ok(Self::Idle),
+            "sent" => Ok(Self::Sent),
+            "stopped" => Ok(Self::Stopped),
+            "failed" => Ok(Self::Failed),
+            other => anyhow::bail!("unknown automation run outcome {other:?}"),
+        }
+    }
+}
+
+/// How many runs one automation keeps.
+///
+/// A per-second schedule produces 86,400 rows a day, almost all of them
+/// "nothing to do", and an unbounded log would grow without ever being read.
+/// The cap is generous enough to cover weeks of a normal schedule and days of
+/// an aggressive one, and old rows are dropped oldest-first.
+pub const MAX_RUNS_PER_AUTOMATION: usize = 2_000;
+
 /// The result of an install, which is the same operation whether it created
 /// something or replaced it.
 ///
@@ -178,6 +253,105 @@ impl AutomationStore {
             automation,
             replaced,
         })
+    }
+
+    /// Append one tick to an automation's history.
+    ///
+    /// Every tick is recorded, including the ones that did nothing: "it ran
+    /// and there was nothing to do" is the answer to most of the questions
+    /// someone asks of an automation, and a log that only kept the
+    /// interesting rows could not distinguish a quiet job from a stopped one.
+    pub fn record_run(
+        &mut self,
+        automation_id: Uuid,
+        outcome: RunOutcome,
+        detail: &str,
+        request_id: Option<Uuid>,
+        calls: u32,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        let transaction = self.database.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO automation_runs (
+                 run_id, automation_id, ran_at, outcome, detail, request_id, calls
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                Blob(*Uuid::new_v4().as_bytes()),
+                Blob(*automation_id.as_bytes()),
+                Millis(at),
+                outcome.as_str(),
+                detail,
+                request_id.map(|id| Blob(*id.as_bytes())),
+                calls,
+            ],
+        )?;
+        // Trimmed on the way in, so the log is bounded by the activity that
+        // produces it rather than by a sweep somebody has to remember.
+        transaction.execute(
+            "DELETE FROM automation_runs
+             WHERE run_id IN (
+                 SELECT run_id FROM automation_runs
+                 WHERE automation_id = ?1
+                 ORDER BY ran_at DESC, run_id DESC
+                 LIMIT -1 OFFSET ?2
+             )",
+            params![
+                Blob(*automation_id.as_bytes()),
+                i64::try_from(MAX_RUNS_PER_AUTOMATION).context("run cap out of range")?
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// One automation's runs, newest first.
+    pub fn runs(&self, automation_id: Uuid, limit: usize) -> Result<Vec<AutomationRun>> {
+        let mut statement = self.database.connection.prepare(
+            "SELECT run_id, automation_id, ran_at, outcome, detail, request_id, calls
+             FROM automation_runs WHERE automation_id = ?1
+             ORDER BY ran_at DESC, run_id DESC LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    Blob(*automation_id.as_bytes()),
+                    i64::try_from(limit).context("run limit out of range")?
+                ],
+                |row| {
+                    let run_id: [u8; 16] = row.blob(0)?;
+                    let automation_id: [u8; 16] = row.blob(1)?;
+                    let ran_at = row.time(2)?;
+                    let outcome: String = row.get(3)?;
+                    let detail: String = row.get(4)?;
+                    let request_id: Option<[u8; 16]> = row.blob_opt(5)?;
+                    let calls: i64 = row.get(6)?;
+                    Ok((
+                        run_id,
+                        automation_id,
+                        ran_at,
+                        outcome,
+                        detail,
+                        request_id,
+                        calls,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(
+                |(run_id, automation_id, ran_at, outcome, detail, request_id, calls)| {
+                    Ok(AutomationRun {
+                        run_id: Uuid::from_bytes(run_id),
+                        automation_id: Uuid::from_bytes(automation_id),
+                        ran_at,
+                        outcome: RunOutcome::parse(&outcome)?,
+                        detail,
+                        request_id: request_id.map(Uuid::from_bytes),
+                        calls: u32::try_from(calls).context("stored run call count is invalid")?,
+                    })
+                },
+            )
+            .collect()
     }
 
     /// The automation this wallet keeps under `key`, if any.
