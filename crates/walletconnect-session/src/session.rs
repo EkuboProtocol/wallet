@@ -599,10 +599,7 @@ impl<'a> Session<'a> {
         let rpc_method = rpc_method.to_owned();
         let params = params.clone();
         match rpc_method.as_str() {
-            method::SESSION_PROPOSE => {
-                self.on_propose(message.id, &params).await?;
-                Ok(false)
-            }
+            method::SESSION_PROPOSE => self.on_propose(message.id, &params).await,
             method::SESSION_REQUEST => {
                 self.on_request(message.id, &params).await?;
                 Ok(false)
@@ -677,18 +674,28 @@ impl<'a> Session<'a> {
         }
     }
 
-    async fn on_propose(&mut self, id: u64, params: &Value) -> Result<()> {
+    /// Answer a proposal. Returns whether the pairing is finished with it.
+    ///
+    /// A refused proposal ends the pairing. The URI that carried it is a
+    /// one-shot credential and the refusal is about the dapp behind it, not
+    /// about a moment — so leaving the pairing subscribed would keep a
+    /// stranger on the relay with standing to propose again, and would keep
+    /// the wallet holding a session slot for a connection the owner already
+    /// said no to. Ask again from a fresh link.
+    async fn on_propose(&mut self, id: u64, params: &Value) -> Result<bool> {
         if self.settled.is_some() {
             // One `connect` run serves one session. A second proposal on the
             // same pairing would need a second review while the first session
-            // is live, and there is one owner review surface.
-            return self
-                .reject_proposal(
-                    id,
-                    error_code::USER_REJECTED,
-                    "This wallet already has a session on this pairing.",
-                )
-                .await;
+            // is live, and there is one owner review surface. This refusal is
+            // the exception that does not end anything: the session it
+            // collides with is still the owner's and still running.
+            self.reject_proposal(
+                id,
+                error_code::USER_REJECTED,
+                "This wallet already has a session on this pairing.",
+            )
+            .await?;
+            return Ok(false);
         }
         self.handler.notify(&SessionEvent::ProposalReceived);
 
@@ -696,7 +703,7 @@ impl<'a> Session<'a> {
             Ok(proposal) => proposal,
             Err(error) => {
                 return self
-                    .reject_proposal(
+                    .refuse_pairing(
                         id,
                         error_code::INVALID_METHOD,
                         format!("The session proposal could not be read: {error}"),
@@ -709,19 +716,19 @@ impl<'a> Session<'a> {
         // proposal or draws it, and a person has to be able to read the result.
         if let Some(refusal) = oversized_refusal(&proposal) {
             return self
-                .reject_proposal(id, error_code::INVALID_METHOD, refusal)
+                .refuse_pairing(id, error_code::INVALID_METHOD, refusal)
                 .await;
         }
         if let Some(refusal) = self.stale_pairing() {
             return self
-                .reject_proposal(id, error_code::INVALID_METHOD, refusal)
+                .refuse_pairing(id, error_code::INVALID_METHOD, refusal)
                 .await;
         }
         if let Some(expiry) = proposal.expiry_timestamp
             && expiry <= Utc::now().timestamp()
         {
             return self
-                .reject_proposal(
+                .refuse_pairing(
                     id,
                     error_code::INVALID_METHOD,
                     "The session proposal had already expired when it arrived.",
@@ -733,7 +740,7 @@ impl<'a> Session<'a> {
         let decision = self.handler.review_proposal(&summary).await?;
         let scope = match decision {
             ProposalDecision::Reject { code, message } => {
-                return self.reject_proposal(id, code, message).await;
+                return self.refuse_pairing(id, code, message).await;
             }
             ProposalDecision::Approve(scope) => scope,
         };
@@ -745,14 +752,14 @@ impl<'a> Session<'a> {
         // a proposal that did, become a week-long session.
         if let Some(refusal) = self.stale_pairing() {
             return self
-                .reject_proposal(id, error_code::INVALID_METHOD, refusal)
+                .refuse_pairing(id, error_code::INVALID_METHOD, refusal)
                 .await;
         }
         if let Some(expiry) = proposal.expiry_timestamp
             && expiry <= Utc::now().timestamp()
         {
             return self
-                .reject_proposal(
+                .refuse_pairing(
                     id,
                     error_code::INVALID_METHOD,
                     "The session proposal expired while it was being reviewed. Ask the dapp to \
@@ -826,7 +833,7 @@ impl<'a> Session<'a> {
             metadata: proposal.proposer.metadata,
             expiry,
         });
-        Ok(())
+        Ok(false)
     }
 
     async fn on_request(&mut self, id: u64, params: &Value) -> Result<()> {
@@ -919,6 +926,15 @@ impl<'a> Session<'a> {
                 )
                 .await;
         }
+    }
+
+    /// Refuse a proposal and be done with the pairing that carried it.
+    ///
+    /// The refusal is published first, so the dapp is told why before the
+    /// wallet stops listening.
+    async fn refuse_pairing(&self, id: u64, code: i64, message: impl Into<String>) -> Result<bool> {
+        self.reject_proposal(id, code, message).await?;
+        Ok(true)
     }
 
     async fn reject_proposal(&self, id: u64, code: i64, message: impl Into<String>) -> Result<()> {

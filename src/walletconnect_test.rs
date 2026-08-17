@@ -127,3 +127,20 @@ fn a_pairing_that_fails_before_settling_frees_its_slot() {
     assert_eq!(sessions[0].last_error.as_deref(), Some("the relay dropped"));
     assert_eq!(sessions[0].status, SessionStatus::Disconnecting);
 }
+
+#[test]
+fn a_session_that_ends_cleanly_leaves_nothing_behind() {
+    let mut manager = WalletConnectManager::default();
+    // A declined proposal ends its pairing at the protocol layer, which comes
+    // back here as an ordinary clean finish. Nothing about the dapp the owner
+    // said no to should survive it — not a row, and not a session slot.
+    let declined = paired(&mut manager, "55");
+    manager.update(declined, SessionStatus::AwaitingProposal, None, 0, None);
+    manager.finish(declined);
+    assert!(manager.sessions().is_empty());
+
+    let connected = paired(&mut manager, "66");
+    manager.update(connected, SessionStatus::Connected, None, 0, None);
+    manager.finish(connected);
+    assert!(manager.sessions().is_empty());
+}

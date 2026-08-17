@@ -5540,10 +5540,10 @@ impl WalletWindow {
 
     fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
         // The connect button stays busy through the review rather than
-        // stopping when the proposal lands. A declined proposal leaves the
-        // pairing live and able to propose again, and that pairing is not
-        // drawn in the connection list, so its only handle is the Cancel this
-        // busy state carries.
+        // stopping when the proposal lands: a proposal under review is not a
+        // connection, and nothing else on the screen behind stands for it.
+        // Both endings clear it — approving settles the session into the list
+        // below, declining ends the pairing outright.
         self.active_review = Some(ActiveReview::new(
             prompt.unselected_document,
             None,
