@@ -34,6 +34,13 @@ pub struct AutomationStore {
     database: PolicyStore,
 }
 
+/// Whether recording a tick counts as evidence the automation is healthy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClearFailures {
+    Yes,
+    No,
+}
+
 /// What [`AutomationStore::due`] found, kept apart from the automations
 /// themselves so a caller cannot mistake "nothing to run" for "nothing
 /// happened".
@@ -74,12 +81,12 @@ impl AutomationStore {
         policy_revision: u64,
     ) -> Result<Automation> {
         ensure!(policy_revision > 0, "policy revision must be positive");
-        let existing = self.count_for(wallet.instance_id, definition.chain_id)?;
+        let existing = self.count_for(wallet.instance_id, definition.chain_id())?;
         ensure!(
             existing < MAX_AUTOMATIONS_PER_WALLET_CHAIN,
             "wallet already has {existing} automations on chain {}, the limit is \
              {MAX_AUTOMATIONS_PER_WALLET_CHAIN}",
-            definition.chain_id
+            definition.chain_id()
         );
         let id = Uuid::new_v4();
         let created_at = now();
@@ -95,11 +102,11 @@ impl AutomationStore {
                 wallet.instance_id.to_string(),
                 wallet.id,
                 format!("{:#x}", wallet.address),
-                i64::try_from(definition.chain_id).context("chain id out of range")?,
-                definition.name,
-                Blob(definition.bytecode.clone()),
-                Blob(definition.config.clone()),
-                definition.schedule.expression(),
+                i64::try_from(definition.chain_id()).context("chain id out of range")?,
+                definition.name(),
+                Blob(definition.bytecode().clone()),
+                Blob(definition.config().clone()),
+                definition.schedule().expression(),
                 i64::try_from(policy_revision).context("policy revision out of range")?,
                 Millis(created_at),
             ],
@@ -173,16 +180,50 @@ impl AutomationStore {
     }
 
     /// Record that a tick ran and produced no transaction — the blob returned
-    /// an empty list, or a skipped tick reported why.
+    /// an empty list, or its calls were sent.
     ///
     /// Clears the failure count: a tick that ran is evidence the automation and
     /// the endpoint both work, and a count that only ever rose would eventually
     /// disable an automation that had been healthy for a month.
     pub fn record_tick(&mut self, id: Uuid, outcome: &str, at: DateTime<Utc>) -> Result<()> {
+        self.write_tick(id, outcome, at, ClearFailures::Yes)
+    }
+
+    /// Record a tick that never got as far as running: the wallet and chain's
+    /// signing slot was held, so there was nothing to poll against that the
+    /// result could be sent from.
+    ///
+    /// Consumes the tick — the design skips rather than defers, so the schedule
+    /// moves on — but deliberately leaves the failure count alone. A skip is not
+    /// evidence of health: an automation nine failures deep that happens to land
+    /// on one busy slot would otherwise reset to zero and could then fail
+    /// forever without ever reaching the limit that stops it.
+    pub fn record_skip(&mut self, id: Uuid, reason: &str, at: DateTime<Utc>) -> Result<()> {
+        self.write_tick(id, reason, at, ClearFailures::No)
+    }
+
+    fn write_tick(
+        &mut self,
+        id: Uuid,
+        outcome: &str,
+        at: DateTime<Utc>,
+        clear: ClearFailures,
+    ) -> Result<()> {
+        let statement = match clear {
+            ClearFailures::Yes => {
+                "UPDATE automations
+                 SET last_tick_at = ?2, last_outcome = ?3, consecutive_failures = 0,
+                     updated_at = ?2
+                 WHERE automation_id = ?1"
+            }
+            ClearFailures::No => {
+                "UPDATE automations
+                 SET last_tick_at = ?2, last_outcome = ?3, updated_at = ?2
+                 WHERE automation_id = ?1"
+            }
+        };
         let changed = self.database.connection.execute(
-            "UPDATE automations
-             SET last_tick_at = ?2, last_outcome = ?3, consecutive_failures = 0, updated_at = ?2
-             WHERE automation_id = ?1",
+            statement,
             params![Blob(*id.as_bytes()), Millis(at), outcome],
         )?;
         ensure!(changed == 1, "automation {id} is not installed");

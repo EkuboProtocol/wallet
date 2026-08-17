@@ -233,6 +233,46 @@ fn consecutive_failures_disable_and_a_good_tick_forgets_them() {
 }
 
 #[test]
+fn a_skipped_tick_consumes_the_schedule_without_forgiving_failures() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, &definition("claim", "0 0 * * * *"), 1)
+        .unwrap();
+    store
+        .record_failure(installed.id, "endpoint refused eth_simulateV1", at(11, 0))
+        .unwrap();
+
+    store
+        .record_skip(
+            installed.id,
+            "another send holds the signing slot",
+            at(12, 0),
+        )
+        .unwrap();
+
+    // The tick is consumed, so the schedule moves on rather than retrying
+    // immediately...
+    assert!(
+        store
+            .due(wallet.instance_id, 1, at(12, 30))
+            .unwrap()
+            .ready
+            .is_empty()
+    );
+    // ...but a busy slot said nothing about whether the automation works, so
+    // it cannot be what rescues one that is nine failures deep.
+    assert_eq!(
+        store
+            .get(installed.id)
+            .unwrap()
+            .unwrap()
+            .consecutive_failures,
+        1
+    );
+}
+
+#[test]
 fn the_per_wallet_chain_limit_holds() {
     let wallet = wallet();
     let (_directory, mut store) = store_with(&wallet);

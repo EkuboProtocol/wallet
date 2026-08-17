@@ -166,6 +166,12 @@ impl CronSchedule {
     /// pasted from a crontab is rejected here rather than silently reinterpreted
     /// — its minute field would land in the seconds column and the schedule
     /// would fire sixty times too often.
+    ///
+    /// Exactly six, though the parser underneath also accepts a seventh year
+    /// field. One documented arity is what the skill teaches, what the review
+    /// shows, and what an error message can name; accepting an undocumented
+    /// seventh silently would make the count in that message a lie for whoever
+    /// found it.
     pub fn parse(expression: &str) -> Result<Self> {
         let trimmed = expression.trim();
         ensure!(!trimmed.is_empty(), "cron expression is empty");
@@ -175,7 +181,7 @@ impl CronSchedule {
         );
         let fields = trimmed.split_whitespace().count();
         ensure!(
-            (6..=7).contains(&fields),
+            fields == 6,
             "cron expression has {fields} fields; automations use six, seconds first \
              (for example \"*/12 * * * * *\" for roughly every block)"
         );
@@ -273,13 +279,20 @@ impl Automation {
 /// This is what an agent proposes and what a review renders. It is deliberately
 /// not [`Automation`]: an agent has no business supplying a policy revision, a
 /// failure count, or the moment of the last tick.
+///
+/// The fields are private so that possessing one of these means its contents
+/// passed [`AutomationDefinition::new`]. Public fields would have made the
+/// validation advisory — a caller inside this crate could assemble the struct
+/// literally and hand the store bytecode of any length, a name carrying a bidi
+/// override, or chain 0 — and a check that the type system does not carry is a
+/// check some future call site omits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutomationDefinition {
-    pub name: String,
-    pub bytecode: Bytes,
-    pub config: Bytes,
-    pub schedule: CronSchedule,
-    pub chain_id: u64,
+    name: String,
+    bytecode: Bytes,
+    config: Bytes,
+    schedule: CronSchedule,
+    chain_id: u64,
 }
 
 impl AutomationDefinition {
@@ -342,6 +355,31 @@ impl AutomationDefinition {
     #[must_use]
     pub fn bytecode_hash(&self) -> B256 {
         keccak256(&self.bytecode)
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn bytecode(&self) -> &Bytes {
+        &self.bytecode
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> &Bytes {
+        &self.config
+    }
+
+    #[must_use]
+    pub const fn schedule(&self) -> &CronSchedule {
+        &self.schedule
+    }
+
+    #[must_use]
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 }
 
