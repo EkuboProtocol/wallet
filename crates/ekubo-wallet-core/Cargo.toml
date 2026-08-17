@@ -18,7 +18,7 @@ test-hooks = []
 
 [dependencies]
 cargo-packager-updater = "0.2.3"
-alloy = { version = "=2.3.0", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
+alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
@@ -38,7 +38,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 subtle = "2.6.1"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
@@ -50,7 +50,7 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 [dev-dependencies]
 flate2 = "1.1.9"
 futures = "0.3.31"
-minisign = "0.7.9"
+minisign = "0.9.1"
 proptest = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
