@@ -37,7 +37,7 @@ reason = "Informational unmaintained notice for transitive ttf-parser; migrate t
 # their exact Cargo manifests declare Apache-2.0. Keep that evidence explicit
 # and expiring instead of allowing every package with UNKNOWN metadata.
 [[PackageOverrides]]
-name = "collections|derive_refineable|gpui-component(-assets|-macros)?|gpui_(linux|macos|macros|platform|tokio|web|wgpu|windows)|http_client|perf|refineable|sum_tree|util_macros"
+name = "collections|derive_refineable|gpui-component(-assets|-macros)?|gpui_(apple|linux|macos|macros|platform|tokio|web|wgpu|windows)|http_client|perf|refineable|sum_tree|util_macros"
 nameIsRegex = true
 license.override = ["Apache-2.0"]
 effectiveUntil = 2027-02-15
