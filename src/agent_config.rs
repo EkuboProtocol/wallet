@@ -30,58 +30,72 @@ pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
 pub const COMPANION_SERVER_NAME: &str = "ekubo";
 pub const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
 
-fn installed_bridge_path() -> Result<PathBuf> {
-    let data_dir = ekubo_wallet_core::config::default_data_dir()?;
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Ok(data_dir.join("helpers").join(format!(
-        "ekubo-wallet-mcp-bridge-{}{}",
-        env!("CARGO_PKG_VERSION"),
-        suffix
-    )))
+/// Every helper image this wallet has ever installed starts with this, so a
+/// single prefix identifies both the file to keep and the debris to collect.
+const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-mcp-bridge";
+/// The one filename a harness is ever configured to execute.
+///
+/// It carries no version. An agent config written once therefore keeps
+/// working across every wallet update: the next launch replaces the bytes at
+/// this path and the harness runs the new bridge the next time it starts one.
+/// Earlier releases installed `…-<version>` instead, which invalidated every
+/// managed config on each update and made the user re-enable each agent.
+#[cfg(windows)]
+const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge.exe";
+#[cfg(not(windows))]
+const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge";
+
+fn helpers_dir() -> Result<PathBuf> {
+    Ok(ekubo_wallet_core::config::default_data_dir()?.join("helpers"))
 }
 
-/// Atomically install the versioned helper in the wallet's private per-user
-/// directory. Release builds use the helper shipped beside the wallet
+fn installed_bridge_path() -> Result<PathBuf> {
+    Ok(helpers_dir()?.join(BRIDGE_FILE_NAME))
+}
+
+/// Atomically install the helper at its fixed path in the wallet's private
+/// per-user directory. Release builds use the helper shipped beside the wallet
 /// executable; debug builds may use the workspace build-tree binary.
 ///
 /// Harnesses execute this copy, never the binary inside the installed
 /// application. A long-lived bridge therefore holds no executable or file
-/// handle in the app bundle while the updater swaps that bundle. The versioned
-/// destination also means a Windows bridge can keep its own image open without
-/// blocking installation of the next release's differently named helper.
+/// handle in the app bundle while the updater swaps that bundle.
+///
+/// The path is fixed rather than versioned, so the managed agent configs
+/// survive an update untouched. Replacing it is still a rename, so a bridge
+/// already running out of the old bytes keeps its own image and no harness
+/// ever sees a half-written helper. Two wallet versions sharing a data
+/// directory therefore share one helper — whichever launched last owns it,
+/// which is the same bridge the running wallet answers.
 pub fn install_bridge_helper() -> Result<PathBuf> {
-    let installed = installed_bridge_path()?;
+    let parent = helpers_dir()?;
+    let installed = parent.join(BRIDGE_FILE_NAME);
     let executable = std::env::current_exe().context("could not locate the wallet executable")?;
-    let filename = if cfg!(windows) {
-        "ekubo-wallet-mcp-bridge.exe"
-    } else {
-        "ekubo-wallet-mcp-bridge"
-    };
-    let packaged = executable.with_file_name(filename);
+    let packaged = executable.with_file_name(BRIDGE_FILE_NAME);
     #[cfg(debug_assertions)]
     let source = if packaged.is_file() {
         packaged.clone()
     } else {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target/debug")
-            .join(filename)
+            .join(BRIDGE_FILE_NAME)
     };
     #[cfg(not(debug_assertions))]
     let source = packaged;
     ensure!(source.is_file(), "the packaged MCP bridge is missing");
     let bytes = fs::read(&source).context("failed to read the packaged MCP bridge")?;
     ensure!(!bytes.is_empty(), "the packaged MCP bridge is empty");
-    if installed.is_file() && fs::read(&installed)? == bytes {
-        return Ok(installed);
-    }
-    let parent = installed.parent().context("helper path has no parent")?;
-    fs::create_dir_all(parent)?;
+    fs::create_dir_all(&parent)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    let mut temporary = NamedTempFile::new_in(parent)?;
+    remove_superseded_helpers(&parent);
+    if installed.is_file() && fs::read(&installed)? == bytes {
+        return Ok(installed);
+    }
+    let mut temporary = NamedTempFile::new_in(&parent)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
     #[cfg(unix)]
@@ -91,12 +105,75 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
             .as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o700))?;
     }
-    temporary.persist(&installed).map_err(|error| error.error)?;
+    replace_installed_helper(temporary, &installed)?;
     ensure!(
         fs::read(&installed)? == bytes,
         "installed MCP bridge failed verification"
     );
     Ok(installed)
+}
+
+/// Rename the freshly written helper over the installed one.
+///
+/// Unix replaces a running binary's directory entry without complaint. Windows
+/// refuses to replace the image of a running process but does allow that image
+/// to be renamed, so a failed replacement moves the old helper aside and
+/// retries. Nothing executes the moved-aside copy: it loses the `.exe`
+/// extension and no config names it.
+fn replace_installed_helper(temporary: NamedTempFile, installed: &Path) -> Result<()> {
+    let temporary = match temporary.persist(installed) {
+        Ok(_) => return Ok(()),
+        Err(error) if cfg!(windows) && installed.is_file() => error.file,
+        Err(error) => return Err(error.error.into()),
+    };
+    let aside = superseded_helper_path(installed)?;
+    fs::rename(installed, &aside).with_context(|| {
+        format!(
+            "failed to move the running MCP bridge aside to {}",
+            aside.display()
+        )
+    })?;
+    if let Err(error) = temporary.persist(installed) {
+        // Leaving no helper at all would break every configured harness, so
+        // put the superseded one back before reporting the failure.
+        let _ = fs::rename(&aside, installed);
+        return Err(error.error.into());
+    }
+    let _ = fs::remove_file(&aside);
+    Ok(())
+}
+
+/// Pick an unused `…​.old-N` sibling for a helper that cannot be replaced in
+/// place. A counter rather than a timestamp keeps the name predictable and the
+/// directory bounded when several superseded images are still held open.
+fn superseded_helper_path(installed: &Path) -> Result<PathBuf> {
+    let name = installed
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("installed MCP bridge path is not valid UTF-8")?;
+    (0..64)
+        .map(|index| installed.with_file_name(format!("{name}.old-{index}")))
+        .find(|candidate| !candidate.exists())
+        .context("too many superseded MCP bridge images are still in use")
+}
+
+/// Delete every helper image this wallet no longer installs: the versioned
+/// copies earlier releases wrote, and the `.old-N` files a Windows replacement
+/// leaves behind.
+///
+/// Best effort. A bridge still running out of a superseded image keeps it
+/// locked on Windows, and the next launch collects it.
+fn remove_superseded_helpers(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name != BRIDGE_FILE_NAME && name.starts_with(BRIDGE_NAME_PREFIX) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn harness_argument(kind: AgentKind) -> Result<&'static str> {

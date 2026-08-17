@@ -8,7 +8,9 @@ open, reconnects automatically when a same-version wallet opens or restarts,
 and enforces a 24 MiB frame ceiling in both directions. If wallet
 initialization reports a different version, the bridge exits with a diagnostic
 instead of retrying; the harness must launch the matching installed helper in
-a new agent session.
+a new agent session. The installed path is fixed rather than versioned, so it
+always holds the current wallet's helper and that next launch matches without
+any change to the harness configuration.
 
 The wallet singleton listens on same-user local IPC only. macOS and Linux use
 `mcp.sock` inside the wallet's private `0700` data directory; the socket is

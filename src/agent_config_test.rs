@@ -1,16 +1,64 @@
 use super::*;
 use serde_json::json;
 
-const HELPER: &str = "/private/ekubo-wallet-mcp-bridge-1.1.1";
+const HELPER: &str = "/private/ekubo-wallet-mcp-bridge";
 
 #[test]
-fn bridge_helper_is_versioned_outside_the_application_bundle() {
+fn bridge_helper_path_is_fixed_outside_the_application_bundle() {
     let data_dir = ekubo_wallet_core::config::default_data_dir().unwrap();
     let helper = installed_bridge_path().unwrap();
     assert_eq!(helper.parent(), Some(data_dir.join("helpers").as_path()));
     let filename = helper.file_name().unwrap().to_string_lossy();
-    assert!(filename.starts_with("ekubo-wallet-mcp-bridge-"));
-    assert!(filename.contains(env!("CARGO_PKG_VERSION")));
+    assert_eq!(filename, BRIDGE_FILE_NAME);
+    // A version in the name is what forced every managed agent config to be
+    // rewritten on update, so the path must never carry one again.
+    assert!(!filename.contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn superseded_helper_path_skips_names_already_taken() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join(BRIDGE_FILE_NAME);
+    let first = superseded_helper_path(&installed).unwrap();
+    assert_eq!(
+        first.file_name().unwrap().to_string_lossy(),
+        format!("{BRIDGE_FILE_NAME}.old-0")
+    );
+    fs::write(&first, b"still running").unwrap();
+    let second = superseded_helper_path(&installed).unwrap();
+    assert_eq!(
+        second.file_name().unwrap().to_string_lossy(),
+        format!("{BRIDGE_FILE_NAME}.old-1")
+    );
+}
+
+#[test]
+fn superseded_helpers_are_collected_and_the_installed_one_is_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join(BRIDGE_FILE_NAME);
+    let unrelated = directory.path().join("notes.txt");
+    for stale in [
+        format!("{BRIDGE_NAME_PREFIX}-1.1.1"),
+        format!("{BRIDGE_NAME_PREFIX}-1.2.0.exe"),
+        format!("{BRIDGE_FILE_NAME}.old-0"),
+    ] {
+        fs::write(directory.path().join(stale), b"stale").unwrap();
+    }
+    fs::write(&installed, b"current").unwrap();
+    fs::write(&unrelated, b"keep").unwrap();
+
+    remove_superseded_helpers(directory.path());
+
+    let remaining: std::collections::BTreeSet<String> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        remaining,
+        [BRIDGE_FILE_NAME.to_owned(), "notes.txt".to_owned()]
+            .into_iter()
+            .collect()
+    );
 }
 
 #[test]
