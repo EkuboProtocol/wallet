@@ -43,11 +43,10 @@ use gpui::{
     Anchor, AnyElement, AnyView, App, ClipboardItem, Context, CursorStyle, ElementId, Entity,
     FocusHandle, HitboxBehavior, Interactivity, KeyBinding, ListAlignment,
     ListState as VariableListState, MouseButton, MouseDownEvent, MouseMoveEvent, PathBuilder,
-    Pixels, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollHandle, SharedString,
+    QuitMode, Render, RenderImage, RenderOnce, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
     WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, anchored, canvas,
-    deferred, div, fill, font, img, list as variable_list, point, prelude::*, px, size,
-    uniform_list,
+    deferred, div, fill, img, list as variable_list, point, prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -121,7 +120,7 @@ const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
 const POLICY_EDITOR_DESCRIPTION: &str =
-    "Requests are automatically signed or refused, or require review.";
+    "Requests are automatically signed, refused or require review according to the account policy";
 const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases/latest";
 
 fn app_button(id: impl Into<ElementId>) -> Button {
@@ -508,44 +507,6 @@ fn app_input(state: &Entity<InputState>, cx: &App) -> Input {
     Input::new(state).large().bg(cx.theme().secondary)
 }
 
-/// Columns of policy JSON that stay on one display line no matter how narrow
-/// the window gets.
-const POLICY_EDITOR_MIN_COLUMNS: f32 = 120.0;
-
-/// Columns of slack added on top of [`POLICY_EDITOR_MIN_COLUMNS`] to cover the
-/// editor's line-number gutter, which it subtracts from its own wrap width.
-/// Five digits is more line numbers than a policy document will ever have.
-const POLICY_EDITOR_GUTTER_COLUMNS: f32 = 5.0;
-
-/// The two fixed margins the code editor takes off its wrap width alongside the
-/// gutter: `LINE_NUMBER_RIGHT_MARGIN` and `RIGHT_MARGIN`, both 10px upstream.
-const POLICY_EDITOR_FIXED_MARGINS: Pixels = px(20.0);
-
-/// The narrowest the policy JSON control is allowed to be laid out.
-///
-/// The code editor soft-wraps at whatever width it is handed, so in a narrow
-/// window a policy folds at a few dozen columns and stops reading as JSON.
-/// Floor the control here and let the pane scroll horizontally underneath,
-/// rather than letting the window dictate how short a line may get.
-///
-/// The floor is on the *text*, so it has to out-cover the chrome the editor
-/// subtracts from its own wrap width before wrapping the remainder.
-fn policy_editor_min_width(cx: &App) -> Pixels {
-    // `app_input` builds every input `.large()`, which resolves to `text_base`
-    // — one rem — and gpui-component pins the window's rem size to the theme
-    // font size. Measuring at that size keeps the floor correct if either moves.
-    let font_size = cx.theme().font_size;
-    let text_system = cx.text_system();
-    let font_id = text_system.resolve_font(&font(MONO_FONT_FAMILY));
-    // Suisse Intl Mono ships embedded, so the measurement only misses if font
-    // loading itself did; 0.6em is the usual advance for a monospace face.
-    let column = text_system
-        .advance(font_id, font_size, '0')
-        .map_or(font_size * 0.6, |advance| advance.width);
-    column * (POLICY_EDITOR_MIN_COLUMNS + POLICY_EDITOR_GUTTER_COLUMNS)
-        + POLICY_EDITOR_FIXED_MARGINS
-}
-
 fn field_error(
     id: impl Into<SharedString>,
     message: impl Into<SharedString>,
@@ -741,7 +702,12 @@ fn account_switcher(
 ) -> TabBar {
     TabBar::new(id)
         .w_full()
-        .segmented()
+        // Segmented marks the active account with the page background plus a
+        // shadow, which is nearly the colour of the bar it sits in — in both
+        // themes it was hard to tell which account was selected. A pill fills
+        // it with the brand primary and its paired foreground, both of which
+        // the interface palette defines per mode.
+        .pill()
         .large()
         .selected_index(selected_index)
         .on_click(on_click)
@@ -4913,6 +4879,14 @@ impl WalletWindow {
             self.policy_json_input = Some(cx.new(|cx| {
                 InputState::new(window, cx)
                     .code_editor("json")
+                    // Policy documents carry long values — addresses, selectors,
+                    // exact calldata — and folding those to the panel width
+                    // stopped the document reading as JSON at all. Turning soft
+                    // wrap off hands the horizontal scrolling to the editor,
+                    // which keeps its line-number gutter pinned and leaves the
+                    // panel's own frame where it is; scrolling the surrounding
+                    // container instead took both of those away with the text.
+                    .soft_wrap(false)
                     .rows(20)
                     .placeholder("Select an account to inspect and edit its policy")
             }));
@@ -14112,9 +14086,11 @@ impl WalletWindow {
 
         let sidebar = div()
             .debug_selector(|| "policy-full-screen-sidebar".to_owned())
-            // Fifteen percent narrower than the previous 360px rail, leaving
-            // the JSON editor useful at the window's minimum width.
-            .w(px(306.0))
+            // The rail holds buttons and short status copy, none of which reads
+            // better for being wider. Every pixel it gives up is a column of
+            // JSON, which is the thing on this page that runs out of room now
+            // that long lines no longer wrap.
+            .w(px(264.0))
             .h_full()
             .min_h_0()
             .flex_none()
@@ -14165,7 +14141,8 @@ impl WalletWindow {
                             .gap_2()
                             .child(
                                 app_button("reset-policy-draft-full-screen")
-                                    .label("Review every transaction")
+                                    .debug_selector(|| "reset-policy-draft-full-screen".to_owned())
+                                    .label("Review every request")
                                     .disabled(self.policy_installing)
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.reset_policy_editor(window, cx);
@@ -14173,7 +14150,10 @@ impl WalletWindow {
                             )
                             .child(
                                 app_button("disable-signing-policy-draft-full-screen")
-                                    .label("Disable transaction signing")
+                                    .debug_selector(|| {
+                                        "disable-signing-policy-draft-full-screen".to_owned()
+                                    })
+                                    .label("Disable signing")
                                     .disabled(self.policy_installing)
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.apply_disable_signing_policy(window, cx);
@@ -14181,24 +14161,30 @@ impl WalletWindow {
                             )
                             .child(
                                 app_button("allow-anything-policy-draft-full-screen")
+                                    .debug_selector(|| {
+                                        "allow-anything-policy-draft-full-screen".to_owned()
+                                    })
                                     .icon(IconName::TriangleAlert)
                                     .label("Allow anything")
                                     .disabled(self.policy_installing)
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.apply_allow_anything_policy(window, cx);
                                     })),
+                            )
+                            // An installed revision is a starting point for the
+                            // draft in exactly the way the presets above are,
+                            // so it belongs with them rather than alone under
+                            // the group as a control of its own kind.
+                            .child(
+                                app_button("previous-policy-revision")
+                                    .debug_selector(|| "previous-policy-revision".to_owned())
+                                    .label("Previous revision")
+                                    .disabled(!can_view_previous || self.policy_installing)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.view_previous_policy_revision(window, cx);
+                                    })),
                             ),
                     ),
-            )
-            .child(
-                app_button("previous-policy-revision")
-                    .debug_selector(|| "previous-policy-revision".to_owned())
-                    .w_full()
-                    .label("Previous revision")
-                    .disabled(!can_view_previous || self.policy_installing)
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.view_previous_policy_revision(window, cx);
-                    })),
             )
             .child(preview);
 
@@ -14231,6 +14217,14 @@ impl WalletWindow {
                             .child(div().text_xl().font_semibold().child("Policy editor"))
                             .child(
                                 div()
+                                    .debug_selector(|| "policy-editor-description".to_owned())
+                                    .w_full()
+                                    .min_w_0()
+                                    // The sentence is long enough to outrun a
+                                    // narrow window, and the header band does
+                                    // not scroll, so it has to fold onto a
+                                    // second line rather than run off the edge.
+                                    .whitespace_normal()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(selectable_label(POLICY_EDITOR_DESCRIPTION)),
@@ -14310,39 +14304,22 @@ impl WalletWindow {
                                         .child(selectable_label("Danger: this policy automatically signs every call on every chain.")),
                                 )
                             })
-                            // Same column floor and scrolling viewport as the
-                            // settings-page editor; both drive the one
-                            // `policy_json_input`, so a line that wraps in one
-                            // and not the other would be the surprise.
                             .child(
                                 div()
-                                    .id("policy-full-screen-json-viewport")
                                     .debug_selector(|| {
-                                        "policy-full-screen-json-viewport".to_owned()
+                                        "policy-full-screen-json-control".to_owned()
                                     })
-                                    .overflow_x_scroll()
                                     .w_full()
                                     .min_w_0()
                                     .min_h_0()
                                     .flex_1()
-                                    .flex()
                                     .child(
-                                        div()
-                                            .debug_selector(|| {
-                                                "policy-full-screen-json-control".to_owned()
-                                            })
-                                            .flex_1()
-                                            .min_w(policy_editor_min_width(cx))
-                                            .min_h_0()
-                                            .h_full()
-                                            .child(
-                                                app_input(input, cx)
-                                                    .aria_label("Policy JSON")
-                                                    .font_family(MONO_FONT_FAMILY)
-                                                    .size_full()
-                                                    .min_w_0()
-                                                    .min_h_0(),
-                                            ),
+                                        app_input(input, cx)
+                                            .aria_label("Policy JSON")
+                                            .font_family(MONO_FONT_FAMILY)
+                                            .size_full()
+                                            .min_w_0()
+                                            .min_h_0(),
                                     ),
                             ),
                     )

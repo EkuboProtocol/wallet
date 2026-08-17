@@ -145,7 +145,7 @@ fn reopening_policies_keeps_the_selected_account_when_it_still_exists() {
 fn policy_editor_header_explains_purpose_without_repeating_picker_context() {
     assert_eq!(
         POLICY_EDITOR_DESCRIPTION,
-        "Requests are automatically signed or refused, or require review."
+        "Requests are automatically signed, refused or require review according to the account policy"
     );
     assert!(!POLICY_EDITOR_DESCRIPTION.contains("Account"));
     assert!(!POLICY_EDITOR_DESCRIPTION.contains("revision"));

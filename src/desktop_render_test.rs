@@ -1208,6 +1208,9 @@ fn policy_editor_is_the_only_policy_layout_and_sits_flush_with_navigation(
             "policy-revision-restore",
             "restore-policy-revision",
             "policy-revision-position",
+            "disable-signing-policy-draft-full-screen",
+            "reset-policy-draft-full-screen",
+            "allow-anything-policy-draft-full-screen",
         ],
     );
     let navigation = bounds[0].expect("navigation rail must remain laid out");
@@ -1219,7 +1222,7 @@ fn policy_editor_is_the_only_policy_layout_and_sits_flush_with_navigation(
     let guidance = bounds[9].expect("policy JSON guidance must be laid out");
     assert!(bounds[10].is_some(), "Previous revision must be laid out");
     assert!(
-        bounds[11..].iter().all(Option::is_none),
+        bounds[11..15].iter().all(Option::is_none),
         "no revision selector, label, next action, or restore action may remain"
     );
     assert_eq!(
@@ -1238,9 +1241,26 @@ fn policy_editor_is_the_only_policy_layout_and_sits_flush_with_navigation(
         "the editor and review sidebar must not overlap: editor {editor:?}, sidebar {sidebar:?}"
     );
     assert!(
-        sidebar.size.width <= px(306.0),
+        sidebar.size.width <= px(264.0),
         "the narrower review sidebar must leave room for JSON at minimum widths: {sidebar:?}"
     );
+    // Every button in the rail, not just the one that overflowed. These size to
+    // their labels, so the rail's width is really a budget for the longest of
+    // them — and before this assertion existed, "Disable transaction signing"
+    // had been hanging 14px past the edge of a wider sidebar unnoticed.
+    for (index, name) in [
+        (10, "previous revision"),
+        (15, "disable signing"),
+        (16, "review every request"),
+        (17, "allow anything"),
+    ] {
+        let button = bounds[index].unwrap_or_else(|| panic!("the {name} preset must be laid out"));
+        assert!(
+            button.origin.x >= sidebar.origin.x
+                && button.origin.x + button.size.width <= sidebar.origin.x + sidebar.size.width,
+            "the {name} preset must stay inside the sidebar: button {button:?}, sidebar {sidebar:?}"
+        );
+    }
     assert!(
         bounds[5].is_none(),
         "the old scrolling Policies page must not render behind the editor"
@@ -1305,7 +1325,7 @@ fn policy_editor_is_the_only_policy_layout_and_sits_flush_with_navigation(
 }
 
 #[gpui::test]
-fn policy_json_keeps_its_column_floor_and_overflows_into_a_scroll(cx: &mut gpui::TestAppContext) {
+fn the_policy_editor_scrolls_inside_its_frame_rather_than_moving_it(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
@@ -1341,43 +1361,44 @@ fn policy_json_keeps_its_column_floor_and_overflows_into_a_scroll(cx: &mut gpui:
         });
     });
 
-    // Narrow enough that the editor cannot simply take the panel's width. A
-    // window this size is exactly where the old layout folded policy JSON into
-    // unreadable stubs, so it is where the floor has to be measured.
+    // Narrow enough that long JSON lines cannot fit. An earlier attempt gave
+    // the control a 120-column minimum width and scrolled the container around
+    // it, which dragged the line-number gutter and the panel's own border off
+    // screen with the text. Whatever the editor does about long lines, it has
+    // to do inside the frame it was given.
     let viewport = gpui::Size {
         width: px(760.0),
         height: px(900.0),
     };
-    let (scroll, control) = {
+    let (panel, control) = {
         let mut visual = gpui::VisualTestContext::from_window(window, cx);
         // The window has to actually be this narrow. Drawing into a space of
-        // this size is a different claim, and the layout reads the window —
-        // which is what left the first version of this test measuring a
-        // comfortably wide editor and passing for the wrong reason.
+        // this size is a different claim, and the layout reads the window.
         visual.simulate_resize(viewport);
         let drawn = view.clone();
         visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
             gpui::AnyView::from(drawn).into_any_element()
         });
-        let scroll = visual
-            .debug_bounds("policy-full-screen-json-viewport")
-            .expect("the policy JSON viewport must be laid out");
+        let panel = visual
+            .debug_bounds("policy-full-screen-editor")
+            .expect("the policy JSON panel must be laid out");
         let control = visual
             .debug_bounds("policy-full-screen-json-control")
             .expect("the policy JSON control must be laid out");
         visual.run_until_parked();
-        (scroll, control)
+        (panel, control)
     };
-    let floor = cx.update(|cx| policy_editor_min_width(cx));
 
     assert!(
-        control.size.width >= floor,
-        "the control must hold its column floor in a narrow window: control {control:?}, floor {floor:?}"
+        control.size.width <= panel.size.width,
+        "the control must stay inside its panel rather than overflowing into a \
+         container scroll: control {control:?}, panel {panel:?}"
     );
     assert!(
-        control.size.width > scroll.size.width,
-        "holding the floor must overflow the viewport, which is what turns into \
-         a horizontal scroll: control {control:?}, viewport {scroll:?}"
+        control.origin.x >= panel.origin.x
+            && control.origin.x + control.size.width <= panel.origin.x + panel.size.width,
+        "the control must sit within the panel's borders on both sides: \
+         control {control:?}, panel {panel:?}"
     );
 
     release(cx, &view);
