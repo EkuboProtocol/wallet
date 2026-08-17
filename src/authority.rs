@@ -24,7 +24,7 @@ use ekubo_wallet_core::{
         authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
-    message::{MessageStore, PendingMessage, describe_message},
+    message::{MessageStore, PendingMessage},
     orchestrator::{
         ApprovalOutcome, approve_transaction, sign_reviewed_message, sign_reviewed_typed_data,
     },
@@ -33,6 +33,7 @@ use ekubo_wallet_core::{
     policy_store::{PolicyProposal, PolicyStore, StoredPolicy},
     reconcile::{attempt_cancellation, reconcile_record, submit_claimed},
     rpc::{ReceiptDetails, transaction_known, transaction_receipt_details},
+    signature_review,
     token_store::{
         ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
         TokenProposal, TokenStore, read_portfolio,
@@ -1534,39 +1535,11 @@ impl OwnerApi {
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = MessageStore::production(self.config.data_dir())?.get(request_id)?;
-        let display = describe_message(&request.message_bytes()?);
-        let mut summary = ApprovalRequest::new(
-            ApprovalKind::MessageSignature,
-            "Review message signature",
-            "This signature can prove account control. It does not submit a transaction.",
-        )
-        .fact("Wallet", request.wallet_id)
-        .fact(
-            "Chain context",
-            request.chain_id.unwrap_or_else(|| "Not specified".into()),
-        )
-        .fact("Sent to the wallet as", request.encoding.label())
-        .fact("Byte length", display.byte_length.to_string())
-        .fact("Line count", display.line_count.to_string())
-        .fact(
-            "Requester",
-            request
-                .requester
-                .unwrap_or_else(|| "Unknown requester".into()),
-        )
-        .digest(request.digest);
-        summary.id = request_id;
-        for warning in display.warnings {
-            summary = summary.warning(warning);
-        }
-        let mut payloads = Vec::with_capacity(2);
-        if let Some(escaped) = display.escaped_text {
-            payloads.push(format!(
-                "Visible text (unsafe characters escaped):\n{escaped}"
-            ));
-        }
-        payloads.push(format!("Exact message bytes:\n{}", request.message_hex));
-        Ok(ReviewDocument::from_request(summary, payloads))
+        let message_bytes = request.message_bytes()?;
+        Ok(signature_review::message_review_document(
+            &request,
+            &message_bytes,
+        ))
     }
 
     pub fn queue_message(
@@ -1599,29 +1572,33 @@ impl OwnerApi {
         let dangerous_display = exact_json.chars().any(|character| {
             character != '\n' && ekubo_wallet_core::sanitize::is_disallowed(character)
         });
-        let exact = escape_review_payload(&exact_json);
-        let mut summary = ApprovalRequest::new(
-            ApprovalKind::TypedDataSignature,
-            "Review typed-data signature",
-            "EIP-712 typed data may grant permissions or authorize off-chain actions.",
-        )
-        .fact("Wallet", request.wallet_id)
-        .fact("Chain", request.chain_id)
-        .fact(
-            "Requester",
-            request.requester.unwrap_or_else(|| "Unknown requester".into()),
-        )
-        .warning(
-            "Review every type, domain, and value. Names are untrusted and Unicode may contain confusable or bidirectional characters.",
-        )
-        .digest(request.digest);
-        summary.id = request_id;
-        if dangerous_display {
-            summary = summary.warning(
-                "The typed data contains control, bidirectional, invisible, or glyph-changing characters. They are escaped in the exact payload below.",
-            );
-        }
-        Ok(ReviewDocument::from_request(summary, vec![exact]))
+        let exact = signature_review::escape_review_payload(&exact_json);
+        // The permit is read against the account that would be signing, which
+        // is what makes "this permit names somebody else as the owner" a fact
+        // the screen can state rather than a discrepancy buried in the JSON.
+        let interpretation =
+            signature_review::PermitInterpretation::of(&request.typed_data, request.wallet_address);
+        // Names come from the owner-confirmed token database and nowhere else,
+        // exactly as they do for a transaction: a permit's own contract does
+        // not get to say what it is called while somebody is deciding about it.
+        let token_metadata = request
+            .chain_id
+            .parse()
+            .ok()
+            .and_then(|chain_id| {
+                let tokens = interpretation.tokens();
+                TokenStore::production(self.config.data_dir())
+                    .and_then(|store| store.display_metadata(chain_id, &tokens))
+                    .ok()
+            })
+            .unwrap_or_default();
+        Ok(signature_review::typed_data_review_document(
+            &request,
+            &interpretation,
+            &token_metadata,
+            exact,
+            dangerous_display,
+        ))
     }
 
     pub fn queue_typed_data(
@@ -1914,19 +1891,6 @@ impl OwnerApi {
     pub fn accept_legal(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
         LegalStore::production(self.config.data_dir())?.record_acceptance(document, reviewed_digest)
     }
-}
-
-fn escape_review_payload(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| {
-            if character != '\n' && ekubo_wallet_core::sanitize::is_disallowed(character) {
-                character.escape_unicode().collect::<Vec<_>>()
-            } else {
-                vec![character]
-            }
-        })
-        .collect()
 }
 
 fn ensure_optional_revision(reviewed: Option<u64>, current: Option<u64>) -> Result<()> {

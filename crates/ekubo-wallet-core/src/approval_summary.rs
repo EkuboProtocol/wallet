@@ -554,7 +554,7 @@ pub fn format_fixed_point(base_units: &str, decimals: u8) -> String {
 /// use as their infinite sentinel. At eighteen decimals that is 7.9e10 tokens —
 /// large, but within the supply of real tokens, so warning on it would train a
 /// reviewer to dismiss the warning.
-fn is_effectively_unlimited(amount: U256) -> bool {
+pub(crate) fn is_effectively_unlimited(amount: U256) -> bool {
     amount >= (U256::from(1_u8) << 128) - U256::from(1_u8)
 }
 

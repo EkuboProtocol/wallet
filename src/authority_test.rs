@@ -65,16 +65,6 @@ fn receipt_presentation_aggregates_wallet_transfers_with_trusted_metadata() {
 }
 
 #[test]
-fn exact_review_payloads_escape_invisible_and_bidirectional_text() {
-    let rendered = escape_review_payload("safe\namount\u{202e}123\u{200b}");
-    assert!(rendered.starts_with("safe\namount"));
-    assert!(rendered.contains("\\u{202e}"));
-    assert!(rendered.contains("\\u{200b}"));
-    assert!(!rendered.contains('\u{202e}'));
-    assert!(!rendered.contains('\u{200b}'));
-}
-
-#[test]
 fn export_lease_counts_down_to_zero_and_stays_there() {
     let lease = ExportLease::new_for_duration(
         zeroize::Zeroizing::new("secret".to_owned()),
