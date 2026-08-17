@@ -7,6 +7,7 @@ use crate::{
         OwnerPortfolioSnapshot, OwnerReviewQueues, OwnerTransactionInspection,
         PRIVATE_KEY_REVEAL_DURATION,
     },
+    automation::{Automation, AutomationState},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
@@ -1451,6 +1452,7 @@ pub enum Route {
     Activity,
     Accounts,
     Policies,
+    Automations,
     Networks,
     Tokens,
     WalletConnect,
@@ -1464,11 +1466,15 @@ impl Route {
     /// so `Accounts` is both the first tab and the screen a new install opens
     /// on. `Activity` follows because it is where an agent's requests land and
     /// where the day's decisions are made.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Accounts,
         Self::Activity,
         Self::Overview,
         Self::Policies,
+        // Directly after Policies, because an automation is only ever as
+        // capable as the policy above it: the two screens are read together
+        // when something has stopped running.
+        Self::Automations,
         Self::WalletConnect,
         Self::Tokens,
         Self::Networks,
@@ -1485,6 +1491,7 @@ impl Route {
             Self::Activity => "Inbox",
             Self::Accounts => "Accounts",
             Self::Policies => "Policies",
+            Self::Automations => "Automations",
             Self::Networks => "Networks",
             Self::Tokens => "Tokens",
             Self::WalletConnect => "WalletConnect",
@@ -1505,6 +1512,9 @@ impl Route {
             Self::Overview => "What each account holds, across every network you have enabled.",
             Self::Policies => {
                 "The rules that decide which agent requests go through, which need you, and which are refused."
+            }
+            Self::Automations => {
+                "Code an agent installed that this wallet runs on a schedule. Every transaction one produces still goes through your policy."
             }
             Self::WalletConnect => {
                 "Connect your wallet to dapps via WalletConnect and use them like you would with any other wallet."
@@ -1530,6 +1540,7 @@ impl Route {
             Self::Activity => IconName::Inbox,
             Self::Accounts => IconName::User,
             Self::Policies => IconName::Inspector,
+            Self::Automations => IconName::Bot,
             Self::Networks => IconName::Network,
             Self::Tokens => IconName::Star,
             Self::WalletConnect => IconName::Globe,
@@ -1540,19 +1551,19 @@ impl Route {
     /// Rail position drives both the displayed shortcut and the registered
     /// binding, so reordering `ALL` can never leave the first tab on ⌘3.
     #[cfg(target_os = "macos")]
-    const SHORTCUT_KEYS: [&'static str; 8] = ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8"];
+    const SHORTCUT_KEYS: [&'static str; 9] = ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9"];
     #[cfg(not(target_os = "macos"))]
-    const SHORTCUT_KEYS: [&'static str; 8] = [
-        "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8",
+    const SHORTCUT_KEYS: [&'static str; 9] = [
+        "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9",
     ];
 
     #[cfg(target_os = "macos")]
-    const KEY_BINDINGS: [&'static str; 8] = [
-        "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8",
+    const KEY_BINDINGS: [&'static str; 9] = [
+        "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9",
     ];
     #[cfg(not(target_os = "macos"))]
-    const KEY_BINDINGS: [&'static str; 8] = [
-        "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8",
+    const KEY_BINDINGS: [&'static str; 9] = [
+        "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8", "ctrl-9",
     ];
 
     fn shortcut(self) -> SharedString {
@@ -1729,6 +1740,10 @@ pub struct WalletWindow {
     policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
     network_proposal_busy: bool,
+    /// The automation whose stop or restart is in flight, so its own row shows
+    /// the spinner rather than the whole list going busy.
+    automation_busy: Option<uuid::Uuid>,
+    automation_error: Option<SharedString>,
     release_state: ReleaseDisplayState,
     pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
     update_data_dir: PathBuf,
@@ -1747,6 +1762,7 @@ struct DesktopSnapshot {
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
     legal_status: std::result::Result<LegalStatus, SharedString>,
     networks: std::result::Result<Vec<NetworkConfig>, SharedString>,
+    automations: std::result::Result<Vec<Automation>, SharedString>,
     message_documents: BTreeMap<uuid::Uuid, std::result::Result<ReviewDocument, SharedString>>,
     typed_data_documents: BTreeMap<uuid::Uuid, std::result::Result<ReviewDocument, SharedString>>,
 }
@@ -1754,6 +1770,7 @@ struct DesktopSnapshot {
 impl DesktopSnapshot {
     fn capture(owner: &OwnerApi) -> Self {
         let reviews = cache_result(owner.reviews(None));
+        let automations = cache_result(owner.automations());
         let activity =
             cache_result(owner.activity(None, 200)).map(Arc::<[OwnerActivityRecord]>::from);
         let activity_sources = owner
@@ -1809,6 +1826,7 @@ impl DesktopSnapshot {
             policies,
             legal_status,
             networks,
+            automations,
             message_documents,
             typed_data_documents,
         }
@@ -4398,6 +4416,8 @@ impl WalletWindow {
             policy_action_error: None,
             token_proposal_busy: false,
             network_proposal_busy: false,
+            automation_busy: None,
+            automation_error: None,
             release_state: ReleaseDisplayState::Idle,
             pending_update,
             update_data_dir: data_dir.to_path_buf(),
@@ -11411,6 +11431,239 @@ impl WalletWindow {
                     }),
             )
     }
+    fn cached_automations(&self) -> Result<&Vec<Automation>> {
+        self.snapshot()?
+            .automations
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    /// Stop one automation, at the owner's request.
+    fn stop_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        self.automation_busy = Some(automation_id);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.disable_automation(automation_id))
+                .await
+                .context("stopping the automation failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.automation_busy = None;
+                view.automation_error = result
+                    .err()
+                    .map(|error| SharedString::from(format!("{error:#}")));
+                view.reload_desktop_snapshot(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Start one again under the policy that is active now.
+    fn relink_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        self.automation_busy = Some(automation_id);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.relink_automation(automation_id))
+                .await
+                .context("restarting the automation failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.automation_busy = None;
+                view.automation_error = result
+                    .err()
+                    .map(|error| SharedString::from(format!("{error:#}")));
+                view.reload_desktop_snapshot(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn render_automations(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut content = div().flex().flex_col().gap_4();
+        content = content.when_some(self.automation_error.clone(), |content, error| {
+            content.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(selectable_label(error)),
+            )
+        });
+
+        let automations = match self.cached_automations() {
+            Err(error) => {
+                return content.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(format!("{error:#}"))),
+                );
+            }
+            Ok(automations) => automations,
+        };
+        if automations.is_empty() {
+            return content.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(
+                        "No automations. An agent can install one to react to something on chain \
+                         without waiting for you — it can only make transactions your policy \
+                         already allows.",
+                    )),
+            );
+        }
+
+        let now = chrono::Utc::now();
+        let mut rows = div()
+            .debug_selector(|| "automation-list".to_owned())
+            .flex()
+            .flex_col()
+            .gap_3();
+        for automation in automations {
+            let id = automation.id;
+            let busy = self.automation_busy == Some(id);
+            let stopped = automation.state != AutomationState::Enabled;
+            // What it is, in the order a reader needs it: the name they were
+            // told, the account it spends from, and how often it runs.
+            let heading = format!(
+                "{} · {} · chain {}",
+                automation.name, automation.wallet_id, automation.chain_id
+            );
+            let schedule = match automation.state {
+                AutomationState::Enabled => automation
+                    .schedule
+                    .next_after(automation.last_tick_at.unwrap_or(now))
+                    .map_or_else(
+                        || format!("{} · not scheduled to run again", automation.schedule),
+                        |next| {
+                            format!(
+                                "{} · next at {} UTC",
+                                automation.schedule,
+                                next.format("%Y-%m-%d %H:%M:%S")
+                            )
+                        },
+                    ),
+                _ => format!("{} · not running", automation.schedule),
+            };
+            let mut card =
+                div()
+                    .p_3()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(if stopped {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().border
+                    })
+                    .bg(cx.theme().secondary)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div().font_semibold().child(selectable_text(
+                                    format!("automation-title-{id}"),
+                                    &heading,
+                                )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .when(stopped, |actions| {
+                                        actions.child(
+                                            app_button(SharedString::from(format!(
+                                                "relink-automation-{id}"
+                                            )))
+                                            .debug_selector(|| "relink-automation".to_owned())
+                                            .label("Run again")
+                                            .primary()
+                                            .loading(busy)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.relink_automation(id, cx);
+                                            })),
+                                        )
+                                    })
+                                    .when(!stopped, |actions| {
+                                        actions.child(
+                                            app_button(SharedString::from(format!(
+                                                "stop-automation-{id}"
+                                            )))
+                                            .debug_selector(|| "stop-automation".to_owned())
+                                            .label("Stop")
+                                            .danger()
+                                            .loading(busy)
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.stop_automation(id, cx);
+                                            })),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(schedule)),
+                    );
+
+            // Why it stopped comes before anything else about it. An
+            // automation that is not running is the only thing on this screen
+            // the reader has to act on, and burying the reason under the hash
+            // would make them hunt for it.
+            if let Some(reason) = automation.stopped_reason.as_ref() {
+                card = card.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(reason.clone())),
+                );
+            }
+            if let Some(outcome) = automation.last_outcome.as_ref() {
+                let when = automation.last_tick_at.map_or_else(String::new, |at| {
+                    format!(" ({})", relative_time_label(at, now))
+                });
+                card = card.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_label(format!("Last run: {outcome}{when}"))),
+                );
+            }
+            // The bytecode cannot be shown as anything a person reads, so the
+            // screen says what it honestly can: its hash, its size, and the
+            // policy revision it is bound to.
+            card = card.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_text(
+                        format!("automation-identity-{id}"),
+                        &format!(
+                            "{} · {} bytes · policy revision {} · key {}",
+                            automation.bytecode_hash(),
+                            automation.bytecode.len(),
+                            automation.policy_revision,
+                            automation.key
+                        ),
+                    )),
+            );
+            rows = rows.child(card);
+        }
+        content.child(rows)
+    }
+
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
         match self.cached_reviews().map(|reviews| {
@@ -12465,6 +12718,7 @@ impl WalletWindow {
             Route::Accounts => self.render_accounts(cx),
             Route::Policies => self.render_policies(cx),
             Route::Networks => self.render_networks(cx),
+            Route::Automations => self.render_automations(cx),
             Route::Tokens => self.render_tokens(cx),
             Route::WalletConnect => self.render_walletconnect(cx),
             Route::Settings => self.render_settings(cx),
@@ -14662,6 +14916,67 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     walletconnect_sessions: 0,
                 });
             }
+            // The automation cron. One supervisor task rather than one per
+            // account and network: it re-reads the configuration every pass,
+            // so accounts added, networks disabled, and endpoints edited take
+            // effect without a restart and without any task bookkeeping.
+            //
+            // Started here, beside the other long-lived services, because it
+            // needs the Tokio runtime `gpui_tokio::init` just installed. It
+            // holds an `AgentExecutionAuthority` — the same narrow signing
+            // capability the MCP server gets — and never a key store.
+            {
+                let automation_config = owner.config().clone();
+                let automation_events = events.clone();
+                gpui_tokio::Tokio::spawn(cx, async move {
+                    let data_dir = automation_config.data_dir().to_path_buf();
+                    let stores = (|| {
+                        Ok::<_, anyhow::Error>((
+                            ekubo_wallet_core::automation_store::AutomationStore::production(
+                                &data_dir,
+                            )?,
+                            ekubo_wallet_core::pending::PendingStore::production(&data_dir)?,
+                            ekubo_wallet_core::policy_store::PolicyStore::production(&data_dir)?,
+                        ))
+                    })();
+                    let Ok((automations, pending, policies)) = stores else {
+                        // Nothing to run against. The wallet is fully usable
+                        // without automations, so this must not take the
+                        // application down with it.
+                        return;
+                    };
+                    let policies = Arc::new(Mutex::new(policies));
+                    let scheduler =
+                        ekubo_wallet_core::automation_scheduler::AutomationScheduler::new(
+                            ekubo_wallet_core::agent_authority::AgentExecutionAuthority::production(
+                                Arc::clone(&policies),
+                            ),
+                        );
+                    let automations = Mutex::new(automations);
+                    let pending = Mutex::new(pending);
+                    ekubo_wallet_core::automation_scheduler::drive(
+                        &scheduler,
+                        &automation_config,
+                        &automations,
+                        &pending,
+                        &policies,
+                        |outcome| {
+                            // Every pass that did something redraws the tab.
+                            // Publishing only on change keeps an idle wallet
+                            // from waking the UI on a timer.
+                            if outcome.is_ok() {
+                                automation_events.publish(
+                                    crate::events::DomainEventKind::AutomationsChanged {
+                                        wallet_id: String::new(),
+                                    },
+                                );
+                            }
+                        },
+                    )
+                    .await;
+                })
+                .detach();
+            }
             cx.set_global(DesktopRuntime {
                 _instance: instance_slot.clone(),
                 _server: server_slot.clone(),
@@ -14900,6 +15215,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 crate::events::DomainEventKind::ConfigurationChanged
                                     | crate::events::DomainEventKind::ReviewChanged { .. }
                                     | crate::events::DomainEventKind::PolicyProposalChanged { .. }
+                                    | crate::events::DomainEventKind::AutomationsChanged { .. }
                                     | crate::events::DomainEventKind::Transaction { .. }
                             );
                             if portfolio_changed || configuration_changed || snapshot_changed {

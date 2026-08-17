@@ -12,9 +12,9 @@ the condition once and lets the wallet watch for it.
 Automations get their own tab in the desktop shell, alongside activity,
 permissions, connections, reference data, and settings.
 
-This document is the design. The core — poll, decode, plan synthesis, storage,
-scheduler, and the MCP tools an agent writes automations with — is implemented;
-the desktop tab and the wiring that starts the scheduler are not yet.
+This document is the design, and it is implemented: the poll, the decoder, plan
+synthesis, storage, the cron driver, the MCP tools an agent writes automations
+with, and the Automations tab.
 
 ## An automation is a plan source, not an authority
 

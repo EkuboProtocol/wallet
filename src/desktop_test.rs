@@ -440,7 +440,7 @@ fn tray_artwork_tracks_both_system_appearance_families() {
 
 #[test]
 fn command_palette_reaches_every_desktop_route() {
-    assert_eq!(Route::ALL.len(), 8);
+    assert_eq!(Route::ALL.len(), 9);
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::Activity.label(), "Inbox");
@@ -511,7 +511,8 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("⌘5", "cmd-5"),
         ("⌘6", "cmd-6"),
         ("⌘7", "cmd-7"),
-        ("⌘8 / ⌘,", "cmd-8"),
+        ("⌘8", "cmd-8"),
+        ("⌘9 / ⌘,", "cmd-9"),
     ];
     #[cfg(not(target_os = "macos"))]
     let expected = [
@@ -522,7 +523,8 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("Ctrl+5", "ctrl-5"),
         ("Ctrl+6", "ctrl-6"),
         ("Ctrl+7", "ctrl-7"),
-        ("Ctrl+8 / Ctrl+,", "ctrl-8"),
+        ("Ctrl+8", "ctrl-8"),
+        ("Ctrl+9 / Ctrl+,", "ctrl-9"),
     ];
 
     let actual = Route::ALL.map(|route| (route.shortcut().to_string(), route.key_binding()));

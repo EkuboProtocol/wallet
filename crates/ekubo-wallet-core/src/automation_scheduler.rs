@@ -496,38 +496,43 @@ pub async fn drive(
     automations: &Mutex<AutomationStore>,
     pending: &Mutex<PendingStore>,
     policies: &Mutex<PolicyStore>,
-    wallet: &WalletMetadata,
-    chain_id: u64,
     mut observe: impl FnMut(Result<Vec<TickReport>>),
 ) -> ! {
     loop {
         let at = tick_moment();
-        let outcome = match current_network(config, chain_id) {
-            Err(error) => Err(error),
-            Ok(network) => {
-                scheduler
-                    .run_due(config, automations, pending, policies, wallet, &network, at)
-                    .await
+        let mut soonest: Option<DateTime<Utc>> = None;
+        // Wallets and networks are re-read every pass rather than captured
+        // once. A loop holding the startup list would keep polling endpoints
+        // the owner has since replaced, keep running on a network they have
+        // since disabled, and never notice an account they have since added —
+        // it would be the one part of the wallet where editing configuration
+        // did nothing until restart.
+        match config.load() {
+            Err(error) => observe(Err(error)),
+            Ok(state) => {
+                let networks: Vec<_> = state
+                    .networks
+                    .into_iter()
+                    .filter(|network| !network.disabled)
+                    .collect();
+                for wallet in state.wallets {
+                    for network in &networks {
+                        let outcome = scheduler
+                            .run_due(config, automations, pending, policies, &wallet, network, at)
+                            .await;
+                        let empty = outcome.as_ref().is_ok_and(Vec::is_empty);
+                        if !empty {
+                            observe(outcome);
+                        }
+                    }
+                    if let Some(next) = next_fire_time(automations, &wallet, at) {
+                        soonest = Some(soonest.map_or(next, |current| current.min(next)));
+                    }
+                }
             }
-        };
-        observe(outcome);
-        let next = next_fire_time(automations, wallet, at);
-        tokio::time::sleep(sleep_for(next, at)).await;
+        }
+        tokio::time::sleep(sleep_for(soonest, at)).await;
     }
-}
-
-/// This pass's view of the network, refusing one the owner has disabled.
-///
-/// Disabled is not an error state to recover from, it is an instruction: a
-/// network the owner switched off must not keep receiving automated
-/// transactions because a loop started before they switched it off.
-fn current_network(config: &ConfigStore, chain_id: u64) -> Result<NetworkConfig> {
-    let network = config.network_by_chain_id(&chain_id.to_string())?;
-    anyhow::ensure!(
-        !network.disabled,
-        "network {chain_id} is disabled, so its automations do not run"
-    );
-    Ok(network)
 }
 
 /// The earliest moment any enabled automation of this wallet is next due.

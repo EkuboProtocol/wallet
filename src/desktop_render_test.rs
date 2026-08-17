@@ -106,6 +106,7 @@ fn quiet_snapshot() -> DesktopSnapshot {
         activity: Ok(Arc::from(Vec::new())),
         activity_sources: BTreeMap::new(),
         accounts: Ok(Vec::new()),
+        automations: Ok(Vec::new()),
         policies: BTreeMap::new(),
         legal_status: Ok(LegalStatus {
             signing_allowed: true,
@@ -1334,5 +1335,78 @@ fn screenshots() {
         let path = directory.join(format!("{}.png", route.label().to_lowercase()));
         image.save(&path).expect("write png");
         println!("wrote {}", path.display());
+    }
+}
+
+#[gpui::test]
+fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let running = automation_fixture(AutomationState::Enabled, None);
+    let stopped = automation_fixture(
+        AutomationState::AwaitingRelink,
+        Some("the signing policy changed to revision 4".to_owned()),
+    );
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automations = Ok(vec![running, stopped]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+
+    let laid_out = measure(
+        cx,
+        window,
+        &view,
+        &["automation-list", "stop-automation", "relink-automation"],
+    );
+    assert!(laid_out[0].is_some(), "the list must draw");
+    // The running one offers Stop; the stopped one offers Run again. Both are
+    // on screen at once, which is the case that matters — an owner reading
+    // this screen is deciding about one of several.
+    assert!(laid_out[1].is_some(), "a running automation can be stopped");
+    assert!(
+        laid_out[2].is_some(),
+        "a stopped automation must offer a way back, not just an explanation"
+    );
+}
+
+#[gpui::test]
+fn an_empty_automations_tab_says_what_one_would_be(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+    });
+    // No list at all rather than an empty frame, so the screen is never a
+    // blank box the reader has to interpret.
+    assert!(measure(cx, window, &view, &["automation-list"])[0].is_none());
+    release(cx, &view);
+}
+
+fn automation_fixture(state: AutomationState, stopped_reason: Option<String>) -> Automation {
+    Automation {
+        id: uuid::Uuid::new_v4(),
+        wallet_instance_id: uuid::Uuid::new_v4(),
+        wallet_id: "primary".into(),
+        wallet_address: alloy::primitives::Address::repeat_byte(0x11),
+        chain_id: 1,
+        key: "rebalance".into(),
+        name: "rebalance the vault".into(),
+        bytecode: alloy::primitives::Bytes::from_static(&[0x60, 0x00, 0xF3]),
+        config: alloy::primitives::Bytes::new(),
+        schedule: ekubo_wallet_core::automation::CronSchedule::parse("0 0 * * * *").unwrap(),
+        policy_revision: 1,
+        state,
+        stopped_reason,
+        consecutive_failures: 0,
+        last_tick_at: None,
+        last_outcome: None,
+        last_request_id: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
