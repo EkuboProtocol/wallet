@@ -1965,3 +1965,245 @@ fn a_dapp_connection_cannot_be_approved_before_an_account_is_chosen() {
     // Every other review answers its own question by existing.
     assert!(review_selection_is_complete(None));
 }
+
+fn setup_account(id: &str) -> WalletMetadata {
+    WalletMetadata {
+        instance_id: uuid::Uuid::new_v4(),
+        id: id.to_owned(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    }
+}
+
+fn setup_policies(
+    account: &WalletMetadata,
+    policy: WalletPolicy,
+) -> BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>> {
+    let mut policies = BTreeMap::new();
+    policies.insert(
+        account.id.clone(),
+        Ok(Some(StoredPolicy {
+            wallet_instance_id: account.instance_id,
+            wallet_id: account.id.clone(),
+            wallet_address: account.address,
+            policy,
+            revision: 1,
+            updated_at: chrono::Utc::now(),
+        })),
+    );
+    policies
+}
+
+fn setup_message(status: MessageStatus) -> OwnerActivityRecord {
+    OwnerActivityRecord::Message(ekubo_wallet_core::message::PendingMessage {
+        request_id: uuid::Uuid::new_v4(),
+        wallet_instance_id: uuid::Uuid::new_v4(),
+        wallet_id: "trading".into(),
+        wallet_address: alloy::primitives::Address::ZERO,
+        chain_id: None,
+        message_hex: "0x68690a".into(),
+        encoding: ekubo_wallet_core::message::MessageEncoding::Text,
+        digest: "0xabc".into(),
+        status,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        approved_at: None,
+        rejected_at: None,
+        signature: None,
+        requester: None,
+    })
+}
+
+fn setup_agents(installed: bool) -> AgentDetectionState {
+    AgentDetectionState::Ready(vec![DetectedAgent {
+        kind: AgentKind::ClaudeCode,
+        display_name: "Claude Code",
+        config_path: "/tmp/config.json".into(),
+        installed: Ok(installed),
+    }])
+}
+
+#[test]
+fn a_fresh_install_has_finished_none_of_the_setup() {
+    let observation = observe_setup(
+        None,
+        &BTreeMap::new(),
+        None,
+        &AgentDetectionState::Loading,
+        &[],
+    );
+
+    assert_eq!(observation, SetupObservation::default());
+    for task in SetupTask::ALL {
+        assert!(!observation.holds(task), "{task:?} cannot already be done");
+    }
+}
+
+#[test]
+fn the_default_deny_everything_policy_does_not_count_as_relaxing_one() {
+    // Every account is installed with `require_approval_for_everything`. If
+    // that satisfied the task, the checklist would tick a box for something
+    // the owner never did — and would be saying an agent may transact on its
+    // own at the exact moment nothing may.
+    let account = setup_account("trading");
+    let observation = observe_setup(
+        Some(std::slice::from_ref(&account)),
+        &setup_policies(&account, WalletPolicy::require_approval_for_everything()),
+        None,
+        &AgentDetectionState::Loading,
+        &[],
+    );
+
+    assert!(observation.account);
+    assert!(!observation.policy);
+}
+
+#[test]
+fn any_policy_other_than_the_installed_default_finishes_the_policy_task() {
+    let account = setup_account("trading");
+    let observation = observe_setup(
+        Some(std::slice::from_ref(&account)),
+        &setup_policies(&account, WalletPolicy::allow_anything()),
+        None,
+        &AgentDetectionState::Loading,
+        &[],
+    );
+
+    assert!(observation.policy);
+}
+
+#[test]
+fn a_signature_request_only_counts_once_it_has_been_decided() {
+    // The step being taught is the review, not the arrival. A request sitting
+    // in the inbox is the moment before the thing worth seeing.
+    let waiting = observe_setup(
+        None,
+        &BTreeMap::new(),
+        Some(&[setup_message(MessageStatus::AwaitingApproval)]),
+        &AgentDetectionState::Loading,
+        &[],
+    );
+    assert!(!waiting.signature);
+
+    for decided in [MessageStatus::Signed, MessageStatus::Rejected] {
+        let observation = observe_setup(
+            None,
+            &BTreeMap::new(),
+            Some(&[setup_message(decided)]),
+            &AgentDetectionState::Loading,
+            &[],
+        );
+        // Refusing one teaches exactly what approving one does: that the
+        // decision is yours and nothing happens without it.
+        assert!(observation.signature, "{decided:?} should finish the task");
+    }
+}
+
+#[test]
+fn an_unsettled_pairing_is_not_a_connected_dapp() {
+    // Everything before settlement is a pairing with a stranger.
+    let pairing = observe_setup(
+        None,
+        &BTreeMap::new(),
+        None,
+        &AgentDetectionState::Loading,
+        &[walletconnect_summary(uuid::Uuid::new_v4(), false)],
+    );
+    assert!(!pairing.dapp);
+
+    let connected = observe_setup(
+        None,
+        &BTreeMap::new(),
+        None,
+        &AgentDetectionState::Loading,
+        &[walletconnect_summary(uuid::Uuid::new_v4(), true)],
+    );
+    assert!(connected.dapp);
+}
+
+#[test]
+fn an_agent_counts_only_once_this_wallet_is_in_its_configuration() {
+    let detected_but_empty = observe_setup(None, &BTreeMap::new(), None, &setup_agents(false), &[]);
+    assert!(!detected_but_empty.agent);
+
+    let installed = observe_setup(None, &BTreeMap::new(), None, &setup_agents(true), &[]);
+    assert!(installed.agent);
+}
+
+#[test]
+fn a_finished_task_stays_finished_when_the_state_behind_it_goes_away() {
+    // A dapp closing its tab ends the session, and history can be cleared.
+    // Neither undoes having done the thing once, and a box that unticks
+    // itself reads as a bug rather than as news.
+    let mut setup = GuidedSetup::new(GuidedSetupState::default());
+    assert!(setup.latch(SetupObservation {
+        dapp: true,
+        ..SetupObservation::default()
+    }));
+    assert!(setup.is_complete(SetupTask::ConnectDapp));
+
+    assert!(!setup.latch(SetupObservation::default()));
+    assert!(setup.is_complete(SetupTask::ConnectDapp));
+    assert_eq!(setup.completed_count(), 1);
+}
+
+#[test]
+fn the_card_stays_up_until_every_task_is_done_or_it_is_sent_away() {
+    let mut setup = GuidedSetup::new(GuidedSetupState::default());
+    assert!(setup.visible());
+
+    setup.latch(SetupObservation {
+        account: true,
+        agent: true,
+        signature: true,
+        dapp: true,
+        policy: false,
+    });
+    assert!(
+        setup.visible(),
+        "four of five is not finished, however far along it looks"
+    );
+
+    setup.latch(SetupObservation {
+        account: true,
+        agent: true,
+        signature: true,
+        dapp: true,
+        policy: true,
+    });
+    assert!(!setup.visible());
+    assert_eq!(setup.completed_count(), SetupTask::ALL.len());
+}
+
+#[test]
+fn dismissal_outlasts_any_amount_of_remaining_work() {
+    let mut setup = GuidedSetup::new(GuidedSetupState {
+        completed: std::collections::BTreeSet::new(),
+        dismissed: true,
+    });
+
+    assert!(!setup.visible());
+    setup.latch(SetupObservation {
+        account: true,
+        ..SetupObservation::default()
+    });
+    assert!(!setup.visible());
+}
+
+#[test]
+fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
+    // The stored name is what survives a rename of the variant, so two tasks
+    // sharing one would silently tick each other's box.
+    let keys: std::collections::BTreeSet<&str> =
+        SetupTask::ALL.iter().map(|task| task.key()).collect();
+    assert_eq!(keys.len(), SetupTask::ALL.len());
+
+    for task in SetupTask::ALL {
+        assert!(!task.title().is_empty());
+        assert!(!task.detail().is_empty());
+        // Every row is a shortcut, so every task needs somewhere to send you.
+        assert!(Route::ALL.contains(&task.route()));
+    }
+}

@@ -32,7 +32,7 @@ use ekubo_wallet_core::approval::{
 use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
 use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
-use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference};
+use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, GuidedSetupState};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
@@ -1731,6 +1731,7 @@ pub struct WalletWindow {
     export_clipboard: Arc<Mutex<Option<Zeroizing<String>>>>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
+    guided_setup: GuidedSetup,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
     testnet_mode: bool,
@@ -3156,6 +3157,230 @@ enum AgentDetectionState {
     Failed(SharedString),
 }
 
+/// One thing to try in the guided setup.
+///
+/// The order here is the order they are listed, and it is a reading order
+/// rather than a sequence: nothing here depends on anything else being done
+/// first except that an agent needs an account to talk about, so a person can
+/// start wherever they are curious and the checklist just keeps up.
+///
+/// The first four cost nothing. An account can be created and thrown away, an
+/// agent install is a config file, a message signature moves no money, and a
+/// dapp connection approves nothing by itself — every transaction it later
+/// asks for still arrives here for a decision. That is the point of the list:
+/// somebody can see the whole shape of how this wallet is meant to be used
+/// before deciding whether to put anything at stake. Only the last task
+/// changes what an agent may do without asking, which is why it is described
+/// as something to do when ready rather than something to get out of the way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SetupTask {
+    CreateAccount,
+    InstallAgent,
+    SignMessage,
+    ConnectDapp,
+    RelaxPolicy,
+}
+
+impl SetupTask {
+    const ALL: [Self; 5] = [
+        Self::CreateAccount,
+        Self::InstallAgent,
+        Self::SignMessage,
+        Self::ConnectDapp,
+        Self::RelaxPolicy,
+    ];
+
+    /// The stored name. Kept apart from the variant so renaming one in code
+    /// cannot silently reopen a task somebody has already finished.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::CreateAccount => "create_account",
+            Self::InstallAgent => "install_agent",
+            Self::SignMessage => "sign_message",
+            Self::ConnectDapp => "connect_dapp",
+            Self::RelaxPolicy => "relax_policy",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::CreateAccount => "Create an account",
+            Self::InstallAgent => "Connect an agent",
+            Self::SignMessage => "Have an agent ask for a signature",
+            Self::ConnectDapp => "Connect a dapp with WalletConnect",
+            Self::RelaxPolicy => "Let an agent transact on its own",
+        }
+    }
+
+    /// One line saying what the step is for and what it costs. Every one of
+    /// these says the cost out loud, because the reason to try any of them is
+    /// that there is almost nothing to lose by trying.
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::CreateAccount => {
+                "A new key, generated on this machine and never sent anywhere. Fund it later, or never — everything below works on an empty account."
+            }
+            Self::InstallAgent => {
+                "Adds this wallet to an agent's MCP configuration so it can read balances and ask you for things. It gets no key and no authority to sign."
+            }
+            Self::SignMessage => {
+                "Ask your agent to sign the message \"hello world\". It arrives in your inbox, you read exactly what it says, and you approve or refuse. Nothing moves either way — this is the review screen every request goes through."
+            }
+            Self::ConnectDapp => {
+                "Paste a WalletConnect URI from any dapp and use it as you would with any wallet. Connecting approves nothing on its own: what the dapp asks for still comes here first."
+            }
+            Self::RelaxPolicy => {
+                "When you are ready, write a policy saying what an agent may do without asking you. Until you do, every transaction waits for you — which is the safe default, not a step you have skipped."
+            }
+        }
+    }
+
+    /// Where the row sends somebody who wants to do this now.
+    const fn route(self) -> Route {
+        match self {
+            Self::CreateAccount => Route::Accounts,
+            Self::InstallAgent => Route::Settings,
+            Self::SignMessage => Route::Activity,
+            Self::ConnectDapp => Route::WalletConnect,
+            Self::RelaxPolicy => Route::Policies,
+        }
+    }
+}
+
+/// What the wallet can see about the checklist right now.
+///
+/// Kept separate from what has been *recorded* finished: this is a reading of
+/// live state, and live state moves backwards. Sessions end, histories get
+/// cleared. Latching happens where the two meet.
+// One answer per task, and the tasks are independent by design: any subset can
+// hold at once. A state machine over them would have to enumerate all
+// thirty-two, which is the combinatorial explosion the lint is normally
+// warning about rather than a case of it.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SetupObservation {
+    account: bool,
+    agent: bool,
+    signature: bool,
+    dapp: bool,
+    policy: bool,
+}
+
+impl SetupObservation {
+    const fn holds(self, task: SetupTask) -> bool {
+        match task {
+            SetupTask::CreateAccount => self.account,
+            SetupTask::InstallAgent => self.agent,
+            SetupTask::SignMessage => self.signature,
+            SetupTask::ConnectDapp => self.dapp,
+            SetupTask::RelaxPolicy => self.policy,
+        }
+    }
+}
+
+/// Read the checklist off the wallet's own state.
+///
+/// Nothing here is a flag the setup writes for itself: each answer is the
+/// thing it describes, asked directly. A checklist kept as its own bookkeeping
+/// is a checklist that can be wrong about the wallet, and being wrong is worse
+/// than being absent — it teaches somebody that the screen does not mean what
+/// it says.
+fn observe_setup(
+    accounts: Option<&[WalletMetadata]>,
+    policies: &BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
+    activity: Option<&[OwnerActivityRecord]>,
+    agents: &AgentDetectionState,
+    sessions: &[SessionSummary],
+) -> SetupObservation {
+    let accounts = accounts.unwrap_or_default();
+    SetupObservation {
+        account: !accounts.is_empty(),
+        agent: match agents {
+            AgentDetectionState::Ready(detected) => detected
+                .iter()
+                .any(|agent| agent.installed.as_ref().copied().unwrap_or(false)),
+            AgentDetectionState::Loading | AgentDetectionState::Failed(_) => false,
+        },
+        // A request that only arrived teaches nothing. The step is finished
+        // when the owner has read one and decided, because the deciding is the
+        // whole thing being shown.
+        signature: activity
+            .unwrap_or_default()
+            .iter()
+            .any(|record| match record {
+                OwnerActivityRecord::Message(record) => {
+                    record.status != MessageStatus::AwaitingApproval
+                }
+                OwnerActivityRecord::TypedData(record) => {
+                    record.status != TypedDataStatus::AwaitingApproval
+                }
+                OwnerActivityRecord::Transaction(_) => false,
+            }),
+        // Only a settled session counts. Everything before that is a pairing
+        // with a stranger the owner has not met yet.
+        dapp: sessions.iter().any(|session| session.settled),
+        // A fresh account is installed with `require_approval_for_everything`,
+        // so anything else is a deliberate edit. Comparing against that policy
+        // rather than counting revisions means reinstalling the default — a
+        // real thing to do after experimenting — correctly reads as not done.
+        policy: accounts.iter().any(|account| {
+            policies
+                .get(&account.id)
+                .and_then(|policy| policy.as_ref().ok())
+                .and_then(Option::as_ref)
+                .is_some_and(|stored| {
+                    stored.policy != WalletPolicy::require_approval_for_everything()
+                })
+        }),
+    }
+}
+
+/// The checklist as it is drawn: what has ever been finished, and whether the
+/// card has been sent away.
+struct GuidedSetup {
+    state: GuidedSetupState,
+}
+
+impl GuidedSetup {
+    fn new(state: GuidedSetupState) -> Self {
+        Self { state }
+    }
+
+    fn is_complete(&self, task: SetupTask) -> bool {
+        self.state.completed.contains(task.key())
+    }
+
+    fn all_complete(&self) -> bool {
+        SetupTask::ALL.iter().all(|task| self.is_complete(*task))
+    }
+
+    /// Fold a fresh reading into the record, and say whether anything changed
+    /// so a caller knows when the result is worth storing.
+    fn latch(&mut self, observation: SetupObservation) -> bool {
+        let mut changed = false;
+        for task in SetupTask::ALL {
+            if observation.holds(task) && self.state.completed.insert(task.key().to_owned()) {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The card is up until every task is finished or the owner sends it away.
+    /// The legal gate is handled by the caller: nothing may share the screen
+    /// with a document that has to be accepted before the wallet runs at all.
+    fn visible(&self) -> bool {
+        !self.state.dismissed && !self.all_complete()
+    }
+
+    fn completed_count(&self) -> usize {
+        SetupTask::ALL
+            .iter()
+            .filter(|task| self.is_complete(**task))
+            .count()
+    }
+}
+
 struct TokenProposalListDelegate {
     source: Option<String>,
     proposals: Vec<TokenProposal>,
@@ -4446,6 +4671,11 @@ impl WalletWindow {
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
         let testnet_mode = owner.testnet_mode().unwrap_or(false);
+        // A store that cannot be read yields the default, which shows the
+        // checklist. Showing it to somebody who has finished is a moment's
+        // annoyance; hiding it from somebody who has not is the whole feature
+        // failing silently.
+        let guided_setup = GuidedSetup::new(owner.guided_setup().unwrap_or_default());
         let route_scroll_handle = ScrollHandle::new();
         let route_overflow_indicator =
             ScrollOverflowIndicator::new(route_scroll_handle.clone(), cx);
@@ -4537,6 +4767,7 @@ impl WalletWindow {
             export_clipboard: Arc::new(Mutex::new(None)),
             legal_review: None,
             legal_gate: false,
+            guided_setup,
             route_errors: BTreeMap::new(),
             appearance_preference,
             testnet_mode,
@@ -5077,6 +5308,45 @@ impl WalletWindow {
         self.desktop_snapshot
             .as_deref()
             .context("Wallet data is loading")
+    }
+
+    /// Fold what the wallet currently looks like into the checklist.
+    ///
+    /// Called from `render`, which is the one place guaranteed to run after
+    /// every source it reads has moved: the snapshot reload, the agent
+    /// detection, and the session list all end by asking for a redraw. Doing
+    /// it in each of those instead would mean a checklist that is right about
+    /// whichever one happened to fire last.
+    fn refresh_guided_setup(&mut self) {
+        if self.guided_setup.state.dismissed {
+            return;
+        }
+        let snapshot = self.desktop_snapshot.clone();
+        let observation = observe_setup(
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.accounts.as_deref().ok()),
+            snapshot
+                .as_ref()
+                .map_or(&BTreeMap::new(), |snapshot| &snapshot.policies),
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.activity.as_deref().ok()),
+            &self.detected_agents,
+            &self.walletconnect_sessions,
+        );
+        if self.guided_setup.latch(observation) {
+            // Best effort. A checklist that redraws correctly but forgets by
+            // tomorrow is far better than one that refuses to advance because
+            // the settings store is momentarily unavailable.
+            let _ = self.owner.set_guided_setup(&self.guided_setup.state);
+        }
+    }
+
+    fn dismiss_guided_setup(&mut self, cx: &mut Context<Self>) {
+        self.guided_setup.state.dismissed = true;
+        let _ = self.owner.set_guided_setup(&self.guided_setup.state);
+        cx.notify();
     }
 
     fn cached_reviews(&self) -> Result<&OwnerReviewQueues> {
@@ -13517,6 +13787,7 @@ impl WalletWindow {
                     ),
             )
             .focus_trap("security-review-focus", &self.modal_focus)
+            .debug_selector(|| "security-review-overlay".to_owned())
             .into_any_element()
     }
 
@@ -14587,6 +14858,159 @@ impl WalletWindow {
         // occludes; this one is no different for as long as it is open.
         div().absolute().inset_0().occlude().child(palette)
     }
+
+    /// The guided setup card.
+    ///
+    /// Deliberately not a modal. Every task on it is finished by using the
+    /// wallet, so a surface that took the window would be a surface that
+    /// blocked the only way to complete it. It floats in a corner, occludes
+    /// its own footprint so a press lands on the row rather than whatever is
+    /// underneath, and is drawn before the decision surfaces so a review that
+    /// arrives mid-checklist covers it rather than fighting it for the screen.
+    fn render_guided_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let completed = self.guided_setup.completed_count();
+        let total = SetupTask::ALL.len();
+        let rows = SetupTask::ALL.into_iter().map(|task| {
+            let done = self.guided_setup.is_complete(task);
+            let marker = div()
+                .flex_none()
+                .mt(px(2.0))
+                .size(px(16.0))
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(if done {
+                    cx.theme().primary
+                } else {
+                    cx.theme().border
+                })
+                .when(done, |marker| marker.bg(cx.theme().primary))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(done, |marker| {
+                    marker.child(
+                        Icon::new(IconName::Check)
+                            .with_size(px(11.0))
+                            .text_color(cx.theme().primary_foreground),
+                    )
+                });
+            let text = div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .when(done, |title| title.text_color(cx.theme().muted_foreground))
+                        .when(!done, gpui_component::StyledExt::font_medium)
+                        .child(task.title()),
+                )
+                // A finished task keeps its row but loses its explanation: the
+                // list is a map of what is left, and five paragraphs of
+                // already-done reading is what makes somebody dismiss it.
+                .when(!done, |text| {
+                    text.child(
+                        div()
+                            .text_xs()
+                            .whitespace_normal()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(task.detail()),
+                    )
+                });
+            div()
+                .id(SharedString::from(format!("guided-setup-{}", task.key())))
+                .debug_selector(move || format!("guided-setup-{}", task.key()))
+                .w_full()
+                .p_2()
+                .rounded(cx.theme().radius)
+                .flex()
+                .items_start()
+                .gap_2p5()
+                .when(!done, |row| {
+                    row.cursor_pointer().hover(|row| row.bg(cx.theme().accent))
+                })
+                // A row is a shortcut to the screen the task lives on, never a
+                // way to tick the box: completion is read off the wallet, so
+                // there is nothing here for a click to set.
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.navigate_route(task.route(), cx);
+                }))
+                .child(marker)
+                .child(text)
+        });
+        let card = div()
+            .id("guided-setup")
+            .debug_selector(|| "guided-setup".to_owned())
+            .absolute()
+            .right(px(20.0))
+            .bottom(px(20.0))
+            .w(px(400.0))
+            .max_h(px(560.0))
+            .overflow_y_scroll()
+            .p_3()
+            .rounded(cx.theme().radius_lg)
+            .shadow_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().font_semibold().child("Getting started"))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{completed} of {total}")),
+                            )
+                            .child(accessible_button(
+                                app_button("guided-setup-dismiss")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::CircleX)
+                                    .tooltip("Dismiss. This does not come back.")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.dismiss_guided_setup(cx);
+                                    })),
+                                "Dismiss the getting-started checklist",
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .whitespace_normal()
+                    .pb_1()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "This wallet holds your keys and hands agents and dapps a request queue \
+                         instead. Nothing below puts anything at risk, and you can stop after any \
+                         of them.",
+                    ),
+            )
+            .children(rows);
+        div()
+            .absolute()
+            .inset_0()
+            // The scrim itself takes no clicks: the page behind stays fully
+            // usable, which is the point of a card that asks somebody to go
+            // and use it.
+            .child(card)
+    }
 }
 
 impl Render for WalletWindow {
@@ -14671,6 +15095,7 @@ impl Render for WalletWindow {
         let policy_editor_layout = self.route == Route::Policies
             && self.policy_editor.is_some()
             && self.policy_json_input.is_some();
+        self.refresh_guided_setup();
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
@@ -14688,6 +15113,16 @@ impl Render for WalletWindow {
             })
             .when(policy_editor_layout, |view| {
                 view.child(self.render_policy_editor(cx))
+            })
+            // Above the page, below every decision: the checklist is drawn
+            // here rather than inside `render_content` because that child is
+            // swapped out entirely for the policy editor, which is exactly
+            // where the policy task sends people — a card living in there
+            // would vanish from the one screen it had just pointed at. Being
+            // ahead of the overlays below also settles the layering: a review,
+            // a legal document, or an export covers it, as they must.
+            .when(self.guided_setup.visible() && !self.legal_gate, |view| {
+                view.child(self.render_guided_setup(cx))
             })
             .when(self.command_palette, |view| {
                 view.child(self.render_palette(cx))

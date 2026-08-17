@@ -1925,6 +1925,105 @@ fn screenshots() {
 }
 
 #[gpui::test]
+fn the_guided_setup_follows_the_owner_onto_every_screen(cx: &mut gpui::TestAppContext) {
+    // It is a card, not a page: somebody finishes these tasks by going to the
+    // screens they live on, so a checklist that only appeared on one of them
+    // would disappear the moment it was acted on.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    for route in Route::ALL {
+        cx.update_entity(&view, |wallet, _| wallet.set_route(route));
+        let bounds = measure(cx, window, &view, &["guided-setup"]);
+
+        assert!(
+            bounds[0].is_some(),
+            "the guided setup is missing from {}",
+            route.label()
+        );
+    }
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn the_guided_setup_stays_off_the_screen_that_has_to_be_accepted(cx: &mut gpui::TestAppContext) {
+    // Accepting the terms is the one thing that has to happen before anything
+    // else, including reading about what to try next.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.legal_gate = true);
+
+    let bounds = measure(cx, window, &view, &["guided-setup"]);
+
+    assert!(
+        bounds[0].is_none(),
+        "the guided setup drew over the legal gate"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn a_security_review_covers_the_guided_setup_rather_than_sharing_the_screen(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let before = measure(cx, window, &view, &["guided-setup"]);
+    assert!(before[0].is_some(), "the card should start visible");
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.active_review = Some(active_review(ActiveReviewCompletion::Message {
+            request_id: uuid::Uuid::new_v4(),
+            digest: "0xabc".into(),
+        }));
+    });
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &["guided-setup", "security-review-overlay"],
+    );
+
+    let card = bounds[0].expect("the card is still in the tree");
+    let review = bounds[1].expect("the review overlay did not draw");
+    // The review is added to the tree after the card and covers the whole
+    // window, so every pixel of the card sits behind it. That is what makes a
+    // decision the only thing on screen while it is up.
+    assert!(
+        review.origin.x <= card.origin.x
+            && review.origin.y <= card.origin.y
+            && review.origin.x + review.size.width >= card.origin.x + card.size.width
+            && review.origin.y + review.size.height >= card.origin.y + card.size.height,
+        "the review overlay {review:?} does not cover the guided setup {card:?}"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn every_guided_setup_row_draws_and_dismissal_takes_the_card_away(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let selectors = [
+        "guided-setup-create_account",
+        "guided-setup-install_agent",
+        "guided-setup-sign_message",
+        "guided-setup-connect_dapp",
+        "guided-setup-relax_policy",
+    ];
+    let bounds = measure(cx, window, &view, &selectors);
+    for (selector, row) in selectors.iter().zip(&bounds) {
+        assert!(row.is_some(), "{selector} did not draw");
+    }
+
+    cx.update_entity(&view, WalletWindow::dismiss_guided_setup);
+    let after = measure(cx, window, &view, &["guided-setup"]);
+
+    assert!(after[0].is_none(), "a dismissed card came back");
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);

@@ -21,6 +21,29 @@ pub enum AppearancePreference {
     Dark,
 }
 
+/// What the guided setup remembers between runs.
+///
+/// Only two things need storing. Everything else about the checklist is
+/// derived from the wallet's own state each time the window draws, so a box
+/// can never disagree with the thing it claims to describe.
+///
+/// Completion latches, which is why it is stored at all rather than derived
+/// afresh every time. A `WalletConnect` session ends when the dapp closes its
+/// tab, and a signature history can be cleared; neither undoes the fact that
+/// the owner has now done that thing once. A box that unticks itself reads as
+/// a bug rather than as news.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuidedSetupState {
+    /// Task identifiers seen finished, as the presenting layer names them.
+    /// Unknown names are kept rather than dropped, so a downgrade does not
+    /// silently reopen a task a later build had already closed.
+    #[serde(default)]
+    pub completed: std::collections::BTreeSet<String>,
+    /// Set when the owner sends the card away. It never comes back.
+    #[serde(default)]
+    pub dismissed: bool,
+}
+
 /// Untrusted harness attribution supplied by the stdio bridge.
 ///
 /// This value is never consulted for authorization. It exists only so the
@@ -150,6 +173,14 @@ impl DesktopStore {
 
     pub fn set_appearance_preference(&mut self, preference: AppearancePreference) -> Result<()> {
         self.set_setting("appearance_preference", &preference)
+    }
+
+    pub fn guided_setup(&self) -> Result<GuidedSetupState> {
+        Ok(self.setting("guided_setup")?.unwrap_or_default())
+    }
+
+    pub fn set_guided_setup(&mut self, state: &GuidedSetupState) -> Result<()> {
+        self.set_setting("guided_setup", state)
     }
 
     pub fn testnet_mode(&self) -> Result<bool> {

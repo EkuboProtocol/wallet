@@ -17,7 +17,7 @@ use ekubo_wallet_core::{
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
-    desktop_store::{AgentKind, AppearancePreference, DesktopStore},
+    desktop_store::{AgentKind, AppearancePreference, DesktopStore, GuidedSetupState},
     execution::BroadcastResult,
     human_presence::{
         DappAuthorization, OwnerAuthorizationScope, PlatformHumanPresence, authorize_dapp_access,
@@ -779,6 +779,17 @@ impl OwnerApi {
         self.desktop()?.set_appearance_preference(preference)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
+    }
+
+    pub fn guided_setup(&self) -> Result<GuidedSetupState> {
+        self.desktop()?.guided_setup()
+    }
+
+    /// Record the checklist's progress. No event is published: the card reads
+    /// its own state directly, and a settings write that redrew every screen
+    /// would be a redraw for something nothing else displays.
+    pub fn set_guided_setup(&self, state: &GuidedSetupState) -> Result<()> {
+        self.desktop()?.set_guided_setup(state)
     }
 
     pub fn testnet_mode(&self) -> Result<bool> {
