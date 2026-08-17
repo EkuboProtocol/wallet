@@ -238,9 +238,38 @@ against this exact wallet, this policy, and this network before anything is
 installed. This section is the feature, as much as the cron loop is: bytecode an
 agent cannot debug is bytecode an agent cannot write.
 
-### 1. A published interface and semantics document
+### 1. A published skill, with worked examples
 
-Shipped as an MCP resource, so the agent reads it rather than guessing:
+`docs/skills/write-ekubo-automation/SKILL.md`, bundled into the MCP server the
+way `use-ekubo-wallet` already is — `include_str!` plus a `wallet://skills/…`
+resource entry in `mcp.rs`. It is written but deliberately not yet wired up:
+advertising a skill for tools that do not exist would send an agent looking for
+`wallet_dry_run_automation` and find nothing. Wiring lands with the
+implementation.
+
+It carries the interface, the hard rules, and four worked Solidity examples —
+the empty case, a threshold-gated claim that probes before emitting, a
+two-call batch that keeps its cadence in chain state because it has no memory,
+and a receiver-hook stub for probing a call that reenters the wallet.
+
+Two things the skill states that the wallet does not enforce:
+
+**Language and compilation are the agent's problem.** The wallet has no
+compiler and no opinion about source language; the contract is deployed runtime
+bytecode as hex — `deployedBytecode`, not `bytecode` — that runs on the target
+network. Consequences the skill spells out because they bite in artifact form:
+no `immutable` values and no constructor (their slots are unresolved
+placeholders in a deployed-bytecode artifact), and no external libraries (link
+placeholders).
+
+**An automation is network-specific**, in two independent senses. Addresses
+are: every protocol, token, and pool identifier exists on one chain. The EVM is
+too: compile against the fork the target network actually runs, or `PUSH0` on a
+pre-Shanghai chain and `MCOPY`/`TSTORE` on a pre-Cancun one revert on the first
+tick. An automation is installed against one wallet and one network and is not
+portable.
+
+The interface it publishes:
 
 ```solidity
 interface IEkuboAutomation {
@@ -256,12 +285,12 @@ interface IEkuboAutomation {
 }
 ```
 
-The agent compiles, takes the **deployed** runtime bytecode (`deployedBytecode`,
-not `bytecode`), and passes the hex. The document carries the semantics above in
-the form an author needs them: `msg.sender` is the wallet, storage is the
-wallet's and writes are discarded, there is no memory between ticks, the
-delegation is displaced so receiver hooks and 1271 need handling, empty array
-means idle, and every emitted call must be allowed by the installed policy.
+The skill carries the semantics above in the form an author needs them:
+`msg.sender` is the wallet, storage is the wallet's — so a contract that
+declares a state variable reads Calibur's slot, not its own — writes are
+discarded, there is no memory between ticks, the delegation is displaced so
+receiver hooks and 1271 need handling, empty array means idle, and every
+emitted call must be allowed by the installed policy.
 
 ### 2. A dry-run tool — the compile-test-fix loop
 
