@@ -15739,14 +15739,17 @@ impl WalletWindow {
                     .debug_selector(|| "guided-setup-header".to_owned())
                     .w_full()
                     .items_center()
-                    .justify_between()
-                    .gap_2()
                     // The title is the collapse control. It is the largest
                     // thing on the card and the one part that stays when the
                     // rest folds away, so it is what somebody reaches for to
                     // get the corner back — and unlike dismissal it keeps the
                     // count on screen, which is the whole reason to fold
                     // rather than send away.
+                    //
+                    // The count reads as part of the heading rather than as
+                    // its own thing across the card: "Getting started, two of
+                    // five" is one sentence, and holding the two ends of a
+                    // 400px row apart made it two.
                     .child(
                         app_button("guided-setup-toggle")
                             .debug_selector(|| "guided-setup-toggle".to_owned())
@@ -15759,6 +15762,13 @@ impl WalletWindow {
                             } else {
                                 IconName::ChevronDown
                             })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{completed} of {total}")),
+                            )
                             .tooltip(if collapsed {
                                 "Show the rest of the checklist."
                             } else {
@@ -15767,12 +15777,6 @@ impl WalletWindow {
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.toggle_guided_setup(cx);
                             })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{completed} of {total}")),
                     ),
             )
             .when(!collapsed, |card| {
