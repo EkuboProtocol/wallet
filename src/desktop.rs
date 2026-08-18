@@ -1193,6 +1193,204 @@ fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalan
     rows
 }
 
+/// One row of the portfolio list: an asset the account holds, or a network
+/// whose balances could not be read at all.
+///
+/// Both are rows of the same virtualized list, so a failing network is
+/// reported in place under the balances that did come back rather than
+/// replacing the list with an error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PortfolioListRow {
+    Balance(PortfolioBalanceRow),
+    Unavailable {
+        chain_id: u64,
+        network_name: String,
+        error: String,
+    },
+}
+
+fn render_portfolio_list_row(
+    row: &PortfolioListRow,
+    wallet_id: &str,
+    divider: bool,
+    cx: &App,
+) -> AnyElement {
+    match row {
+        PortfolioListRow::Balance(row) => render_portfolio_balance_row(row, wallet_id, divider, cx),
+        PortfolioListRow::Unavailable {
+            chain_id,
+            network_name,
+            error,
+        } => div()
+            .w_full()
+            .py_2()
+            .text_sm()
+            .text_color(cx.theme().danger)
+            .child(selectable_text(
+                format!("portfolio-error-{wallet_id}-{chain_id}"),
+                &format!("{network_name} · Chain {chain_id}: {error}"),
+            ))
+            .into_any_element(),
+    }
+}
+
+/// One asset: what it is called and where it lives on the left, how much of it
+/// the account holds on the right.
+fn render_portfolio_balance_row(
+    row: &PortfolioBalanceRow,
+    wallet_id: &str,
+    divider: bool,
+    cx: &App,
+) -> AnyElement {
+    let address = row.asset_address.clone();
+    let token_identity = match (row.token_name.as_deref(), row.token_symbol.as_deref()) {
+        (Some(name), Some(symbol)) if name != symbol => format!("{name} ({symbol})"),
+        (Some(name), _) => name.to_owned(),
+        (_, Some(symbol)) => symbol.to_owned(),
+        _ if row.native => "Native asset".to_owned(),
+        _ => "Unlabeled token".to_owned(),
+    };
+    let identity = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            selectable_text(
+                format!(
+                    "portfolio-asset-token-{wallet_id}-{}-{address}",
+                    row.chain_id
+                ),
+                &token_identity,
+            )
+            .min_w_0()
+            .flex_1()
+            .truncate()
+            .font_medium(),
+        );
+    let mut metadata = h_flex()
+        .w_full()
+        .min_w_0()
+        .flex_wrap()
+        .justify_start()
+        .gap_1()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(selectable_text(
+            SharedString::from(format!(
+                "portfolio-asset-network-{wallet_id}-{}-{address}",
+                row.chain_id
+            )),
+            &format!(
+                "{}{}",
+                row.network_name,
+                if row.native { " · Native asset" } else { "" },
+            ),
+        ));
+    if !row.native {
+        let address_label = if address.len() > 22 {
+            format!("{}…{}", &address[..12], &address[address.len() - 8..])
+        } else {
+            address.clone()
+        };
+        metadata = metadata
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("·"),
+            )
+            .child(match row.explorer_url.clone() {
+                Some(explorer_url) => app_button(SharedString::from(format!(
+                    "portfolio-token-explorer-{wallet_id}-{}-{address}",
+                    row.chain_id
+                )))
+                .label(address_label)
+                .link()
+                .h(px(22.0))
+                .max_w_full()
+                .min_w_0()
+                .px_0()
+                .text_xs()
+                .font_normal()
+                .font_family(MONO_FONT_FAMILY)
+                .text_color(cx.theme().muted_foreground)
+                .tooltip(address.clone())
+                .on_click(move |_, _, cx| cx.open_url(&explorer_url))
+                .into_any_element(),
+                None => selectable_text(
+                    SharedString::from(format!(
+                        "portfolio-asset-address-{wallet_id}-{}-{address}",
+                        row.chain_id
+                    )),
+                    &address_label,
+                )
+                .min_w_0()
+                .truncate()
+                .text_xs()
+                .font_family(MONO_FONT_FAMILY)
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element(),
+            });
+    }
+    div()
+        .w_full()
+        .min_w_0()
+        .py_2()
+        .when(divider, |row| {
+            row.border_b_1().border_color(cx.theme().border)
+        })
+        .flex()
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .min_w(px(180.0))
+                        .flex_1()
+                        .flex_basis(px(260.0))
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(identity)
+                        .child(metadata),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w_full()
+                        .flex_none()
+                        .id(SharedString::from(format!(
+                            "portfolio-balance-scroll-{wallet_id}-{}-{address}",
+                            row.chain_id
+                        )))
+                        .overflow_x_scroll()
+                        .text_right()
+                        .font_family(MONO_FONT_FAMILY)
+                        .text_lg()
+                        .font_semibold()
+                        .child(
+                            selectable_text(
+                                SharedString::from(format!(
+                                    "portfolio-asset-balance-{wallet_id}-{}-{address}",
+                                    row.chain_id
+                                )),
+                                &row.balance,
+                            )
+                            .whitespace_nowrap(),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
 fn sort_portfolio_balance_rows(rows: &mut [PortfolioBalanceRow]) {
     rows.sort_by(|left, right| {
         left.chain_id.cmp(&right.chain_id).then_with(|| {
@@ -1875,6 +2073,19 @@ pub struct WalletWindow {
     portfolio_clock_task: Option<Task<()>>,
     route_scroll_handle: ScrollHandle,
     route_overflow_indicator: ScrollOverflowIndicator,
+    /// The two inbox queues and the portfolio, each virtualized behind its own
+    /// list state so the page holds the window's height and only the rows on
+    /// screen are laid out.
+    ///
+    /// A list state is told how many rows it holds, so the row count it was
+    /// last built for rides alongside it: a queue that grew or shrank between
+    /// frames has to rebuild the state rather than index past the end of it.
+    inbox_waiting_list: VariableListState,
+    inbox_waiting_rows: Cell<usize>,
+    inbox_decided_list: VariableListState,
+    inbox_decided_rows: Cell<usize>,
+    portfolio_list: VariableListState,
+    portfolio_rows: Cell<usize>,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_sessions: Vec<SessionSummary>,
@@ -2157,6 +2368,64 @@ enum InboxTab {
 enum AccountOperation {
     Creating,
     Importing,
+}
+
+/// One request waiting on the owner, read out of the queues as owned text.
+///
+/// The waiting list is virtualized, so its rows are drawn long after the
+/// snapshot they came from was borrowed — and a row that is scrolled past
+/// still has to know what it says. Reading the queues into these first is what
+/// lets the list draw only the handful of rows on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InboxWaitingCard {
+    id: SharedString,
+    title: String,
+    subtitle: String,
+    action_label: &'static str,
+    action: InboxWaitingAction,
+}
+
+/// What the single button on a waiting card does.
+///
+/// Each variant carries everything the press needs, because the press happens
+/// inside the list's own closure rather than anywhere that can still see the
+/// queue the card was read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InboxWaitingAction {
+    ReviewTransaction(uuid::Uuid),
+    ReviewTypedData(uuid::Uuid),
+    ReviewMessage(uuid::Uuid),
+    OpenPolicyProposal(String),
+    OpenNetworks,
+    OpenTokens,
+}
+
+impl InboxWaitingAction {
+    /// Whether an in-flight review blocks this action.
+    ///
+    /// Opening another review while one is on screen answered the press with
+    /// an error about the review already in front of the reader. Merely
+    /// changing tabs is not a review, so those stay live.
+    const fn blocked_by_review_flow(&self) -> bool {
+        matches!(
+            self,
+            Self::ReviewTransaction(_) | Self::ReviewTypedData(_) | Self::ReviewMessage(_)
+        )
+    }
+}
+
+/// Height hints for the two inbox lists.
+///
+/// Cards and history rows are not uniform — a wrapped subtitle or an expanded
+/// error makes one taller — so this only sizes the scrollbar for rows that
+/// have never been laid out. Each visible row replaces the hint with its
+/// measured height.
+const INBOX_ROW_HEIGHT_HINT: gpui::Pixels = px(96.0);
+const INBOX_LIST_OVERDRAW: gpui::Pixels = px(480.0);
+
+fn virtual_inbox_list(row_count: usize) -> VariableListState {
+    VariableListState::new(row_count, ListAlignment::Top, INBOX_LIST_OVERDRAW)
+        .with_uniform_item_height(INBOX_ROW_HEIGHT_HINT)
 }
 
 fn render_embedded_png(bytes: &[u8]) -> Result<Arc<RenderImage>> {
@@ -3068,6 +3337,64 @@ fn activity_row_summary(
             tone: typed_data_status_tone(item.status),
         },
     }
+}
+
+/// One waiting card, drawn from the row the queues were read into.
+///
+/// The list owns the rows, so the press has to reach the window through a weak
+/// handle rather than through a listener bound to a borrow that ended when the
+/// row was built.
+fn render_inbox_waiting_card(
+    card: &InboxWaitingCard,
+    review_in_flight: bool,
+    view: &WeakEntity<WalletWindow>,
+    cx: &mut App,
+) -> AnyElement {
+    let action = card.action.clone();
+    let view = view.clone();
+    let button = app_button(card.id.clone())
+        .label(card.action_label)
+        .primary()
+        .disabled(review_in_flight && action.blocked_by_review_flow())
+        .on_click(move |_, window, cx| {
+            let action = action.clone();
+            let _ = view.update(cx, |view, cx| match action {
+                InboxWaitingAction::ReviewTransaction(request_id) => {
+                    view.begin_transaction_review(request_id, cx);
+                }
+                InboxWaitingAction::ReviewTypedData(request_id) => {
+                    view.begin_typed_data_review(request_id, cx);
+                }
+                InboxWaitingAction::ReviewMessage(request_id) => {
+                    view.begin_message_review(request_id, cx);
+                }
+                InboxWaitingAction::OpenPolicyProposal(wallet_id) => {
+                    view.set_route(Route::Policies);
+                    view.open_policy_editor(&wallet_id, window, cx);
+                    cx.notify();
+                }
+                InboxWaitingAction::OpenNetworks => {
+                    view.set_route(Route::Networks);
+                    cx.notify();
+                }
+                InboxWaitingAction::OpenTokens => {
+                    view.set_route(Route::Tokens);
+                    cx.notify();
+                }
+            });
+        });
+    // The gap the queue used to get from its column lives on the row now:
+    // a virtualized list stacks its items with no spacing of its own.
+    div()
+        .pb_3()
+        .child(WalletWindow::render_review_card(
+            &card.id,
+            &card.title,
+            &card.subtitle,
+            button,
+            cx,
+        ))
+        .into_any_element()
 }
 
 fn render_activity_row(
@@ -5028,6 +5355,12 @@ impl WalletWindow {
             portfolio_clock_task: None,
             route_scroll_handle,
             route_overflow_indicator,
+            inbox_waiting_list: virtual_inbox_list(0),
+            inbox_waiting_rows: Cell::new(0),
+            inbox_decided_list: virtual_inbox_list(0),
+            inbox_decided_rows: Cell::new(0),
+            portfolio_list: virtual_inbox_list(0),
+            portfolio_rows: Cell::new(0),
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_sessions: Vec::new(),
@@ -6420,6 +6753,16 @@ impl WalletWindow {
         self.private_key_error = None;
         self.account_status = None;
         cx.notify();
+    }
+
+    /// Put both inbox lists back at their first row.
+    ///
+    /// Switching tabs and re-entering the inbox both mean "show me the top of
+    /// this queue", and the lists keep their own scroll position, so neither
+    /// is achieved by moving the page behind them.
+    fn reset_inbox_scroll(&self) {
+        self.route_scroll_handle
+            .set_offset(gpui::point(px(0.0), px(0.0)));
     }
 
     fn set_inbox_tab(&mut self, tab: InboxTab, cx: &mut Context<Self>) {
@@ -9090,8 +9433,14 @@ impl WalletWindow {
         if route == Route::Overview {
             self.refresh_portfolio_if_stale(cx);
         }
-        if route == Route::Activity && self.inbox_tab == InboxTab::Decided {
-            self.refresh_visible_pending_transactions(cx);
+        // Opening the inbox always asks the same question — what needs me
+        // now — and pressing its rail button while the inbox is already open
+        // asks it again. Either way the answer is the waiting queue, so the
+        // tab returns to it rather than resuming wherever reading history
+        // left off.
+        if route == Route::Activity {
+            self.set_inbox_tab(InboxTab::Waiting, cx);
+            self.reset_inbox_scroll();
         }
         if route == Route::Settings && matches!(self.release_state, ReleaseDisplayState::Idle) {
             self.check_latest_release(cx);
@@ -9495,224 +9844,241 @@ impl WalletWindow {
             .child(button)
     }
 
+    /// Every request waiting on the owner, in the order the inbox lists them.
+    ///
+    /// Reading the queues into owned rows is what lets the list virtualize:
+    /// a row is drawn when it scrolls into view, long after this borrow of the
+    /// snapshot ended.
+    fn inbox_waiting_cards(&self) -> Result<Vec<InboxWaitingCard>> {
+        let queues = self.cached_reviews()?;
+        let networks = self.network_display_names();
+        let now = chrono::Utc::now();
+        let mut cards = Vec::new();
+        for request in queues
+            .transactions
+            .iter()
+            .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
+        {
+            let request_id = request.request_id;
+            cards.push(InboxWaitingCard {
+                id: SharedString::from(format!("review-transaction-{request_id}")),
+                title: format!(
+                    "Transaction on {}",
+                    chain_label(request.chain_id.parse().ok(), &networks)
+                ),
+                subtitle: format!(
+                    "{} · asked {}",
+                    request.wallet_id,
+                    relative_time_label(request.created_at, now)
+                ),
+                action_label: "Review",
+                action: InboxWaitingAction::ReviewTransaction(request_id),
+            });
+        }
+        for request in queues
+            .typed_data
+            .iter()
+            .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
+        {
+            let request_id = request.request_id;
+            cards.push(InboxWaitingCard {
+                id: SharedString::from(format!("review-typed-data-{request_id}")),
+                title: format!(
+                    "Typed-data signature on {}",
+                    chain_label(request.chain_id.parse().ok(), &networks)
+                ),
+                subtitle: format!(
+                    "{} · {} · asked {}",
+                    request.wallet_id,
+                    request.requester.as_deref().unwrap_or("unnamed requester"),
+                    relative_time_label(request.created_at, now)
+                ),
+                action_label: "Review",
+                action: InboxWaitingAction::ReviewTypedData(request_id),
+            });
+        }
+        for request in queues.messages.iter().filter(|request| {
+            self.chain_id_is_visible(
+                request
+                    .chain_id
+                    .as_deref()
+                    .and_then(|chain| chain.parse().ok()),
+            )
+        }) {
+            let request_id = request.request_id;
+            cards.push(InboxWaitingCard {
+                id: SharedString::from(format!("review-message-{request_id}")),
+                title: "Message signature".to_owned(),
+                subtitle: format!(
+                    "{} · {} · asked {}",
+                    request.wallet_id,
+                    request.requester.as_deref().unwrap_or("unnamed requester"),
+                    relative_time_label(request.created_at, now)
+                ),
+                action_label: "Review",
+                action: InboxWaitingAction::ReviewMessage(request_id),
+            });
+        }
+        for proposal in &queues.policy_proposals {
+            let wallet_id = proposal.wallet_id.clone();
+            cards.push(InboxWaitingCard {
+                id: SharedString::from(format!("review-policy-{wallet_id}")),
+                title: format!("Proposed policy change for {wallet_id}"),
+                subtitle: format!(
+                    "An agent has suggested new signing rules, written against revision {}.",
+                    proposal.source_revision
+                ),
+                action_label: "Review changes",
+                action: InboxWaitingAction::OpenPolicyProposal(wallet_id),
+            });
+        }
+        for proposal in queues
+            .network_proposals
+            .iter()
+            .filter(|proposal| self.testnet_mode || !proposal.testnet)
+        {
+            let chain_id = proposal.chain_id;
+            cards.push(InboxWaitingCard {
+                id: SharedString::from(format!("review-network-{chain_id}")),
+                title: format!("Proposed network: {}", proposal.name),
+                subtitle: format!(
+                    "This wallet would start signing for chain {chain_id} once you accept it."
+                ),
+                action_label: "Open Networks",
+                action: InboxWaitingAction::OpenNetworks,
+            });
+        }
+        let mut token_groups = std::collections::BTreeMap::<String, usize>::new();
+        for proposal in queues
+            .token_proposals
+            .iter()
+            .filter(|proposal| self.token_proposal_is_visible(proposal))
+        {
+            *token_groups.entry(proposal.source.clone()).or_default() += 1;
+        }
+        for (index, (source, count)) in token_groups.into_iter().enumerate() {
+            cards.push(InboxWaitingCard {
+                        id: SharedString::from(format!("review-token-{index}")),
+                        title: format!("{} proposed by {source}", pluralize(count, "token name")),
+                        subtitle: "Accepting these only changes how amounts are described to you. It grants nothing.".to_owned(),
+                        action_label: "Open Tokens",
+                        action: InboxWaitingAction::OpenTokens,
+                    });
+        }
+        Ok(cards)
+    }
+
+    /// The waiting queue: a fixed summary line over a virtualized list of
+    /// cards that scrolls inside the window rather than lengthening the page.
+    ///
+    /// The list keeps its own height, so a hundred waiting requests cost the
+    /// same layout as three, and the tab bar above it never scrolls away from
+    /// the person trying to leave the queue.
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut content = div().flex().flex_col().gap_3();
+        let mut content = div()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3();
         if self.review_flow == ReviewFlowState::Loading {
             content = content.child(
                 h_flex()
                     .id("transaction-review-loading")
+                    .flex_none()
                     .gap_2()
                     .text_color(cx.theme().muted_foreground)
                     .child(Spinner::new().small())
                     .child(selectable_label("Opening the exact transaction review…")),
             );
         }
-        let networks = self.network_display_names();
-        let now = chrono::Utc::now();
-        match self.cached_reviews() {
-            Ok(queues) => {
-                let total = self.cached_networks().map_or(0, |networks| {
-                    review_queue_decision_count(queues, networks, self.testnet_mode)
-                });
-                if total > 0 {
-                    content = content.child(selectable_label(format!(
-                        "{} waiting for your decision. Nothing is signed or sent until you say so.",
-                        pluralize(total, "request")
-                    )));
-                }
-                for request in queues
-                    .transactions
-                    .iter()
-                    .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
-                {
-                    let request_id = request.request_id;
-                    content = content.child(Self::render_review_card(
-                        &SharedString::from(format!("review-transaction-{request_id}")),
-                        &format!(
-                            "Transaction on {}",
-                            chain_label(request.chain_id.parse().ok(), &networks)
-                        ),
-                        &format!(
-                            "{} · asked {}",
-                            request.wallet_id,
-                            relative_time_label(request.created_at, now)
-                        ),
-                        app_button(SharedString::from(format!(
-                            "review-transaction-{request_id}"
-                        )))
-                        .label("Review")
-                        .primary()
-                        .disabled(self.review_flow.is_in_progress())
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.begin_transaction_review(request_id, cx);
-                        })),
-                        cx,
-                    ));
-                }
-                for request in queues
-                    .typed_data
-                    .iter()
-                    .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
-                {
-                    let request_id = request.request_id;
-                    content = content.child(Self::render_review_card(
-                        &SharedString::from(format!("review-typed-data-{request_id}")),
-                        &format!(
-                            "Typed-data signature on {}",
-                            chain_label(request.chain_id.parse().ok(), &networks)
-                        ),
-                        &format!(
-                            "{} · {} · asked {}",
-                            request.wallet_id,
-                            request.requester.as_deref().unwrap_or("unnamed requester"),
-                            relative_time_label(request.created_at, now)
-                        ),
-                        app_button(SharedString::from(format!(
-                            "review-typed-data-{request_id}"
-                        )))
-                        .label("Review")
-                        .primary()
-                        // The same guard the transaction card above carries.
-                        // Without it these two answered a press with an error
-                        // telling the reader to finish the review that was
-                        // already on the screen in front of them.
-                        .disabled(self.review_flow.is_in_progress())
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.begin_typed_data_review(request_id, cx);
-                        })),
-                        cx,
-                    ));
-                }
-                for request in queues.messages.iter().filter(|request| {
-                    self.chain_id_is_visible(
-                        request
-                            .chain_id
-                            .as_deref()
-                            .and_then(|chain| chain.parse().ok()),
-                    )
-                }) {
-                    let request_id = request.request_id;
-                    content = content.child(Self::render_review_card(
-                        &SharedString::from(format!("review-message-{request_id}")),
-                        "Message signature",
-                        &format!(
-                            "{} · {} · asked {}",
-                            request.wallet_id,
-                            request.requester.as_deref().unwrap_or("unnamed requester"),
-                            relative_time_label(request.created_at, now)
-                        ),
-                        app_button(SharedString::from(format!("review-message-{request_id}")))
-                            .label("Review")
-                            .primary()
-                            .disabled(self.review_flow.is_in_progress())
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.begin_message_review(request_id, cx);
-                            })),
-                        cx,
-                    ));
-                }
-                for proposal in &queues.policy_proposals {
-                    let wallet_id = proposal.wallet_id.clone();
-                    let proposal_wallet_id = wallet_id.clone();
-                    content = content.child(Self::render_review_card(
-                        &SharedString::from(format!("review-policy-{wallet_id}")),
-                        &format!("Proposed policy change for {wallet_id}"),
-                        &format!(
-                            "An agent has suggested new signing rules, written against revision {}.",
-                            proposal.source_revision
-                        ),
-                        app_button(SharedString::from(format!(
-                            "open-policy-proposal-{wallet_id}"
-                        )))
-                        .label("Open Policies")
-                        .primary()
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.set_route(Route::Policies);
-                            view.open_policy_editor(&proposal_wallet_id, window, cx);
-                            cx.notify();
-                        })),
-                        cx,
-                    ));
-                }
-                for proposal in queues
-                    .network_proposals
-                    .iter()
-                    .filter(|proposal| self.testnet_mode || !proposal.testnet)
-                {
-                    let chain_id = proposal.chain_id;
-                    content = content.child(Self::render_review_card(
-                        &SharedString::from(format!("review-network-{chain_id}")),
-                        &format!("Proposed network: {}", proposal.name),
-                        &format!(
-                            "This wallet would start signing for chain {chain_id} once you accept it."
-                        ),
-                        app_button(SharedString::from(format!(
-                            "open-network-proposal-{chain_id}"
-                        )))
-                        .label("Open Networks")
-                        .primary()
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.set_route(Route::Networks);
-                            cx.notify();
-                        })),
-                        cx,
-                    ));
-                }
-                let mut token_groups = std::collections::BTreeMap::<String, usize>::new();
-                for proposal in queues
-                    .token_proposals
-                    .iter()
-                    .filter(|proposal| self.token_proposal_is_visible(proposal))
-                {
-                    *token_groups.entry(proposal.source.clone()).or_default() += 1;
-                }
-                for (index, (source, count)) in token_groups.into_iter().enumerate() {
-                    content = content.child(Self::render_review_card(
-                        &SharedString::from(format!("review-token-{index}")),
-                        &format!("{} proposed by {source}", pluralize(count, "token name")),
-                        "Accepting these only changes how amounts are described to you. It grants nothing.",
-                        app_button(("open-token-proposal", index))
-                            .label("Open Tokens")
-                            .primary()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_route(Route::Tokens);
-                                cx.notify();
-                            })),
-                        cx,
-                    ));
-                }
-                if total == 0 {
-                    content = content.child(
-                        div()
-                            .p_5()
-                            .rounded(cx.theme().radius_lg)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .child(selectable_label("Nothing needs you right now")),
-                            )
-                            .child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_label("When an agent or a dapp asks this wallet to sign or send something your policy will not decide on its own, it waits here.")),
-                            ),
-                    );
-                }
-            }
+        let cards = match self.inbox_waiting_cards() {
+            Ok(cards) => cards,
             Err(error) => {
-                content = content.child(selectable_error_alert(
+                return content.child(selectable_error_alert(
                     "review-queue-error",
                     format!("Waiting requests could not be read: {error:#}"),
                 ));
             }
+        };
+        if cards.is_empty() {
+            return content.child(
+                div()
+                    .flex_none()
+                    .p_5()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(selectable_label("Nothing needs you right now")),
+                    )
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label("When an agent or a dapp asks this wallet to sign or send something your policy will not decide on its own, it waits here.")),
+                    ),
+            );
         }
-        content
+        let decisions = self
+            .cached_reviews()
+            .ok()
+            .zip(self.cached_networks().ok())
+            .map_or(0, |(queues, networks)| {
+                review_queue_decision_count(queues, networks, self.testnet_mode)
+            });
+        if decisions > 0 {
+            content = content.child(div().flex_none().child(selectable_label(format!(
+                "{} waiting for your decision. Nothing is signed or sent until you say so.",
+                pluralize(decisions, "request")
+            ))));
+        }
+        Self::resize_list(
+            &self.inbox_waiting_list,
+            &self.inbox_waiting_rows,
+            cards.len(),
+        );
+        self.route_overflow_indicator
+            .set_scroll_handle(self.inbox_waiting_list.clone());
+        let blocked = self.review_flow.is_in_progress();
+        let view = cx.entity().downgrade();
+        let cards = Arc::<[InboxWaitingCard]>::from(cards);
+        content.child(
+            div()
+                .id("inbox-waiting-list")
+                .debug_selector(|| "inbox-waiting-list".to_owned())
+                .flex_1()
+                .min_h_0()
+                .child(variable_list(
+                    self.inbox_waiting_list.clone(),
+                    move |index, _, cx| {
+                        let Some(card) = cards.get(index) else {
+                            return div().into_any_element();
+                        };
+                        render_inbox_waiting_card(card, blocked, &view, cx)
+                    },
+                )),
+        )
+    }
+
+    /// Tell a list how many rows it now holds.
+    ///
+    /// A list state is built for a fixed count, so a queue that gained or lost
+    /// a row between frames has to say so or the list draws past its own end.
+    /// Nothing happens while the count is unchanged, which is every frame the
+    /// reader is merely scrolling.
+    fn resize_list(list: &VariableListState, drawn_for: &Cell<usize>, rows: usize) {
+        if drawn_for.get() != rows {
+            drawn_for.set(rows);
+            list.reset(rows);
+        }
     }
 
     fn render_activity_detail_header(
@@ -10563,7 +10929,14 @@ impl WalletWindow {
         // bordered container, and wrapping a second one — same border, same
         // `secondary` fill as the cards inside it — drew a box around a box
         // around each row.
-        let panel = div().w_full().flex().flex_col().gap_3();
+        let panel = div()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3();
         let records = match self.cached_activity_records() {
             Ok(records) => records,
             Err(error) => {
@@ -10609,29 +10982,38 @@ impl WalletWindow {
                     )),
             );
         }
+        let row_count = items.len();
         let selected_record = self.selected_record;
         let busy = Arc::new(self.activity_busy.clone());
         let refreshing = Arc::new(self.activity_refreshing.clone());
         let feedback = Arc::new(self.activity_feedback.clone());
-        let no_sources = BTreeMap::new();
-        let sources = self
-            .snapshot()
-            .map_or(&no_sources, |snapshot| &snapshot.activity_sources);
-        let networks = self.network_display_names();
+        let sources = Arc::new(
+            self.snapshot()
+                .map(|snapshot| snapshot.activity_sources.clone())
+                .unwrap_or_default(),
+        );
+        let networks = Arc::new(self.network_display_names());
         let now = chrono::Utc::now();
         let editor = cx.entity().downgrade();
-        let mut rows = div()
-            .id("activity-records")
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col();
-        for record in items {
+        Self::resize_list(
+            &self.inbox_decided_list,
+            &self.inbox_decided_rows,
+            row_count,
+        );
+        self.route_overflow_indicator
+            .set_scroll_handle(self.inbox_decided_list.clone());
+        // History only grows. Drawing every row of it laid out a card per
+        // record on every frame, so the list keeps the window's height and
+        // lays out the rows inside it — however far back the history runs.
+        let rows = variable_list(self.inbox_decided_list.clone(), move |index, _, cx| {
+            let Some(record) = records.get(index) else {
+                return div().into_any_element();
+            };
             let request_id = record.request_id();
             // The detail is a modal now. Expanding it in place pushed every
             // later row off the screen, so reading one receipt cost you the
             // list you were reading it from.
-            rows = rows.child(render_activity_row(
+            render_activity_row(
                 record,
                 selected_record == Some(request_id),
                 busy.contains(&request_id),
@@ -10642,11 +11024,23 @@ impl WalletWindow {
                 now,
                 editor.clone(),
                 cx,
-            ));
-        }
+            )
+            .into_any_element()
+        });
         panel
-            .child(self.render_activity_history_header(items.len(), cx))
-            .child(rows)
+            .child(
+                div()
+                    .flex_none()
+                    .child(self.render_activity_history_header(row_count, cx)),
+            )
+            .child(
+                div()
+                    .id("activity-records")
+                    .debug_selector(|| "activity-records".to_owned())
+                    .flex_1()
+                    .min_h_0()
+                    .child(rows),
+            )
     }
 
     /// How much history there is, and the one control that ends it.
@@ -10700,6 +11094,12 @@ impl WalletWindow {
         let waiting = self.inbox_tab == InboxTab::Waiting;
         div()
             .w_full()
+            .min_w_0()
+            // The inbox is the window: its tab bar stays put and the queue
+            // under it scrolls, rather than the page growing a row at a time
+            // until the tabs are somewhere above the top of the screen.
+            .flex_1()
+            .min_h_0()
             .p_5()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -10710,6 +11110,7 @@ impl WalletWindow {
             .gap_4()
             .child(
                 TabBar::new("inbox-tabs")
+                    .flex_none()
                     .w_full()
                     .underline()
                     .large()
@@ -10732,6 +11133,10 @@ impl WalletWindow {
                     div()
                         .id("activity-needs-review")
                         .debug_selector(|| "activity-waiting-panel".to_owned())
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
                         .child(self.render_reviews(cx)),
                 )
             })
@@ -10740,6 +11145,10 @@ impl WalletWindow {
                     div()
                         .id("inbox-history")
                         .debug_selector(|| "activity-decided-panel".to_owned())
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
                         .child(self.render_activity_history(cx)),
                 )
             })
@@ -13301,7 +13710,18 @@ impl WalletWindow {
             .count();
         // The account selector and the refresh control live in the fixed page
         // header, so this panel is only the balances themselves.
-        let mut content = div().flex().flex_col().gap_4();
+        //
+        // It takes the window's height rather than growing with the holdings:
+        // an account with two hundred balances used to push the line saying
+        // how old they are two hundred rows below the fold.
+        let content = div()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_4();
         if enabled_network_count == 0 {
             return content.child(
                 div()
@@ -13329,260 +13749,152 @@ impl WalletWindow {
                 cx,
             ));
         }
-        let content = match &self.portfolio {
+        let (body, holdings) = match &self.portfolio {
             // Placeholder rows shaped like balance rows, so the page shows
             // where the token list is about to appear instead of a spinner
             // that says only that something, somewhere, is happening.
-            PortfolioState::Idle | PortfolioState::Loading => {
-                content.child(portfolio_loading_placeholder(cx))
-            }
-            PortfolioState::Failed(error) => content.child(
-                selectable_error_alert("portfolio-error", error.clone())
-                    .title("Portfolio unavailable"),
+            PortfolioState::Idle | PortfolioState::Loading => (
+                div().flex_none().child(portfolio_loading_placeholder(cx)),
+                false,
+            ),
+            PortfolioState::Failed(error) => (
+                div().flex_none().child(
+                    selectable_error_alert("portfolio-error", error.clone())
+                        .title("Portfolio unavailable"),
+                ),
+                false,
             ),
             // One account is read per refresh, so the snapshot holds exactly
             // the selected account.
-            PortfolioState::Ready(snapshot) => {
-                let Some(account) = snapshot.accounts.first() else {
-                    return content
-                        .child(portfolio_loading_placeholder(cx))
-                        .children(self.portfolio_refreshed_note(cx));
-                };
-                let rows = portfolio_balance_rows(account);
-                let failures = account
-                    .networks
-                    .iter()
-                    .filter_map(|item| {
-                        item.result.as_ref().err().map(|error| {
-                            (
-                                item.network.chain_id,
-                                item.network
-                                    .display_name
-                                    .as_deref()
-                                    .unwrap_or(&item.network.name)
-                                    .to_owned(),
-                                error,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let row_count = rows.len();
-                let mut balances = div().w_full().min_w_0().flex().flex_col();
-                for (index, row) in rows.into_iter().enumerate() {
-                    let address = row.asset_address.clone();
-                    let token_identity =
-                        match (row.token_name.as_deref(), row.token_symbol.as_deref()) {
-                            (Some(name), Some(symbol)) if name != symbol => {
-                                format!("{name} ({symbol})")
-                            }
-                            (Some(name), _) => name.to_owned(),
-                            (_, Some(symbol)) => symbol.to_owned(),
-                            _ if row.native => "Native asset".to_owned(),
-                            _ => "Unlabeled token".to_owned(),
-                        };
-                    let identity = div()
-                        .w_full()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            selectable_text(
-                                format!(
-                                    "portfolio-asset-token-{}-{}-{address}",
-                                    account.wallet.id, row.chain_id
-                                ),
-                                &token_identity,
-                            )
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .font_medium(),
-                        );
-                    let mut metadata = h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .flex_wrap()
-                        .justify_start()
-                        .gap_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(selectable_text(
-                            SharedString::from(format!(
-                                "portfolio-asset-network-{}-{}-{address}",
-                                account.wallet.id, row.chain_id
-                            )),
-                            &format!(
-                                "{}{}",
-                                row.network_name,
-                                if row.native { " · Native asset" } else { "" },
-                            ),
-                        ));
-                    if !row.native {
-                        let address_label = if address.len() > 22 {
-                            format!("{}…{}", &address[..12], &address[address.len() - 8..])
-                        } else {
-                            address.clone()
-                        };
-                        metadata = metadata
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("·"),
-                            )
-                            .child(match row.explorer_url {
-                                Some(explorer_url) => app_button(SharedString::from(format!(
-                                    "portfolio-token-explorer-{}-{}-{address}",
-                                    account.wallet.id, row.chain_id
-                                )))
-                                .label(address_label)
-                                .link()
-                                .h(px(22.0))
-                                .max_w_full()
-                                .min_w_0()
-                                .px_0()
-                                .text_xs()
-                                .font_normal()
-                                .font_family(MONO_FONT_FAMILY)
-                                .text_color(cx.theme().muted_foreground)
-                                .tooltip(address.clone())
-                                .on_click(move |_, _, cx| cx.open_url(&explorer_url))
-                                .into_any_element(),
-                                None => selectable_text(
-                                    SharedString::from(format!(
-                                        "portfolio-asset-address-{}-{}-{address}",
-                                        account.wallet.id, row.chain_id
-                                    )),
-                                    &address_label,
-                                )
-                                .min_w_0()
-                                .truncate()
-                                .text_xs()
-                                .font_family(MONO_FONT_FAMILY)
-                                .text_color(cx.theme().muted_foreground)
-                                .into_any_element(),
-                            });
-                    }
-                    balances = balances.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .py_2()
-                            .when(index + 1 < row_count, |row| {
-                                row.border_b_1().border_color(cx.theme().border)
-                            })
-                            .flex()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .min_w(px(180.0))
-                                            .flex_1()
-                                            .flex_basis(px(260.0))
-                                            .flex()
-                                            .flex_col()
-                                            .gap_0p5()
-                                            .child(identity)
-                                            .child(metadata),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .max_w_full()
-                                            .flex_none()
-                                            .id(SharedString::from(format!(
-                                                "portfolio-balance-scroll-{}-{}-{address}",
-                                                account.wallet.id, row.chain_id
-                                            )))
-                                            .overflow_x_scroll()
-                                            .text_right()
-                                            .font_family(MONO_FONT_FAMILY)
-                                            .text_lg()
-                                            .font_semibold()
-                                            .child(
-                                                selectable_text(
-                                                    SharedString::from(format!(
-                                                        "portfolio-asset-balance-{}-{}-{address}",
-                                                        account.wallet.id, row.chain_id
-                                                    )),
-                                                    &row.balance,
-                                                )
-                                                .whitespace_nowrap(),
-                                            ),
-                                    ),
-                            ),
-                    );
-                }
-                if row_count == 0 {
-                    balances = balances.child(
-                        div()
-                            .py_4()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("No balances.")),
-                    );
-                }
-                for (chain_id, network_name, error) in failures {
-                    balances = balances.child(
-                        div()
-                            .w_full()
-                            .py_2()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(selectable_text(
-                                format!("portfolio-error-{}-{chain_id}", account.wallet.id),
-                                &format!("{network_name} · Chain {chain_id}: {error}"),
-                            )),
-                    );
-                }
-                content = content.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .p_4()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(balances),
-                );
-                // One line under the list, because the question it answers —
-                // "why is my token missing?" — only comes up once the list is
-                // on screen.
-                content.child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(selectable_label("Only non-zero balances are shown."))
-                        .child(
-                            app_button("portfolio-manage-tokens")
-                                .label("Add a token")
-                                .link()
-                                .h(px(22.0))
-                                .px_0()
-                                .text_sm()
-                                .font_normal()
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.set_route(Route::Tokens);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            }
+            PortfolioState::Ready(snapshot) => match snapshot.accounts.first() {
+                None => (
+                    div().flex_none().child(portfolio_loading_placeholder(cx)),
+                    false,
+                ),
+                Some(account) => (self.render_portfolio_balances(account, cx), true),
+            },
         };
-        content.children(self.portfolio_refreshed_note(cx))
+        content
+            .child(body)
+            .child(self.render_portfolio_footer(holdings, cx))
+    }
+
+    /// The two facts that belong under the list, on one line: why a token you
+    /// hold might not be in it, and how old the numbers in it are.
+    ///
+    /// One line rather than two stacked ones, because they are read together
+    /// and each is short — and because the tab's bottom edge is fixed now, so
+    /// a second line is a row of balances nobody sees.
+    fn render_portfolio_footer(&self, holdings: bool, cx: &mut Context<Self>) -> gpui::Div {
+        h_flex()
+            .debug_selector(|| "portfolio-footer".to_owned())
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    // The question this answers — "why is my token missing?" —
+                    // only comes up once a list of balances is on screen.
+                    .when(holdings, |hint| {
+                        hint.child(selectable_label("Only non-zero balances are shown."))
+                            .child(
+                                app_button("portfolio-manage-tokens")
+                                    .label("Add a token")
+                                    .link()
+                                    .h(px(22.0))
+                                    .px_0()
+                                    .text_sm()
+                                    .font_normal()
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.set_route(Route::Tokens);
+                                        cx.notify();
+                                    })),
+                            )
+                    }),
+            )
+            .children(self.portfolio_refreshed_note(cx))
+    }
+
+    /// Every asset the account holds, as one virtualized list inside a frame
+    /// that keeps the window's height.
+    fn render_portfolio_balances(
+        &self,
+        account: &OwnerPortfolioAccount,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let wallet_id = account.wallet.id.clone();
+        let mut rows = portfolio_balance_rows(account)
+            .into_iter()
+            .map(PortfolioListRow::Balance)
+            .collect::<Vec<_>>();
+        // A network that could not be read is reported under the balances
+        // that could, rather than replacing them.
+        rows.extend(account.networks.iter().filter_map(|item| {
+            item.result
+                .as_ref()
+                .err()
+                .map(|error| PortfolioListRow::Unavailable {
+                    chain_id: item.network.chain_id,
+                    network_name: item
+                        .network
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&item.network.name)
+                        .to_owned(),
+                    error: error.clone(),
+                })
+        }));
+        let card = div()
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .p_4()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .flex()
+            .flex_col();
+        if rows.is_empty() {
+            return card.child(
+                div()
+                    .py_4()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label("No balances.")),
+            );
+        }
+        Self::resize_list(&self.portfolio_list, &self.portfolio_rows, rows.len());
+        self.route_overflow_indicator
+            .set_scroll_handle(self.portfolio_list.clone());
+        let row_count = rows.len();
+        let rows = Arc::<[PortfolioListRow]>::from(rows);
+        card.child(
+            div()
+                .id("portfolio-balances")
+                .debug_selector(|| "portfolio-balances".to_owned())
+                .flex_1()
+                .min_h_0()
+                .child(variable_list(
+                    self.portfolio_list.clone(),
+                    move |index, _, cx| {
+                        let Some(row) = rows.get(index) else {
+                            return div().into_any_element();
+                        };
+                        render_portfolio_list_row(row, &wallet_id, index + 1 < row_count, cx)
+                    },
+                )),
+        )
     }
 
     /// How old the balances on screen are, as the last line of the tab.
@@ -13597,7 +13909,11 @@ impl WalletWindow {
         Some(
             div()
                 .debug_selector(|| "portfolio-refreshed-at".to_owned())
-                .w_full()
+                // Right of the footer line, opposite the note about which
+                // balances are listed: two short facts about the same list,
+                // read together on one line instead of stacked under it.
+                .flex_none()
+                .text_right()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(selectable_text(
@@ -13908,6 +14224,11 @@ impl WalletWindow {
             .appearance(false);
         if !search_input.read(cx).value().is_empty() {
             let clear_input = search_input.clone();
+            // Clearing the field has to clear the filter too. Setting the
+            // value from code does not raise the change event the search
+            // subscription listens for, so pressing this button emptied the
+            // box and left the list showing the last query's results.
+            let clear_list = list.clone();
             token_search = token_search.suffix(
                 Button::new("clear-token-search")
                     .icon(Icon::new(IconName::CircleX).with_size(px(24.0)))
@@ -13919,6 +14240,12 @@ impl WalletWindow {
                     .text_color(cx.theme().muted_foreground)
                     .on_click(move |_, window, cx| {
                         clear_input.update(cx, |input, cx| input.set_value("", window, cx));
+                        clear_list.update(cx, |list, cx| {
+                            let delegate = list.delegate_mut();
+                            delegate.query = String::new();
+                            delegate.apply_filters();
+                            cx.notify();
+                        });
                     }),
             );
         }
@@ -15550,6 +15877,19 @@ impl WalletWindow {
     }
 
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Three routes are lists with a fixed frame around them: they take the
+        // window's height and scroll their own contents, so the page behind
+        // them must not grow with the list.
+        let route_fills_window = matches!(
+            self.route,
+            Route::Tokens | Route::Activity | Route::Overview
+        );
+        // The chevron belongs to whatever actually scrolls here. A route with
+        // its own list points it at that list while it draws; every other
+        // route is the page itself, so the default is restored first rather
+        // than left aimed at a list that is no longer on screen.
+        self.route_overflow_indicator
+            .set_scroll_handle(self.route_scroll_handle.clone());
         let route_panel = if self.desktop_snapshot.is_none() {
             div()
                 .flex()
@@ -15625,12 +15965,8 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_4()
-            .when(self.route == Route::Tokens, |content| {
-                content.flex_1().min_h_0()
-            })
-            .when(self.route != Route::Tokens, |content| {
-                content.flex_shrink_0()
-            })
+            .when(route_fills_window, |content| content.flex_1().min_h_0())
+            .when(!route_fills_window, gpui::Styled::flex_shrink_0)
             .when_some(self.desktop_snapshot_error.clone(), |content, error| {
                 content.child(
                     selectable_error_alert("desktop-snapshot-error", error)
@@ -15656,7 +15992,7 @@ impl WalletWindow {
             .min_w_0()
             .px_5()
             .pb_5()
-            .when(self.route == Route::Tokens, |scroll_content| {
+            .when(route_fills_window, |scroll_content| {
                 scroll_content.h_full().min_h_0().flex().flex_col()
             })
             .child(content);

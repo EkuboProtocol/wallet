@@ -682,6 +682,185 @@ fn inbox_tabs_render_one_queue_at_a_time(cx: &mut gpui::TestAppContext) {
     release(cx, &view);
 }
 
+/// Opening the inbox asks what needs you now, and pressing its rail button
+/// while it is already open asks again. Both used to land on whichever tab was
+/// read last, so a person who had once looked at history kept arriving in it.
+#[gpui::test]
+fn re_entering_the_inbox_returns_to_the_waiting_queue(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.navigate_route(Route::Activity, cx);
+        wallet.set_inbox_tab(InboxTab::Decided, cx);
+        wallet.navigate_route(Route::Overview, cx);
+        assert_eq!(
+            wallet.inbox_tab,
+            InboxTab::Decided,
+            "leaving the tab is not what resets it"
+        );
+        wallet.navigate_route(Route::Activity, cx);
+        assert_eq!(
+            wallet.inbox_tab,
+            InboxTab::Waiting,
+            "returning to the inbox must land on the waiting queue"
+        );
+
+        wallet.set_inbox_tab(InboxTab::Decided, cx);
+        wallet.navigate_route(Route::Activity, cx);
+        assert_eq!(
+            wallet.inbox_tab,
+            InboxTab::Waiting,
+            "pressing the inbox while already in it must return to the waiting queue"
+        );
+    });
+    draw(cx, window, &view);
+    release(cx, &view);
+}
+
+/// History only grows, and it used to grow the page: two hundred records laid
+/// out two hundred cards and pushed the tab bar off the top of the window.
+/// The list holds the window's height and scrolls inside it instead.
+#[gpui::test]
+fn a_long_history_scrolls_inside_the_inbox_rather_than_the_page(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let records = (0..200)
+        .map(|_| {
+            OwnerActivityRecord::Transaction(Box::new(cleared_transaction_fixture(
+                uuid::Uuid::new_v4(),
+            )))
+        })
+        .collect::<Vec<_>>();
+    cx.update_entity(&view, |wallet, cx| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.activity = Ok(Arc::from(records));
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Activity);
+        wallet.set_inbox_tab(InboxTab::Decided, cx);
+    });
+
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "activity-decided-panel",
+            "activity-records",
+            "route-content-scroll",
+        ],
+    );
+    let panel = bounds[0].expect("the history panel must draw");
+    let records = bounds[1].expect("the history list must draw");
+    let scroll = bounds[2].expect("the route's scroll region must draw");
+    assert!(
+        panel.bottom() <= scroll.bottom() + px(1.0),
+        "the inbox must keep the window's height rather than growing with its history: \
+         it ended at {} against a window bottom of {}",
+        panel.bottom(),
+        scroll.bottom()
+    );
+    assert!(
+        records.bottom() <= scroll.bottom() + px(1.0),
+        "the history list must end inside the window: it ended at {} against a window bottom of {}",
+        records.bottom(),
+        scroll.bottom()
+    );
+    release(cx, &view);
+}
+
+/// The two facts under the balances — which balances are listed, and how old
+/// they are — belong on one line at the bottom of the tab, and have to stay on
+/// screen however many balances the account holds.
+#[gpui::test]
+fn the_portfolio_footer_stays_on_screen_under_a_long_list(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let account = WalletMetadata {
+        instance_id: uuid::Uuid::nil(),
+        id: "primary".into(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    };
+    let network = ekubo_wallet_core::config::default_networks()
+        .first()
+        .expect("a shipped network")
+        .clone();
+    let tokens = (0..250u32)
+        .map(|index| ekubo_wallet_core::token_store::PortfolioToken {
+            address: format!("0x{index:040x}"),
+            symbol: Some(format!("TKN{index}")),
+            name: Some(format!("Token {index}")),
+            decimals: Some(18),
+            balance: "1000000000000000000".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account.clone()]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
+            accounts: vec![OwnerPortfolioAccount {
+                wallet: account,
+                networks: vec![crate::authority::OwnerPortfolioNetwork {
+                    network: network.clone(),
+                    result: Ok(ekubo_wallet_core::token_store::Portfolio {
+                        address: "0x0000000000000000000000000000000000000000".to_owned(),
+                        chain_id: network.chain_id.to_string(),
+                        network: network.name.clone(),
+                        native_balance: "1000000000000000000".to_owned(),
+                        block_number: "1".to_owned(),
+                        tokens,
+                        tokens_checked: 250,
+                        tokens_skipped: None,
+                        fork: None,
+                    }),
+                }],
+            }],
+        });
+        wallet
+            .portfolio_refreshed_at
+            .insert("primary".to_owned(), chrono::Utc::now());
+        wallet.set_route(Route::Overview);
+    });
+
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "portfolio-balances",
+            "portfolio-footer",
+            "portfolio-refreshed-at",
+            "route-content-scroll",
+        ],
+    );
+    let balances = bounds[0].expect("the balance list must draw");
+    let footer = bounds[1].expect("the footer must draw");
+    let refreshed = bounds[2].expect("the refreshed line must draw");
+    let scroll = bounds[3].expect("the route's scroll region must draw");
+    assert!(
+        footer.bottom() <= scroll.bottom() + px(1.0),
+        "the footer must stay in the window: it ended at {} against a window bottom of {}",
+        footer.bottom(),
+        scroll.bottom()
+    );
+    assert!(
+        balances.bottom() <= footer.origin.y + px(1.0),
+        "the balances must end above the footer rather than running under it"
+    );
+    assert!(
+        refreshed.origin.x > footer.center().x,
+        "the refreshed line belongs on the right of the footer, opposite the note about \
+         which balances are listed"
+    );
+    release(cx, &view);
+}
+
 #[gpui::test]
 fn claude_connector_instructions_require_detected_claude_desktop(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
