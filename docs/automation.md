@@ -282,8 +282,46 @@ which keeps "run this" and "here is exactly what it runs" a single operation.
 
 The owner comes in when transactions stop working, not to authorize the job.
 
-The tab lists each automation with its key, schedule, next fire time, and —
-when it stopped — why, above that automation's run history.
+## The tab
+
+Each automation is a card that leads with the name its installer gave it and a
+state pill, with the `automation_key` an agent addresses it by on the line
+below, and the account and network under that. Then the schedule, twice: the
+cadence written out (`Every hour, on the hour`) over the exact expression in the
+mono face (`0 0 * * * *`) and a countdown to the next fire. Both, deliberately —
+the sentence is what makes a schedule legible at a glance, the expression is
+what makes it checkable against what an agent said it installed, and neither
+replaces the other. `CronSchedule::describe` builds the sentence from the parsed
+field sets rather than from the text, so the day-of-week column — which numbers
+Sunday 1 in this dialect, not 0 — is named rather than assumed, and a schedule
+whose shape it cannot state exactly is left as its expression.
+
+Under that, the bytecode's keccak256, its byte length, and the policy revision
+it is bound to. The tab cannot show what the bytecode *does*; that limit is the
+honest one to state rather than paper over. See the open questions.
+
+A running automation can be stopped. A stopped one can be started — which is a
+relink, not a tick: it goes back on its schedule under the policy that is active
+now — or deleted outright, after a confirmation, which is offered only once it
+is stopped. Deleting mid-tick would race the scheduler, and whether to keep it
+is a second question anyway, asked after the first is settled. Deleting takes
+its run history with it; the transactions those runs produced are activity
+records and stay where they are.
+
+### Dry run, from the tab
+
+Any automation, in any state, can be polled on demand. The tab runs the stored
+bytecode against the chain as it is right now — the same `eth_simulateV1` poll a
+tick performs, the same plan synthesis, the same exact simulation and policy
+evaluation — and reports the block it read, the calls it would send, and whether
+the policy would let them send. Nothing is scheduled, signed, stored, or
+broadcast; the result is display-only and is discarded when the owner hides it.
+
+This is what makes a quiet automation legible. Its run history says it found
+nothing to do, and that reads identically whether it is patiently waiting for
+its condition, reverting on every tick, or emitting a batch the policy has been
+silently refusing since the day the policy changed. Only a poll on demand
+separates those three.
 
 ## Every run is kept, and every transaction stays openable
 
@@ -308,9 +346,19 @@ Clearing history was a delete before this feature. Making it a hide is the
 smaller change of the two available — the alternative, exempting only
 automation-produced rows from the delete, would have made "clear history" mean
 different things for different rows, which is worse to explain and worse to
-rely on. It shows the bytecode's
-keccak256 and byte length and cannot show what the bytecode *does*; that limit
-is the honest one to state rather than paper over. See the open questions.
+rely on.
+
+Hiding the row is only half of keeping the link alive. The activity list filters
+hidden rows out, so the window resolves a run's transaction by id and holds it
+beside the list for the detail to draw; following the link fetches before it
+navigates, because a selected record the list cannot account for is dropped on
+the next frame.
+
+The runs themselves are a table inside the card — when, outcome, detail, and a
+way into the transaction — in a panel filled with the page background rather
+than the card's own fill. A box drawn in the same colour as the box around it
+separates nothing, and the run history had been reading as more detail lines
+about the automation itself.
 
 ## The authoring surface
 
