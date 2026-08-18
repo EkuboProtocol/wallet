@@ -9169,10 +9169,11 @@
    },
    "block_explorer_url": "https://basescan.org",
    "documentation_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
-   "simulate_endpoints": 6,
-   "fork_endpoints": 6,
+   "simulate_endpoints": 7,
+   "fork_endpoints": 7,
    "rpc_urls": [
     "https://mainnet.base.org/",
+    "https://rpc.baseazul.dev/",
     "https://base-rpc.publicnode.com/",
     "https://base.api.pocket.network/",
     "https://base.rpc.sentio.xyz/",
