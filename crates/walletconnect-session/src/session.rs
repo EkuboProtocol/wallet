@@ -573,8 +573,8 @@ impl<'a> Session<'a> {
         mut self,
         shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<()> {
-        self.relay
-            .subscribe(&self.pairing_topic)
+        let pairing_topic = self.pairing_topic.clone();
+        self.subscribe(&pairing_topic)
             .await
             .context("could not subscribe to the pairing topic")?;
         self.handler.notify(&SessionEvent::Pairing);
@@ -951,13 +951,26 @@ impl<'a> Session<'a> {
         let agreement = KeyAgreement::generate()?;
         let session_key = agreement.derive(&proposal.proposer.public_key)?;
         let session_topic = session_key.topic();
-        self.relay
-            .subscribe(&session_topic)
+        let expiry = Utc::now().timestamp() + SESSION_TTL_SECONDS;
+        let namespaces = settled_namespaces(&proposal, &scope);
+        // Recorded before the topic is subscribed to, rather than after the
+        // dapp has been answered. Everything below this line can lose the
+        // connection and dial another, and a reconnect resubscribes the topics
+        // this session holds — which it can only do for a session topic it has
+        // been told about. Settling and then reconnecting from the window in
+        // between left the wallet on a healthy socket, subscribed to the
+        // pairing alone, deaf to the session it had just granted.
+        self.settled = Some(Settled {
+            topic: session_topic.clone(),
+            key: session_key.clone(),
+            scope,
+            metadata: proposal.proposer.metadata,
+            expiry,
+        });
+        self.subscribe(&session_topic)
             .await
             .context("could not subscribe to the session topic")?;
 
-        let expiry = Utc::now().timestamp() + SESSION_TTL_SECONDS;
-        let namespaces = settled_namespaces(&proposal, &scope);
         let settle = OutgoingRequest::new(
             self.next_id(),
             method::SESSION_SETTLE,
@@ -997,16 +1010,10 @@ impl<'a> Session<'a> {
         )
         .await?;
 
+        let settled = self.settled.as_ref().expect("recorded before settling");
         self.handler.notify(&SessionEvent::Settled {
-            scope: &scope,
-            metadata: &proposal.proposer.metadata,
-            expiry,
-        });
-        self.settled = Some(Settled {
-            topic: session_topic,
-            key: session_key,
-            scope,
-            metadata: proposal.proposer.metadata,
+            scope: &settled.scope,
+            metadata: &settled.metadata,
             expiry,
         });
         Ok(false)
@@ -1162,6 +1169,27 @@ impl<'a> Session<'a> {
             ttl::SESSION_REQUEST_RESPONSE,
         )
         .await
+    }
+
+    /// Listen on a topic, dialing again first if the connection went away
+    /// while the wallet was busy.
+    ///
+    /// The same retry [`Self::publish`] does, and needed for the same reason:
+    /// the first thing settlement does after a review is subscribe to the
+    /// session topic, and a review is a person reading a screen. Reopening
+    /// resubscribes everything this session holds, so a successful reopen has
+    /// already done what the caller asked.
+    async fn subscribe(&mut self, topic: &str) -> Result<()> {
+        let first = self.relay.subscribe(topic).await;
+        if first.is_ok() || !self.relay.is_closed() {
+            return first.map(|_| ());
+        }
+        self.handler.notify(&SessionEvent::RelayDisconnected);
+        self.reopen()
+            .await
+            .context("the relay connection closed and could not be reopened")?;
+        self.handler.notify(&SessionEvent::RelayReconnected);
+        Ok(())
     }
 
     /// Seal one body and hand it to the relay, dialing again first if the
