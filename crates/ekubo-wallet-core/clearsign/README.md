@@ -8,6 +8,12 @@ fetches descriptors from the network: updating the snapshot is a reviewed
 git commit, exactly like a code change, because descriptors shape what a
 human sees while approving a transaction.
 
+`registry/ekubo/` is the exception: those descriptors are written and
+maintained here for Ekubo's own contracts, so a defect in them is fixed in
+this tree. Everything else stays byte-identical to upstream, defects
+included — a known upstream defect is named in the test that would
+otherwise fail, never patched in place.
+
 Descriptors are display metadata only. The approval digest binds the exact
 calldata, matching is by exact chain ID, contract address, and function
 selector, and a descriptor mismatch falls back to the generic selector

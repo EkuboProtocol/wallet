@@ -36,8 +36,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -61,8 +61,8 @@
         "fields": [
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" },
           { "path": "liquidity", "label": "Liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -93,8 +93,8 @@
             "params": { "types": ["wallet", "eoa", "contract"], "sources": ["local", "ens"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -118,8 +118,8 @@
         "fields": [
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" },
           { "path": "liquidity", "label": "Liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -150,8 +150,8 @@
             "params": { "types": ["wallet", "eoa", "contract"], "sources": ["local", "ens"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -174,8 +174,8 @@
         "interpolatedIntent": "Claim rewards {id}",
         "fields": [
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -205,8 +205,8 @@
             "params": { "types": ["wallet", "eoa", "contract"], "sources": ["local", "ens"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -243,7 +243,7 @@
             "visible": "always"
           },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" },
-          { "path": "tick", "label": "Initial tick", "format": "raw", "visible": "always" }
+          { "path": "tick", "label": "Initial tick", "format": "number", "visible": "always" }
         ]
       },
       "mintAndDeposit((address token0, address token1, bytes32 config) poolKey, int32 tickLower, int32 tickUpper, uint128 maxAmount0, uint128 maxAmount1, uint128 minLiquidity)": {
@@ -265,8 +265,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           {
             "path": "poolKey.token0",
             "label": "Pool token 0",
@@ -303,8 +303,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "salt", "label": "Salt", "format": "raw", "visible": "optional" },
           {
             "path": "poolKey.token0",

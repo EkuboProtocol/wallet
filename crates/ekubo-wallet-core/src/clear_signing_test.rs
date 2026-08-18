@@ -120,6 +120,203 @@ async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
     );
 }
 
+#[tokio::test]
+async fn a_negative_tick_reads_as_a_negative_number() {
+    // The engine's `raw` formatter prints a signed word through
+    // `BigUint::from_bytes_be`, so a tick of -140 rendered as
+    // 2^256 - 140 — a number no reviewer can read as a position bound.
+    let (chain, address, calldata) = negative_tick_fixture();
+    let reading = interpret(
+        chain,
+        CallEnvelope {
+            from: Address::repeat_byte(0x11),
+            to: address,
+        },
+        &Bytes::from(calldata),
+        U256::ZERO,
+        &TokenMetadataMap::new(),
+    )
+    .await
+    .expect("descriptor matches");
+    assert!(
+        reading
+            .fields
+            .iter()
+            .any(|field| field == "Lower tick: -140"),
+        "the negative tick is not rendered as a negative number: {:?}",
+        reading.fields
+    );
+    let unsigned = I256::unchecked_from(-140).into_raw().to_string();
+    assert!(
+        !reading.fields.iter().any(|field| field.contains(&unsigned)),
+        "a field still carries the unsigned reading of -140: {:?}",
+        reading.fields
+    );
+}
+
+/// The one formatter that renders a two's-complement word with its sign.
+/// Every other numeric format in the pinned engine — `raw`, `amount`,
+/// `tokenAmount`, and an absent format, which falls back to `raw` — prints
+/// the unsigned word, so `-140` becomes 2^256 - 140.
+const SIGNED_SAFE_FORMAT: &str = "number";
+
+/// Upstream descriptors ship verbatim, defects included, so that what was
+/// reviewed is what runs. These fields display a signed staking reward
+/// through an unsigned formatter; the list exists so the next one cannot
+/// arrive unnoticed, and each entry must still be reachable.
+const UPSTREAM_UNSIGNED_SIGNED_FIELDS: &[(&str, &str)] = &[
+    (
+        "registry/p2p/calldata-NativeTokenVault.json",
+        "#.harvestParams.reward",
+    ),
+    (
+        "registry/serenita/calldata-EthVault.json",
+        "#.harvestParams.reward",
+    ),
+];
+
+#[test]
+fn every_signed_parameter_is_displayed_by_a_signed_formatter() {
+    let by_path: BTreeMap<&str, &str> = CLEARSIGN_FILES.iter().copied().collect();
+    let mut offenders = Vec::new();
+    let mut excused = BTreeSet::new();
+    for (path, contents) in CLEARSIGN_FILES {
+        let standalone = path.starts_with("registry/")
+            && path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("calldata-"));
+        if !standalone {
+            continue;
+        }
+        // A file that does not resolve is already covered by
+        // `every_vendored_descriptor_resolves_and_parses`.
+        let Ok((_, resolved)) = resolve_vendored(path, contents, &by_path) else {
+            continue;
+        };
+        let document: serde_json::Value =
+            serde_json::from_str(&resolved).expect("a resolved descriptor is JSON");
+        let Some(formats) = document
+            .pointer("/display/formats")
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        for (signature, format) in formats {
+            let signed = signed_parameter_names(signature);
+            if signed.is_empty() {
+                continue;
+            }
+            let mut fields = Vec::new();
+            collect_fields(format.get("fields"), &document, &mut fields);
+            for (field_path, field_format) in fields {
+                let leaf = field_path.rsplit('.').next().unwrap_or(field_path);
+                if !signed.contains(leaf) || field_format == Some(SIGNED_SAFE_FORMAT) {
+                    continue;
+                }
+                if let Some(known) = UPSTREAM_UNSIGNED_SIGNED_FIELDS
+                    .iter()
+                    .find(|(file, field)| file == path && *field == field_path)
+                {
+                    excused.insert(*known);
+                    continue;
+                }
+                offenders.push(format!(
+                    "{path}: {signature} renders signed field {field_path} \
+                     as {field_format:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "signed parameters displayed by an unsigned formatter, which prints \
+         -140 as 2^256 - 140; use {SIGNED_SAFE_FORMAT:?}: {offenders:#?}"
+    );
+    let listed: BTreeSet<_> = UPSTREAM_UNSIGNED_SIGNED_FIELDS.iter().copied().collect();
+    assert_eq!(
+        excused, listed,
+        "the upstream exception list no longer matches the corpus"
+    );
+}
+
+/// Parameter names the ERC-7730 signature spelling declares as signed
+/// integers. The registry spells formats with names — including inside
+/// tuples — so a field path's last segment names its parameter.
+fn signed_parameter_names(signature: &str) -> BTreeSet<&str> {
+    let bytes = signature.as_bytes();
+    let mut names = BTreeSet::new();
+    for start in 0..bytes.len() {
+        if !signature[start..].starts_with("int") {
+            continue;
+        }
+        // `uint256` ends in `int256`: an identifier character before `int`
+        // means this is the tail of a longer word, signed or not.
+        if start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            continue;
+        }
+        let mut cursor = start + "int".len();
+        // Width digits and any array suffix sit between the type and the name.
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'[' || bytes[cursor] == b']')
+        {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b' ' {
+            continue;
+        }
+        cursor += 1;
+        let name = cursor;
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+        {
+            cursor += 1;
+        }
+        if cursor > name {
+            names.insert(&signature[name..cursor]);
+        }
+    }
+    names
+}
+
+/// Every displayed field of one format, as (path, format), following the
+/// nesting the engine follows: sub-field lists, and `$ref` definitions that
+/// carry the format the field itself omits.
+fn collect_fields<'a>(
+    fields: Option<&'a serde_json::Value>,
+    document: &'a serde_json::Value,
+    out: &mut Vec<(&'a str, Option<&'a str>)>,
+) {
+    let Some(items) = fields.and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for item in items {
+        collect_fields(item.get("fields"), document, out);
+        let Some(path) = item.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let format = item
+            .get("format")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| defined_format(item, document));
+        out.push((path, format));
+    }
+}
+
+fn defined_format<'a>(
+    field: &serde_json::Value,
+    document: &'a serde_json::Value,
+) -> Option<&'a str> {
+    let name = field
+        .get("$ref")?
+        .as_str()?
+        .strip_prefix("$.display.definitions.")?;
+    document
+        .pointer(&format!("/display/definitions/{name}"))?
+        .get("format")?
+        .as_str()
+}
+
 mod vendored_embedding_tests {
     //! What ships as a vendored descriptor is what was reviewed as one.
 

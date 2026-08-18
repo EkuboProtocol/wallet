@@ -36,8 +36,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Add liquidity"
@@ -60,8 +60,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Add liquidity"
@@ -85,8 +85,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Add liquidity"
@@ -109,8 +109,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Collect fees {id}"
@@ -140,8 +140,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Collect fees {id}"
@@ -165,8 +165,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Withdraw position {id}"
@@ -198,8 +198,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Withdraw position {id}"
@@ -221,7 +221,7 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tick", "label": "Initial tick", "format": "raw", "visible": "always" },
+          { "path": "tick", "label": "Initial tick", "format": "number", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Initialize pool if needed"

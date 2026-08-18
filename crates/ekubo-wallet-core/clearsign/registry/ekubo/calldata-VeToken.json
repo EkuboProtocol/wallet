@@ -536,7 +536,7 @@
             "visible": "always"
           },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" },
-          { "path": "tick", "label": "Initial tick", "format": "raw", "visible": "always" }
+          { "path": "tick", "label": "Initial tick", "format": "number", "visible": "always" }
         ]
       },
       "multicall(bytes[] data)": {

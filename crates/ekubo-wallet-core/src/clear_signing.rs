@@ -616,6 +616,53 @@ pub(crate) fn stake_fixture() -> (u64, Address, Vec<u8>) {
     (chain, address, calldata)
 }
 
+/// Test fixture for the signed-parameter rendering: a `Positions`
+/// `collectFees` call whose lower tick is negative, derived from the vendored
+/// descriptor itself. A tick below the price of token1 in token0 is the
+/// ordinary case, so this is what a real review shows.
+#[cfg(test)]
+pub(crate) fn negative_tick_fixture() -> (u64, Address, Vec<u8>) {
+    use alloy::dyn_abi::DynSolValue;
+    use alloy::primitives::{FixedBytes, keccak256};
+    let (_, contents) = CLEARSIGN_FILES
+        .iter()
+        .find(|(path, _)| path.ends_with("registry/ekubo/calldata-Positions.json"))
+        .expect("positions descriptor vendored");
+    let descriptor: serde_json::Value = serde_json::from_str(contents).expect("valid JSON");
+    let deployment = &descriptor["context"]["contract"]["deployments"][0];
+    let chain = deployment["chainId"].as_u64().expect("chain id");
+    let address = deployment["address"]
+        .as_str()
+        .expect("address")
+        .parse::<Address>()
+        .expect("valid address");
+    assert!(
+        descriptor["display"]["formats"]
+            .as_object()
+            .expect("formats")
+            .contains_key(
+                "collectFees(uint256 id, (address token0, address token1, bytes32 config) \
+                 poolKey, int32 tickLower, int32 tickUpper)"
+            ),
+        "collectFees format vendored"
+    );
+    let selector =
+        &keccak256("collectFees(uint256,(address,address,bytes32),int32,int32)".as_bytes())[..4];
+    let value = DynSolValue::Tuple(vec![
+        DynSolValue::Uint(U256::from(4_242_u64), 256),
+        DynSolValue::Tuple(vec![
+            DynSolValue::Address(Address::repeat_byte(0xA0)),
+            DynSolValue::Address(Address::repeat_byte(0xB0)),
+            DynSolValue::FixedBytes(FixedBytes::default(), 32),
+        ]),
+        DynSolValue::Int(I256::unchecked_from(-140), 32),
+        DynSolValue::Int(I256::ZERO, 32),
+    ]);
+    let mut calldata = selector.to_vec();
+    calldata.extend(value.abi_encode_params());
+    (chain, address, calldata)
+}
+
 #[cfg(test)]
 #[path = "clear_signing_test.rs"]
 mod tests;
