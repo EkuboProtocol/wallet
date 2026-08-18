@@ -301,11 +301,12 @@ const EXPIRED_REFUSAL: &str = "This session has expired. Reconnect to continue."
 const STALE_AFTER_OUTAGE: &str = "The dapp will most likely still show the session as connected: disconnect it there, then \
      open Connections → WalletConnect and use a fresh link.";
 
-/// How long to wait before the first reconnect attempt.
+/// How long to wait after the first reconnect attempt fails.
 ///
-/// Long enough that a socket dropped by a network that is still settling is
-/// not dialed into the same failure immediately, short enough that a blip
-/// costs the owner nothing they would notice.
+/// The first attempt itself is immediate — see [`Session::restore_connection`]
+/// — so this is the pause between a dial that failed and the next one. Long
+/// enough that a network still settling is not dialed into the same failure at
+/// once, short enough that a blip costs the owner nothing they would notice.
 const RECONNECT_MIN_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The longest the backoff climbs to.
@@ -619,10 +620,17 @@ impl<'a> Session<'a> {
     /// Returns whether the session should keep running: `false` is the owner
     /// stopping, and `Err` is the session ending for a reason worth showing.
     ///
-    /// The wait is inside the same `select!` the idle loop uses, because a
-    /// relay that is down stays down for as long as it likes and the person
-    /// must be able to close the connection during the retries rather than
-    /// after them.
+    /// The first attempt is made at once, without waiting. Two of the three
+    /// close codes the relay documents are routine — a server terminating and
+    /// a load rebalance — and both mean "come back now" rather than "stay
+    /// away"; a delay in front of the first dial would spend a second of every
+    /// rebalance doing nothing. Only a failed attempt earns a wait.
+    ///
+    /// Both the dial and the wait are inside the same `select!` the idle loop
+    /// uses. A relay that is down stays down for as long as it likes, and
+    /// opening a connection to a host that has stopped answering takes the
+    /// whole handshake deadline to fail — so the person has to be able to
+    /// close the connection during either, rather than after both.
     async fn restore_connection<F>(&mut self, shutdown: &mut std::pin::Pin<&mut F>) -> Result<bool>
     where
         F: std::future::Future<Output = ()>,
@@ -637,17 +645,13 @@ impl<'a> Session<'a> {
                 bail!("{reason}");
             }
             let handler = self.handler;
-            let slept = tokio::select! {
-                () = &mut *shutdown => false,
-                () = handler.quit_requested() => false,
-                () = tokio::time::sleep(delay) => true,
+            let dialed = tokio::select! {
+                () = &mut *shutdown => None,
+                () = handler.quit_requested() => None,
+                opened = self.reopen() => Some(opened),
             };
-            if !slept {
-                self.disconnect("The wallet closed the session.").await;
-                return Ok(false);
-            }
-            match self.reopen().await {
-                Ok(()) => {
+            match dialed {
+                Some(Ok(())) => {
                     self.handler.notify(&SessionEvent::RelayReconnected);
                     return Ok(true);
                 }
@@ -656,7 +660,22 @@ impl<'a> Session<'a> {
                 // live session over while its deadline still stands. The
                 // backoff is what keeps a long outage from becoming a dial
                 // loop.
-                Err(_) => delay = backoff(delay),
+                Some(Err(_)) => {
+                    let waited = tokio::select! {
+                        () = &mut *shutdown => false,
+                        () = handler.quit_requested() => false,
+                        () = tokio::time::sleep(delay) => true,
+                    };
+                    if !waited {
+                        self.disconnect("The wallet closed the session.").await;
+                        return Ok(false);
+                    }
+                    delay = backoff(delay);
+                }
+                None => {
+                    self.disconnect("The wallet closed the session.").await;
+                    return Ok(false);
+                }
             }
         }
     }
