@@ -1890,8 +1890,8 @@ pub struct WalletWindow {
     network_editor_testnet: bool,
     network_editor_rpc_strategy: RpcStrategy,
     /// The optional fields live behind a disclosure so the required ones fit
-    /// without scrolling. Edit opens it when the network already uses one,
-    /// because a gas cap nobody can see is worse than a longer form.
+    /// without scrolling. Edit opens it when the network already carries any
+    /// advanced metadata, so existing values are not hidden from the owner.
     network_editor_advanced_open: bool,
     network_editor_busy: bool,
     network_editor_errors: NetworkEditorErrors,
@@ -12372,10 +12372,12 @@ impl WalletWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(selectable_label(
                         "Installing one grants no new authority. Every call it proposes is \
-                         checked against the signing policy you approved, and one the policy does \
-                         not allow stops the automation instead of sending. Ask an agent for what \
-                         you want watched; it can test the program against your policy before \
-                         anything is installed, and you can stop or delete it here at any time.",
+                         checked against the signing policy you approved, and a call the policy \
+                         does not allow cannot send. Review or unmatched results stop the job; an \
+                         explicit deny is reported without signing and may be tried again until \
+                         the job is stopped or replaced. Ask an agent for what you want watched; \
+                         it can test the program against your policy before anything is installed, \
+                         and you can stop or delete it here at any time.",
                     )),
             )
     }
@@ -12393,7 +12395,7 @@ impl WalletWindow {
         let (state_label, tone) = match automation.state {
             AutomationState::Enabled => ("Running", StatusTone::Working),
             AutomationState::Disabled => ("Stopped", StatusTone::Failed),
-            AutomationState::AwaitingRelink => ("Needs you", StatusTone::NeedsYou),
+            AutomationState::AwaitingRelink => ("Needs restart", StatusTone::NeedsYou),
         };
         let dry_running = matches!(
             self.automation_dry_runs.get(&id),

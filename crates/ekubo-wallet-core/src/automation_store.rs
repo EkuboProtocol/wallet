@@ -579,10 +579,11 @@ impl AutomationStore {
 
     /// Rebind an automation to the current policy revision and start it again.
     ///
-    /// The only way back to `Enabled`, and it always rebinds — which is why
-    /// re-enabling something the owner disabled is the same operation as
-    /// relinking something the policy moved out from under. Both are the owner
-    /// saying "yes, run this, under what my policy says now".
+    /// The owner UI's way back to `Enabled`, and it always rebinds — which is
+    /// why re-enabling something the owner disabled is the same operation as
+    /// relinking something the policy moved out from under. An agent can also
+    /// replace the key through [`Self::install`], which installs a definition
+    /// under the active revision and resets its history.
     pub fn relink(&mut self, id: Uuid, policy_revision: u64) -> Result<Automation> {
         ensure!(policy_revision > 0, "policy revision must be positive");
         let changed = self.database.connection.execute(
@@ -617,7 +618,7 @@ impl AutomationStore {
                 Blob(*id.as_bytes()),
                 format!(
                     "the signing policy changed to revision {current_revision} after this \
-                     automation was installed; review it again to run it under the new policy"
+                     automation was installed; start or replace it to run under the new policy"
                 ),
                 Millis(now()),
             ],

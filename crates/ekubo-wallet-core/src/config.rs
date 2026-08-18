@@ -906,12 +906,10 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
                 matches!(url.scheme(), "http" | "https"),
                 "{label} must use http:// or https://"
             );
-            // Neither of these is ever fetched; they are handed to whatever
-            // the desktop has registered for `http`. That launcher is a fixed
-            // program on every platform now (see `tx_browser::open_in_browser`,
-            // which used to route through `cmd.exe` on Windows), but this is
-            // an agent-supplied string that ends up as an argument to a
-            // process, so it is worth being narrow about at the door as well.
+            // Neither of these is ever fetched; GPUI hands them to the
+            // platform's URL opener. This is an agent-supplied string that
+            // crosses that platform boundary, so it is worth being narrow at
+            // the door as well.
             //
             // A base is a base: `explorer_transaction_url` appends
             // `/tx/{hash}`, so anything after a `?` or `#` would be discarded

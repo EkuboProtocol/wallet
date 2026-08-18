@@ -348,8 +348,10 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          release_body=$'> [!WARNING]\n> **Windows and Linux key-storage warning:** The current builds use per-user credential services that do not isolate raw account keys or the database key to Ekubo Wallet. Same-user malware, including a prompt-injected local agent that can execute programs, can extract those keys and bypass wallet policy and review. [Read the security model](https://docs.ekubo.org/wallet/security/#windows-and-linux-credential-store-limitation) before installing.'
           gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TAG" \
+            -f body="$release_body" \
             -F prerelease="$( [[ "$RELEASE_TAG" == *-* ]] && echo true || echo false )" > release.json
           upload_url="$(jq -r '.upload_url | sub("\\{.*"; "")' release.json)"
           for file in dist/*; do

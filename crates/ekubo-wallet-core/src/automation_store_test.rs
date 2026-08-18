@@ -81,8 +81,8 @@ fn a_policy_revision_that_moved_unlinks_rather_than_running() {
     assert_eq!(due.ready.len(), 1);
     assert!(due.unlinked.is_empty());
 
-    // The owner installs a new policy for some unrelated reason. The
-    // automation must not simply keep going under authority nobody granted it.
+    // A new policy is installed for some unrelated reason. The dormant
+    // automation must not simply inherit the later revision.
     let due = store.due(wallet.instance_id, 2, at(13, 0)).unwrap();
     assert!(due.ready.is_empty());
     assert_eq!(due.unlinked.len(), 1);

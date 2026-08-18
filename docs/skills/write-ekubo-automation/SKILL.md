@@ -112,15 +112,18 @@ submit yourself. So:
 
 - If the active policy allows every call in the batch, the automation sends it
   and keeps running.
-- If **any** call resolves to `review`, to `deny`, or to no rule at all, the
-  batch does not send. The automation **stops on that tick** and records why.
-  It does not queue the batch for approval and try again next tick — a job
-  emitting a call the policy refuses would emit it every tick, and the approval
-  queue would fill with the same decision.
+- If any call resolves to `review` or to no rule at all, the batch does not
+  send. One diagnostic request is queued and the automation stops on that tick,
+  so the approval queue cannot fill with the same decision.
+- If any call resolves to `deny`, the automatic path rejects it before creating
+  a request or signature. The current scheduler reports that pass as an error
+  and leaves the automation enabled, so inspect and disable or replace a denied
+  job instead of expecting it to stop itself.
 
-So an automation installed against a policy that does not permit its calls does
-nothing except stop, once, with an explanation. That is the single most common
-way to install a broken automation, and it is entirely avoidable:
+So an automation installed against a policy that does not permit its calls
+cannot send. A review or unmatched result stops once with a diagnostic; an
+explicit deny currently remains enabled and may fail again on later passes.
+Both are avoidable:
 
 1. `wallet_dry_run_automation` — it returns the policy verdict for every call
    alongside the simulation, without installing anything.
@@ -131,9 +134,12 @@ way to install a broken automation, and it is entirely avoidable:
 
 The same rule applies afterwards. An automation is bound to the revision it was
 installed against; when the user changes their policy, the automation moves to
-`awaiting_relink` and stops until they look at it again. This is deliberate —
-otherwise a policy widened for some unrelated reason would silently re-arm jobs
-the user had forgotten about.
+`awaiting_relink` and that stored definition stops. The user can press Start to
+rebind the exact stored definition, or an agent can deliberately reinstall or
+replace the same key after reading and naming the current policy revision. Do
+not describe agent replacement as owner approval. The binding prevents a
+dormant job from silently inheriting a later policy; a live agent could already
+submit any calls the current policy allows.
 
 Bring the user in when transactions stop working, not to install. Check
 `wallet_list_automations` and read `stopped_reason`.
@@ -344,10 +350,13 @@ roughly per-block on a twelve-second chain.
 
 Ticks are skipped, never queued up, when the previous run's transaction is
 still pending or another send holds that wallet and chain's slot, and missed
-ticks — application closed, wallet locked, machine asleep — are not backfilled.
+ticks — application closed or machine asleep — are not backfilled.
 A schedule is a maximum rate, not a guarantee. Write the contract so that a
 skipped tick is harmless and the next one recomputes from live state.
 
-The automation disables itself and notifies the owner on a policy rejection, an
-on-chain revert, a transaction that never mines, or ten consecutive failed
-ticks. `wallet_get_automation_status` reports which of those happened.
+The automation disables itself and makes the reason visible in its row and run
+history after a queued review/unmatched result, an on-chain revert, a
+transaction that never mines, or ten consecutive poll failures. An explicit
+policy deny is rejected without a signature but currently leaves the job
+enabled. `wallet_list_automations` reports `last_outcome`, `last_request_id`,
+and `stopped_reason`.

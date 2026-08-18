@@ -1,4 +1,4 @@
-//! Owner-installed bytecode that the wallet polls on a schedule and turns into
+//! Agent-installed bytecode that the wallet polls on a schedule and turns into
 //! calls.
 //!
 //! An automation is EVM runtime bytecode plus a cron expression, bound to one
@@ -74,7 +74,7 @@ sol! {
 /// problem.
 pub const MAX_BYTECODE_BYTES: usize = 49_152;
 
-/// The most owner-supplied configuration an automation may carry.
+/// The most caller-supplied configuration an automation may carry.
 ///
 /// `config` exists so one blob serves many parameterizations without
 /// recompiling — an address, a threshold, a pool key. It is not a data channel,
@@ -145,12 +145,12 @@ impl AutomationState {
     }
 }
 
-/// A parsed cron expression, kept beside the exact text the owner approved.
+/// A parsed cron expression, kept beside the exact text that was installed.
 ///
 /// The text is what a review shows and what the database stores, so it must
 /// survive a round trip unchanged: a schedule redisplayed as some normalized
-/// spelling is a schedule the owner cannot compare against the one they
-/// approved.
+/// spelling is a schedule the owner cannot compare against the one that was
+/// installed.
 #[derive(Clone, Debug)]
 pub struct CronSchedule {
     expression: String,
@@ -497,7 +497,7 @@ impl Automation {
     }
 }
 
-/// Everything about an automation that the owner authorizes, separated from the
+/// Everything about an automation that an agent supplies, separated from the
 /// bookkeeping the wallet maintains.
 ///
 /// This is what an agent proposes and what a review renders. It is deliberately

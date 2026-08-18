@@ -28,9 +28,10 @@ authorization path, and no policy exemption.
 That is why installing an automation is not a widening of authority. A blob can
 only emit calls; every call is evaluated against the installed policy at send
 time, and a batch that does not resolve to all-allow never reaches the signer.
-An automation the owner installs and then forgets is bounded by the policy the
-owner installed, the same way an agent they leave running is.
-[security-boundary.md](security-boundary.md) is unchanged by this feature.
+An automation an agent installs and leaves running is bounded by the policy the
+owner installed, the same way that live agent is.
+[security-boundary.md](security-boundary.md) describes the shared execution
+capability.
 
 ## The in-process cron
 
@@ -52,9 +53,9 @@ the sleep loop is a dozen lines.
 happens to a 02:30 job in a DST transition, and the answer is never worth what
 it costs. An owner who wants a job at a local hour writes the UTC hour.
 
-**Missed ticks are skipped, never backfilled.** If the application was closed,
-the wallet was locked, or the machine was asleep across ten fire times, the
-automation runs once at the next tick — not eleven times. Every tick derives
+**Missed ticks are skipped, never backfilled.** If the application was closed
+or the machine was asleep across ten fire times, the automation runs once at
+the next tick — not eleven times. Every tick derives
 its calls from live chain state, so a backlogged tick would be executing an
 intent computed for a chain that no longer exists. The same rule covers a tick
 that arrives while the previous run is still working: it is dropped, with the
@@ -68,16 +69,17 @@ Each tick, for one automation:
    configured endpoint, at the latest block, with a `stateOverride` entry
    setting the wallet address's `code` to the installed bytecode, and one call
    `to` and `from` the wallet address, calldata `automate(bytes config)` — a
-   fixed 4-byte selector plus the owner's stored `config` bytes.
+   fixed 4-byte selector plus the stored `config` bytes.
 2. **Read the automation's state.** Whatever the blob decides is state: chain
    reads it performs, balances, positions, the effects of its own last
    transaction.
 3. **Produce the calls.** The blob returns the list, ABI-encoded.
 4. **Queue them.** A non-empty list is synthesized into an `ExecutionPlan` and
    handed to `execute_automatic`, which simulates, prepares exactly, evaluates
-   the policy, and writes a pending row — signed and broadcast if the policy
-   allowed every call, and otherwise left as the one row that says which call it
-   did not.
+   the policy, and either writes a pending row or rejects the batch. An
+   all-allow batch is signed and broadcast; review, unmatched, and failed
+   simulation results leave one diagnostic row; an explicit deny leaves no row
+   and produces no signature.
 
 The bytecode is **deployed runtime code**, not initcode. The wallet does not run
 a constructor, and it never deploys anything.
@@ -153,50 +155,57 @@ the blob decides *what*, the wallet decides *whether* and *how*.
 The synthesized plan goes through `execute_automatic` unchanged, which means it
 is simulated, exactly prepared, and evaluated against the current policy at send
 time. `SendDisposition::Signed` broadcasts. `SendDisposition::Queued` — a
-`review` rule, a call no rule matched, a `deny`, or a failed simulation —
-**disables the automation** and notifies the owner.
+`review` rule, a call no rule matched, or a failed simulation — **disables the
+automation** and leaves one diagnostic request for the owner. An explicit
+`deny` is rejected by `execute_automatic` before it can create a request or a
+signature. The current scheduler propagates that error and leaves the
+automation enabled, so a denied due job can be attempted again on a later
+pass.
 
-Disabling rather than leaving it enabled is the whole answer to the obvious
-failure mode. A blob that emits a non-allowed call emits it on every tick;
-queuing each one for approval would turn a cron job into an approval-queue
-flood. Because the automation stops, exactly one row survives, and that row is
-the diagnostic: it shows the owner precisely which call their policy did not
-permit.
+For review, unmatched, and simulation-failure results, disabling prevents a
+blob from filling the approval queue with the same decision. Exactly one row
+survives, and that row is the diagnostic showing which call did not proceed.
+An explicit deny creates no row; until the scheduler's error handling changes,
+the owner or agent must disable or replace that job to stop later attempts.
 
-Owners running automations should also set the network's `max_fee_per_gas`
-(documented in `config.rs` as the bound on what a dishonest endpoint can cost an
-unreviewed automatic send). It is an existing knob and it is the right one;
-automations add no separate fee cap.
+Owners running automations should bound `gas_limit` and `max_fee_per_gas` in
+the signing policy when they do not want the selected endpoint to choose those
+fields for an unreviewed automatic send. Network profiles carry no fee ceiling;
+automations add no separate one. See `docs/policy-authoring.md`.
 
 ## An automation is bound to a wallet and a policy revision
 
-Every automation records the policy revision that was active when the owner
-installed it. A tick reads the current revision first: if it does not match, the
-automation does not run, and it does not fail either — it moves to
-`awaiting_relink` and waits for the owner to look at it again in the Automations
-tab.
+Every automation records the active policy revision that its installer named.
+A tick reads the current revision first: if it does not match, the automation
+does not run, and it does not fail either — it moves to
+`awaiting_relink`. The stored definition stays stopped until the owner presses
+Start in the Automations tab or an agent replaces it under the same key while
+naming the current revision.
 
-The threat this closes is the one that only appears later. An automation whose
-calls the policy rejects stops, which is correct and visible. But the owner then
-widens the policy for some unrelated reason — a new protocol, a raised limit —
-and under a design that only checks the policy at send time, the stopped
-automation silently becomes live again, now authorized by a rule written for
-something else entirely. Nobody decided that. The policy edit was about the new
-protocol, and its side effect was to re-arm a job the owner may not have thought
-about in weeks.
+The threat this closes is the one that only appears later. A non-allow output
+cannot sign, but the owner may then widen the policy for some unrelated reason
+— a new protocol, a raised limit. Under a design that only checks the policy at
+send time, the existing automation could silently become authorized by a rule
+written for something else entirely. Nobody decided that. The policy edit was
+about the new protocol, and its side effect would be to arm a job the owner may
+not have thought about in weeks.
 
-Binding makes that re-arming an explicit act. Relinking shows the same review as
-the original install — bytecode hash, cron, config, network — against the new
-policy, and rebinds to the current revision. The check is cheap: one comparison
-against `PolicyStore`'s revision at the top of every tick.
+Binding makes a dormant job require a new action against the current revision.
+The Automations card shows the name, key, account, network, schedule, bytecode
+hash and length, and bound revision. Pressing Start reuses the exact stored
+definition and rebinds it without a separate review or OS-authentication
+dialog. A live agent can instead reinstall or replace the key after reading the
+current policy; it could already submit the same current-policy calls directly,
+so revision binding is not an owner-approval boundary against an active agent.
+The check is cheap: one comparison against `PolicyStore`'s revision at the top
+of every tick.
 
 This is deliberately stricter than "the policy is re-evaluated at send anyway".
-Send-time evaluation answers "may this call proceed"; the binding answers "did
-the owner intend this job to run under this policy", and no amount of
-per-call checking answers the second question. It is also why the binding is to
-the revision rather than to a hash of the rules an automation happens to touch:
-a narrower rule would be a guess about which edits matter, and the whole point
-is that the owner decides.
+Send-time evaluation answers "may this call proceed"; the binding records
+whether this stored definition has been deliberately rebound since the policy
+changed. It is bound to the revision rather than to a hash of rules the
+automation happens to touch because guessing which edits matter would let a
+dormant job cross some policy changes without any new action.
 
 An automation is likewise bound to one wallet. It does not follow a key that is
 imported elsewhere, and there is no operation that moves one between wallets —
@@ -228,12 +237,14 @@ Several automations on one wallet and chain share that single slot. They are
 scheduled independently, but only one is in flight at a time, and the losers
 skip rather than stack up.
 
-Ticks run while the application is running and the wallet is unlocked. There is
-no headless mode.
+Ticks run while the application process is running. There is no separate
+application-level wallet lock and no headless mode; signing also depends on the
+OS credential store allowing the account key to be read.
 
 ## Failure handling
 
-Each of these disables the automation and notifies the owner:
+Each of these disables the automation and makes the reason visible in its row
+and run history:
 
 - a queued (non-allow) disposition,
 - an on-chain revert (`status == 0`) on a sent batch,
@@ -252,8 +263,8 @@ expression, network, wallet, the bound policy revision, state, last fire time,
 last result, the transaction the last tick sent, and the reason it stopped if it
 did. A unique index on (wallet, key) is what makes installing idempotent.
 
-State is one of `enabled`, `disabled` (it failed; the reason says how), or
-`awaiting_relink` (the policy revision moved). Only `enabled` ticks.
+State is one of `enabled`, `disabled` (stopped explicitly or after a failure),
+or `awaiting_relink` (the policy revision moved). Only `enabled` ticks.
 
 An agent installs an automation directly, with no owner confirmation step. An
 automation is another way to suggest transactions, and the policy is what
@@ -298,7 +309,7 @@ whose shape it cannot state exactly is left as its expression.
 
 Under that, the bytecode's keccak256, its byte length, and the policy revision
 it is bound to. The tab cannot show what the bytecode *does*; that limit is the
-honest one to state rather than paper over. See the open questions.
+honest one to state rather than paper over. See the remaining open question.
 
 A running automation can be stopped. A stopped one can be started — which is a
 relink, not a tick: it goes back on its schedule under the policy that is active
@@ -318,25 +329,27 @@ the policy would let them send. Nothing is scheduled, signed, stored, or
 broadcast; the result is display-only and is discarded when the owner hides it.
 
 This is what makes a quiet automation legible. Its run history says it found
-nothing to do, and that reads identically whether it is patiently waiting for
-its condition, reverting on every tick, or emitting a batch the policy has been
-silently refusing since the day the policy changed. Only a poll on demand
-separates those three.
+nothing to do; a failed poll or policy-revision unlink is recorded separately.
+The dry run shows what the bytecode sees now and whether its current output
+would be allowed.
 
-## Every run is kept, and every transaction stays openable
+## Every reported tick is logged, and every retained transaction stays openable
 
 The automation row carries only the latest outcome, which answers "is this
 working right now". A person deciding whether to keep trusting something that
 runs unattended has a different question — what has it been doing — so every
-tick appends to `automation_runs`: the quiet ones that found nothing to do, the
-skips, the failures, and the sends. A log that kept only the eventful runs could
-not tell a quiet automation from a stopped one, which is usually the distinction
-the reader came for. The log is capped per automation and trimmed oldest-first
-on the way in, because a per-second schedule writes 86,400 rows a day.
+tick that returns a `TickReport` appends to `automation_runs`: the quiet ones
+that found nothing to do, the skips, reported failures, and the sends. A pass
+error propagated before a report exists is not appended; an explicit policy
+deny currently takes that path. A log that kept only the eventful reported runs
+could not tell a quiet automation from a stopped one, which is usually the
+distinction the reader came for. The newest 2,000 runs per automation are
+retained and older ones are trimmed on the way in, because a per-second schedule
+writes 86,400 rows a day.
 
 A run that produced a transaction names it, and the tab opens it in the same
 activity detail any other transaction opens in. That link has to keep working
-however long ago the run happened, which is why **clearing activity history
+for as long as the run is retained, which is why **clearing activity history
 hides rows rather than deleting them**. A hidden row is absent from every list
 and still resolves by id. The per-wallet history cap likewise skips any row an
 automation run points at: the cap exists to bound storage, not to break the
@@ -444,15 +457,12 @@ point where it should be cheapest.
 
 ### 3. Status tools for live automations
 
-`wallet_list_automations` and `wallet_get_automation_status` expose the cron
-expression and next fire time, the last tick's time and outcome, the calls it
-returned, the last transaction hash and its status, the consecutive-failure
-count, and the disable reason. An automation that stopped should be debuggable
-without the owner reading a log.
-
-A schedule-validation tool — expression in, next N fire times out — costs
-nothing and keeps an agent from installing `*/12 * * *` and wondering why it
-never fires.
+`wallet_list_automations` exposes the cron expression and next fire time, the
+last tick's time and outcome, the last request ID, the consecutive-failure
+count, and the stopped reason. An agent can follow the request through the
+ordinary activity tools. `wallet_dry_run_automation` accepts an optional cron
+expression and returns its next fire times, so schedule validation is part of
+the dry-run loop rather than a separate tool.
 
 ## Implementation shape
 
@@ -470,21 +480,20 @@ never fires.
 ## Not in scope
 
 - Compiling anything inside the wallet.
-- Running ticks while the wallet is locked or the process is not running.
+- Running ticks while the process is not running.
 - Backfilling missed ticks.
-- Cumulative spend budgets. The bound is the policy, `max_fee_per_gas`, and the
-  fact that a send must confirm before the same wallet and chain runs again.
+- Cumulative spend budgets. Policy amount and fee matchers apply to each call
+  or prepared envelope; confirmation serialization limits concurrency, not the
+  total value of later sends.
 - Any automation-specific relaxation of the policy engine.
 
-## Open questions
+## Remaining open question
 
 - **Unverified source display.** An owner looking at 4 KB of hex has no way to
   understand it. The agent could attach the Solidity it compiled, shown clearly
   labeled as unverified. This makes the tab more useful and also creates a place
   to display source that does not correspond to the bytecode. Not committed
   either way.
-- **Selector for `automate`.** Left to implementation; the interface above is
-  the candidate.
-- **A floor on fire frequency.** Six-field cron can express `* * * * * *` —
-  every second — which no RPC endpoint will enjoy. Whether to reject such an
-  expression at install time or let the serialization rule absorb it is open.
+The implemented selector is `automate(bytes)`. Six-field cron may request an
+every-second tick, and the driver enforces a one-second sleep floor rather than
+rejecting that schedule.

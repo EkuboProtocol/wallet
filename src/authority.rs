@@ -871,10 +871,11 @@ impl OwnerApi {
 
     /// One automation's run history, newest first.
     ///
-    /// Every tick is in here, including the ones that did nothing, because the
-    /// question this screen answers is "what has this thing been doing" and a
-    /// log of only the eventful runs cannot tell a quiet automation from a
-    /// stopped one.
+    /// Every retained reported tick is in here, including the ones that did
+    /// nothing, because the question this screen answers is "what has this thing
+    /// been doing" and a log of only the eventful runs cannot tell a quiet
+    /// automation from a stopped one. A scheduler error that produces no report
+    /// is not a run-history row.
     pub fn automation_runs(&self, automation_id: Uuid, limit: usize) -> Result<Vec<AutomationRun>> {
         AutomationStore::production(self.config.data_dir())?.runs(automation_id, limit)
     }
@@ -897,9 +898,10 @@ impl OwnerApi {
     ///
     /// One operation for both "it broke and I fixed the cause" and "I changed
     /// my policy and this needs to run under the new one", because they are the
-    /// same act: the owner saying yes, run this, under what my policy says
-    /// today. Rebinding is the whole point — re-enabling while still bound to a
-    /// revision that no longer exists would stop it again on its next tick.
+    /// same act in the owner UI: run this stored definition under what the
+    /// policy says today. Rebinding is the whole point — re-enabling while
+    /// still bound to a revision that no longer exists would stop it again on
+    /// its next tick. Agents have a separate replace-by-key route.
     pub fn relink_automation(&self, automation_id: uuid::Uuid) -> Result<Automation> {
         let mut store = AutomationStore::production(self.config.data_dir())?;
         let automation = store

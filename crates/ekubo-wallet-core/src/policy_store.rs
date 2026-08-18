@@ -1979,18 +1979,20 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
     )
 }
 
-/// Owner-installed bytecode the scheduler polls, and the bookkeeping one tick
+/// Agent-installed bytecode the scheduler polls, and the bookkeeping one tick
 /// leaves behind.
 ///
 /// `policy_revision` is the load-bearing column. An automation is authorized
-/// against the policy that was active when the owner installed or relinked it,
+/// against the policy active when an agent installed it or the owner relinked it,
 /// and a tick reads this before it reads anything else: if the wallet's current
 /// revision differs, the automation moves to `awaiting_relink` and does not
 /// run. Send-time policy evaluation cannot replace that check, because it
 /// answers a different question. It says whether a call may proceed; this says
-/// whether the owner meant this job to keep running under a policy they have
-/// since replaced. Without it, widening a policy for an unrelated reason
-/// silently re-arms every automation that policy had previously stopped.
+/// whether this stored definition remains bound to the policy revision under
+/// which it was installed or reviewed. Without it, widening a policy for an
+/// unrelated reason silently re-arms dormant automations. An active agent can
+/// replace a key under the current revision, but can already submit any calls
+/// that revision permits directly.
 ///
 /// `bytecode` is a `BLOB` for the same reason every other byte string here is:
 /// a column of bytes is bytes, where hex `TEXT` would be a claim the schema

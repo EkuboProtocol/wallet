@@ -2533,7 +2533,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_install_automation",
-        description = "Install EVM bytecode the wallet polls on a cron schedule, whose returned calls go through the ordinary signing policy. No user approval is needed to install one: an automation only suggests transactions, and the policy decides whether any of them may send. IMPORTANT: unless the active policy already allows every call the bytecode emits to send automatically, the automation stops on its first tick and reports why — so dry-run it with wallet_dry_run_automation first, and propose a policy with wallet_propose_policy if the batch is not allowed. Read wallet://skills/write-ekubo-automation/SKILL.md before writing bytecode. Installing with an automation_key that already exists replaces that automation, so retrying this call is safe.",
+        description = "Install EVM bytecode the wallet polls on a cron schedule, whose returned calls go through the ordinary signing policy. No user approval is needed to install one: an automation only suggests transactions, and the policy decides whether any of them may send. IMPORTANT: unless the active policy allows every emitted call, the batch cannot send — review or unmatched results queue one diagnostic and stop the job, while an explicit deny is rejected before any request or signature and currently leaves the job enabled. Dry-run it with wallet_dry_run_automation first, and propose a policy with wallet_propose_policy if the intended batch is not allowed. Read wallet://skills/write-ekubo-automation/SKILL.md before writing bytecode. Installing with an automation_key that already exists replaces that automation, so retrying this call is safe.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2614,7 +2614,7 @@ impl WalletMcpServer {
             replaced_existing: installed.replaced.is_some(),
             upcoming: schedule.preview(chrono::Utc::now(), 3),
             instruction: format!(
-                "The automation is installed and will run on its schedule while the wallet is unlocked. It stops on its own if policy revision {} stops allowing its calls, if a batch reverts on chain, or after repeated failures; check wallet_list_automations for `stopped_reason` before assuming it is still running. Tell the user it exists and what it does.",
+                "The automation is installed and will run on its schedule while the wallet application is running; signing also depends on the OS credential store allowing key access. It stops on its own if policy revision {} changes, if a queued review/unmatched result or sent batch fails, or after repeated poll failures; an explicit policy deny is rejected without a signature but currently leaves the job enabled. Check wallet_list_automations before assuming it is still running. Tell the user it exists and what it does.",
                 automation.policy_revision
             ),
         }))
@@ -2672,7 +2672,7 @@ impl WalletMcpServer {
                 "Every automation on this wallet is running.".into()
             } else {
                 format!(
-                    "{stopped} automation(s) have stopped. Read each `stopped_reason`: one in `awaiting_relink` needs the user to review it again in the Automations tab because the signing policy changed, and one in `disabled` failed — fix the bytecode or the policy and install again under the same automation_key."
+                    "{stopped} automation(s) have stopped. Read each `stopped_reason`: one in `awaiting_relink` stopped because the signing policy changed and can be started from the Automations tab or deliberately replaced after re-reading the current policy, while one in `disabled` was stopped explicitly or after a failure — inspect the reason before installing again under the same automation_key."
                 )
             },
             automations,

@@ -6,21 +6,63 @@ provides the companion code-oriented boundary map.
 ## Assets and trust boundaries
 
 Protected assets include private keys, signed transactions and messages, owner
-policy, network and token metadata, update authority, and privacy-sensitive
-settings. Wallet authority lives in SQLCipher or the OS credential store;
+policy, network and token metadata, installed automation definitions and run
+history, update authority, and privacy-sensitive settings. Wallet authority and
+persistent executable intent live in SQLCipher or the OS credential store;
 plaintext configuration files are not wallet authority.
 
 `ekubo-wallet-core` is the security kernel. GPUI, MCP agents, dapps, RPC
 servers, relays, token lists, update hosting, clipboard contents, imported
-files, and the harness-reported client kind are untrusted. Agent input is
-assumed prompt-injected and hostile. OS human-presence services, platform
-credential storage, release signing keys, and pinned dependencies are trusted
-within their documented purposes.
+files, automation bytecode and configuration, and the harness-reported client
+kind are untrusted. Agent input is assumed prompt-injected and hostile. OS
+human-presence services, release signing keys, and pinned dependencies are
+trusted within their documented purposes. Platform credential storage is
+trusted for at-rest encryption and ordinary availability, but not uniformly
+for application isolation from another process running as the desktop user.
 
 An unlocked-window attacker may automate GPUI but cannot satisfy a fresh OS
-human-presence challenge. A same-user process can access the local MCP IPC by
-design and can deny service. Debugger/injection access, a compromised loaded
+human-presence challenge. A same-user process using public filesystem, IPC, or
+credential-store APIs is in scope; it can access the local MCP IPC by design
+and can deny service. Debugger/injection access, a compromised loaded
 dependency or OS, and control of the wallet process are out of scope.
+
+## Critical Windows and Linux credential-store limitation
+
+The current `keyring` v1 defaults persist both the SQLCipher database key and
+raw account private keys in the macOS User keychain, Windows generic Credential
+Manager, or the Linux Secret Service default collection. The service and
+account strings are lookup identifiers, not application authorization.
+
+On Windows, Microsoft documents that
+[generic credentials can be read and written by user processes](https://learn.microsoft.com/en-us/windows/win32/secauthn/kinds-of-credentials).
+The [Secret Service specification](https://specifications.freedesktop.org/secret-service/latest/ch10.html)
+does not mandate access control, and GNOME states that
+[any application with the same user's privileges can read secrets in an unlocked keyring](https://wiki.gnome.org/Projects%282f%29GnomeKeyring%282f%29SecurityFAQ.html).
+Ekubo Wallet does not establish or verify a stronger application-specific
+control on either platform.
+
+Consequently, same-user malware on Windows or Linux can query the credential
+service for the database key and raw account keys without owner presence. A
+prompt-injected agent or harness with permission to execute shell commands or
+programs as the desktop user has the same capability. This attack does not use
+the wallet MCP API: it bypasses the wallet process entirely, creates an
+external signer, and defeats wallet policy, native review, and wallet audit
+records. Closing Ekubo Wallet does not remove the persistent credentials.
+SQLCipher continues to protect a copied database when its unwrap key is
+unavailable, and the credential services protect against other OS users and
+offline disk access; neither is a same-user application-isolation boundary.
+
+The current macOS backend uses Keychain item access controls. Apple documents
+that the [creating application is automatically trusted and item access is
+tracked by its code-signing requirement](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/AboutCS/AboutCS.html).
+That is a materially stronger application boundary, but it does not protect a
+compromised wallet process, signing identity, authenticated owner session, or
+operating system.
+
+This Windows and Linux behavior is an open critical boundary failure, not an
+accepted custody guarantee; [issue #112](https://github.com/EkuboProtocol/wallet/issues/112)
+tracks the required redesign. Until it is fixed, valuable Windows and Linux
+accounts depend on preventing untrusted code from running as the wallet user.
 
 ## Owner authorization
 
@@ -86,6 +128,16 @@ Policy cannot reveal raw key
 material or grant exports, settings mutation, review decisions, owner
 authorization, or other owner capabilities.
 
+RPC-reported balance changes and simulation success are not policy inputs, but
+the native review displays them as expected effects to help a person decide.
+They are advisory rather than authenticated chain state: a dishonest configured
+endpoint can fabricate favorable effects or conceal unfavorable ones. The
+exact target, calldata summary and payload, native value, transaction type,
+nonce, gas and fee ceiling remain the authoritative reviewed fields, with local
+clear-signing interpretations where available. Owner authentication of an RPC
+profile controls who may select that input; it does not make the endpoint's
+later answers truthful.
+
 Fee liability on the automatic path is a policy question and only a policy
 question. `gas_limit`, `max_fee_per_gas`, and `max_priority_fee_per_gas` are
 prepared-envelope matchers, so a rule bounds `gas_limit × max_fee_per_gas`
@@ -104,6 +156,65 @@ unlikely and awkward to arrange, and a mandatory ceiling would refuse ordinary
 transactions on every chain whose fee scale it was not written for. Owners
 running automatic policies against a single public endpoint should carry the
 bound as a rule; `docs/policy-authoring.md` spells it.
+
+Atomic batches hardcode Calibur's non-upgradeable v1.1.0 implementation address
+and runtime hash. Before simulation, core requires the configured endpoint to
+report exactly those runtime bytes at that address, and a delegation
+authorization can name only that address. This is still an RPC assertion, not
+authenticated chain state: the wallet has no local consensus or `eth_getProof`
+path, and it does not restrict batches to Calibur's published deployment chains.
+On an owner-added network, safety therefore also depends on the real chain
+having the canonical implementation at that address. A dishonest endpoint could
+conceal different or absent code; different code at the delegated address could
+exercise the account's durable EIP-7702 authority. Owners must independently
+verify the deployment before enabling batches or automatic policy on a custom
+network.
+
+Policy limits are evaluated per call and per prepared transaction. They are not
+cumulative spend budgets or rate limits. A hostile agent or installed
+automation can repeat an otherwise permitted action whenever the wallet and
+chain signing slot becomes free. Owners who need a lifetime or time-window
+budget must encode one in on-chain state or avoid granting that action automatic
+authority; a numeric matcher on one call does not cap the sum of later calls.
+
+## Scheduled automations
+
+An MCP agent may install, replace, or disable an automation without owner
+authentication. The stored bytecode, configuration, name, key, and schedule are
+hostile executable intent, not authority: each non-empty output is synthesized
+into an ordinary execution plan, freshly simulated and prepared, and passed to
+the same current-policy automatic execution path as an inline agent plan. The
+scheduler holds `AgentExecutionAuthority`, not `OwnerApi` or an arbitrary
+signing operation.
+
+Automations are bound to the wallet instance, network, and policy revision they
+name at installation. A policy revision change moves an enabled automation to
+`awaiting_relink`; that stored definition cannot silently start operating under
+a later policy. The owner can start it again from the desktop, and an MCP agent
+can install a replacement under the same key while naming the active revision.
+That does not give a live hostile agent new authority: it could already submit
+the replacement's calls directly, and both routes remain bounded by the current
+policy. Revision binding protects against dormant executable intent inheriting
+a later policy, not against an active agent using that policy. The scheduler
+re-reads wallets and enabled networks each pass, serializes sends through the
+wallet-and-chain in-flight slot, skips missed ticks, bounds bytecode,
+configuration, returned calls, calldata, and installed-job counts, and stops
+after repeated poll failures or a failed sent transaction.
+
+The automation poll and its RPC response grant nothing. The code runs only in
+an `eth_simulateV1` state override and the returned calls are untrusted input to
+the ordinary policy path. A review or unmatched result queues one diagnostic
+request and disables the automation; an explicit policy deny is rejected before
+any request or signature is created. The current scheduler reports that deny as
+a failed pass without a run-history row and leaves the automation enabled. It
+can therefore repeat RPC work and prevent later due jobs for the same wallet and
+network from running in that pass. This is an availability and RPC-load
+residual, not a signing bypass.
+
+There is no application-level wallet lock state. Ticks run only while the
+wallet process is running; an automatic signature also depends on the platform
+credential store allowing the key to be read. Closing the process or suspending
+the machine skips ticks rather than replaying them later.
 
 ## Updates and release supply chain
 
@@ -134,7 +245,11 @@ local MCP IPC listener directly.
 
 ## Local platform and lifecycle
 
-The OS credential store protects the database key and account keys.
+The platform credential-store consequences are described in
+[Critical Windows and Linux credential-store limitation](#critical-windows-and-linux-credential-store-limitation).
+On those platforms, closing the process stops scheduled execution but does not
+remove the persistent SQLCipher or account-key credentials.
+
 Transaction notifications default to detailed previews: their titles disclose
 lifecycle state and their bodies name the local account and configured network.
 They contain no request identifier or approval action. The encrypted preview

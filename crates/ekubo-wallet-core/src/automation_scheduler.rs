@@ -17,11 +17,11 @@
 //! moved, which is precisely what re-deriving from live state every tick exists
 //! to avoid.
 //!
-//! **Nothing retries.** Every terminal disappointment — a policy that did not
-//! allow the batch, a batch that reverted on chain, a transaction that never
-//! mined — stops the automation and says why. A blob that emitted a reverting
-//! call will emit it again next tick, so stopping is the only response that does
-//! not burn gas in a loop.
+//! **Sent failures do not retry.** A queued review/unmatched result, a batch
+//! that reverted on chain, or a transaction that never mined stops the
+//! automation and says why. An explicit policy deny is returned as a scheduler
+//! error before a pending row exists and currently leaves the automation
+//! enabled. No denied call is signed.
 
 use crate::{
     agent_authority::AgentExecutionAuthority,
@@ -342,12 +342,13 @@ impl AutomationScheduler {
     }
 }
 
-/// Append one tick's outcome to the automation's history.
+/// Append one reported tick's outcome to the automation's history.
 ///
-/// Every tick, including the ones that did nothing. A log that skipped the
-/// quiet runs could not tell a working automation apart from a stopped one,
-/// which is the distinction a person opening this screen is usually there to
-/// make.
+/// Every tick that reaches a [`TickReport`], including the ones that did
+/// nothing. An error propagated before `run_one` can return — currently an
+/// explicit policy deny is one — has no report to append. Among reported runs,
+/// retaining quiet outcomes distinguishes a working automation from a stopped
+/// one.
 fn log_run(
     automations: &Mutex<AutomationStore>,
     report: &TickReport,

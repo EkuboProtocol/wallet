@@ -23,6 +23,12 @@ prepared transaction. Sending through one runs fresh real-chain simulation,
 exact envelope preparation, and current-policy evaluation before signing or
 queuing.
 
+The configured RPC supplies simulation results and can lie. Expected balance
+changes are advisory review evidence, never automatic-policy inputs or
+authenticated state. The exact target, calldata/payload, native value, and
+prepared transaction fields in the document are authoritative; refreshing a
+review asks an endpoint again but does not create an independent trust anchor.
+
 Private-key export uses the same owner-authentication boundary. The revealed
 value is held for 30 seconds, copying requires a separate click, and clipboard
 cleanup occurs only when the clipboard still contains that exact value.

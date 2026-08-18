@@ -19,6 +19,15 @@ a named pipe restricted to the current user's SID and verifies the connected
 peer SID. Native package signatures protect helper distribution integrity, not
 IPC access. Same-user local code execution is the authorization boundary.
 
+On Windows and Linux, that boundary currently extends beyond IPC: the generic
+per-user credential backend does not isolate the SQLCipher key or raw account
+keys to Ekubo Wallet. Same-user malware, or a prompt-injected harness allowed
+to execute local programs, can query those credentials directly and create an
+external signer without using MCP. The restricted MCP interface below never
+exports a key, but it cannot enforce policy or review on a signer created by
+this out-of-process credential-store bypass. See the
+[threat model](threat-model.md#critical-windows-and-linux-credential-store-limitation).
+
 Every bridge connection receives a new MCP session UUID and a freshly
 restricted `WalletMcpServer`. The IPC layer receives `AgentApi`, not `OwnerApi`.
 `AgentApi` is a server factory; the server it constructs intentionally opens

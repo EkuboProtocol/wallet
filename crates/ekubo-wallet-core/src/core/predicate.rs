@@ -15,10 +15,11 @@
 //!   error — calldata too short, a decode that fails, a literal that does not
 //!   parse as the value's type — makes that rule inapplicable. Ordered policy
 //!   evaluation then continues to the next rule.
-//! * **A matched call starts with a canonical ABI encoding.** Solidity permits
-//!   trailing calldata, so [`Predicate::Selector`] re-encodes decoded values
-//!   and requires that canonical encoding as a prefix. Dirty padding,
-//!   malformed offsets, out-of-width words, and truncation remain unreadable.
+//! * **A matched call is exactly a canonical ABI encoding.** Solidity permits
+//!   trailing calldata and some contracts inspect it directly, so
+//!   [`Predicate::Selector`] re-encodes decoded values and requires byte-for-byte
+//!   equality. Dirty padding, malformed offsets, out-of-width words,
+//!   truncation, and trailing bytes remain unreadable.
 //! * **Unreadable is neither a match nor a mismatch.** It survives boolean
 //!   composition, but at the rule layer it makes that rule inapplicable so
 //!   evaluation can continue to a later ordered fallback.
