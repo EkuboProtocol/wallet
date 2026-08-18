@@ -3374,7 +3374,7 @@ impl SetupTask {
                 "Paste a WalletConnect URI from any dapp and use it as you would with any wallet. Connecting approves nothing on its own: what the dapp asks for still comes here first."
             }
             Self::RelaxPolicy => {
-                "When you are ready, write a policy saying what an agent may do without asking you. Until you do, every transaction waits for you — which is the safe default, not a step you have skipped."
+                "Install a policy enabling an agent to transact without your permission. You may ask your agent to propose one for you. Until you do, every transaction waits for you — which is the safe default, not a step you have skipped."
             }
         }
     }
