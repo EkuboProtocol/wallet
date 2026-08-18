@@ -10209,6 +10209,7 @@ impl WalletWindow {
                 .into_any_element()
         };
         div()
+            .debug_selector(|| "activity-detail-overlay".to_owned())
             .absolute()
             .inset_0()
             .flex()
@@ -12363,15 +12364,24 @@ impl WalletWindow {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .gap_0p5()
                     .child(
                         h_flex()
                             .min_w_0()
                             .items_center()
                             .gap_2()
-                            .child(div().min_w_0().truncate().font_semibold().child(
-                                selectable_text(format!("automation-title-{id}"), &automation.name),
-                            ))
+                            .pb_0p5()
+                            .child(
+                                div()
+                                    .debug_selector(|| "automation-title".to_owned())
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_semibold()
+                                    .child(selectable_text(
+                                        format!("automation-title-{id}"),
+                                        &automation.name,
+                                    )),
+                            )
                             .child(status_pill(state_label, tone, cx)),
                     )
                     // The name is what the owner calls it; the key is what an
@@ -12380,13 +12390,32 @@ impl WalletWindow {
                     // where nobody looking for it would think to look.
                     .child(
                         div()
+                            .debug_selector(|| "automation-key".to_owned())
                             .min_w_0()
                             .truncate()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(selectable_text(
                                 format!("automation-key-{id}"),
-                                &format!("key {}", automation.key),
+                                &format!("Key: {}", automation.key),
+                            )),
+                    )
+                    // Which account it spends from and on which chain: the
+                    // same stack, because it is all one answer to "what is
+                    // this thing".
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_text(
+                                format!("automation-account-{id}"),
+                                &format!(
+                                    "{} · {}",
+                                    automation.wallet_id,
+                                    chain_label(Some(automation.chain_id), networks)
+                                ),
                             )),
                     ),
             )
@@ -12406,19 +12435,6 @@ impl WalletWindow {
             .flex_col()
             .gap_3()
             .child(header)
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_text(
-                        format!("automation-account-{id}"),
-                        &format!(
-                            "{} · {}",
-                            automation.wallet_id,
-                            chain_label(Some(automation.chain_id), networks)
-                        ),
-                    )),
-            )
             .child(Self::render_automation_schedule(automation, now, cx));
 
         // Why it stopped comes before anything else about it. An automation
@@ -12503,14 +12519,32 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_0p5()
-            .child(div().child(selectable_text(
-                format!("automation-cadence-{id}"),
-                cadence.as_ref().unwrap_or(&expression),
-            )))
             .child(
                 div()
+                    .debug_selector(|| "automation-cadence".to_owned())
+                    .child(selectable_text(
+                        format!("automation-cadence-{id}"),
+                        cadence.as_ref().unwrap_or(&expression),
+                    )),
+            )
+            .child(
+                h_flex()
+                    .debug_selector(|| "automation-schedule".to_owned())
+                    .min_w_0()
+                    .flex_wrap()
+                    .gap_1p5()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
+                    // The expression is code, and set in the text face it is
+                    // hard to compare against the one an agent reported: the
+                    // asterisks and spaces of a cron field only line up in the
+                    // mono face.
+                    .when(cadence.is_some(), |line| {
+                        line.child(div().font_family(MONO_FONT_FAMILY).child(selectable_text(
+                            format!("automation-expression-{id}"),
+                            &expression,
+                        )))
+                    })
                     .child(selectable_text(
                         format!("automation-schedule-{id}"),
                         &match &cadence {
@@ -12518,7 +12552,7 @@ impl WalletWindow {
                             // is no sentence: the line above is already the
                             // expression.
                             None => timing,
-                            Some(_) => format!("{expression} · {timing}"),
+                            Some(_) => format!("· {timing}"),
                         },
                     )),
             )

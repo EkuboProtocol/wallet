@@ -375,6 +375,83 @@ fn a_record_detail_lays_out_with_its_fixed_footer(cx: &mut gpui::TestAppContext)
     release(cx, &view);
 }
 
+/// Clearing history hides finished records rather than deleting them, exactly
+/// so an automation run's link to the transaction it produced keeps resolving.
+/// The window only ever looked for the record in the visible list, so following
+/// one after a tidy-up dropped the selection on the next frame and left the
+/// reader on an empty inbox with nothing open.
+#[gpui::test]
+fn a_transaction_cleared_from_history_still_opens_from_the_run_that_made_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let request_id = uuid::Uuid::new_v4();
+    let record =
+        OwnerActivityRecord::Transaction(Box::new(cleared_transaction_fixture(request_id)));
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        // The list after a clear: the row is hidden, so nothing here has it.
+        snapshot.activity = Ok(Arc::from(Vec::new()));
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Activity);
+        wallet.detached_activity_records.insert(request_id, record);
+        wallet.selected_record = Some(request_id);
+    });
+
+    let laid_out = measure(cx, window, &view, &["activity-detail-overlay"]);
+    assert!(
+        laid_out[0].is_some(),
+        "a record the list has forgotten must still draw its detail"
+    );
+    cx.update_entity(&view, |wallet, _| {
+        assert_eq!(
+            wallet.selected_record,
+            Some(request_id),
+            "the selection must survive the frame that reconciles it against the list"
+        );
+    });
+    release(cx, &view);
+}
+
+fn cleared_transaction_fixture(request_id: uuid::Uuid) -> PendingTransaction {
+    let now = chrono::Utc::now();
+    serde_json::from_value(serde_json::json!({
+        "request_id": request_id,
+        "wallet_instance_id": uuid::Uuid::new_v4(),
+        "wallet_id": "primary",
+        "wallet_address": "0x1111111111111111111111111111111111111111",
+        "network_name": "ethereum",
+        "chain_id": "1",
+        "execution_plan": {
+            "schema_version": "1",
+            "chain_id": "1",
+            "caip2_chain_id": "eip155:1",
+            "sender": "0x1111111111111111111111111111111111111111",
+            "ordered_steps": [{
+                "step": 1,
+                "kind": "execution",
+                "transaction": {
+                    "chain_id": "1",
+                    "from": "0x1111111111111111111111111111111111111111",
+                    "to": "0x2222222222222222222222222222222222222222",
+                    "data": "0x",
+                    "value": "1"
+                }
+            }]
+        },
+        "plan_source": "an automation",
+        "digest": "0x00",
+        "policy_revision": 1,
+        "approval_required": false,
+        "status": "confirmed",
+        "created_at": now,
+        "updated_at": now
+    }))
+    .expect("test transaction")
+}
+
 #[gpui::test]
 fn an_expanded_multi_megabyte_transaction_payload_stays_virtual_and_scrollable(
     cx: &mut gpui::TestAppContext,
@@ -1859,6 +1936,27 @@ fn screenshots() {
                 // The Policies page is only meaningfully reviewable with an
                 // account selected and its real editor open. The renderer will
                 // load the default policy for this throwaway account on draw.
+                // An empty tab is a screenshot of a paragraph. The one worth
+                // looking at has something installed, something stopped, and a
+                // dry run open on it.
+                if route == Route::Automations {
+                    let running = automation_fixture(AutomationState::Enabled, None);
+                    let stopped = automation_fixture(
+                        AutomationState::Disabled,
+                        Some("the last three ticks reverted".to_owned()),
+                    );
+                    let runs = vec![
+                        run_fixture(running.id, RunOutcome::Sent, Some(uuid::Uuid::new_v4())),
+                        run_fixture(running.id, RunOutcome::Idle, None),
+                        run_fixture(running.id, RunOutcome::Failed, None),
+                    ];
+                    wallet.automation_dry_runs.insert(
+                        running.id,
+                        AutomationDryRunState::Ready(Box::new(dry_run_fixture())),
+                    );
+                    snapshot.automation_runs = BTreeMap::from([(running.id, runs)]);
+                    snapshot.automations = Ok(vec![running, stopped]);
+                }
                 if route == Route::Policies {
                     snapshot.accounts = Ok(vec![WalletMetadata {
                         instance_id: uuid::Uuid::nil(),
@@ -2078,7 +2176,7 @@ fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestApp
 }
 
 #[gpui::test]
-fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui::TestAppContext) {
+fn a_stopped_automation_leads_with_why_and_offers_to_start_it_again(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
@@ -2103,9 +2201,9 @@ fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui:
         &["automation-list", "stop-automation", "relink-automation"],
     );
     assert!(laid_out[0].is_some(), "the list must draw");
-    // The running one offers Stop; the stopped one offers Run again. Both are
-    // on screen at once, which is the case that matters — an owner reading
-    // this screen is deciding about one of several.
+    // The running one offers Stop; the stopped one offers Start. Both are on
+    // screen at once, which is the case that matters — an owner reading this
+    // screen is deciding about one of several.
     assert!(laid_out[1].is_some(), "a running automation can be stopped");
     assert!(
         laid_out[2].is_some(),
@@ -2121,10 +2219,164 @@ fn an_empty_automations_tab_says_what_one_would_be(cx: &mut gpui::TestAppContext
     cx.update_entity(&view, |wallet, _| {
         wallet.set_route(Route::Automations);
     });
+    let laid_out = measure(cx, window, &view, &["automation-list", "automations-empty"]);
     // No list at all rather than an empty frame, so the screen is never a
     // blank box the reader has to interpret.
-    assert!(measure(cx, window, &view, &["automation-list"])[0].is_none());
+    assert!(laid_out[0].is_none(), "an empty list must not draw");
+    // Empty is the state most owners see, and it is the one chance the tab has
+    // to explain what an automation is before anyone installs one.
+    assert!(
+        laid_out[1].is_some(),
+        "the empty tab must say what an automation would be"
+    );
     release(cx, &view);
+}
+
+/// The name is the owner's word for it and the key is the agent's. Reading
+/// order follows: the label first, the address it is known by underneath.
+#[gpui::test]
+fn an_automations_key_sits_under_the_name_the_owner_gave_it(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let automation = automation_fixture(AutomationState::Enabled, None);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automations = Ok(vec![automation]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+
+    let laid_out = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "automation-title",
+            "automation-key",
+            "automation-cadence",
+            "automation-schedule",
+        ],
+    );
+    let title = laid_out[0].expect("the name must draw");
+    let key = laid_out[1].expect("the key must draw");
+    assert!(
+        key.origin.y > title.origin.y,
+        "the key belongs under the name, not beside or above it: {title:?} {key:?}"
+    );
+    // The cadence in words leads, with the expression it was installed as
+    // underneath: one is readable, the other is checkable, and neither
+    // replaces the other.
+    let cadence = laid_out[2].expect("the schedule must read as a sentence");
+    let expression = laid_out[3].expect("the expression must stay on screen");
+    assert!(
+        expression.origin.y > cadence.origin.y,
+        "the expression belongs under the sentence: {cadence:?} {expression:?}"
+    );
+    release(cx, &view);
+}
+
+/// Deleting is offered only once it is stopped: a delete mid-tick races the
+/// scheduler, and "should this keep existing" is a second question anyway.
+#[gpui::test]
+fn only_a_stopped_automation_offers_to_be_deleted(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let running = automation_fixture(AutomationState::Enabled, None);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automations = Ok(vec![running]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+    assert!(
+        measure(cx, window, &view, &["delete-automation"])[0].is_none(),
+        "a running automation must be stopped before it can be deleted"
+    );
+
+    let stopped = automation_fixture(
+        AutomationState::Disabled,
+        Some("you stopped this automation".to_owned()),
+    );
+    cx.update_entity(&view, |wallet, _| {
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automations = Ok(vec![stopped]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+    assert!(
+        measure(cx, window, &view, &["delete-automation"])[0].is_some(),
+        "a stopped automation must be removable without an agent"
+    );
+    release(cx, &view);
+}
+
+/// A dry run is offered in every state, including stopped — "what would this
+/// do right now" is the one question a stopped automation can still answer.
+#[gpui::test]
+fn a_dry_run_can_be_asked_for_and_its_answer_stays_on_screen(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let automation = automation_fixture(
+        AutomationState::Disabled,
+        Some("you stopped this automation".to_owned()),
+    );
+    let id = automation.id;
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Automations);
+        if let Some(snapshot) = wallet.desktop_snapshot.as_ref() {
+            let mut replacement = (**snapshot).clone();
+            replacement.automations = Ok(vec![automation]);
+            wallet.desktop_snapshot = Some(std::sync::Arc::new(replacement));
+        }
+    });
+    let laid_out = measure(
+        cx,
+        window,
+        &view,
+        &["dry-run-automation", "automation-dry-run"],
+    );
+    assert!(laid_out[0].is_some(), "a dry run must be offerable");
+    assert!(
+        laid_out[1].is_none(),
+        "nothing was run, so there is nothing to report"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.automation_dry_runs.insert(
+            id,
+            crate::desktop::AutomationDryRunState::Ready(Box::new(dry_run_fixture())),
+        );
+    });
+    assert!(
+        measure(cx, window, &view, &["automation-dry-run"])[0].is_some(),
+        "a finished dry run must stay on screen to be read"
+    );
+    release(cx, &view);
+}
+
+fn dry_run_fixture() -> crate::authority::AutomationDryRun {
+    crate::authority::AutomationDryRun {
+        ran_at: chrono::Utc::now(),
+        block_number: Some(21_000_000),
+        failure: None,
+        calls: vec![ekubo_wallet_core::automation::PolledCall {
+            to: alloy::primitives::Address::repeat_byte(0x22),
+            value: alloy::primitives::U256::ZERO,
+            data: alloy::primitives::Bytes::from_static(&[0x4e, 0x71, 0xd9, 0x2d]),
+        }],
+        verdict: Some(crate::authority::AutomationDryRunVerdict {
+            policy_revision: 4,
+            sends_automatically: false,
+            simulation_succeeded: true,
+            simulation_failure: None,
+            findings: vec!["no rule matched call 1".to_owned()],
+        }),
+    }
 }
 
 fn automation_fixture(state: AutomationState, stopped_reason: Option<String>) -> Automation {
