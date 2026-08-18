@@ -2227,56 +2227,93 @@ fn a_finished_row_does_nothing_when_it_is_pressed(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestAppContext) {
     // The window can be dragged down to 660x500, and the card does not scroll:
-    // whatever it draws has to fit there outright, with every task still
-    // unfinished, which is the tallest the card ever gets.
+    // whatever it draws has to fit there outright.
+    //
+    // Which state is the tallest is not obvious, so it is not guessed at. Only
+    // the task up next is explained, and the explanations are not the same
+    // length — the longest belongs to the third task, which nobody sees until
+    // they are two tasks in. An empty checklist is the state that gets looked
+    // at; a card that overflowed here would do it to somebody who had already
+    // done some of this.
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
     let smallest = gpui::size(px(660.0), px(500.0));
-    // The card sizes itself from the window rather than from the space it is
-    // handed, because the window is what its margins are measured off — so the
-    // window itself has to shrink for this to be the real case.
-    cx.simulate_window_resize(window, smallest);
-    let bounds = measure_at(
-        cx,
-        window,
-        &view,
-        smallest,
-        &[
-            "guided-setup",
-            "guided-setup-header",
-            "guided-setup-tasks",
-            "guided-setup-dismiss",
-        ],
-    );
-    let card = bounds[0].expect("the card must draw in a minimum-size window");
-    let header = bounds[1].expect("the card header must draw");
-    let tasks = bounds[2].expect("the task list must draw");
-    let dismiss = bounds[3].expect("the way out must draw");
+    for done in [
+        SetupObservation::default(),
+        SetupObservation {
+            account: true,
+            ..SetupObservation::default()
+        },
+        SetupObservation {
+            account: true,
+            agent: true,
+            ..SetupObservation::default()
+        },
+        SetupObservation {
+            account: true,
+            agent: true,
+            signature: true,
+            ..SetupObservation::default()
+        },
+        SetupObservation {
+            account: true,
+            agent: true,
+            signature: true,
+            dapp: true,
+            ..SetupObservation::default()
+        },
+    ] {
+        cx.update_entity(&view, |wallet, _| {
+            wallet.guided_setup.latch(done);
+        });
+        // The card sizes itself from the window rather than from the space it
+        // is handed, because the window is what its margins are measured off —
+        // so the window itself has to shrink for this to be the real case.
+        cx.simulate_window_resize(window, smallest);
+        let bounds = measure_at(
+            cx,
+            window,
+            &view,
+            smallest,
+            &[
+                "guided-setup",
+                "guided-setup-header",
+                "guided-setup-tasks",
+                "guided-setup-dismiss",
+            ],
+        );
+        let card = bounds[0].expect("the card must draw in a minimum-size window");
+        let header = bounds[1].expect("the card header must draw");
+        let tasks = bounds[2].expect("the task list must draw");
+        let dismiss = bounds[3].expect("the way out must draw");
 
-    assert!(
-        card.origin.y >= px(0.0) && card.origin.y + card.size.height <= smallest.height,
-        "the card does not fit a 660x500 window: {card:?}"
-    );
-    assert!(
-        card.origin.x >= px(0.0) && card.origin.x + card.size.width <= smallest.width,
-        "the card does not fit across a 660x500 window: {card:?}"
-    );
-    // The header carries the count and the fold, and the link is the way out.
-    // Both are inside the card, so both follow from the fit above — but they
-    // are what the fit is for, so they are asserted rather than assumed.
-    assert!(
-        header.origin.y >= px(0.0) && header.origin.y + header.size.height <= smallest.height,
-        "the header left the window: {header:?}"
-    );
-    assert!(
-        dismiss.origin.y >= px(0.0) && dismiss.origin.y + dismiss.size.height <= smallest.height,
-        "the dismiss link left the window: {dismiss:?}"
-    );
-    assert!(
-        tasks.origin.y >= px(0.0) && tasks.origin.y + tasks.size.height <= smallest.height,
-        "the task list ran off the window instead of fitting inside it: {tasks:?}"
-    );
+        assert!(
+            card.origin.y >= px(0.0) && card.origin.y + card.size.height <= smallest.height,
+            "the card does not fit a 660x500 window at {done:?}: {card:?}"
+        );
+        assert!(
+            card.origin.x >= px(0.0) && card.origin.x + card.size.width <= smallest.width,
+            "the card does not fit across a 660x500 window at {done:?}: {card:?}"
+        );
+        // The header carries the count and the fold, and the link is the way
+        // out. Both are inside the card, so both follow from the fit above —
+        // but they are what the fit is for, so they are asserted rather than
+        // assumed.
+        assert!(
+            header.origin.y >= px(0.0) && header.origin.y + header.size.height <= smallest.height,
+            "the header left the window at {done:?}: {header:?}"
+        );
+        assert!(
+            dismiss.origin.y >= px(0.0)
+                && dismiss.origin.y + dismiss.size.height <= smallest.height,
+            "the dismiss link left the window at {done:?}: {dismiss:?}"
+        );
+        assert!(
+            tasks.origin.y >= px(0.0) && tasks.origin.y + tasks.size.height <= smallest.height,
+            "the task list ran off the window instead of fitting inside it at {done:?}: {tasks:?}"
+        );
+    }
     release(cx, &view);
 }
 
