@@ -429,7 +429,7 @@ file follows in the appendix. Regenerate this document with
 - gtk 0.18.2 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk3-rs
 - gtk-sys 0.18.2 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk3-rs
 - gtk3-macros 0.18.2 — The gtk-rs Project Developers — https://github.com/gtk-rs/gtk3-rs
-- h2 0.4.15 — Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/h2
+- h2 0.4.16 — Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/h2
 - harfrust 0.5.2 — https://github.com/harfbuzz/harfrust
 - http-body 1.1.0 — Carl Lerche <me@carllerche.com>, Lucio Franco <luciofranco14@gmail.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http-body
 - http-body-util 0.1.4 — Carl Lerche <me@carllerche.com>, Lucio Franco <luciofranco14@gmail.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http-body
@@ -8944,7 +8944,7 @@ Modifications after commit `825edf857426d034954523fed19599635cbb5043` are Copyri
 Redistributions of this Work must include all inherited and new license notices, including the notices for Chen Yuheng, Ethiraric, and Bourumir Wyngs.
 ```
 
-## License text for: h2 0.4.15
+## License text for: h2 0.4.16
 
 ```text
 Copyright (c) 2017 h2 authors
