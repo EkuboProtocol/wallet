@@ -15755,6 +15755,7 @@ impl WalletWindow {
                             .debug_selector(|| "guided-setup-toggle".to_owned())
                             .ghost()
                             .px_1()
+                            .w_full()
                             .label("Getting started")
                             .font_semibold()
                             .icon(if collapsed {
@@ -15769,6 +15770,13 @@ impl WalletWindow {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(format!("{completed} of {total}")),
                             )
+                            // The button centres whatever it is given, and a
+                            // heading floating in the middle of the card is
+                            // not what a full-width press target is for. The
+                            // spacer takes the slack so the whole row is
+                            // pressable while the heading stays where a
+                            // heading goes.
+                            .child(div().flex_1())
                             .tooltip(if collapsed {
                                 "Show the rest of the checklist."
                             } else {

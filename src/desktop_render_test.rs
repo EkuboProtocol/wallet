@@ -2155,7 +2155,28 @@ fn the_title_folds_the_checklist_away_and_opens_it_again(cx: &mut gpui::TestAppC
     // line — count and all — and unfolds it.
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
-    let open = measure(cx, window, &view, &["guided-setup"])[0].expect("the card starts open");
+    let start = measure(
+        cx,
+        window,
+        &view,
+        &["guided-setup", "guided-setup-header", "guided-setup-toggle"],
+    );
+    let open = start[0].expect("the card starts open");
+    let header = start[1].expect("the card header must draw");
+    let toggle = start[2].expect("the fold control must draw");
+
+    // The whole header takes the press, not just the words in it. The button
+    // this is built from centres its own contents, so a full-width target and
+    // a heading that stays at the left edge are two separate things that have
+    // to hold at once.
+    assert_eq!(
+        toggle.size.width, header.size.width,
+        "the fold control does not span the header: {toggle:?} in {header:?}"
+    );
+    assert!(
+        toggle.origin.x <= header.origin.x,
+        "the fold control is inset from the header: {toggle:?} in {header:?}"
+    );
 
     click(cx, window, &view, "guided-setup-toggle");
     let folded = measure(
