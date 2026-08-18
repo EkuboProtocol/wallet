@@ -35,6 +35,12 @@ def main() -> None:
             "method": "tools/list",
             "params": {},
         },
+        {
+            "jsonrpc": "2.0",
+            "id": "package-resources",
+            "method": "resources/list",
+            "params": {},
+        },
     ]
     stdin = "".join(f"{json.dumps(frame, separators=(',', ':'))}\n" for frame in frames)
 
@@ -63,10 +69,10 @@ def main() -> None:
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
     except json.JSONDecodeError as error:
         fail(f"{binary} emitted invalid MCP JSON: {error}")
-    if len(responses) != 2:
-        fail(f"{binary} emitted {len(responses)} MCP frames instead of 2")
+    if len(responses) != 3:
+        fail(f"{binary} emitted {len(responses)} MCP frames instead of 3")
 
-    initialized, tools = responses
+    initialized, tools, resources = responses
     result = initialized.get("result", {})
     server = result.get("serverInfo", {})
     if initialized.get("id") != "package-initialize":
@@ -80,12 +86,23 @@ def main() -> None:
         )
     if result.get("capabilities", {}).get("tools", {}).get("listChanged") is not True:
         fail("initialize response does not advertise tools.listChanged")
+    # A harness keeps this answer for its whole session, so a package that
+    # forgets to claim resources here makes every wallet:// document
+    # unreachable no matter what the wallet itself serves.
+    if result.get("capabilities", {}).get("resources", {}).get("listChanged") is not True:
+        fail("initialize response does not advertise resources.listChanged")
     if tools != {
         "jsonrpc": "2.0",
         "id": "package-tools",
         "result": {"tools": []},
     }:
         fail("offline tools/list response is not the deterministic empty catalog")
+    if resources != {
+        "jsonrpc": "2.0",
+        "id": "package-resources",
+        "result": {"resources": []},
+    }:
+        fail("offline resources/list response is not the deterministic empty catalog")
 
 
 if __name__ == "__main__":
