@@ -119,12 +119,28 @@ fn data_dir() -> Result<PathBuf> {
         .join("ekubo-wallet"))
 }
 
-async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
-    let mut frame = Vec::new();
+/// Read one newline-terminated frame, accumulating into caller-owned `partial`.
+///
+/// The accumulator belongs to the caller because this future gets dropped
+/// between polls: it is a `tokio::select!` branch against the other direction
+/// of the bridge, and in the offline loop it also runs under a `timeout`. A
+/// frame is only rarely one read — the peer's JSON writer emits it in several
+/// small writes — so a cancelled call has usually already `consume`d some
+/// bytes out of `reader`. Held in a future-local buffer those bytes are
+/// dropped with the future, and the *next* call resumes mid-JSON: the peer
+/// then looks like it sent a corrupt frame, and the bridge tears down a
+/// perfectly good connection over bytes it deleted itself.
+///
+/// Only `fill_buf` awaits here, and it consumes nothing, so whatever this
+/// leaves in `partial` is exactly what a resumed call needs.
+async fn read_frame_into<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    partial: &mut Vec<u8>,
+) -> Result<Option<Vec<u8>>> {
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            return if frame.is_empty() {
+            return if partial.is_empty() {
                 Ok(None)
             } else {
                 anyhow::bail!("MCP frame ended before its newline")
@@ -135,15 +151,21 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Resul
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |position| position + 1);
         ensure!(
-            frame.len() + take <= MAX_FRAME_BYTES,
+            partial.len() + take <= MAX_FRAME_BYTES,
             "MCP frame exceeds 24 MiB"
         );
-        frame.extend_from_slice(&available[..take]);
+        partial.extend_from_slice(&available[..take]);
         reader.consume(take);
-        if frame.last() == Some(&b'\n') {
-            return Ok(Some(frame));
+        if partial.last() == Some(&b'\n') {
+            return Ok(Some(std::mem::take(partial)));
         }
     }
+}
+
+/// [`read_frame_into`] for the sequential call sites, which are never raced
+/// against another branch and so cannot lose a partial frame.
+async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
+    read_frame_into(reader, &mut Vec::new()).await
 }
 
 fn request_id(message: &Value) -> Option<Value> {
@@ -442,6 +464,13 @@ async fn run() -> Result<()> {
     let mut tools_refresh_pending = false;
     let mut resources_refresh_pending = false;
     let mut backoff = Duration::from_millis(250);
+    // Frame bytes already taken from each side but not yet terminated by a
+    // newline. They outlive the reads that collected them because those reads
+    // are cancelled routinely; see [`read_frame_into`]. The upstream half is
+    // cleared whenever a connection is dropped, so a half-frame from a wallet
+    // that went away is never prepended to the next wallet's first frame.
+    let mut stdin_partial = Vec::<u8>::new();
+    let mut upstream_partial = Vec::<u8>::new();
 
     // Ask the wallet for the handshake before answering the harness, because
     // a harness records what it is told here for the whole session and never
@@ -517,7 +546,7 @@ async fn run() -> Result<()> {
 
         if let Some((up_read, up_write)) = upstream.as_mut() {
             tokio::select! {
-                frame = read_frame(&mut stdin) => {
+                frame = read_frame_into(&mut stdin, &mut stdin_partial) => {
                     let Some(frame) = frame? else { return Ok(()); };
                     let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
                         emit(&mut stdout, &parse_error()).await?;
@@ -527,12 +556,13 @@ async fn run() -> Result<()> {
                     if let Some(id) = request_id(&message) { in_flight.insert(id.to_string()); }
                     up_write.write_all(&frame).await?;
                 }
-                frame = read_frame(up_read) => {
+                frame = read_frame_into(up_read, &mut upstream_partial) => {
                     let Ok(Some(frame)) = frame else {
                         for id in std::mem::take(&mut in_flight) {
                             if let Ok(id) = serde_json::from_str(&id) { emit(&mut stdout, &error(&id, "Ekubo Wallet stopped while the request was in flight; the bridge will reconnect automatically" )).await?; }
                         }
                         upstream = None;
+                        upstream_partial.clear();
                         tools_refresh_pending = false;
                         resources_refresh_pending = false;
                         continue;
@@ -544,6 +574,7 @@ async fn run() -> Result<()> {
                                     }
                                 }
                                 upstream = None;
+                                upstream_partial.clear();
                                 tools_refresh_pending = false;
                                 resources_refresh_pending = false;
                                 continue;
@@ -582,13 +613,19 @@ async fn run() -> Result<()> {
             }
         } else {
             let frame = if initialized.is_some() {
-                let Ok(frame) = tokio::time::timeout(backoff, read_frame(&mut stdin)).await else {
+                // The backoff expiring here is the ordinary case, not an
+                // error, so this read is abandoned on most passes through the
+                // loop; a harness frame split across writes must survive that.
+                let Ok(frame) =
+                    tokio::time::timeout(backoff, read_frame_into(&mut stdin, &mut stdin_partial))
+                        .await
+                else {
                     backoff = (backoff * 2).min(Duration::from_secs(5));
                     continue;
                 };
                 frame?
             } else {
-                read_frame(&mut stdin).await?
+                read_frame_into(&mut stdin, &mut stdin_partial).await?
             };
             let Some(frame) = frame else {
                 return Ok(());

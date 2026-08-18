@@ -424,6 +424,133 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
 
 #[cfg(unix)]
 #[test]
+fn a_wallet_frame_split_across_writes_survives_a_racing_harness_frame() {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt as _,
+        os::unix::net::{UnixListener, UnixStream},
+        thread,
+    };
+
+    fn read(stream: &mut BufReader<UnixStream>) -> Value {
+        let mut line = String::new();
+        stream.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    fn write(stream: &mut UnixStream, value: &Value) {
+        serde_json::to_writer(&mut *stream, &value).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(home.path().join("mcp.sock")).unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    let wallet = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        assert_eq!(read(&mut reader)["client"], "codex");
+        let initialize = read(&mut reader);
+        write(
+            &mut writer,
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+                "protocolVersion":"2025-11-25",
+                "capabilities":{"tools":{},"resources":{}},
+                "serverInfo":{"name":"fake-wallet","version":BUILD_VERSION}
+            }}),
+        );
+        for _ in 0..2 {
+            let list = read(&mut reader);
+            let result = match list["method"].as_str().unwrap() {
+                "tools/list" => {
+                    json!({"tools":[{"name":"wallet_test","description":"test","inputSchema":{"type":"object"}}]})
+                }
+                "resources/list" => json!({"resources":[]}),
+                other => panic!("unexpected catalog request {other}"),
+            };
+            write(
+                &mut writer,
+                &json!({"jsonrpc":"2.0","id":list["id"],"result":result}),
+            );
+        }
+        ready_tx.send(()).unwrap();
+
+        assert_eq!(read(&mut reader)["method"], "notifications/initialized");
+        assert_eq!(read(&mut reader)["id"], "split");
+
+        // Deliver the answer in two writes with a gap between them. A real
+        // wallet's JSON writer already emits a frame as several small writes,
+        // so the bridge holding half of one is the ordinary case; this only
+        // makes the timing of it something the test can rely on.
+        let body = serde_json::to_vec(
+            &json!({"jsonrpc":"2.0","id":"split","result":{"content":[{"type":"text","text":"whole"}]}}),
+        )
+        .unwrap();
+        let (head, tail) = body.split_at(body.len() / 2);
+        writer.write_all(head).unwrap();
+        writer.flush().unwrap();
+        thread::sleep(Duration::from_millis(400));
+        writer.write_all(tail).unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+
+        // The frame that raced the split one. Nothing has to answer it: its
+        // whole job was to wake the other select! branch mid-frame.
+        assert_eq!(read(&mut reader)["id"], "racer");
+    });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        .args(["--client", "codex"])
+        .env("EKUBO_WALLET_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+    );
+    assert_eq!(receive(&mut stdout)["id"], 1);
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":"split","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
+    );
+    // Land inside the wallet's gap, so the bridge is holding half a frame when
+    // this arrives and abandons that read in order to forward it.
+    thread::sleep(Duration::from_millis(150));
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":"racer","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
+    );
+
+    // Before the accumulator outlived the cancelled read, the bytes taken from
+    // the socket went with it: the bridge resumed inside the JSON, called the
+    // wallet's frame corrupt, and answered this id with an error instead.
+    let answered = receive(&mut stdout);
+    assert_eq!(answered["id"], "split", "{answered}");
+    assert_eq!(
+        answered["result"]["content"][0]["text"], "whole",
+        "{answered}"
+    );
+
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    wallet.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn standard_server_version_mismatch_terminates_the_bridge() {
     use std::{
         fs,
