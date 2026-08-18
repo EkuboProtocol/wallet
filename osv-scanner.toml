@@ -19,11 +19,6 @@ ignoreUntil = 2027-02-15
 reason = "Informational unmaintained notice for transitive paste; replace through its upstream dependency before this exception expires."
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2026-0173"
-ignoreUntil = 2027-02-15
-reason = "Informational unmaintained notice for transitive proc-macro-error2; replace through its upstream dependency before this exception expires."
-
-[[IgnoredVulns]]
 id = "RUSTSEC-2026-0206"
 ignoreUntil = 2027-02-15
 reason = "Informational unmaintained notice for transitive rustybuzz; migrate the font stack before this exception expires."
