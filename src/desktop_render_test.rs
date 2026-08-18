@@ -299,6 +299,22 @@ fn scrollbar_tracks_stay_hidden_in_favor_of_the_overflow_chevron(cx: &mut gpui::
     release(cx, &view);
 }
 
+/// The gutter is drawn over the text, so an unfilled one lets a horizontally
+/// scrolled policy pass under its own line numbers.
+#[gpui::test]
+fn the_code_gutter_is_filled_so_scrolled_text_cannot_run_under_it(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    cx.read(|cx| {
+        let theme = Theme::global(cx);
+        assert_eq!(
+            theme.highlight_theme.style.editor_gutter_background,
+            Some(theme.colors.secondary),
+            "the gutter must match the field the editor is drawn on"
+        );
+    });
+    release(cx, &view);
+}
+
 #[gpui::test]
 fn an_accounts_page_that_fits_has_no_phantom_scroll_range(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);

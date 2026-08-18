@@ -5366,6 +5366,11 @@ impl WalletWindow {
             self.policy_json_input = Some(cx.new(|cx| {
                 InputState::new(window, cx)
                     .code_editor("json")
+                    // A folded object leaves a line that looks like an empty
+                    // document rather than a closed one, and a policy read as
+                    // empty is a policy read as permitting nothing. The
+                    // document is short enough that nothing needs hiding.
+                    .folding(false)
                     // Policy documents carry long values — addresses, selectors,
                     // exact calldata — and folding those to the panel width
                     // stopped the document reading as JSON at all. Turning soft
@@ -16218,6 +16223,14 @@ fn apply_interface_palette(cx: &mut App) {
     colors.warning = warning;
     colors.warning_foreground = background;
     theme.tokens = ThemeTokens::from(&theme.colors);
+    // The line-number column is painted over the text, but only where it has
+    // a fill; unset, it is transparent, and a horizontally scrolled policy
+    // slid its own calldata underneath the numbers. `secondary` is what
+    // `app_input` fills the editor with, so the gutter reads as part of the
+    // same field rather than as a second surface.
+    let mut highlight = (*theme.highlight_theme).clone();
+    highlight.style.editor_gutter_background = Some(surface);
+    theme.highlight_theme = Arc::new(highlight);
 }
 
 fn apply_appearance_preference(
