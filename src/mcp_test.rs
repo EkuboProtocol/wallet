@@ -2200,3 +2200,75 @@ fn disabling_records_the_reason_the_user_will_read() {
     };
     assert!(format!("{missing:?}").contains("no automation with key"));
 }
+
+#[test]
+fn every_advertised_resource_reads_back_with_its_advertised_mime_type() {
+    // One function advertises the catalog and another serves it, so a URI can
+    // be listed with no arm to answer it. Nothing fails at build time and the
+    // catalog still looks complete: the gap only appears when an agent asks
+    // for a document the wallet just promised and gets resource_not_found.
+    for resource in wallet_resources() {
+        let (contents, mime_type) = resource_contents(&resource.uri).unwrap_or_else(|error| {
+            panic!("{} is advertised but unreadable: {error:?}", resource.uri)
+        });
+        assert!(
+            !contents.trim().is_empty(),
+            "{} served an empty body",
+            resource.uri
+        );
+        // An agent picks a parser from the advertised type, so the two have to
+        // agree; the policy schema is the one resource that is not markdown.
+        assert_eq!(
+            resource.mime_type.as_deref(),
+            Some(mime_type),
+            "{} is served as {mime_type} but advertised otherwise",
+            resource.uri
+        );
+    }
+}
+
+#[test]
+fn an_unadvertised_resource_uri_is_refused_rather_than_served() {
+    let error = resource_contents("wallet://legal/does-not-exist")
+        .expect_err("an unknown URI must not resolve to a document");
+    assert_eq!(
+        error.code,
+        ErrorData::resource_not_found("probe", None).code
+    );
+    assert!(
+        error.message.contains("unknown wallet resource"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_policy_schema_resource_is_the_json_it_advertises() {
+    let (contents, mime_type) = resource_contents(POLICY_SCHEMA_RESOURCE_URI).unwrap();
+    assert_eq!(mime_type, "application/json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&contents).expect("the schema resource must parse as JSON");
+    // wallet_propose_policy validates against this exact document, so an agent
+    // reading it has to find the rule shape it is being asked to produce.
+    assert!(
+        parsed
+            .get("$defs")
+            .and_then(|defs| defs.get("Rule"))
+            .is_some()
+    );
+}
+
+#[test]
+fn the_application_license_is_served_like_every_other_legal_document() {
+    // wallet_get_legal already answers for this document and the desktop legal
+    // viewer already shows it. Leaving it out of the catalog meant an agent
+    // could read the terms, the privacy policy, and the dependency
+    // attributions, but not the license covering this application itself.
+    let advertised: Vec<String> = wallet_resources()
+        .into_iter()
+        .map(|resource| resource.uri)
+        .collect();
+    assert!(advertised.contains(&APPLICATION_LICENSE_RESOURCE_URI.to_string()));
+    let (contents, _) = resource_contents(APPLICATION_LICENSE_RESOURCE_URI).unwrap();
+    assert_eq!(contents, LegalDocument::ApplicationLicense.text());
+}

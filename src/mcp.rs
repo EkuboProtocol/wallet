@@ -3578,6 +3578,7 @@ const SKILL_RESOURCE_URI: &str = "wallet://skills/use-ekubo-wallet/SKILL.md";
 const AUTOMATION_SKILL_RESOURCE_URI: &str = "wallet://skills/write-ekubo-automation/SKILL.md";
 const TERMS_RESOURCE_URI: &str = "wallet://legal/terms-of-service";
 const PRIVACY_RESOURCE_URI: &str = "wallet://legal/privacy-policy";
+const APPLICATION_LICENSE_RESOURCE_URI: &str = "wallet://legal/application-license";
 const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 // This server is a general-purpose local EVM wallet. It is deliberately not
 // bound to any particular protocol, dapp, or companion MCP server: it accepts a
@@ -3687,11 +3688,45 @@ fn wallet_resources() -> Vec<Resource> {
                 "Discloses the default RPC endpoints; must be acknowledged separately via the native wallet application.",
             )
             .with_mime_type("text/markdown"),
+        Resource::new(APPLICATION_LICENSE_RESOURCE_URI, "application-license")
+            .with_title("Application License")
+            .with_description("The license this wallet itself is distributed under.")
+            .with_mime_type("text/markdown"),
         Resource::new(LICENSES_RESOURCE_URI, "third-party-licenses")
             .with_title("Third-Party Licenses")
             .with_description("License attributions for every bundled dependency.")
             .with_mime_type("text/markdown"),
     ]
+}
+
+/// The body and media type served for one advertised resource URI.
+///
+/// Split out of [`ServerHandler::read_resource`] so the mapping every
+/// advertised URI depends on is reachable from a plain test: a URI listed by
+/// [`wallet_resources`] but missing an arm here is advertised and unreadable,
+/// and nothing about the handler itself is what makes that a bug.
+fn resource_contents(uri: &str) -> Result<(String, &'static str), ErrorData> {
+    match uri {
+        SKILL_RESOURCE_URI => Ok((EKUBO_WALLET_SKILL.to_string(), "text/markdown")),
+        AUTOMATION_SKILL_RESOURCE_URI => Ok((WRITE_AUTOMATION_SKILL.to_string(), "text/markdown")),
+        SECURITY_RESOURCE_URI => Ok((SECURITY_MODEL.to_string(), "text/markdown")),
+        POLICY_AUTHORING_RESOURCE_URI => Ok((POLICY_AUTHORING_GUIDE.to_string(), "text/markdown")),
+        POLICY_SCHEMA_RESOURCE_URI => Ok((
+            serde_json::to_string_pretty(&crate::core::policy::json_schema())
+                .map_err(|error| tool_error(&error))?,
+            "application/json",
+        )),
+        TERMS_RESOURCE_URI => Ok((LegalDocument::TermsOfService.text(), "text/markdown")),
+        PRIVACY_RESOURCE_URI => Ok((LegalDocument::PrivacyPolicy.text(), "text/markdown")),
+        APPLICATION_LICENSE_RESOURCE_URI => {
+            Ok((LegalDocument::ApplicationLicense.text(), "text/markdown"))
+        }
+        LICENSES_RESOURCE_URI => Ok((LegalDocument::ThirdPartyLicenses.text(), "text/markdown")),
+        _ => Err(ErrorData::resource_not_found(
+            "unknown wallet resource",
+            None,
+        )),
+    }
 }
 
 #[tool_handler(router = Self::sanitized_tool_router())]
@@ -3737,30 +3772,7 @@ impl ServerHandler for WalletMcpServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        let contents = match request.uri.as_ref() {
-            SKILL_RESOURCE_URI => EKUBO_WALLET_SKILL.to_string(),
-            AUTOMATION_SKILL_RESOURCE_URI => WRITE_AUTOMATION_SKILL.to_string(),
-            SECURITY_RESOURCE_URI => SECURITY_MODEL.to_string(),
-            POLICY_AUTHORING_RESOURCE_URI => POLICY_AUTHORING_GUIDE.to_string(),
-            POLICY_SCHEMA_RESOURCE_URI => {
-                serde_json::to_string_pretty(&crate::core::policy::json_schema())
-                    .map_err(|error| tool_error(&error))?
-            }
-            TERMS_RESOURCE_URI => LegalDocument::TermsOfService.text(),
-            PRIVACY_RESOURCE_URI => LegalDocument::PrivacyPolicy.text(),
-            LICENSES_RESOURCE_URI => LegalDocument::ThirdPartyLicenses.text(),
-            _ => {
-                return Err(ErrorData::resource_not_found(
-                    "unknown wallet resource",
-                    None,
-                ));
-            }
-        };
-        let mime_type = if request.uri == POLICY_SCHEMA_RESOURCE_URI {
-            "application/json"
-        } else {
-            "text/markdown"
-        };
+        let (contents, mime_type) = resource_contents(request.uri.as_ref())?;
         Ok(ReadResourceResult::new(vec![
             ResourceContents::text(contents, request.uri.clone()).with_mime_type(mime_type),
         ])
