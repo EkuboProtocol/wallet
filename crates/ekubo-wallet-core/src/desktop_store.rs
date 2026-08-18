@@ -23,7 +23,7 @@ pub enum AppearancePreference {
 
 /// What the guided setup remembers between runs.
 ///
-/// Only two things need storing. Everything else about the checklist is
+/// Only one thing needs storing. Everything else about the checklist is
 /// derived from the wallet's own state each time the window draws, so a box
 /// can never disagree with the thing it claims to describe.
 ///
@@ -32,6 +32,13 @@ pub enum AppearancePreference {
 /// tab, and a signature history can be cleared; neither undoes the fact that
 /// the owner has now done that thing once. A box that unticks itself reads as
 /// a bug rather than as news.
+///
+/// Sending the card away is deliberately not stored. Dismissal means "not
+/// now" rather than "never again": while anything is left to do the checklist
+/// comes back at the next launch, and once all of it is done it stops coming
+/// back on its own. An earlier build stored a `dismissed` flag here; serde
+/// ignores it on the way in, so a wallet that was dismissed under that build
+/// simply sees the checklist again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuidedSetupState {
     /// Task identifiers seen finished, as the presenting layer names them.
@@ -39,9 +46,6 @@ pub struct GuidedSetupState {
     /// silently reopen a task a later build had already closed.
     #[serde(default)]
     pub completed: std::collections::BTreeSet<String>,
-    /// Set when the owner sends the card away. It never comes back.
-    #[serde(default)]
-    pub dismissed: bool,
 }
 
 /// Untrusted harness attribution supplied by the stdio bridge.

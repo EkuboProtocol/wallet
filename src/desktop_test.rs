@@ -2137,7 +2137,7 @@ fn a_finished_task_stays_finished_when_the_state_behind_it_goes_away() {
     // A dapp closing its tab ends the session, and history can be cleared.
     // Neither undoes having done the thing once, and a box that unticks
     // itself reads as a bug rather than as news.
-    let mut setup = GuidedSetup::new(GuidedSetupState::default());
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
     assert!(setup.latch(SetupObservation {
         dapp: true,
         ..SetupObservation::default()
@@ -2151,7 +2151,7 @@ fn a_finished_task_stays_finished_when_the_state_behind_it_goes_away() {
 
 #[test]
 fn the_card_stays_up_until_every_task_is_done_or_it_is_sent_away() {
-    let mut setup = GuidedSetup::new(GuidedSetupState::default());
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
     assert!(setup.visible());
 
     setup.latch(SetupObservation {
@@ -2178,18 +2178,70 @@ fn the_card_stays_up_until_every_task_is_done_or_it_is_sent_away() {
 }
 
 #[test]
-fn dismissal_outlasts_any_amount_of_remaining_work() {
-    let mut setup = GuidedSetup::new(GuidedSetupState {
-        completed: std::collections::BTreeSet::new(),
-        dismissed: true,
-    });
-
+fn dismissal_lasts_the_run_and_still_records_what_the_run_saw() {
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
+    setup.dismiss();
     assert!(!setup.visible());
-    setup.latch(SetupObservation {
+
+    // The evidence for a task can be gone by the next launch — a session
+    // ends, a history is cleared — so a dismissed card has to keep watching.
+    assert!(setup.latch(SetupObservation {
+        dapp: true,
+        ..SetupObservation::default()
+    }));
+    assert!(!setup.visible(), "dismissal holds for the rest of the run");
+    assert!(setup.is_complete(SetupTask::ConnectDapp));
+}
+
+#[test]
+fn the_checklist_starts_over_at_the_next_launch_while_anything_is_left() {
+    let mut run = GuidedSetup::loaded(GuidedSetupState::default());
+    run.latch(SetupObservation {
         account: true,
         ..SetupObservation::default()
     });
-    assert!(!setup.visible());
+    run.dismiss();
+    let stored = run.state.clone().expect("the run had its progress loaded");
+
+    // Whatever a run does to the card, the next one reads only the finished
+    // tasks back — which is what makes dismissal "not now" rather than
+    // "never again".
+    let relaunched = GuidedSetup::loaded(stored);
+    assert!(relaunched.visible());
+    assert_eq!(relaunched.completed_count(), 1);
+}
+
+#[test]
+fn a_finished_checklist_does_not_come_back() {
+    let mut run = GuidedSetup::loaded(GuidedSetupState::default());
+    run.latch(SetupObservation {
+        account: true,
+        agent: true,
+        signature: true,
+        dapp: true,
+        policy: true,
+    });
+    let stored = run.state.clone().expect("the run had its progress loaded");
+
+    assert!(!GuidedSetup::loaded(stored).visible());
+}
+
+#[test]
+fn nothing_is_drawn_or_recorded_until_the_stored_progress_is_read() {
+    // Defaulting an unreadable store would show an empty checklist to
+    // somebody who has finished it, at every launch rather than once, and
+    // storing the result would overwrite the progress it failed to read.
+    let mut unread = GuidedSetup::unloaded();
+    assert!(!unread.visible(), "an unread checklist draws nothing");
+    assert!(!unread.latch(SetupObservation {
+        account: true,
+        ..SetupObservation::default()
+    }));
+    assert_eq!(unread.completed_count(), 0);
+    assert!(!unread.is_complete(SetupTask::CreateAccount));
+
+    unread.load(GuidedSetupState::default());
+    assert!(unread.visible());
 }
 
 #[test]

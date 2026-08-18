@@ -3365,18 +3365,53 @@ fn observe_setup(
 }
 
 /// The checklist as it is drawn: what has ever been finished, and whether the
-/// card has been sent away.
+/// card has been sent away for the rest of this run.
 struct GuidedSetup {
-    state: GuidedSetupState,
+    /// Stored progress, or `None` while it is still unread.
+    ///
+    /// Nothing draws until the read lands. A checklist that appears before
+    /// its own history does is a checklist claiming somebody has done none of
+    /// this, in front of somebody who may have done all of it — and since a
+    /// dismissal now lasts only until the next launch, it would make that
+    /// claim at every launch rather than once.
+    state: Option<GuidedSetupState>,
+    /// Set when the owner sends the card away. Deliberately not stored: it
+    /// means "not now", so the checklist starts over on the next launch while
+    /// anything is left to do.
+    dismissed: bool,
 }
 
 impl GuidedSetup {
-    fn new(state: GuidedSetupState) -> Self {
-        Self { state }
+    /// A checklist whose stored progress has not been read yet.
+    const fn unloaded() -> Self {
+        Self {
+            state: None,
+            dismissed: false,
+        }
+    }
+
+    fn loaded(state: GuidedSetupState) -> Self {
+        Self {
+            state: Some(state),
+            dismissed: false,
+        }
+    }
+
+    const fn is_loaded(&self) -> bool {
+        self.state.is_some()
+    }
+
+    /// Take the stored progress once it has been read. A dismissal already
+    /// made in this run survives it, because the read is a retry of something
+    /// that should have happened before the card was ever on screen.
+    fn load(&mut self, state: GuidedSetupState) {
+        self.state = Some(state);
     }
 
     fn is_complete(&self, task: SetupTask) -> bool {
-        self.state.completed.contains(task.key())
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.completed.contains(task.key()))
     }
 
     fn all_complete(&self) -> bool {
@@ -3385,21 +3420,34 @@ impl GuidedSetup {
 
     /// Fold a fresh reading into the record, and say whether anything changed
     /// so a caller knows when the result is worth storing.
+    ///
+    /// An unread checklist latches nothing. Folding a reading into a fresh
+    /// default and storing that would overwrite progress that is on disk and
+    /// merely unavailable.
     fn latch(&mut self, observation: SetupObservation) -> bool {
+        let Some(state) = self.state.as_mut() else {
+            return false;
+        };
         let mut changed = false;
         for task in SetupTask::ALL {
-            if observation.holds(task) && self.state.completed.insert(task.key().to_owned()) {
+            if observation.holds(task) && state.completed.insert(task.key().to_owned()) {
                 changed = true;
             }
         }
         changed
     }
 
-    /// The card is up until every task is finished or the owner sends it away.
-    /// The legal gate is handled by the caller: nothing may share the screen
-    /// with a document that has to be accepted before the wallet runs at all.
+    /// Send the card away for the rest of this run.
+    fn dismiss(&mut self) {
+        self.dismissed = true;
+    }
+
+    /// The card is up once its progress is known, until every task is
+    /// finished or the owner sends it away. The legal gate is handled by the
+    /// caller: nothing may share the screen with a document that has to be
+    /// accepted before the wallet runs at all.
     fn visible(&self) -> bool {
-        !self.state.dismissed && !self.all_complete()
+        self.is_loaded() && !self.dismissed && !self.all_complete()
     }
 
     fn completed_count(&self) -> usize {
@@ -4700,11 +4748,14 @@ impl WalletWindow {
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
         let testnet_mode = owner.testnet_mode().unwrap_or(false);
-        // A store that cannot be read yields the default, which shows the
-        // checklist. Showing it to somebody who has finished is a moment's
-        // annoyance; hiding it from somebody who has not is the whole feature
-        // failing silently.
-        let guided_setup = GuidedSetup::new(owner.guided_setup().unwrap_or_default());
+        // A store that cannot be read yields nothing rather than a default,
+        // and the card stays off screen until the read lands — `render`
+        // retries it. Defaulting would show an empty checklist to somebody
+        // who has finished it, and since dismissing now only lasts the run,
+        // it would do that at every launch instead of once.
+        let guided_setup = owner
+            .guided_setup()
+            .map_or_else(|_| GuidedSetup::unloaded(), GuidedSetup::loaded);
         // Five explanations do not fit a short window, and a card that clipped
         // one mid-sentence with nothing to say so would read as broken rather
         // than as scrollable — the theme draws no scrollbar track.
@@ -5355,9 +5406,18 @@ impl WalletWindow {
     /// it in each of those instead would mean a checklist that is right about
     /// whichever one happened to fire last.
     fn refresh_guided_setup(&mut self) {
-        if self.guided_setup.state.dismissed {
-            return;
+        if !self.guided_setup.is_loaded() {
+            // Retry the read that startup could not complete. Until it lands
+            // there is nothing to fold a reading into, and nothing is drawn.
+            let Ok(state) = self.owner.guided_setup() else {
+                return;
+            };
+            self.guided_setup.load(state);
         }
+        // A dismissed card keeps latching. It is coming back at the next
+        // launch, and the evidence for a task can be gone by then — a settled
+        // session ends, a history gets cleared — so a run that watched
+        // somebody finish something has to be the run that records it.
         let snapshot = self.desktop_snapshot.clone();
         let observation = observe_setup(
             snapshot
@@ -5372,17 +5432,22 @@ impl WalletWindow {
             &self.detected_agents,
             &self.walletconnect_sessions,
         );
-        if self.guided_setup.latch(observation) {
+        if self.guided_setup.latch(observation)
+            && let Some(state) = self.guided_setup.state.as_ref()
+        {
             // Best effort. A checklist that redraws correctly but forgets by
             // tomorrow is far better than one that refuses to advance because
             // the settings store is momentarily unavailable.
-            let _ = self.owner.set_guided_setup(&self.guided_setup.state);
+            let _ = self.owner.set_guided_setup(state);
         }
     }
 
+    /// Send the checklist away for the rest of this run.
+    ///
+    /// Nothing is stored: the wallet asks again at the next launch while any
+    /// task is left, and stops asking on its own once they are all done.
     fn dismiss_guided_setup(&mut self, cx: &mut Context<Self>) {
-        self.guided_setup.state.dismissed = true;
-        let _ = self.owner.set_guided_setup(&self.guided_setup.state);
+        self.guided_setup.dismiss();
         cx.notify();
     }
 
@@ -15049,11 +15114,11 @@ impl WalletWindow {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::CircleX)
-                                    .tooltip("Dismiss. This does not come back.")
+                                    .tooltip("Hide this. It comes back next launch.")
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.dismiss_guided_setup(cx);
                                     })),
-                                "Dismiss the getting-started checklist",
+                                "Hide the getting-started checklist until the next launch",
                             )),
                     ),
             )
