@@ -14576,13 +14576,23 @@ impl WalletWindow {
     ) -> gpui::Div {
         let wallet_id = account.wallet.id.clone();
         let held = portfolio_balance_rows(account);
+        // The filter engages only once it has something to go on. An account
+        // whose tokens are all unpriced — which is every account until someone
+        // records a value — would otherwise open onto a tab holding back
+        // everything it holds, which is a worse answer than an unsorted list.
+        let sortable = held
+            .iter()
+            .any(|row| row.approximate_usd_value.is_some_and(|value| value > 0.0));
         // Dust is hidden rather than dropped, and the count of it is on screen
         // whether or not it is showing: a tab that quietly omitted holdings
         // would be a tab that could be made to lie by one wrong price.
-        let hidden = held.iter().filter(|row| row.is_low_value()).count();
+        let hidden = held
+            .iter()
+            .filter(|row| sortable && row.is_low_value())
+            .count();
         let mut rows = held
             .into_iter()
-            .filter(|row| self.show_low_value_balances || !row.is_low_value())
+            .filter(|row| !sortable || self.show_low_value_balances || !row.is_low_value())
             .map(PortfolioListRow::Balance)
             .collect::<Vec<_>>();
         // A network that could not be read is reported under the balances

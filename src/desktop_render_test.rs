@@ -1521,6 +1521,18 @@ fn the_portfolio_says_how_much_dust_it_is_holding_back(cx: &mut gpui::TestAppCon
         "with nothing hidden there is nothing to say, and no switch to offer"
     );
 
+    // Until some value is recorded there is nothing to sort or hide by, and
+    // every token would count as dust. A wallet nobody has priced anything in
+    // must open onto its holdings, not onto a tab that hid all of them.
+    cx.update_entity(&view, |wallet, _| {
+        ready(wallet, vec![token(1, None), token(2, None), token(3, None)]);
+    });
+    let unpriced = measure(cx, window, &view, &["portfolio-dust-control"]);
+    assert!(
+        unpriced[0].is_none(),
+        "with no recorded values at all, nothing is held back"
+    );
+
     release(cx, &view);
 }
 
