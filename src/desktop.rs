@@ -3,11 +3,11 @@ use crate::{
     agent_config::AgentAdapter,
     assets::{PENCIL_ICON, WalletAssets},
     authority::{
-        ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioAccount,
-        OwnerPortfolioSnapshot, OwnerReviewQueues, OwnerTransactionInspection,
-        PRIVATE_KEY_REVEAL_DURATION,
+        ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerApi,
+        OwnerPortfolioAccount, OwnerPortfolioSnapshot, OwnerReviewQueues,
+        OwnerTransactionInspection, PRIVATE_KEY_REVEAL_DURATION,
     },
-    automation::{Automation, AutomationState},
+    automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
@@ -1477,6 +1477,85 @@ fn walletconnect_expiry_label(expires_at: i64, now: chrono::DateTime<chrono::Utc
 }
 
 /// "1 request" / "3 requests" — the `(s)` suffix reads like a form field.
+/// A panel inside an automation card.
+///
+/// Filled with the page background rather than the card's own fill: a box drawn
+/// in the same colour as the box around it separates nothing, which is how the
+/// run history used to read as more detail lines about the automation itself.
+fn automation_subpanel(cx: &App) -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .p_3()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
+        .flex()
+        .flex_col()
+        .gap_2()
+}
+
+fn automation_subpanel_caption(label: &'static str, cx: &App) -> gpui::Div {
+    div()
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.theme().muted_foreground)
+        .child(selectable_label(label))
+}
+
+/// One call a dry run produced, in the only terms this screen can honestly give
+/// them: where it goes, what it carries, and which function it names.
+fn describe_polled_call(call: &PolledCall) -> String {
+    let value = if call.value.is_zero() {
+        String::new()
+    } else {
+        format!(" · {} wei", call.value)
+    };
+    let data = match call.data.get(..4) {
+        None if call.data.is_empty() => " · no calldata".to_owned(),
+        None => format!(" · {} bytes", call.data.len()),
+        Some(selector) => format!(" · 0x{} · {} bytes", hex::encode(selector), call.data.len()),
+    };
+    format!("{:#x}{value}{data}", call.to)
+}
+
+/// The wait before a moment that has not arrived yet.
+///
+/// The mirror of [`relative_time_label`], for the one thing on this screen that
+/// is ahead rather than behind: an automation's next fire time. A cron
+/// expression plus a UTC timestamp does not tell anybody whether the next run
+/// is in eight seconds or eight hours.
+fn countdown_label(
+    moment: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let remaining = moment.signed_duration_since(now);
+    let seconds = remaining.num_seconds();
+    // A fire time already in the past means the scheduler is between its sleep
+    // and its tick, not that anything is wrong.
+    if seconds <= 0 {
+        return "any moment now".to_owned();
+    }
+    let count = |value: i64| usize::try_from(value).unwrap_or(usize::MAX);
+    if seconds < 60 {
+        return format!("in {}", pluralize(count(seconds), "second"));
+    }
+    if seconds < 3_600 {
+        return format!(
+            "in {}",
+            pluralize(count(remaining.num_minutes().max(1)), "minute")
+        );
+    }
+    if seconds < 86_400 {
+        return format!(
+            "in {}",
+            pluralize(count(remaining.num_hours().max(1)), "hour")
+        );
+    }
+    format!("on {}", absolute_time_label(moment))
+}
+
 fn pluralize(count: usize, singular: &str) -> String {
     if count == 1 {
         format!("1 {singular}")
@@ -1835,6 +1914,16 @@ pub struct WalletWindow {
     /// the spinner rather than the whole list going busy.
     automation_busy: Option<uuid::Uuid>,
     automation_error: Option<SharedString>,
+    /// The last dry run each automation was asked for, until the owner hides
+    /// it.
+    automation_dry_runs: BTreeMap<uuid::Uuid, AutomationDryRunState>,
+    /// Activity records opened by id that the visible list no longer carries.
+    ///
+    /// Clearing history hides finished rows rather than deleting them, exactly
+    /// so an automation run's pointer at the transaction it produced keeps
+    /// resolving. This is where following that pointer puts what it found, so
+    /// the detail has a record to draw even though the list has none.
+    detached_activity_records: BTreeMap<uuid::Uuid, OwnerActivityRecord>,
     release_state: ReleaseDisplayState,
     pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
     update_data_dir: PathBuf,
@@ -1846,6 +1935,22 @@ pub struct WalletWindow {
 /// lately", and a page rendering a per-second automation's whole history is a
 /// page nobody scrolls to the end of.
 const AUTOMATION_RUNS_SHOWN: usize = 20;
+
+/// Runs read as a table only when their columns line up, and a fixed width is
+/// what lines them up when every cell holds a different length of text.
+const RUN_WHEN_COLUMN: gpui::Pixels = px(104.0);
+const RUN_OUTCOME_COLUMN: gpui::Pixels = px(120.0);
+
+/// What the tab is showing for one automation's dry run.
+///
+/// Held in view state rather than recomputed, because a poll is a network round
+/// trip: a result that disappeared on the next re-render would be a result
+/// nobody had time to read.
+enum AutomationDryRunState {
+    Running,
+    Ready(Box<AutomationDryRun>),
+    Failed(SharedString),
+}
 
 #[derive(Clone)]
 struct DesktopSnapshot {
@@ -4909,6 +5014,8 @@ impl WalletWindow {
             network_proposal_busy: false,
             automation_busy: None,
             automation_error: None,
+            automation_dry_runs: BTreeMap::new(),
+            detached_activity_records: BTreeMap::new(),
             release_state: ReleaseDisplayState::Idle,
             pending_update,
             update_data_dir: data_dir.to_path_buf(),
@@ -10046,6 +10153,9 @@ impl WalletWindow {
         let Some(record) = records
             .iter()
             .find(|record| record.request_id() == request_id)
+            // A record cleared out of the list is hidden, not deleted, and an
+            // automation run still points at it. One fetched by id lives here.
+            .or_else(|| self.detached_activity_records.get(&request_id))
         else {
             // Unreachable in a settled frame: `render` drops a selection the
             // snapshot cannot account for before it gets here. Kept so a
@@ -11929,12 +12039,147 @@ impl WalletWindow {
         .detach();
     }
 
+    /// Delete one stopped automation, once the owner has confirmed it.
+    fn confirm_automation_delete(
+        &mut self,
+        automation_id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.automation_busy.is_some() {
+            return;
+        }
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            alert
+                .title("Delete this automation?")
+                .description(
+                    "Its bytecode, its schedule, and the record of what it did are removed from this machine. The transactions it already sent stay in your activity and nothing on chain changes. An agent can install it again under the same key.",
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Keep it")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| {
+                        view.delete_automation(automation_id, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn delete_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        self.automation_busy = Some(automation_id);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.delete_automation(automation_id))
+                .await
+                .context("deleting the automation failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.automation_busy = None;
+                view.automation_dry_runs.remove(&automation_id);
+                view.automation_error = result
+                    .err()
+                    .map(|error| SharedString::from(format!("{error:#}")));
+                view.reload_desktop_snapshot(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Run one automation's bytecode now and show what it would do.
+    ///
+    /// The tab otherwise reports only what already happened, which cannot tell
+    /// an automation that is quietly waiting for its condition from one whose
+    /// bytecode has been reverting all week, or from one the policy has been
+    /// silently refusing since it was installed. Nothing is sent: the poll and
+    /// the simulation behind it are the same read-only ones a tick performs
+    /// before it decides anything.
+    fn dry_run_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.automation_dry_runs
+            .insert(automation_id, AutomationDryRunState::Running);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.dry_run_automation(automation_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.automation_dry_runs.insert(
+                    automation_id,
+                    match result {
+                        Ok(dry_run) => AutomationDryRunState::Ready(Box::new(dry_run)),
+                        Err(error) => AutomationDryRunState::Failed(
+                            format!("The dry run could not finish: {error:#}").into(),
+                        ),
+                    },
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Open the transaction one automation run produced.
     ///
     /// Goes to the same activity detail any other transaction opens in: an
     /// automation's transaction is an ordinary transaction, and giving it a
     /// second, lesser viewer would be the wrong kind of special case.
+    ///
+    /// The record may no longer be in the activity list. Clearing history
+    /// hides finished rows rather than deleting them, precisely so this link
+    /// keeps resolving, so one the list has forgotten is fetched by id first
+    /// and held beside it. Fetching before navigating is what makes the click
+    /// land: a selection the list cannot account for is dropped on the next
+    /// frame, which used to leave the reader on an empty inbox wondering what
+    /// the button had done.
     fn open_automation_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let listed = self.cached_activity_records().is_ok_and(|records| {
+            records
+                .iter()
+                .any(|record| record.request_id() == request_id)
+        });
+        if listed || self.detached_activity_records.contains_key(&request_id) {
+            self.show_activity_record(request_id, cx);
+            return;
+        }
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.activity_record(request_id))
+                .await
+                .context("reading that transaction failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| match result {
+                Ok(record) => {
+                    view.detached_activity_records.insert(request_id, record);
+                    view.show_activity_record(request_id, cx);
+                }
+                Err(error) => {
+                    // Reported here rather than on the tab it would have
+                    // opened: the reader is still looking at the run they
+                    // clicked, and that is where the answer belongs.
+                    view.automation_error = Some(SharedString::from(format!(
+                        "That transaction is no longer on this machine: {error:#}"
+                    )));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn show_activity_record(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         self.set_route(Route::Activity);
         self.inbox_tab = InboxTab::Decided;
         self.selected_record = Some(request_id);
@@ -11947,247 +12192,596 @@ impl WalletWindow {
     fn render_automations(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
         content = content.when_some(self.automation_error.clone(), |content, error| {
-            content.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(selectable_label(error)),
-            )
+            content.child(selectable_error_alert("automation-error", error))
         });
 
         let automations = match self.cached_automations() {
             Err(error) => {
-                return content.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label(format!("{error:#}"))),
-                );
+                return content.child(selectable_error_alert(
+                    "automation-list-error",
+                    format!("The installed automations could not be read: {error:#}"),
+                ));
             }
             Ok(automations) => automations,
         };
         if automations.is_empty() {
-            return content.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(
-                        "No automations. An agent can install one to react to something on chain \
-                         without waiting for you — it can only make transactions your policy \
-                         already allows.",
-                    )),
-            );
+            return content.child(Self::render_automations_empty(cx));
         }
 
         let now = chrono::Utc::now();
+        let networks = self.network_display_names();
         let mut rows = div()
             .debug_selector(|| "automation-list".to_owned())
             .flex()
             .flex_col()
             .gap_3();
         for automation in automations {
-            let id = automation.id;
-            let busy = self.automation_busy == Some(id);
-            let stopped = automation.state != AutomationState::Enabled;
-            // What it is, in the order a reader needs it: the name they were
-            // told, the account it spends from, and how often it runs.
-            let heading = format!(
-                "{} · {} · chain {}",
-                automation.name, automation.wallet_id, automation.chain_id
-            );
-            let schedule = match automation.state {
-                AutomationState::Enabled => automation
-                    .schedule
-                    .next_after(automation.last_tick_at.unwrap_or(now))
-                    .map_or_else(
-                        || format!("{} · not scheduled to run again", automation.schedule),
-                        |next| {
-                            format!(
-                                "{} · next at {} UTC",
-                                automation.schedule,
-                                next.format("%Y-%m-%d %H:%M:%S")
-                            )
-                        },
-                    ),
-                _ => format!("{} · not running", automation.schedule),
-            };
-            let mut card =
-                div()
-                    .p_3()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(if stopped {
-                        cx.theme().danger
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div().font_semibold().child(selectable_text(
-                                    format!("automation-title-{id}"),
-                                    &heading,
-                                )),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .when(stopped, |actions| {
-                                        actions.child(
-                                            app_button(SharedString::from(format!(
-                                                "relink-automation-{id}"
-                                            )))
-                                            .debug_selector(|| "relink-automation".to_owned())
-                                            .label("Run again")
-                                            .primary()
-                                            .loading(busy)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.relink_automation(id, cx);
-                                            })),
-                                        )
-                                    })
-                                    .when(!stopped, |actions| {
-                                        actions.child(
-                                            app_button(SharedString::from(format!(
-                                                "stop-automation-{id}"
-                                            )))
-                                            .debug_selector(|| "stop-automation".to_owned())
-                                            .label("Stop")
-                                            .danger()
-                                            .loading(busy)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.stop_automation(id, cx);
-                                            })),
-                                        )
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label(schedule)),
-                    );
+            rows = rows.child(self.render_automation(automation, &networks, now, cx));
+        }
+        content.child(rows)
+    }
 
-            // Why it stopped comes before anything else about it. An
-            // automation that is not running is the only thing on this screen
-            // the reader has to act on, and burying the reason under the hash
-            // would make them hunt for it.
-            if let Some(reason) = automation.stopped_reason.as_ref() {
-                card = card.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label(reason.clone())),
-                );
-            }
-            if let Some(outcome) = automation.last_outcome.as_ref() {
-                let when = automation.last_tick_at.map_or_else(String::new, |at| {
-                    format!(" ({})", relative_time_label(at, now))
-                });
-                card = card.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(selectable_label(format!("Last run: {outcome}{when}"))),
-                );
-            }
-            // The bytecode cannot be shown as anything a person reads, so the
-            // screen says what it honestly can: its hash, its size, and the
-            // policy revision it is bound to.
-            card = card.child(
+    /// What this tab would hold, for the owner who has never installed one.
+    ///
+    /// An empty list here is the normal state for most people, and the useful
+    /// thing to say is not "nothing yet" but what an automation *is* and what
+    /// bounds it — because the reason to want one and the reason to trust one
+    /// are the same fact: it cannot do anything the signing policy does not
+    /// already allow.
+    fn render_automations_empty(cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .debug_selector(|| "automations-empty".to_owned())
+            .p_5()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
                 div()
-                    .text_xs()
+                    .font_semibold()
+                    .child(selectable_label("Nothing runs on its own yet")),
+            )
+            .child(
+                div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_text(
-                        format!("automation-identity-{id}"),
-                        &format!(
-                            "{} · {} bytes · policy revision {} · key {}",
-                            automation.bytecode_hash(),
-                            automation.bytecode.len(),
-                            automation.policy_revision,
-                            automation.key
-                        ),
+                    .child(selectable_label(
+                        "An automation is a small program an agent installs here. The wallet runs \
+                         it on a schedule, and whatever it asks for becomes an ordinary \
+                         transaction — so an agent can react to something on chain in seconds \
+                         instead of waiting until you are next talking to it.",
                     )),
-            );
-            // The run history, which is the answer to "what has this been
-            // doing" — and for every run that produced a transaction, a way
-            // straight to that transaction's details. Those records are hidden
-            // rather than deleted when history is cleared, so this link keeps
-            // working however long ago the run happened.
-            if let Some(runs) = self
-                .snapshot()
-                .ok()
-                .and_then(|snapshot| snapshot.automation_runs.get(&id))
-                .filter(|runs| !runs.is_empty())
-            {
-                let mut history = div()
-                    .debug_selector(|| "automation-runs".to_owned())
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(
+                        "Installing one grants no new authority. Every call it proposes is \
+                         checked against the signing policy you approved, and one the policy does \
+                         not allow stops the automation instead of sending. Ask an agent for what \
+                         you want watched; it can test the program against your policy before \
+                         anything is installed, and you can stop or delete it here at any time.",
+                    )),
+            )
+    }
+
+    fn render_automation(
+        &self,
+        automation: &Automation,
+        networks: &BTreeMap<u64, SharedString>,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let id = automation.id;
+        let busy = self.automation_busy == Some(id);
+        let stopped = automation.state != AutomationState::Enabled;
+        let (state_label, tone) = match automation.state {
+            AutomationState::Enabled => ("Running", StatusTone::Working),
+            AutomationState::Disabled => ("Stopped", StatusTone::Failed),
+            AutomationState::AwaitingRelink => ("Needs you", StatusTone::NeedsYou),
+        };
+        let dry_running = matches!(
+            self.automation_dry_runs.get(&id),
+            Some(AutomationDryRunState::Running)
+        );
+
+        let actions = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                app_button(SharedString::from(format!("dry-run-automation-{id}")))
+                    .debug_selector(|| "dry-run-automation".to_owned())
+                    // "What would it do right now" is the question this screen
+                    // exists to answer, and it is the one question a stopped
+                    // automation can still answer, so the control is offered
+                    // in every state.
+                    .label("Dry run")
+                    .loading(dry_running)
+                    .disabled(dry_running)
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.dry_run_automation(id, cx);
+                    })),
+            )
+            .when(stopped, |actions| {
+                actions.child(
+                    app_button(SharedString::from(format!("relink-automation-{id}")))
+                        .debug_selector(|| "relink-automation".to_owned())
+                        // "Start", not "Run again": this does not run a tick,
+                        // it puts the automation back on its schedule under
+                        // the policy that is active now.
+                        .label("Start")
+                        .primary()
+                        .loading(busy)
+                        .disabled(busy)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.relink_automation(id, cx);
+                        })),
+                )
+            })
+            .when(!stopped, |actions| {
+                actions.child(
+                    app_button(SharedString::from(format!("stop-automation-{id}")))
+                        .debug_selector(|| "stop-automation".to_owned())
+                        .label("Stop")
+                        .danger()
+                        .loading(busy)
+                        .disabled(busy)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.stop_automation(id, cx);
+                        })),
+                )
+            })
+            // Only once it is stopped. Deleting something mid-tick races the
+            // scheduler, and stopping first is also the order a person decides
+            // in: whether to keep it is a second question, asked after the
+            // first one is settled.
+            .when(stopped, |actions| {
+                actions.child(
+                    app_button(SharedString::from(format!("delete-automation-{id}")))
+                        .debug_selector(|| "delete-automation".to_owned())
+                        .label("Delete")
+                        .ghost()
+                        .disabled(busy)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.confirm_automation_delete(id, window, cx);
+                        })),
+                )
+            });
+
+        let header = h_flex()
+            .w_full()
+            .items_start()
+            .justify_between()
+            .flex_wrap()
+            .gap_3()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
                     .flex()
                     .flex_col()
                     .gap_1()
                     .child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("Runs")),
-                    );
-                for run in runs {
-                    let request_id = run.request_id;
-                    history = history.child(
                         h_flex()
-                            .w_full()
+                            .min_w_0()
                             .items_center()
-                            .justify_between()
                             .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if run.outcome == RunOutcome::Failed {
-                                        cx.theme().danger
-                                    } else {
-                                        cx.theme().muted_foreground
-                                    })
-                                    .child(selectable_label(format!(
-                                        "{} · {} · {}",
-                                        relative_time_label(run.ran_at, now),
-                                        run.outcome.label(),
-                                        run.detail
-                                    ))),
-                            )
-                            .when_some(request_id, |row, request_id| {
-                                row.child(
-                                    app_button(SharedString::from(format!(
-                                        "open-automation-transaction-{}",
-                                        run.run_id
-                                    )))
-                                    .debug_selector(|| "open-automation-transaction".to_owned())
-                                    .label("Transaction")
-                                    .small()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.open_automation_transaction(request_id, cx);
-                                    })),
-                                )
-                            }),
+                            .child(div().min_w_0().truncate().font_semibold().child(
+                                selectable_text(format!("automation-title-{id}"), &automation.name),
+                            ))
+                            .child(status_pill(state_label, tone, cx)),
+                    )
+                    // The name is what the owner calls it; the key is what an
+                    // agent addresses it by. Both belong here, in that order,
+                    // rather than the key being packed into the hash line
+                    // where nobody looking for it would think to look.
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_text(
+                                format!("automation-key-{id}"),
+                                &format!("key {}", automation.key),
+                            )),
+                    ),
+            )
+            .child(actions);
+
+        let mut card = div()
+            .p_4()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(if stopped {
+                tone.color(cx)
+            } else {
+                cx.theme().border
+            })
+            .bg(cx.theme().secondary)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(header)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_text(
+                        format!("automation-account-{id}"),
+                        &format!(
+                            "{} · {}",
+                            automation.wallet_id,
+                            chain_label(Some(automation.chain_id), networks)
+                        ),
+                    )),
+            )
+            .child(Self::render_automation_schedule(automation, now, cx));
+
+        // Why it stopped comes before anything else about it. An automation
+        // that is not running is the only thing on this screen the reader has
+        // to act on, and burying the reason under the hash would make them
+        // hunt for it.
+        if let Some(reason) = automation.stopped_reason.as_ref() {
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(tone.color(cx))
+                    .child(selectable_label(reason.clone())),
+            );
+        }
+        if let Some(outcome) = automation.last_outcome.as_ref() {
+            let when = automation.last_tick_at.map_or_else(String::new, |at| {
+                format!(" ({})", relative_time_label(at, now))
+            });
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(format!("Last run: {outcome}{when}"))),
+            );
+        }
+        // The bytecode cannot be shown as anything a person reads, so the
+        // screen says what it honestly can: its hash, its size, and the policy
+        // revision it is bound to.
+        card = card.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(selectable_text(
+                    format!("automation-identity-{id}"),
+                    &format!(
+                        "{} · {} bytes · policy revision {}",
+                        automation.bytecode_hash(),
+                        automation.bytecode.len(),
+                        automation.policy_revision
+                    ),
+                )),
+        );
+        if let Some(state) = self.automation_dry_runs.get(&id) {
+            card = card.child(Self::render_automation_dry_run(id, state, now, cx));
+        }
+        if let Some(runs) = self
+            .snapshot()
+            .ok()
+            .and_then(|snapshot| snapshot.automation_runs.get(&id))
+            .filter(|runs| !runs.is_empty())
+        {
+            card = card.child(Self::render_automation_runs(runs, now, cx));
+        }
+        card
+    }
+
+    /// The cadence, in the words the owner reads, over the expression they
+    /// approved.
+    ///
+    /// Both, always. The sentence is what makes a schedule legible at a glance
+    /// and the expression is what makes it checkable against what an agent
+    /// said it installed, so neither one replaces the other.
+    fn render_automation_schedule(
+        automation: &Automation,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let id = automation.id;
+        let expression = automation.schedule.to_string();
+        let timing = match automation.state {
+            AutomationState::Enabled => automation
+                .schedule
+                .next_after(automation.last_tick_at.unwrap_or(now))
+                .map_or_else(
+                    || "not scheduled to run again".to_owned(),
+                    |next| format!("next run {}", countdown_label(next, now)),
+                ),
+            _ => "not running".to_owned(),
+        };
+        let cadence = automation.schedule.describe();
+        div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(div().child(selectable_text(
+                format!("automation-cadence-{id}"),
+                cadence.as_ref().unwrap_or(&expression),
+            )))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_text(
+                        format!("automation-schedule-{id}"),
+                        &match &cadence {
+                            // Nothing to check the sentence against when there
+                            // is no sentence: the line above is already the
+                            // expression.
+                            None => timing,
+                            Some(_) => format!("{expression} · {timing}"),
+                        },
+                    )),
+            )
+    }
+
+    /// What this automation would do if it ticked right now.
+    fn render_automation_dry_run(
+        id: uuid::Uuid,
+        state: &AutomationDryRunState,
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut panel = automation_subpanel(cx)
+            .debug_selector(|| "automation-dry-run".to_owned())
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(automation_subpanel_caption("Dry run", cx))
+                    .child(
+                        app_button(SharedString::from(format!("hide-dry-run-{id}")))
+                            .label("Hide")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.automation_dry_runs.remove(&id);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        match state {
+            AutomationDryRunState::Running => panel.child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Spinner::new().small())
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(
+                                "Running the bytecode against the chain as a tick would. Nothing \
+                                 is sent.",
+                            )),
+                    ),
+            ),
+            AutomationDryRunState::Failed(error) => panel.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(selectable_label(error.clone())),
+            ),
+            AutomationDryRunState::Ready(result) => {
+                panel = panel.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_label(match result.block_number {
+                            None => relative_time_label(result.ran_at, now),
+                            Some(block) => format!(
+                                "{} · block {block}",
+                                relative_time_label(result.ran_at, now)
+                            ),
+                        })),
+                );
+                if let Some(failure) = result.failure.as_ref() {
+                    return panel.child(div().text_sm().text_color(cx.theme().danger).child(
+                        selectable_text(
+                            format!("dry-run-failure-{id}"),
+                            &format!("The bytecode did not produce calls. {failure}"),
+                        ),
+                    ));
+                }
+                if result.calls.is_empty() {
+                    return panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(
+                                "It ran and asked for nothing, which is what an idle tick looks \
+                                 like. Whatever it watches for has not happened yet.",
+                            )),
                     );
                 }
-                card = card.child(history);
+                panel = panel.child(div().text_sm().child(selectable_label(format!(
+                    "It would send {} right now.",
+                    pluralize(result.calls.len(), "call")
+                ))));
+                for (index, call) in result.calls.iter().enumerate() {
+                    panel = panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_text(
+                                format!("dry-run-call-{id}-{index}"),
+                                &format!("{}. {}", index + 1, describe_polled_call(call)),
+                            )),
+                    );
+                }
+                // Whether it would actually send is a different question from
+                // whether it runs, and it is the one that decides if this
+                // automation is doing anything at all.
+                if let Some(verdict) = result.verdict.as_ref() {
+                    panel = panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(if verdict.sends_automatically {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().warning
+                            })
+                            .child(selectable_text(
+                                format!("dry-run-verdict-{id}"),
+                                &if verdict.sends_automatically {
+                                    format!(
+                                        "Policy revision {} allows this, so a tick right now would \
+                                         send it.",
+                                        verdict.policy_revision
+                                    )
+                                } else {
+                                    format!(
+                                        "Policy revision {} would not let this send, so a tick \
+                                         right now would stop the automation instead.",
+                                        verdict.policy_revision
+                                    )
+                                },
+                            )),
+                    );
+                    if !verdict.simulation_succeeded {
+                        panel = panel.child(div().text_xs().text_color(cx.theme().danger).child(
+                            selectable_label(format!(
+                                "The batch did not simulate successfully{}",
+                                verdict.simulation_failure.as_ref().map_or_else(
+                                    || ".".to_owned(),
+                                    |failure| format!(": {failure}")
+                                )
+                            )),
+                        ));
+                    }
+                    for (index, finding) in verdict.findings.iter().enumerate() {
+                        panel = panel.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(selectable_text(
+                                    format!("dry-run-finding-{id}-{index}"),
+                                    &format!("· {finding}"),
+                                )),
+                        );
+                    }
+                }
+                panel
             }
-            rows = rows.child(card);
         }
-        content.child(rows)
+    }
+
+    /// Every tick this automation has run lately, as a table.
+    ///
+    /// In its own filled panel rather than as more lines in the card. The rows
+    /// above are what this automation *is*; these are what it has *done*, and
+    /// with both drawn as muted text on the same fill the reader had to work
+    /// out where one ended and the other began.
+    fn render_automation_runs(
+        runs: &[AutomationRun],
+        now: chrono::DateTime<chrono::Utc>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut history = automation_subpanel(cx)
+            .debug_selector(|| "automation-runs".to_owned())
+            .gap_0()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .pb_1p5()
+                    .child(
+                        div()
+                            .w(RUN_WHEN_COLUMN)
+                            .flex_none()
+                            .child(automation_subpanel_caption("When", cx)),
+                    )
+                    .child(
+                        div()
+                            .w(RUN_OUTCOME_COLUMN)
+                            .flex_none()
+                            .child(automation_subpanel_caption("Outcome", cx)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(automation_subpanel_caption("Detail", cx)),
+                    ),
+            );
+        let last = runs.len().saturating_sub(1);
+        for (index, run) in runs.iter().enumerate() {
+            let request_id = run.request_id;
+            let tone = match run.outcome {
+                RunOutcome::Failed | RunOutcome::Stopped => cx.theme().danger,
+                RunOutcome::Sent => cx.theme().foreground,
+                RunOutcome::Idle | RunOutcome::Skipped => cx.theme().muted_foreground,
+            };
+            history = history.child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .py_1p5()
+                    .when(index < last, |row| {
+                        row.border_b_1().border_color(cx.theme().border)
+                    })
+                    .child(
+                        div()
+                            .w(RUN_WHEN_COLUMN)
+                            .flex_none()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(relative_time_label(run.ran_at, now))),
+                    )
+                    .child(
+                        div()
+                            .w(RUN_OUTCOME_COLUMN)
+                            .flex_none()
+                            .text_xs()
+                            .text_color(tone)
+                            .child(selectable_label(run.outcome.label())),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_text(
+                                format!("automation-run-detail-{}", run.run_id),
+                                &run.detail,
+                            )),
+                    )
+                    // Those records are hidden rather than deleted when
+                    // history is cleared, so this link keeps working however
+                    // long ago the run happened.
+                    .when_some(request_id, |row, request_id| {
+                        row.child(
+                            app_button(SharedString::from(format!(
+                                "open-automation-transaction-{}",
+                                run.run_id
+                            )))
+                            .debug_selector(|| "open-automation-transaction".to_owned())
+                            .label("Transaction")
+                            .small()
+                            .on_click(cx.listener(
+                                move |view, _, _, cx| {
+                                    view.open_automation_transaction(request_id, cx);
+                                },
+                            )),
+                        )
+                    }),
+            );
+        }
+        history
     }
 
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -15198,6 +15792,7 @@ impl Render for WalletWindow {
         // trap that was not on the screen. Drop the selection instead, so the
         // click lands on the inbox it was always about.
         if let Some(request_id) = self.selected_record
+            && !self.detached_activity_records.contains_key(&request_id)
             && let Ok(records) = self.cached_activity_records()
             && !records
                 .iter()

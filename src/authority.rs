@@ -12,7 +12,7 @@ use ekubo_wallet_core::{
         ApprovalKind, ApprovalRequest, ApprovalSectionKind, ReviewDocument, ReviewPresenter,
     },
     approval_summary::{TokenMetadataMap, format_fixed_point, interpret_steps, plan_token_targets},
-    automation::Automation,
+    automation::{Automation, AutomationState, PollFailure, PolledCall},
     automation_store::{AutomationRun, AutomationStore},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
@@ -51,6 +51,41 @@ fn contains_configured_chain(config: &WalletConfig, chain_id: u64) -> bool {
         .networks
         .iter()
         .any(|network| network.chain_id == chain_id)
+}
+
+/// What an automation would do if it ticked right now.
+///
+/// Display-only. It carries no plan, no simulation handle, and nothing else
+/// that could be sent: an owner reading a dry run is reading a report, and the
+/// only way anything here reaches a chain is the automation's own next tick.
+#[derive(Clone, Debug)]
+pub struct AutomationDryRun {
+    pub ran_at: DateTime<Utc>,
+    /// The block the poll observed, absent when the poll never ran.
+    pub block_number: Option<u64>,
+    /// Why the bytecode produced nothing readable: a revert, an undecodable
+    /// return value, or an endpoint that could not be reached.
+    pub failure: Option<String>,
+    /// Empty is the healthy idle tick, not an error.
+    pub calls: Vec<PolledCall>,
+    /// Absent when there were no calls to judge.
+    pub verdict: Option<AutomationDryRunVerdict>,
+}
+
+/// Whether the calls a dry run produced would actually have sent.
+///
+/// The question an owner asks of an automation is not "does the bytecode run"
+/// but "would anything come of it", and those have different answers whenever
+/// the policy moved after the automation was written.
+#[derive(Clone, Debug)]
+pub struct AutomationDryRunVerdict {
+    pub policy_revision: u64,
+    /// True only when the policy allowed every call and the simulation
+    /// succeeded — the exact condition a tick sends under.
+    pub sends_automatically: bool,
+    pub simulation_succeeded: bool,
+    pub simulation_failure: Option<String>,
+    pub findings: Vec<String>,
 }
 
 /// One owner account's balances across every configured network.
@@ -881,6 +916,136 @@ impl OwnerApi {
         Ok(relinked)
     }
 
+    /// Forget one stopped automation entirely, at the owner's request.
+    ///
+    /// Only a stopped one. Deleting something mid-tick would race the
+    /// scheduler for a row it is holding, and "stop it, then decide whether to
+    /// keep it" is also the order a person reasons in — the two steps are not
+    /// the same decision, and collapsing them would make an accidental click
+    /// unrecoverable rather than merely inconvenient. Its run history goes with
+    /// it; the transactions those runs produced are activity records and stay
+    /// where they are.
+    pub fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
+        let mut store = AutomationStore::production(self.config.data_dir())?;
+        let automation = store
+            .get(automation_id)?
+            .context("that automation is no longer installed")?;
+        ensure!(
+            automation.state != AutomationState::Enabled,
+            "stop this automation before deleting it"
+        );
+        ensure!(
+            store.remove(automation_id)?,
+            "that automation is no longer installed"
+        );
+        self.events.publish(DomainEventKind::AutomationsChanged {
+            wallet_id: automation.wallet_id.clone(),
+        });
+        Ok(())
+    }
+
+    /// Run one installed automation's bytecode against the chain as it is right
+    /// now, without scheduling, signing, storing, or sending anything.
+    ///
+    /// The same poll a tick performs, followed by the same simulation and
+    /// policy evaluation the send path would perform, so the answer is the real
+    /// one rather than a rehearsal of it. Nothing here can send: the result is
+    /// discarded after it is displayed, and a plan the owner never approved has
+    /// no path to a signature.
+    ///
+    /// This is what makes a quiet automation legible. Its run history says it
+    /// found nothing to do; only a poll on demand says what it is looking at
+    /// while it finds nothing, and whether the policy would still let it act if
+    /// it did.
+    pub async fn dry_run_automation(&self, automation_id: uuid::Uuid) -> Result<AutomationDryRun> {
+        let automation = AutomationStore::production(self.config.data_dir())?
+            .get(automation_id)?
+            .context("that automation is no longer installed")?;
+        let wallet = self.account(&automation.wallet_id)?;
+        let network = self.network_by_chain_id(automation.chain_id)?;
+
+        // Failover across endpoints exactly as a tick does, so one unreachable
+        // endpoint reports as the RPC problem it is rather than as a fault in
+        // the automation. Only an RPC failure moves on: a revert is a fact
+        // about the bytecode and every endpoint returns it again.
+        let clients = ekubo_wallet_core::rpc::clients_for(&network).await?;
+        let mut last = None;
+        let mut remaining = clients.len();
+        for client in clients {
+            remaining -= 1;
+            let attempt = ekubo_wallet_core::automation::poll(
+                client.as_ref(),
+                wallet.address,
+                &automation.bytecode,
+                &automation.config,
+            )
+            .await?;
+            let retryable = matches!(attempt, Err(PollFailure::Rpc(_))) && remaining > 0;
+            last = Some(attempt);
+            if !retryable {
+                break;
+            }
+        }
+        let polled = match last.context("network has no RPC endpoints")? {
+            Err(failure) => {
+                return Ok(AutomationDryRun {
+                    ran_at: Utc::now(),
+                    block_number: None,
+                    failure: Some(failure.to_string()),
+                    calls: Vec::new(),
+                    verdict: None,
+                });
+            }
+            Ok(polled) => polled,
+        };
+        let mut result = AutomationDryRun {
+            ran_at: Utc::now(),
+            block_number: Some(polled.block_number),
+            failure: None,
+            calls: polled.calls.clone(),
+            verdict: None,
+        };
+        if polled.calls.is_empty() {
+            return Ok(result);
+        }
+
+        let plan = ekubo_wallet_core::automation::synthesize_plan(
+            wallet.address,
+            network.chain_id,
+            &polled.calls,
+        )?;
+        let policy = PolicyStore::production(self.config.data_dir())?
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+            .context("wallet has no active policy")?;
+        let simulation = ekubo_wallet_core::simulation::simulate_external_execution(
+            &wallet,
+            &network,
+            &plan,
+            &policy,
+            &ekubo_wallet_core::core::predicate::PolicyContext {
+                wallet: wallet.address,
+            },
+            None,
+        )
+        .await?;
+        result.verdict = Some(AutomationDryRunVerdict {
+            policy_revision: simulation.policy_revision,
+            sends_automatically: simulation.allowed,
+            simulation_succeeded: simulation.simulation.success,
+            simulation_failure: simulation
+                .simulation
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.clone()),
+            findings: simulation
+                .policy_findings
+                .iter()
+                .map(|finding| finding.message.clone())
+                .collect(),
+        });
+        Ok(result)
+    }
+
     pub fn policy_history(&self, wallet_id: &str) -> Result<Vec<StoredPolicy>> {
         let wallet = self.account(wallet_id)?;
         PolicyStore::production(self.config.data_dir())?.history_for_wallet(
@@ -1202,6 +1367,21 @@ impl OwnerApi {
         });
         records.truncate(usize::from(limit));
         Ok(records)
+    }
+
+    /// One activity record by id, whether or not the list still carries it.
+    ///
+    /// Clearing history hides finished rows rather than deleting them, so that
+    /// an automation run's pointer at the transaction it produced keeps
+    /// resolving however long ago the run happened. This is how the owner's
+    /// window follows that pointer: the list query filters hidden rows out, and
+    /// a lookup by id deliberately does not.
+    ///
+    /// Transactions only. Nothing else in the wallet links to a record by id
+    /// from outside the list it lives in.
+    pub fn activity_record(&self, request_id: Uuid) -> Result<OwnerActivityRecord> {
+        let record = PendingStore::production(self.config.data_dir())?.get(request_id)?;
+        Ok(OwnerActivityRecord::Transaction(Box::new(record)))
     }
 
     /// The agent that asked for each record, by request ID.
