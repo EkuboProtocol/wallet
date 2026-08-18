@@ -1451,6 +1451,12 @@ fn render_portfolio_balance_row(
                         .flex_col()
                         .items_end()
                         .gap_0p5()
+                        // The balance and nothing else. A recorded value is a
+                        // price somebody typed once and no ticker maintains,
+                        // so printing a dollar figure beside a live balance
+                        // would put a stale number where an exact one belongs.
+                        // It decides the order of these rows and which of them
+                        // are dust, and says nothing on screen.
                         .child(
                             div()
                                 .min_w_0()
@@ -1474,21 +1480,7 @@ fn render_portfolio_balance_row(
                                     )
                                     .whitespace_nowrap(),
                                 ),
-                        )
-                        // Under the exact amount, never instead of it: this is
-                        // an estimate from a price the owner typed, and the
-                        // line above is the number the chain agrees with.
-                        .when_some(row.approximate_usd_value, |column, value| {
-                            column.child(
-                                div()
-                                    .flex_none()
-                                    .whitespace_nowrap()
-                                    .text_right()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("≈ {}", format_usd(value))),
-                            )
-                        }),
+                        ),
                 ),
         )
         .into_any_element()
@@ -5280,9 +5272,12 @@ impl ListDelegate for TokenListDelegate {
         let price_token = token.clone();
         let price_wallet = self.wallet.clone();
         let value_action = app_button(("set-token-value", index.row))
+            // The token's own row is where the recorded price belongs and the
+            // only place it is shown: it is a field of this token, not a fact
+            // about a balance somewhere else.
             .label(token.approximate_usd_price.map_or_else(
                 || "Set value".to_owned(),
-                |price| format!("≈ {} each", format_usd(price)),
+                |price| format!("Value {}", format_usd(price)),
             ))
             .on_click(move |_, window, cx| {
                 let token = price_token.clone();
