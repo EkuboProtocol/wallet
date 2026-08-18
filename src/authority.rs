@@ -1797,12 +1797,30 @@ impl OwnerApi {
                 send_error: None,
             });
         };
-        let (record, broadcast) = submit_claimed(&pending, &wallet, &network, claimed).await?;
-        self.publish_transaction_status(&record);
-        Ok(ReviewedTransaction {
-            record,
-            send_error: broadcast.broadcast_error,
-        })
+        match submit_claimed(&pending, &wallet, &network, claimed).await {
+            Ok((record, broadcast)) => {
+                self.publish_transaction_status(&record);
+                Ok(ReviewedTransaction {
+                    record,
+                    send_error: broadcast.broadcast_error,
+                })
+            }
+            // The review is not what failed. The owner authenticated, the
+            // signature is stored, and the row is back to `signed` or still
+            // holding its lease; raising here would report the decision itself
+            // as having gone wrong and say nothing about the send that did.
+            Err(error) => {
+                let current = pending
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                    .get(record.request_id)?;
+                self.publish_transaction_status(&current);
+                Ok(ReviewedTransaction {
+                    record: current,
+                    send_error: Some(format!("{error:#}")),
+                })
+            }
+        }
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {

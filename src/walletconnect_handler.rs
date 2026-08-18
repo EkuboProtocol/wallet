@@ -756,6 +756,11 @@ impl DesktopSession {
             tokio::select! {
                 () = self.shutdown.cancelled() => return Ok(ReviewedRequest::Declined),
                 _ = events.recv() => {}
+                // Every local sender publishes, but the row is the authority
+                // and this waits on the row: a tick costs one encrypted read
+                // and removes "somebody wrote the database quietly" as a way
+                // to strand a dapp request.
+                () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
             }
         }
     }
@@ -830,13 +835,20 @@ enum ReviewedStatus {
 /// state has to be classified deliberately, because guessing here either hangs
 /// a dapp on a decision that already happened or reports a sent transaction as
 /// a failure.
+///
+/// `submitting` is deliberately not an answer. It is the common state to
+/// observe — the review window publishes `signed` and then claims the
+/// submission, so this session usually wakes inside that window — and it is
+/// the one state where the row has no broadcast hash to answer
+/// `eth_sendTransaction` with. Waiting through it costs one RPC round trip and
+/// ends at `broadcast` with a hash, or back at `signed` if no endpoint took
+/// the bytes, which is this session's cue to send them itself.
 const fn classify_reviewed_status(status: PendingStatus) -> ReviewedStatus {
     match status {
-        PendingStatus::AwaitingApproval => ReviewedStatus::Undecided,
+        PendingStatus::AwaitingApproval | PendingStatus::Submitting => ReviewedStatus::Undecided,
         PendingStatus::Signed => ReviewedStatus::Signed,
         PendingStatus::Rejected => ReviewedStatus::Declined,
-        PendingStatus::Submitting
-        | PendingStatus::Broadcast
+        PendingStatus::Broadcast
         | PendingStatus::Confirmed
         | PendingStatus::Reverted
         | PendingStatus::Cancelling

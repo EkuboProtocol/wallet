@@ -8693,8 +8693,8 @@ impl WalletWindow {
                                 view.set_activity_feedback(
                                     request_id,
                                     ActivityFeedback::failure(format!(
-                                        "Approved and signed, but no endpoint accepted the exact \
-                                         signed bytes: {error}. Use Send now to try again."
+                                        "Approved and signed, but the exact signed bytes were not \
+                                         sent: {error}. Use Send now to try again."
                                     )),
                                     cx,
                                 );

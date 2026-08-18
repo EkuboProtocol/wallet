@@ -102,7 +102,6 @@ fn a_transaction_the_review_window_already_sent_is_not_an_unexpected_state() {
     // own request therefore wakes to a row that is already past `signed`, and
     // every one of those states is the approval it was waiting for.
     for sent in [
-        PendingStatus::Submitting,
         PendingStatus::Broadcast,
         PendingStatus::Confirmed,
         PendingStatus::Reverted,
@@ -118,6 +117,12 @@ fn a_transaction_the_review_window_already_sent_is_not_an_unexpected_state() {
     }
     assert_eq!(
         classify_reviewed_status(PendingStatus::AwaitingApproval),
+        ReviewedStatus::Undecided
+    );
+    // Not an answer: a claimed submission has no broadcast hash yet, and
+    // `eth_sendTransaction` has nothing to reply with until it does.
+    assert_eq!(
+        classify_reviewed_status(PendingStatus::Submitting),
         ReviewedStatus::Undecided
     );
     assert_eq!(
