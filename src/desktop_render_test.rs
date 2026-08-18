@@ -239,6 +239,29 @@ fn measure_at(
     bounds
 }
 
+/// Draw, then press the named element in the middle of wherever it landed.
+///
+/// Whether something is clickable at all is only answerable from outside: a
+/// row that navigates and a row that is inert look identical in the tree, and
+/// the difference between them is the whole point of a finished task.
+fn click(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    selector: &'static str,
+) {
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    let drawn = view.clone();
+    visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
+        gpui::AnyView::from(drawn).into_any_element()
+    });
+    let bounds = visual
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} did not draw, so it cannot be pressed"));
+    visual.simulate_click(bounds.center(), gpui::Modifiers::none());
+    visual.run_until_parked();
+}
+
 /// Hosts the network form in a real view so entity-backed inputs have the
 /// rendered-view context GPUI requires during prepaint.
 struct NetworkEditorFormTestView {
@@ -2098,7 +2121,9 @@ fn a_security_review_covers_the_guided_setup_rather_than_sharing_the_screen(
 }
 
 #[gpui::test]
-fn every_guided_setup_row_draws_and_dismissal_takes_the_card_away(cx: &mut gpui::TestAppContext) {
+fn every_guided_setup_row_draws_and_the_dismiss_link_takes_the_card_away(
+    cx: &mut gpui::TestAppContext,
+) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
@@ -2114,7 +2139,9 @@ fn every_guided_setup_row_draws_and_dismissal_takes_the_card_away(cx: &mut gpui:
         assert!(row.is_some(), "{selector} did not draw");
     }
 
-    cx.update_entity(&view, WalletWindow::dismiss_guided_setup);
+    // Pressed rather than called: the way out is a word at the bottom of the
+    // card now, and a link nobody can hit is the same as no link at all.
+    click(cx, window, &view, "guided-setup-dismiss");
     let after = measure(cx, window, &view, &["guided-setup"]);
 
     assert!(after[0].is_none(), "a dismissed card came back");
@@ -2122,11 +2149,86 @@ fn every_guided_setup_row_draws_and_dismissal_takes_the_card_away(cx: &mut gpui:
 }
 
 #[gpui::test]
+fn the_title_folds_the_checklist_away_and_opens_it_again(cx: &mut gpui::TestAppContext) {
+    // Somebody whose corner is covered should not have to give the checklist
+    // up for the run to get it back, so the title folds the card down to a
+    // line — count and all — and unfolds it.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let open = measure(cx, window, &view, &["guided-setup"])[0].expect("the card starts open");
+
+    click(cx, window, &view, "guided-setup-toggle");
+    let folded = measure(
+        cx,
+        window,
+        &view,
+        &["guided-setup", "guided-setup-tasks", "guided-setup-toggle"],
+    );
+    let card = folded[0].expect("folding must not send the card away");
+    assert!(
+        folded[1].is_none(),
+        "the task list is still drawn under a folded title: {:?}",
+        folded[1]
+    );
+    assert!(
+        folded[2].is_some(),
+        "the title has to survive folding — it is the way back"
+    );
+    assert!(
+        card.size.height < open.size.height,
+        "the folded card is no shorter than the open one: {card:?} against {open:?}"
+    );
+
+    click(cx, window, &view, "guided-setup-toggle");
+    let reopened = measure(cx, window, &view, &["guided-setup", "guided-setup-tasks"]);
+    assert!(
+        reopened[1].is_some(),
+        "the title did not open the checklist again"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn a_finished_row_does_nothing_when_it_is_pressed(cx: &mut gpui::TestAppContext) {
+    // A row is a shortcut to the screen its task lives on, and a finished task
+    // has nowhere left to send anybody. Ticking the box is not on offer
+    // either: completion is read off the wallet, never set here.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.guided_setup.latch(SetupObservation {
+            account: true,
+            ..SetupObservation::default()
+        });
+        wallet.set_route(Route::Settings);
+    });
+
+    click(cx, window, &view, "guided-setup-create_account");
+
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.route),
+        Route::Settings,
+        "a finished row navigated anyway"
+    );
+
+    // The control: an unfinished row in the same card does move, which is what
+    // makes the assertion above about the row rather than about a press that
+    // never landed.
+    click(cx, window, &view, "guided-setup-connect_dapp");
+
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.route),
+        Route::WalletConnect,
+        "an unfinished row stopped being a shortcut"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestAppContext) {
-    // The window can be dragged down to 660x500. Five tasks with their
-    // explanations come to more than that, so the card has to give somewhere —
-    // and the place it must not give is the top, where the count and the way
-    // out live.
+    // The window can be dragged down to 660x500, and the card does not scroll:
+    // whatever it draws has to fit there outright, with every task still
+    // unfinished, which is the tallest the card ever gets.
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
@@ -2140,11 +2242,17 @@ fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestApp
         window,
         &view,
         smallest,
-        &["guided-setup", "guided-setup-header", "guided-setup-tasks"],
+        &[
+            "guided-setup",
+            "guided-setup-header",
+            "guided-setup-tasks",
+            "guided-setup-dismiss",
+        ],
     );
     let card = bounds[0].expect("the card must draw in a minimum-size window");
     let header = bounds[1].expect("the card header must draw");
     let tasks = bounds[2].expect("the task list must draw");
+    let dismiss = bounds[3].expect("the way out must draw");
 
     assert!(
         card.origin.y >= px(0.0) && card.origin.y + card.size.height <= smallest.height,
@@ -2154,23 +2262,20 @@ fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestApp
         card.origin.x >= px(0.0) && card.origin.x + card.size.width <= smallest.width,
         "the card does not fit across a 660x500 window: {card:?}"
     );
+    // The header carries the count and the fold, and the link is the way out.
+    // Both are inside the card, so both follow from the fit above — but they
+    // are what the fit is for, so they are asserted rather than assumed.
     assert!(
         header.origin.y >= px(0.0) && header.origin.y + header.size.height <= smallest.height,
         "the header left the window: {header:?}"
     );
-    // Shrinking must land on the list, and must leave enough of it to read a
-    // task from: a card whose list collapsed to nothing is a header with a
-    // paragraph under it.
     assert!(
-        tasks.size.height >= px(80.0),
-        "the task list was crushed instead of scrolled: {tasks:?}"
+        dismiss.origin.y >= px(0.0) && dismiss.origin.y + dismiss.size.height <= smallest.height,
+        "the dismiss link left the window: {dismiss:?}"
     );
-    let scroll = cx.read_entity(&view, |wallet, _| {
-        wallet.guided_setup_scroll_handle.max_offset()
-    });
     assert!(
-        scroll.y > px(0.0),
-        "a list too tall for a 660x500 window must actually scroll: {scroll:?}"
+        tasks.origin.y >= px(0.0) && tasks.origin.y + tasks.size.height <= smallest.height,
+        "the task list ran off the window instead of fitting inside it: {tasks:?}"
     );
     release(cx, &view);
 }

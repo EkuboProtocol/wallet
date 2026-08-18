@@ -999,31 +999,21 @@ fn network_editor_metrics(viewport: gpui::Size<gpui::Pixels>) -> NetworkEditorMe
     }
 }
 
-struct GuidedSetupMetrics {
-    width: gpui::Pixels,
-    max_height: gpui::Pixels,
-}
-
-/// How large the getting-started card may be in a window of this size.
+/// How wide the getting-started card may be in a window of this size.
 ///
-/// The card is pinned 20px off two edges, so a card taller than the window
-/// less those margins runs its own header off the top — the failure the
-/// scrolling task list exists to prevent, moved rather than fixed. The wallet
-/// opens at 960x650 but can be dragged down to 660x500, and both dimensions
-/// have to give: a 400px card on a 660px window is most of the width.
-fn guided_setup_metrics(viewport: gpui::Size<gpui::Pixels>) -> GuidedSetupMetrics {
+/// Only the width is measured off the window. Height is whatever the card's
+/// own content comes to: it does not scroll, so a cap here would clip the
+/// bottom of the list silently. What keeps a card short enough to fit the
+/// smallest window is the card itself — one explanation at a time, and a
+/// header that collapses the rest away.
+///
+/// The card is pinned 20px off two edges. The wallet opens at 960x650 but can
+/// be dragged down to 660x500, where a 400px card is most of the width.
+fn guided_setup_width(viewport: gpui::Size<gpui::Pixels>) -> gpui::Pixels {
     const MARGIN: gpui::Pixels = px(20.0);
-    GuidedSetupMetrics {
-        width: (viewport.width - MARGIN * 2.0)
-            .min(px(400.0))
-            .max(px(240.0)),
-        // A card with room for the header, the summary, and one task is still
-        // worth drawing; below that it would be a scroll box with nothing
-        // around it, so the floor stops shrinking rather than the card.
-        max_height: (viewport.height - MARGIN * 2.0)
-            .min(px(560.0))
-            .max(px(200.0)),
-    }
+    (viewport.width - MARGIN * 2.0)
+        .min(px(400.0))
+        .max(px(240.0))
 }
 
 fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
@@ -1838,8 +1828,6 @@ pub struct WalletWindow {
     legal_review: Option<LegalReview>,
     legal_gate: bool,
     guided_setup: GuidedSetup,
-    guided_setup_scroll_handle: ScrollHandle,
-    guided_setup_overflow_indicator: ScrollOverflowIndicator,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
     testnet_mode: bool,
@@ -3484,6 +3472,13 @@ struct GuidedSetup {
     /// means "not now", so the checklist starts over on the next launch while
     /// anything is left to do.
     dismissed: bool,
+    /// Set when the owner folds the card down to its header.
+    ///
+    /// The lighter of the two ways out, and the reason dismissal is no longer
+    /// the only one: a card in the way of the screen behind it can be folded
+    /// to one line and stay there, count and all, instead of having to be
+    /// sent away to be got past. Not stored either — the same "not now".
+    collapsed: bool,
 }
 
 impl GuidedSetup {
@@ -3492,6 +3487,7 @@ impl GuidedSetup {
         Self {
             state: None,
             dismissed: false,
+            collapsed: false,
         }
     }
 
@@ -3499,6 +3495,7 @@ impl GuidedSetup {
         Self {
             state: Some(state),
             dismissed: false,
+            collapsed: false,
         }
     }
 
@@ -3545,6 +3542,26 @@ impl GuidedSetup {
     /// Send the card away for the rest of this run.
     fn dismiss(&mut self) {
         self.dismissed = true;
+    }
+
+    /// Fold the card down to its header, or unfold it again.
+    const fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+    }
+
+    const fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    /// The first task left to do, or `None` once they are all finished.
+    ///
+    /// Only this one is explained. Five explanations at once do not fit the
+    /// smallest window the wallet can be dragged to, and a list that has to
+    /// scroll to be read is the thing this card stopped doing.
+    fn next_task(&self) -> Option<SetupTask> {
+        SetupTask::ALL
+            .into_iter()
+            .find(|task| !self.is_complete(*task))
     }
 
     /// The card is up once its progress is known, until every task is
@@ -4861,12 +4878,6 @@ impl WalletWindow {
         let guided_setup = owner
             .guided_setup()
             .map_or_else(|_| GuidedSetup::unloaded(), GuidedSetup::loaded);
-        // Five explanations do not fit a short window, and a card that clipped
-        // one mid-sentence with nothing to say so would read as broken rather
-        // than as scrollable — the theme draws no scrollbar track.
-        let guided_setup_scroll_handle = ScrollHandle::new();
-        let guided_setup_overflow_indicator =
-            ScrollOverflowIndicator::new(guided_setup_scroll_handle.clone(), cx);
         let route_scroll_handle = ScrollHandle::new();
         let route_overflow_indicator =
             ScrollOverflowIndicator::new(route_scroll_handle.clone(), cx);
@@ -4959,8 +4970,6 @@ impl WalletWindow {
             legal_review: None,
             legal_gate: false,
             guided_setup,
-            guided_setup_scroll_handle,
-            guided_setup_overflow_indicator,
             route_errors: BTreeMap::new(),
             appearance_preference,
             testnet_mode,
@@ -5555,6 +5564,16 @@ impl WalletWindow {
     /// task is left, and stops asking on its own once they are all done.
     fn dismiss_guided_setup(&mut self, cx: &mut Context<Self>) {
         self.guided_setup.dismiss();
+        cx.notify();
+    }
+
+    /// Fold the checklist down to its title, or open it again.
+    ///
+    /// The lighter way past a card that is over something: it gives the corner
+    /// back without giving up the checklist, and without the card having to be
+    /// sent away for the rest of the run to get out of the way once.
+    fn toggle_guided_setup(&mut self, cx: &mut Context<Self>) {
+        self.guided_setup.toggle_collapsed();
         cx.notify();
     }
 
@@ -15608,10 +15627,18 @@ impl WalletWindow {
     /// its own footprint so a press lands on the row rather than whatever is
     /// underneath, and is drawn before the decision surfaces so a review that
     /// arrives mid-checklist covers it rather than fighting it for the screen.
+    ///
+    /// Nothing on it scrolls. A card in a corner that has to be scrolled to be
+    /// read is a card in the way, arguing with the page behind it over the
+    /// wheel — so it is kept short enough not to need it: one explanation at a
+    /// time, and a title that folds the rest away for anybody who wants the
+    /// corner back without giving up the checklist for the run.
     fn render_guided_setup(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let metrics = guided_setup_metrics(window.viewport_size());
+        let width = guided_setup_width(window.viewport_size());
         let completed = self.guided_setup.completed_count();
         let total = SetupTask::ALL.len();
+        let collapsed = self.guided_setup.is_collapsed();
+        let next = self.guided_setup.next_task();
         let rows = SetupTask::ALL.into_iter().map(|task| {
             let done = self.guided_setup.is_complete(task);
             let marker = div()
@@ -15650,10 +15677,13 @@ impl WalletWindow {
                         .when(!done, gpui_component::StyledExt::font_medium)
                         .child(task.title()),
                 )
-                // A finished task keeps its row but loses its explanation: the
-                // list is a map of what is left, and five paragraphs of
-                // already-done reading is what makes somebody dismiss it.
-                .when(!done, |text| {
+                // Only the task actually up next is explained. A finished one
+                // keeps its row but loses its paragraph — the list is a map of
+                // what is left — and the ones behind the next one lose theirs
+                // too, because five explanations at once do not fit the
+                // smallest window the wallet can be dragged to, and this card
+                // no longer has a scroll box to hide the overflow in.
+                .when(next == Some(task), |text| {
                     text.child(
                         div()
                             .text_xs()
@@ -15671,54 +15701,29 @@ impl WalletWindow {
                 .flex()
                 .items_start()
                 .gap_2p5()
-                .when(!done, |row| {
-                    row.cursor_pointer().hover(|row| row.bg(cx.theme().accent))
-                })
                 // A row is a shortcut to the screen the task lives on, never a
                 // way to tick the box: completion is read off the wallet, so
-                // there is nothing here for a click to set.
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    view.navigate_route(task.route(), cx);
-                }))
+                // there is nothing here for a click to set. A finished row is
+                // therefore inert rather than merely pointless — no cursor, no
+                // hover, and no handler — so pressing one cannot even move
+                // somebody off the screen they were on.
+                .when(!done, |row| {
+                    row.cursor_pointer()
+                        .hover(|row| row.bg(cx.theme().accent))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.navigate_route(task.route(), cx);
+                        }))
+                })
                 .child(marker)
                 .child(text)
         });
-        // The header and the summary line stay put; only the tasks scroll.
-        // Losing "3 of 5" and the way out off the top of a scrolled list is
-        // how a card becomes something somebody has to fight.
-        // The list is the only part of the card that gives: it takes what the
-        // header and the summary leave, and scrolls the rest. `min_h_0` is
-        // what lets it shrink past its content at all — without it the tasks
-        // would push the card past the cap and take the header off the top.
-        let list = div()
-            .relative()
-            .w_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id("guided-setup-tasks")
-                    .debug_selector(|| "guided-setup-tasks".to_owned())
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .track_scroll(&self.guided_setup_scroll_handle)
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .children(rows),
-            )
-            .child(self.guided_setup_overflow_indicator.element());
         let card = div()
             .id("guided-setup")
             .debug_selector(|| "guided-setup".to_owned())
             .absolute()
             .right(px(20.0))
             .bottom(px(20.0))
-            .w(metrics.width)
-            .max_h(metrics.max_height)
+            .w(width)
             .p_3()
             .rounded(cx.theme().radius_lg)
             .shadow_lg()
@@ -15733,48 +15738,82 @@ impl WalletWindow {
                 h_flex()
                     .debug_selector(|| "guided-setup-header".to_owned())
                     .w_full()
-                    .flex_shrink_0()
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(div().font_semibold().child("Getting started"))
+                    // The title is the collapse control. It is the largest
+                    // thing on the card and the one part that stays when the
+                    // rest folds away, so it is what somebody reaches for to
+                    // get the corner back — and unlike dismissal it keeps the
+                    // count on screen, which is the whole reason to fold
+                    // rather than send away.
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{completed} of {total}")),
-                            )
-                            .child(accessible_button(
-                                app_button("guided-setup-dismiss")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::CircleX)
-                                    .tooltip("Hide this. It comes back next launch.")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.dismiss_guided_setup(cx);
-                                    })),
-                                "Hide the getting-started checklist until the next launch",
-                            )),
+                        app_button("guided-setup-toggle")
+                            .debug_selector(|| "guided-setup-toggle".to_owned())
+                            .ghost()
+                            .px_1()
+                            .label("Getting started")
+                            .font_semibold()
+                            .icon(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .tooltip(if collapsed {
+                                "Show the rest of the checklist."
+                            } else {
+                                "Fold this down to its title. Nothing is lost."
+                            })
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.toggle_guided_setup(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{completed} of {total}")),
                     ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .flex_shrink_0()
-                    .whitespace_normal()
-                    .pb_1()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        "This wallet holds your keys and hands agents and dapps a request queue \
-                         instead. Nothing below puts anything at risk, and you can stop after any \
-                         of them.",
-                    ),
-            )
-            .child(list);
+            .when(!collapsed, |card| {
+                card.child(
+                    div()
+                        .id("guided-setup-tasks")
+                        .debug_selector(|| "guided-setup-tasks".to_owned())
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(rows),
+                )
+                // The way out sits under the list rather than beside the
+                // title, where an icon used to be: a close button on a card
+                // nobody has read yet is the most prominent thing on it, and
+                // reads as the point of the card. Down here it is what is left
+                // after the checklist, for somebody who has decided.
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .pt_1()
+                        .child(accessible_button(
+                            app_button("guided-setup-dismiss")
+                                .debug_selector(|| "guided-setup-dismiss".to_owned())
+                                .link()
+                                .px_0()
+                                .h(px(20.0))
+                                .text_xs()
+                                .font_normal()
+                                .text_color(cx.theme().muted_foreground)
+                                .label("Dismiss")
+                                .tooltip("Hide this. It comes back next launch.")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.dismiss_guided_setup(cx);
+                                })),
+                            "Hide the getting-started checklist until the next launch",
+                        )),
+                )
+            });
         div()
             .absolute()
             .inset_0()

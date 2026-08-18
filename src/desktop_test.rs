@@ -2245,40 +2245,36 @@ fn nothing_is_drawn_or_recorded_until_the_stored_progress_is_read() {
 }
 
 #[test]
-fn the_guided_setup_card_fits_every_window_the_wallet_can_be_dragged_to() {
+fn the_guided_setup_card_fits_across_every_window_the_wallet_can_be_dragged_to() {
     // 660x500 is the window minimum, so it is the smallest the card ever has
     // to survive, and the card is pinned 20px off two edges.
     for (width, height) in [(660.0, 500.0), (960.0, 650.0), (1400.0, 900.0)] {
         let viewport = gpui::size(px(width), px(height));
-        let metrics = guided_setup_metrics(viewport);
 
         assert!(
-            metrics.max_height + px(40.0) <= viewport.height,
-            "the card outgrows a {width}x{height} window: {:?}",
-            metrics.max_height
-        );
-        assert!(
-            metrics.width + px(40.0) <= viewport.width,
+            guided_setup_width(viewport) + px(40.0) <= viewport.width,
             "the card is wider than a {width}x{height} window: {:?}",
-            metrics.width
+            guided_setup_width(viewport)
         );
     }
 }
 
 #[test]
 fn a_roomy_window_does_not_make_the_guided_setup_card_enormous() {
-    // The card is an aside, not the page: past the point where every task
-    // fits, more window is not more checklist.
-    let opening = guided_setup_metrics(gpui::size(px(960.0), px(650.0)));
-    let huge = guided_setup_metrics(gpui::size(px(3840.0), px(2160.0)));
+    // The card is an aside, not the page: past the point where a task reads
+    // comfortably, more window is not more checklist.
+    let huge = guided_setup_width(gpui::size(px(3840.0), px(2160.0)));
 
-    assert_eq!(huge.width, px(400.0));
-    assert_eq!(huge.max_height, px(560.0));
-    assert!(opening.max_height <= huge.max_height);
+    assert_eq!(huge, px(400.0));
+    assert!(guided_setup_width(gpui::size(px(960.0), px(650.0))) <= huge);
 }
 
 #[test]
-fn the_guided_setup_scrolls_its_tasks_and_keeps_its_header() {
+fn nothing_on_the_guided_setup_card_scrolls() {
+    // A card in the corner that has to be scrolled to be read is a card
+    // arguing with the page behind it over the wheel. It is kept short enough
+    // not to need one instead, so a scroll box reappearing here is the
+    // regression, not the fix.
     let source = include_str!("desktop.rs");
     let card = source
         .split_once("fn render_guided_setup")
@@ -2288,19 +2284,60 @@ fn the_guided_setup_scrolls_its_tasks_and_keeps_its_header() {
         .expect("guided setup card has an end marker")
         .0;
 
-    // Exactly one scrolling box, and it is the task list. A second one on the
-    // card would take the count and the way out off the top of the screen,
-    // and two nested scroll boxes would argue over the wheel.
-    assert_eq!(card.matches("overflow_y_scroll()").count(), 1);
-    let list = card
-        .split_once("guided-setup-tasks")
-        .expect("the task list is the box that scrolls")
-        .1;
-    assert!(list.contains("track_scroll(&self.guided_setup_scroll_handle)"));
-    assert!(list.contains("overflow_y_scroll()"));
-    // The theme draws no scrollbar track, so a clipped list says nothing
-    // about being scrollable unless the indicator says it.
-    assert!(list.contains("self.guided_setup_overflow_indicator.element()"));
+    assert_eq!(card.matches("overflow_y_scroll()").count(), 0);
+    assert_eq!(card.matches("overflow_x_scroll()").count(), 0);
+    assert_eq!(card.matches("track_scroll(").count(), 0);
+    // A height cap with nothing scrolling behind it is silent clipping: the
+    // card takes the height its content comes to, and the content is what is
+    // kept short.
+    assert_eq!(card.matches("max_h(").count(), 0);
+}
+
+#[test]
+fn only_the_task_up_next_is_explained() {
+    // Every explanation at once does not fit the smallest window, and the
+    // card has nowhere to put the overflow now that it does not scroll.
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
+    assert_eq!(setup.next_task(), Some(SetupTask::CreateAccount));
+
+    setup.latch(SetupObservation {
+        account: true,
+        ..SetupObservation::default()
+    });
+    assert_eq!(setup.next_task(), Some(SetupTask::InstallAgent));
+
+    setup.latch(SetupObservation {
+        account: true,
+        agent: true,
+        signature: true,
+        dapp: true,
+        policy: true,
+    });
+    assert_eq!(
+        setup.next_task(),
+        None,
+        "a finished checklist has nothing up next"
+    );
+}
+
+#[test]
+fn folding_the_card_keeps_it_while_dismissal_sends_it_away() {
+    // The two ways past the card are not the same one: folding gives the
+    // corner back and keeps the checklist, so it must not take the card off
+    // the screen the way dismissal does.
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
+    assert!(!setup.is_collapsed());
+
+    setup.toggle_collapsed();
+    assert!(setup.is_collapsed());
+    assert!(
+        setup.visible(),
+        "a folded card is still on the screen, and still counting"
+    );
+
+    setup.toggle_collapsed();
+    assert!(!setup.is_collapsed(), "the title opens it again");
+    assert!(setup.visible());
 }
 
 #[test]
