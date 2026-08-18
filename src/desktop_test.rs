@@ -203,6 +203,7 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
         display_name: "Owner Chain".into(),
         aliases: "owner, owner_test".into(),
         chain_id: "9999991".into(),
+        finality_confirmations: "6".into(),
         rpc_urls: "https://rpc-one.example,\nhttps://rpc-two.example".into(),
         native_currency_name: "Ether".into(),
         native_currency_symbol: "ETH".into(),
@@ -211,7 +212,7 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
         documentation_url: "https://docs.example/network".into(),
     };
 
-    let (network, errors) = parse_network_editor_draft(&draft, true, true, RpcStrategy::Random, 12);
+    let (network, errors) = parse_network_editor_draft(&draft, true, true, RpcStrategy::Random);
     assert_eq!(errors, NetworkEditorErrors::default());
     let network = network.unwrap();
     assert_eq!(network.name, "owner-chain");
@@ -240,6 +241,7 @@ fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
     let draft = NetworkEditorDraft {
         name: "comma-chain".into(),
         chain_id: "9001".into(),
+        finality_confirmations: "3".into(),
         rpc_urls: displayed,
         native_currency_name: "Ether".into(),
         native_currency_symbol: "ETH".into(),
@@ -248,10 +250,46 @@ fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
         documentation_url: "https://docs.example".into(),
         ..NetworkEditorDraft::default()
     };
-    let (parsed, errors) =
-        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
+    let (parsed, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
     assert_eq!(errors, NetworkEditorErrors::default());
     assert_eq!(parsed.unwrap().rpc_urls, urls);
+}
+
+/// The value was carried through the editor untouched and shown nowhere, so
+/// every network ran on whatever the build's constant happened to be.
+#[test]
+fn structured_network_editor_takes_finality_confirmations_from_the_owner() {
+    let draft = NetworkEditorDraft {
+        name: "owner-chain".into(),
+        chain_id: "9001".into(),
+        finality_confirmations: "1".into(),
+        rpc_urls: "https://rpc.example".into(),
+        native_currency_name: "Ether".into(),
+        native_currency_symbol: "ETH".into(),
+        native_currency_decimals: "18".into(),
+        block_explorer_url: "https://explorer.example".into(),
+        documentation_url: "https://docs.example".into(),
+        ..NetworkEditorDraft::default()
+    };
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+    assert_eq!(errors, NetworkEditorErrors::default());
+    assert_eq!(network.unwrap().finality_confirmations, 1);
+
+    // The editor must refuse exactly what the config loader refuses, so a
+    // saved network is never one core would reject on the next launch.
+    for rejected in ["0", "1001", "", "3.5", "-1", "twelve"] {
+        let draft = NetworkEditorDraft {
+            finality_confirmations: rejected.into(),
+            ..draft.clone()
+        };
+        let (network, errors) =
+            parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+        assert!(network.is_none(), "{rejected} was accepted");
+        assert!(
+            errors.finality_confirmations.is_some(),
+            "{rejected} produced no error"
+        );
+    }
 }
 
 #[test]
@@ -267,8 +305,7 @@ fn structured_network_editor_requires_network_metadata() {
         ..NetworkEditorDraft::default()
     };
 
-    let (network, errors) =
-        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
 
     assert!(network.is_none());
     assert_eq!(
@@ -287,8 +324,7 @@ fn structured_network_editor_reports_errors_beside_the_relevant_fields() {
         ..NetworkEditorDraft::default()
     };
 
-    let (network, errors) =
-        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
     assert!(network.is_none());
     assert!(errors.name.is_some());
     assert!(errors.chain_id.is_some());
@@ -1775,6 +1811,7 @@ fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
         display_name: "Owner Chain".into(),
         aliases: String::new(),
         chain_id: "9999991".into(),
+        finality_confirmations: "3".into(),
         rpc_urls: seeded,
         native_currency_name: "Ether".into(),
         native_currency_symbol: "ETH".into(),
@@ -1782,8 +1819,7 @@ fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
         block_explorer_url: "https://explorer.example".into(),
         documentation_url: "https://docs.example/network".into(),
     };
-    let (network, errors) =
-        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
     assert_eq!(errors, NetworkEditorErrors::default());
     assert_eq!(
         network

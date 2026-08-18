@@ -111,7 +111,20 @@ pub struct NetworkConfig {
     pub documentation_url: Option<Url>,
 }
 
-pub const DEFAULT_FINALITY_CONFIRMATIONS: u16 = 12;
+/// How deep a receipt must be before the wallet will sign the next
+/// transaction on the same chain.
+///
+/// This is a latency setting far more than a safety one: nothing is undone by
+/// a reorg that the wallet could have prevented by waiting, and the only
+/// thing waiting buys is that a receipt already reported is less likely to be
+/// re-mined at another position. Twelve blocks — the old value, inherited
+/// from proof-of-work exchange practice — held the signing slot for about
+/// two and a half minutes of Ethereum mainnet before an agent could send
+/// anything else, which read as the wallet having hung. Three keeps the
+/// reorg window covered on every chain the registry ships while leaving the
+/// wallet usable, and any network that wants to be more careful can say so
+/// per network in its own configuration.
+pub const DEFAULT_FINALITY_CONFIRMATIONS: u16 = 3;
 
 const fn default_finality_confirmations() -> u16 {
     DEFAULT_FINALITY_CONFIRMATIONS

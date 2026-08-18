@@ -1899,6 +1899,7 @@ pub struct WalletWindow {
     network_display_name_input: Option<Entity<InputState>>,
     network_aliases_input: Option<Entity<InputState>>,
     network_chain_id_input: Option<Entity<InputState>>,
+    network_finality_confirmations_input: Option<Entity<InputState>>,
     network_rpc_urls_input: Option<Entity<InputState>>,
     network_native_name_input: Option<Entity<InputState>>,
     network_native_symbol_input: Option<Entity<InputState>>,
@@ -2585,6 +2586,7 @@ struct NetworkEditorErrors {
     display_name: Option<String>,
     aliases: Option<String>,
     chain_id: Option<String>,
+    finality_confirmations: Option<String>,
     rpc_urls: Option<String>,
     native_currency: Option<String>,
     block_explorer_url: Option<String>,
@@ -2598,6 +2600,7 @@ struct NetworkEditorDraft {
     display_name: String,
     aliases: String,
     chain_id: String,
+    finality_confirmations: String,
     rpc_urls: String,
     native_currency_name: String,
     native_currency_symbol: String,
@@ -4060,7 +4063,6 @@ fn parse_network_editor_draft(
     disabled: bool,
     testnet: bool,
     rpc_strategy: RpcStrategy,
-    finality_confirmations: u16,
 ) -> (Option<NetworkConfig>, NetworkEditorErrors) {
     let mut errors = NetworkEditorErrors::default();
     let name = draft.name.trim();
@@ -4106,6 +4108,16 @@ fn parse_network_editor_draft(
             ekubo_wallet_core::config::MAX_NETWORK_ALIASES
         ));
     }
+    // The same bounds core enforces when it loads the file, so a value
+    // rejected on save is never one the owner could have written by hand.
+    let finality_confirmations = match draft.finality_confirmations.trim().parse::<u16>() {
+        Ok(confirmations) if (1..=1_000).contains(&confirmations) => Some(confirmations),
+        _ => {
+            errors.finality_confirmations =
+                Some("Enter a whole number of blocks between 1 and 1000.".into());
+            None
+        }
+    };
     let chain_id = match draft.chain_id.trim().parse::<u64>() {
         Ok(chain_id) if chain_id > 0 => Some(chain_id),
         _ => {
@@ -4231,7 +4243,7 @@ fn parse_network_editor_draft(
         chain_id: chain_id.expect("validated above"),
         rpc_urls,
         rpc_strategy,
-        finality_confirmations,
+        finality_confirmations: finality_confirmations.expect("validated above"),
         native_currency,
         block_explorer_url,
         documentation_url,
@@ -5022,6 +5034,7 @@ impl WalletWindow {
             network_display_name_input: None,
             network_aliases_input: None,
             network_chain_id_input: None,
+            network_finality_confirmations_input: None,
             network_rpc_urls_input: None,
             network_native_name_input: None,
             network_native_symbol_input: None,
@@ -5322,6 +5335,13 @@ impl WalletWindow {
             self.network_chain_id_input =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("123456")));
         }
+        if self.network_finality_confirmations_input.is_none() {
+            self.network_finality_confirmations_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder(
+                    ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS.to_string(),
+                )
+            }));
+        }
         if self.network_rpc_urls_input.is_none() {
             self.network_rpc_urls_input = Some(cx.new(|cx| {
                 InputState::new(window, cx)
@@ -5418,6 +5438,7 @@ impl WalletWindow {
         self.network_display_name_input = None;
         self.network_aliases_input = None;
         self.network_chain_id_input = None;
+        self.network_finality_confirmations_input = None;
         self.network_rpc_urls_input = None;
         self.network_native_name_input = None;
         self.network_native_symbol_input = None;
@@ -7319,6 +7340,12 @@ impl WalletWindow {
                 .read(cx)
                 .value()
                 .to_string(),
+            finality_confirmations: self
+                .network_finality_confirmations_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
             rpc_urls: self
                 .network_rpc_urls_input
                 .as_ref()?
@@ -7383,6 +7410,15 @@ impl WalletWindow {
         self.network_editor_original = None;
         self.network_editor_disabled = false;
         self.network_editor_testnet = false;
+        // Prefilled rather than blank: this one has a value in force whether
+        // or not anybody types in it, and an empty box invites the reading
+        // that there is no wait at all.
+        replace_input_value(
+            self.network_finality_confirmations_input.as_ref(),
+            ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS.to_string(),
+            window,
+            cx,
+        );
         self.network_editor_rpc_strategy = RpcStrategy::Ordered;
         self.network_editor_advanced_open = false;
         self.network_editor_errors = NetworkEditorErrors::default();
@@ -7588,6 +7624,12 @@ impl WalletWindow {
             cx,
         );
         replace_input_value(
+            self.network_finality_confirmations_input.as_ref(),
+            network.finality_confirmations.to_string(),
+            window,
+            cx,
+        );
+        replace_input_value(
             self.network_native_name_input.as_ref(),
             network
                 .native_currency
@@ -7666,14 +7708,11 @@ impl WalletWindow {
             self.network_editor_disabled,
             self.network_editor_testnet,
             self.network_editor_rpc_strategy,
-            self.network_editor_original.as_ref().map_or(
-                ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS,
-                |network| network.finality_confirmations,
-            ),
         );
         // An error under a collapsed disclosure is invisible, so a rejected
         // save always reveals the field it is complaining about.
-        self.network_editor_advanced_open |= errors.aliases.is_some();
+        self.network_editor_advanced_open |=
+            errors.aliases.is_some() || errors.finality_confirmations.is_some();
         self.network_editor_errors = errors;
         let Some(network) = network else {
             cx.notify();
@@ -11663,6 +11702,10 @@ impl WalletWindow {
         let Some(chain_id) = self.network_chain_id_input.as_ref() else {
             return div();
         };
+        let Some(finality_confirmations) = self.network_finality_confirmations_input.as_ref()
+        else {
+            return div();
+        };
         let Some(rpc_urls) = self.network_rpc_urls_input.as_ref() else {
             return div();
         };
@@ -11970,6 +12013,27 @@ impl WalletWindow {
                                 )
                                 .description(
                                     "Other names this network answers to, separated by commas.",
+                                ),
+                            )
+                            // Editable here because it is the one field whose
+                            // right value is a property of the chain rather
+                            // than a preference: a fast chain that reorgs
+                            // deeply and a slow one that never does want
+                            // opposite numbers, and until now every network
+                            // silently carried the same one.
+                            .child(
+                                text_field(
+                                    "Confirmations",
+                                    finality_confirmations,
+                                    self.network_editor_errors
+                                        .finality_confirmations
+                                        .clone(),
+                                    true,
+                                    false,
+                                    2,
+                                )
+                                .description(
+                                    "Blocks a receipt must be deep before this wallet will sign again on this chain.",
                                 ),
                             ),
                     ),

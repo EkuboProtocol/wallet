@@ -528,7 +528,8 @@ struct AddNetworkInput {
     #[schemars(with = "Option<String>")]
     rpc_strategy: Option<String>,
     /// Confirmations required before a receipt releases the wallet's signing
-    /// slot. Omit for the conservative default of 12.
+    /// slot. Omit for the default of 3, and raise it for a chain that reorgs
+    /// deeper than that.
     #[serde(default = "default_network_finality_confirmations")]
     finality_confirmations: u16,
     native_currency: NativeCurrency,
