@@ -558,6 +558,33 @@ fn confirming_token_proposals_installs_and_consumes_the_exact_reviewed_rows() {
     assert_eq!(store.count(None).unwrap(), 2);
 }
 
+/// Where a token came from decides what this wallet calls it, and nothing
+/// about what it is worth. A token confirmed through a review carries the same
+/// shipped value as the identical token the wallet shipped with, or the
+/// portfolio would sort the two differently for no reason a person could see.
+#[test]
+fn a_confirmed_proposal_carries_the_value_this_build_ships() {
+    let (_directory, mut store) = store();
+    let priced = *crate::token_prices::seeded_prices()
+        .first()
+        .expect("the build ships at least one value");
+    let listed = ListedToken {
+        chain_id: priced.chain_id,
+        address: priced.address,
+        symbol: "SEED".into(),
+        name: None,
+        decimals: 18,
+    };
+    store
+        .propose(&[listed], &ProposalSource::Claimed("reviewed-list"))
+        .unwrap();
+    let reviewed = store.proposals().unwrap();
+    assert_eq!(store.consume_proposals(&reviewed).unwrap(), 1);
+
+    let stored = store.get(priced.chain_id, priced.address).unwrap().unwrap();
+    assert_eq!(stored.approximate_usd_price, Some(priced.usd_price));
+}
+
 #[test]
 fn reviewed_token_removal_does_not_require_human_presence() {
     let (_directory, mut store) = store();

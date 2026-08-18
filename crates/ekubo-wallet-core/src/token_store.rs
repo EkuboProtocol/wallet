@@ -396,8 +396,11 @@ impl TokenStore {
             // the one column that says where a name came from.
             let source = sanitize(source);
             let changed = transaction.execute(
-                "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO tokens(
+                     chain_id, address, symbol, name, decimals, source, added_at,
+                     approximate_usd_price
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(chain_id, address) DO NOTHING",
                 params![
                     chain_id,
@@ -407,6 +410,12 @@ impl TokenStore {
                     token.decimals,
                     source,
                     now,
+                    // The same value the default list would have carried for
+                    // this address. Where a token came from decides nothing
+                    // about what it is worth, so a token confirmed through a
+                    // review must not sort differently from the same token
+                    // shipped with the wallet.
+                    crate::token_prices::seeded_token_price(token.chain_id, token.address),
                 ],
             )?;
             // A confirmed address has nothing left to decide, so any suggestion
@@ -540,8 +549,11 @@ impl TokenStore {
             let chain_id = i64::try_from(token.chain_id).context("chain ID out of range")?;
             inserted += u64::from(
                 transaction.execute(
-                    "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "INSERT INTO tokens(
+                         chain_id, address, symbol, name, decimals, source, added_at,
+                         approximate_usd_price
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(chain_id, address) DO NOTHING",
                     params![
                         chain_id,
@@ -551,6 +563,11 @@ impl TokenStore {
                         token.decimals,
                         sanitize(&proposal.source),
                         now,
+                        // Accepting a suggestion decides what this wallet
+                        // calls a token, not what it is worth. The shipped
+                        // value comes from the same snapshot either way, and
+                        // nothing in the proposal is consulted about it.
+                        crate::token_prices::seeded_token_price(token.chain_id, token.address),
                     ],
                 )? == 1,
             );
