@@ -15,7 +15,13 @@ that a simulation or policy finding is approval.
 
 For agents, matching no policy rule or a `review` rule is the ordinary route to a human approval;
 installing a policy is never a prerequisite for the one in hand. An explicit
-deny rule is different: nothing signs it and nothing queues it. Continue the
+deny rule is different: nothing signs it and nothing queues it. When the user
+asks to look at a particular transaction their policy would have sent
+automatically, send it with `must_review` true rather than proposing a policy
+change: that queues this one submission for their review and leaves their
+policy alone. It only ever adds a review, so it cannot approve anything or
+make a denied plan sendable, and it is not accepted with a `request_id`, whose
+bytes are already reviewed and signed. Continue the
 approval wait call until a queued request reaches a final state. The rule is:
 wallet_wait_for_execution does not cover this phase. Also, never hand back a request-id and stop.
 

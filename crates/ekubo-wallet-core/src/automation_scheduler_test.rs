@@ -26,6 +26,7 @@ fn record(status: PendingStatus, updated_at: DateTime<Utc>) -> PendingTransactio
         review_digest: None,
         policy_revision: 1,
         approval_required: false,
+        requested_review: false,
         status,
         created_at: updated_at,
         updated_at,

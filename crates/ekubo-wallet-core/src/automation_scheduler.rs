@@ -28,7 +28,7 @@ use crate::{
     automation::{self, Automation, PollFailure},
     automation_store::{AutomationStore, RunOutcome},
     config::{ConfigStore, NetworkConfig, WalletMetadata},
-    core::predicate::PolicyContext,
+    core::{policy::ReviewRequest, predicate::PolicyContext},
     orchestrator::SendDisposition,
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
@@ -230,6 +230,11 @@ impl AutomationScheduler {
                 &plan,
                 Some(plan_source.as_str()),
                 &simulation,
+                // An automation runs unattended by definition: there is nobody
+                // to ask for a second look, and a tick that queued one would
+                // stop the automation rather than getting an answer. What it
+                // may sign is the policy's question alone.
+                ReviewRequest::PolicyDecides,
             )
             .await?;
         let record = match disposition {

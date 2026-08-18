@@ -17,6 +17,26 @@ use crate::{
     simulation::SimulationResult,
 };
 
+/// A presenter that keeps the document it was shown before approving, so a
+/// test can read the sentence a human would have read.
+#[derive(Default)]
+struct CaptureThenApprove {
+    documents: StdMutex<Vec<ReviewDocument>>,
+}
+
+#[async_trait::async_trait]
+impl ReviewPresenter for CaptureThenApprove {
+    async fn review_transaction(
+        &self,
+        document: &ReviewDocument,
+        _simulation: &SimulationResult,
+        _refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
+    ) -> anyhow::Result<ApprovalDecision> {
+        self.documents.lock().unwrap().push(document.clone());
+        Ok(ApprovalDecision::Approved)
+    }
+}
+
 /// A presenter that approves whatever it is shown: the handoff test's stand-in
 /// for the terminal review.
 struct ApproveEverything;
@@ -122,16 +142,21 @@ struct StubChain {
     /// perfectly and still be an envelope no node will accept -- one that
     /// spends the whole native balance has nothing left to pay for itself.
     refuses_send: bool,
+    /// Whether every simulated call comes back reverted. A plan that will not
+    /// execute is a different failure from a policy that will not allow it,
+    /// and the two have opposite answers.
+    reverts_simulation: bool,
     hide_receipts: AtomicBool,
     receipt_succeeded: AtomicBool,
     receipt_block_hash_byte: AtomicU8,
     head_block_number: AtomicU64,
 }
 
-/// The one lie a stub tells, if it tells one.
+/// The lies a stub tells, if it tells any.
 #[derive(Default)]
 struct StubLie {
     refuses_send: bool,
+    reverts_simulation: bool,
 }
 
 fn zero_bloom() -> String {
@@ -193,14 +218,22 @@ impl StubChain {
                     let mut block = block_json_limited(number, parent, BLOCK_GAS_LIMIT);
                     parent = serde_json::from_value(block["hash"].clone()).unwrap();
                     let calls = entry["calls"].as_array().map_or(0, Vec::len);
+                    let (status, error) = if self.reverts_simulation {
+                        (
+                            "0x0",
+                            serde_json::json!({ "code": 3, "message": "execution reverted" }),
+                        )
+                    } else {
+                        ("0x1", serde_json::Value::Null)
+                    };
                     block["calls"] = serde_json::json!(
                         (0..calls)
                             .map(|_| serde_json::json!({
                                 "returnData": "0x",
                                 "logs": [],
                                 "gasUsed": "0x5208",
-                                "status": "0x1",
-                                "error": null,
+                                "status": status,
+                                "error": error,
                             }))
                             .collect::<Vec<_>>()
                     );
@@ -257,6 +290,7 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
     let address = listener.local_addr().unwrap();
     let chain = std::sync::Arc::new(StubChain {
         refuses_send: lie.refuses_send,
+        reverts_simulation: lie.reverts_simulation,
         hide_receipts: AtomicBool::new(false),
         receipt_succeeded: AtomicBool::new(true),
         receipt_block_hash_byte: AtomicU8::new(0xbb),
@@ -500,6 +534,7 @@ async fn automatic_path_signs_broadcasts_and_confirms_through_the_stub() {
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("automatic send succeeds")
@@ -533,6 +568,7 @@ async fn a_reorged_receipt_rolls_back_and_keeps_the_automatic_signing_slot() {
         simulation_id: None,
         request_id: None,
         on_simulation_failure: OnSimulationFailure::RequestApproval,
+        must_review: false,
     };
     let first = server
         .wallet_send_execution_plan(Parameters(send()))
@@ -623,6 +659,7 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("denied send queues")
@@ -678,6 +715,7 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
             simulation_id: None,
             request_id: Some(request_id),
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("approved resubmission succeeds")
@@ -701,6 +739,7 @@ async fn queue_and_approve(
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("an uncovered call queues")
@@ -779,6 +818,7 @@ async fn approving_sends_the_signed_bytes_without_waiting_to_be_asked_again() {
             simulation_id: None,
             request_id: Some(reviewed.record.request_id),
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("a sent request reports its state")
@@ -826,6 +866,7 @@ async fn a_submission_somebody_else_claimed_is_reported_rather_than_repeated() {
             simulation_id: None,
             request_id: Some(reviewed.record.request_id),
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("a claimed request reports its state")
@@ -860,6 +901,7 @@ async fn an_explicit_deny_rule_is_refused_outright_and_never_queues() {
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .err()
@@ -882,6 +924,270 @@ async fn an_explicit_deny_rule_is_refused_outright_and_never_queues() {
         "a rejected plan must not leave a request for a human to approve"
     );
     drop(directory);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn must_review_queues_a_plan_the_policy_would_have_signed() {
+    // The same plan and the same allow-anything policy that
+    // `automatic_path_signs_broadcasts_and_confirms_through_the_stub` sends
+    // without asking anyone. The only difference is the caller's ask, and it
+    // is enough: nothing signs, nothing broadcasts, and a row waits.
+    let (address, chain) = start_stub().await;
+    let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: true,
+        }))
+        .await
+        .expect("the send queues rather than failing")
+        .0;
+    assert_eq!(
+        output.status,
+        ExecutionStatus::ApprovalRequired,
+        "{output:?}"
+    );
+    assert_eq!(
+        chain.mined.lock().unwrap().len(),
+        0,
+        "a transaction awaiting review must not have been broadcast"
+    );
+
+    let record = server
+        .pending
+        .lock()
+        .unwrap()
+        .get(output.request_id)
+        .unwrap();
+    assert!(record.approval_required);
+    assert!(
+        record.serialized_transaction.is_none(),
+        "nothing was signed"
+    );
+    // Persisted, because the review is authored fresh when the owner opens it
+    // and by then the policy says this plan is perfectly allowed. Without the
+    // row remembering, the reviewer would be shown a prompt with no reason.
+    assert!(
+        record.requested_review,
+        "the row must remember that the review was asked for"
+    );
+
+    // And the caller is told why, in the same vocabulary as every other
+    // reason a send does not sign itself.
+    let simulation = output.simulation.expect("the send reports its simulation");
+    assert_eq!(
+        simulation.policy_outcome,
+        ekubo_wallet_core::core::policy::PolicyOutcome::RequiresApproval
+    );
+    assert!(!simulation.allowed);
+    assert!(
+        simulation
+            .policy_findings
+            .iter()
+            .any(|finding| finding.code
+                == ekubo_wallet_core::core::policy::CALLER_REQUESTED_REVIEW_CODE),
+        "{:?}",
+        simulation.policy_findings
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requested_review_tells_the_reviewer_why_they_are_being_asked() {
+    // The document is authored fresh when the owner opens it, from a policy
+    // that by then allows this plan outright. The usual sentence -- "outside
+    // the wallet's automatic policy" -- would be false here, and a reviewer
+    // acting on it would go looking for a rule that does not exist. Then the
+    // ordinary approval path signs it, because asking for a second look is a
+    // question, not a refusal.
+    let (address, _chain) = start_stub().await;
+    let (directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: true,
+        }))
+        .await
+        .expect("the send queues")
+        .0;
+    let record = server
+        .pending
+        .lock()
+        .unwrap()
+        .get(output.request_id)
+        .unwrap();
+
+    let read_policy = || -> anyhow::Result<crate::policy_store::StoredPolicy> {
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .get("primary")?
+            .context("policy exists")
+    };
+    let presenter = CaptureThenApprove::default();
+    let outcome = Box::pin(crate::orchestrator::approve_transaction(
+        &server.config,
+        PendingStore::new(test_store(directory.path())),
+        TokenStore::new(test_store(directory.path())),
+        &legal_store(directory.path()),
+        &read_policy,
+        record,
+        &presenter,
+        &TestHumanPresence { allow: true },
+        server.execution_authority.key_store_for_test(),
+    ))
+    .await
+    .unwrap();
+
+    let documents = presenter.documents.lock().unwrap();
+    let summary = &documents
+        .first()
+        .expect("the reviewer was shown one")
+        .request
+        .summary;
+    assert!(
+        summary.contains("asked for you to review it"),
+        "the reviewer must be told the real reason: {summary}"
+    );
+    assert!(
+        !summary.contains("outside the wallet's automatic policy"),
+        "the policy allows this plan, so saying otherwise is false: {summary}"
+    );
+
+    let crate::orchestrator::ApprovalOutcome::Signed(signed) = outcome else {
+        panic!("presenter approved, so the outcome must be Signed");
+    };
+    assert_eq!(signed.status, PendingStatus::Signed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn must_review_cannot_rescue_a_plan_a_deny_rule_refused() {
+    // Asking for review adds a human to a decision the owner has not made.
+    // A `deny` rule is the owner having made it, and no caller-set flag turns
+    // that back into a question — least of all one that would put the plan in
+    // front of them with an Approve button on it.
+    let (address, _chain) = start_stub().await;
+    let policy = WalletPolicy::parse(serde_json::json!({
+        "version": 1,
+        "rules": [
+            { "effect": "deny", "label": "deny every transaction" }
+        ]
+    }))
+    .expect("policy parses");
+    let (directory, server, wallet) = pipeline_server(address, &policy);
+
+    let error = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: true,
+        }))
+        .await
+        .err()
+        .expect("a deny rule refuses the send outright");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("rejects this plan outright"),
+        "asking for review must not turn a denial into a prompt: {message}"
+    );
+    assert_eq!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .awaiting_approval(None)
+            .unwrap()
+            .len(),
+        0,
+        "a denied plan must not leave a request for a human to approve"
+    );
+    drop(directory);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn must_review_and_a_failed_simulation_still_honors_fail() {
+    // Two different asks that both end in "do not sign". `on_simulation_failure`
+    // says not to spend the user's attention on a plan that cannot execute,
+    // and asking for review does not contradict it: a review whose only
+    // possible outcome is a reverting transaction is not the second look
+    // anybody wanted. Nothing queues, so nothing has to be rejected later.
+    let (address, _chain) = start_stub_lying(StubLie {
+        reverts_simulation: true,
+        ..StubLie::default()
+    })
+    .await;
+    let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
+
+    let error = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::Fail,
+            must_review: true,
+        }))
+        .await
+        .err()
+        .expect("a failed simulation with \"fail\" is reported, not queued");
+    assert!(
+        format!("{error:?}").contains("nothing was queued or signed"),
+        "{error:?}"
+    );
+    assert_eq!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .awaiting_approval(None)
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn must_review_is_refused_on_a_request_that_is_already_signed() {
+    // A `request_id` submits bytes a human already approved. There is no
+    // decision left for a review to change, and quietly accepting the flag
+    // would let an agent believe it had asked for one.
+    let (address, _chain) = start_stub().await;
+    let (_directory, server, _wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
+
+    let error = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: None,
+            simulation_id: None,
+            request_id: Some(uuid::Uuid::from_u128(9)),
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: true,
+        }))
+        .await
+        .err()
+        .expect("must_review with request_id is refused");
+    assert!(
+        format!("{error:?}").contains("already reviewed and"),
+        "{error:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -913,6 +1219,7 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
             simulation_id: Some(simulation_id),
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("recorded send succeeds")
@@ -928,6 +1235,7 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
             simulation_id: Some(simulation_id),
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await;
     let Err(error) = error else {
@@ -964,6 +1272,7 @@ async fn a_reviewer_can_re_simulate_before_approving() {
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("send queues for approval")
@@ -1030,6 +1339,7 @@ async fn a_reviewer_can_re_simulate_before_approving() {
             simulation_id: None,
             request_id: Some(request_id),
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("approved resubmission succeeds")
@@ -1056,6 +1366,7 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("send queues for approval")
@@ -1109,7 +1420,11 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
 /// for itself, froze the account until someone intervened by hand.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_send_no_endpoint_accepted_leaves_the_chain_usable() {
-    let (address, chain) = start_stub_lying(StubLie { refuses_send: true }).await;
+    let (address, chain) = start_stub_lying(StubLie {
+        refuses_send: true,
+        ..StubLie::default()
+    })
+    .await;
     let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
 
     let output = server
@@ -1120,6 +1435,7 @@ async fn a_send_no_endpoint_accepted_leaves_the_chain_usable() {
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
         }))
         .await
         .expect("a refused send is a reportable outcome, not a crash")

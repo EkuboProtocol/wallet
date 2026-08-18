@@ -41,7 +41,11 @@ agent or an automation.
 
 Policies may allow, require native review, or deny. Each call resolves through
 its first matching rule; deny dominates the whole transaction, then review or
-an unmatched call, and only all-allow transactions proceed automatically.
+an unmatched call, and only all-allow transactions proceed automatically. A
+sender may additionally ask for native review of one submission it would
+otherwise have sent automatically, which adds a human to a decision the policy
+had already permitted; it cannot remove a review, widen a policy, or make a
+denied transaction sendable, and it never applies to bytes already signed.
 Typed data and personal messages always require native
 review because reusable off-chain authority cannot be bounded by transaction
 policy. Before every signature approved through native review, the authority

@@ -704,6 +704,10 @@ impl DesktopSession {
             plan,
             Some(plan_source),
             &simulation,
+            // A dapp is not the wallet's agent and gets no say in how closely
+            // the owner looks at what it asked for. Only the policy decides
+            // here, exactly as it did before the ask existed.
+            ekubo_wallet_core::core::policy::ReviewRequest::PolicyDecides,
         )
         .await?;
         drop(pending);

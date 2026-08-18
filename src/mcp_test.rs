@@ -1342,6 +1342,7 @@ async fn a_recorded_simulation_is_only_a_one_use_handle_for_a_fresh_simulation()
         server.config.network_by_chain_id("1").unwrap(),
         recorded.simulation_id,
         OnSimulationFailure::Fail,
+        ReviewRequest::PolicyDecides,
     ))
     .await
     .expect_err("the send must freshly contact the configured RPC");
@@ -1356,6 +1357,7 @@ async fn a_recorded_simulation_is_only_a_one_use_handle_for_a_fresh_simulation()
         server.config.network_by_chain_id("1").unwrap(),
         recorded.simulation_id,
         OnSimulationFailure::Fail,
+        ReviewRequest::PolicyDecides,
     ))
     .await
     .expect_err("a spent simulation must not send again");
@@ -1394,6 +1396,7 @@ async fn a_preview_policy_revision_never_substitutes_for_fresh_policy_evaluation
         server.config.network_by_chain_id("1").unwrap(),
         recorded.simulation_id,
         OnSimulationFailure::Fail,
+        ReviewRequest::PolicyDecides,
     ))
     .await
     .expect_err("the old preview must lead into a fresh simulation");
@@ -1437,6 +1440,7 @@ async fn a_fork_result_can_never_be_sent_even_if_one_reaches_the_registry() {
         server.config.network_by_chain_id("1").unwrap(),
         recorded.simulation_id,
         OnSimulationFailure::Fail,
+        ReviewRequest::PolicyDecides,
     ))
     .await
     .expect_err("a hypothetical preview must grant no signing authority");
@@ -1530,6 +1534,7 @@ async fn signing_tools_fail_closed_until_legal_acceptance() {
             simulation_id: Some(uuid::Uuid::nil()),
             request_id: None,
             on_simulation_failure: OnSimulationFailure::default(),
+            must_review: false,
         }))
         .await;
     let Err(error) = result else {

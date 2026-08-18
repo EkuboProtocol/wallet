@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1609,6 +1609,16 @@ const MIGRATIONS: &[Migration] = &[
             AUTOMATION_RUNS_INDEX,
         ],
     },
+    // Every row that existed before this column did was queued because the
+    // policy would not sign it, which is exactly what the default says, so
+    // the added column needs no backfill to be true of the history it joins.
+    Migration {
+        to_version: 6,
+        statements: &[
+            "ALTER TABLE pending_transactions ADD COLUMN requested_review INTEGER NOT NULL
+                 DEFAULT 0 CHECK (requested_review IN (0, 1))",
+        ],
+    },
 ];
 
 /// Brings an existing database up to [`SCHEMA_VERSION`], returning the version
@@ -1750,6 +1760,15 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  finalized_at INTEGER,
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
+                 -- Whoever submitted the plan asked for a human to look at it,
+                 -- rather than the policy having refused to sign it. The
+                 -- review document is authored fresh when the owner opens it,
+                 -- by which time the policy evaluation says the plan is
+                 -- allowed and nothing is left to explain why they are being
+                 -- asked. This column is that explanation, and it only ever
+                 -- adds a review: no writer clears it.
+                 requested_review INTEGER NOT NULL DEFAULT 0
+                     CHECK (requested_review IN (0, 1)),
                  review_digest BLOB
                      CHECK (review_digest IS NULL OR length(review_digest) = 32),
                  cancel_serialized_transaction BLOB

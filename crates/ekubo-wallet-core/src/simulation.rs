@@ -22,8 +22,8 @@ use crate::{
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
-            FindingSeverity, PolicyFinding, PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy,
-            policy_allows, policy_outcome,
+            CALLER_REQUESTED_REVIEW_CODE, FindingSeverity, PolicyFinding, PolicyOutcome,
+            SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -244,6 +244,41 @@ pub struct SimulationResult {
     /// approved, or authorized by simulating here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fork: Option<ForkContext>,
+}
+
+impl SimulationResult {
+    /// Record that whoever submitted this plan asked for a human to review it,
+    /// and carry that through every verdict this result reports.
+    ///
+    /// The ask is not a policy decision and reaches the findings as its own
+    /// code, so it can be told apart from a rule that refused. It can only add
+    /// a review: [`policy_outcome`] recognizes a refusal by
+    /// [`CALL_DENIED_CODE`](crate::core::policy::CALL_DENIED_CODE) rather than
+    /// by counting errors, so a plan a `deny` rule matched stays
+    /// [`PolicyOutcome::Rejected`] and never acquires an approval path it did
+    /// not have.
+    ///
+    /// Idempotent, because the send path evaluates policy more than once and a
+    /// reviewer should read the reason once rather than as many times as the
+    /// plan was checked.
+    pub fn note_requested_review(&mut self) {
+        if !self
+            .policy_findings
+            .iter()
+            .any(|finding| finding.code == CALLER_REQUESTED_REVIEW_CODE)
+        {
+            self.policy_findings.push(PolicyFinding {
+                severity: FindingSeverity::Error,
+                code: CALLER_REQUESTED_REVIEW_CODE.into(),
+                message: "whoever submitted this plan asked for a human to review it, so it does \
+                          not sign automatically even where the policy allows it"
+                    .into(),
+                step: None,
+            });
+        }
+        self.policy_outcome = policy_outcome(&self.policy_findings);
+        self.allowed = self.simulation.success && policy_allows(&self.policy_findings);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

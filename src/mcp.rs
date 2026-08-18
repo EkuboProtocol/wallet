@@ -6,7 +6,10 @@ use crate::{
     automation_store::AutomationStore,
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
     config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
-    core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
+    core::{
+        execution_plan::ExecutionPlan,
+        policy::{ReviewRequest, WalletPolicy},
+    },
     custody::KeyStore,
     execution::ReceiptStatus,
     fork::{ForkSession, ForkStore, MAX_FORKS, MAX_PLANS_PER_FORK, pin_parent_block},
@@ -455,6 +458,19 @@ struct SendExecutionPlanInput {
     /// plan a `deny` rule matched always fails outright.
     #[serde(default)]
     on_simulation_failure: OnSimulationFailure,
+    /// Queue this transaction for the user to review even when their policy
+    /// would have signed it automatically. Set it when the user asked to see
+    /// this particular transaction before it goes out; leave it off
+    /// otherwise, because every one of these interrupts them.
+    ///
+    /// It only ever adds a review. It cannot approve anything, cannot widen
+    /// the policy, and cannot make a plan a `deny` rule matched sendable —
+    /// that still fails outright. It applies to this submission only: nothing
+    /// about the user's policy changes, so the next identical plan is
+    /// automatic again unless you ask for review again. Not accepted with
+    /// `request_id`, whose bytes are already reviewed and signed.
+    #[serde(default)]
+    must_review: bool,
 }
 
 /// What a caller wants done when simulation says the plan will not execute.
@@ -2136,7 +2152,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. Set must_review true when the user asked to look at this particular transaction before it is sent: it queues the plan for their review even where their policy would have signed it automatically, and it can only add that review — it never approves, widens the policy, or makes a denied plan sendable. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2157,6 +2173,19 @@ impl WalletMcpServer {
                 None,
             ));
         }
+        // A `request_id` submits bytes a human already reviewed and the wallet
+        // already signed. There is no decision left for a review to change,
+        // and accepting the flag here would let an agent report that it asked
+        // for a second look at something nobody will be shown.
+        if input.must_review && input.request_id.is_some() {
+            return Err(ErrorData::invalid_params(
+                "must_review does not apply to request_id: those bytes are already reviewed and \
+                 signed, and submitting them cannot be made to ask again. Reject the request in \
+                 the wallet application if it should not go out.",
+                None,
+            ));
+        }
+        let review_request = ReviewRequest::from_flag(input.must_review);
         let wallet = self
             .config
             .wallet(&input.wallet_id)
@@ -2177,6 +2206,7 @@ impl WalletMcpServer {
                     plan,
                     Some(plan_source.to_string()),
                     input.on_simulation_failure,
+                    review_request,
                 ))
                 .await
             }
@@ -2186,6 +2216,7 @@ impl WalletMcpServer {
                     network,
                     simulation_id,
                     input.on_simulation_failure,
+                    review_request,
                 ))
                 .await
             }
@@ -3289,6 +3320,7 @@ impl WalletMcpServer {
         Ok(record)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn send_new_plan(
         &self,
         wallet: WalletMetadata,
@@ -3296,6 +3328,7 @@ impl WalletMcpServer {
         plan: ExecutionPlan,
         plan_source: Option<String>,
         on_simulation_failure: OnSimulationFailure,
+        review_request: ReviewRequest,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
         let stored_policy = self.active_policy(&wallet)?;
@@ -3320,6 +3353,7 @@ impl WalletMcpServer {
             plan_source,
             simulation,
             on_simulation_failure,
+            review_request,
         ))
         .await
     }
@@ -3333,6 +3367,7 @@ impl WalletMcpServer {
         network: NetworkConfig,
         simulation_id: uuid::Uuid,
         on_simulation_failure: OnSimulationFailure,
+        review_request: ReviewRequest,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
         let recorded = self
@@ -3359,6 +3394,7 @@ impl WalletMcpServer {
             recorded.plan,
             recorded.plan_source,
             on_simulation_failure,
+            review_request,
         ))
         .await
     }
@@ -3375,10 +3411,19 @@ impl WalletMcpServer {
         plan_source: Option<String>,
         mut simulation: SimulationResult,
         on_simulation_failure: OnSimulationFailure,
+        review_request: ReviewRequest,
     ) -> Result<ExecutionStatusOutput> {
         crate::orchestrator::validate_send(&wallet, &network, &plan, &simulation)?;
         // Whatever identifier this result carried is spent now.
         simulation.simulation_id = None;
+        // The result reported back has to agree with what the send did. Core
+        // applies this again to its own freshly evaluated copy, which is the
+        // one that decides; without it here the caller would be handed a
+        // queued request beside a simulation still claiming the plan signs
+        // automatically.
+        if review_request.is_required() {
+            simulation.note_requested_review();
+        }
 
         // A caller that asked to hear about a failed simulation hears about
         // it, and nothing is written: no pending row, no expiry to wait out,
@@ -3419,6 +3464,7 @@ impl WalletMcpServer {
                 &plan,
                 plan_source.as_deref(),
                 &simulation,
+                review_request,
             )
             .await?;
         if let crate::orchestrator::SendDisposition::Queued(request) = disposition {

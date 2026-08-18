@@ -7,7 +7,7 @@
 
 use crate::{
     config::{ConfigStore, NetworkConfig, WalletMetadata},
-    core::execution_plan::ExecutionPlan,
+    core::{execution_plan::ExecutionPlan, policy::ReviewRequest},
     custody::{KeyStore, OsKeyStore},
     execution::BroadcastResult,
     orchestrator::{SendDisposition, execute_automatic},
@@ -57,6 +57,7 @@ impl AgentExecutionAuthority {
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
         simulation: &SimulationResult,
+        review_request: ReviewRequest,
     ) -> Result<SendDisposition> {
         execute_automatic(
             config,
@@ -68,6 +69,7 @@ impl AgentExecutionAuthority {
             plan,
             plan_source,
             simulation,
+            review_request,
         )
         .await
     }

@@ -5,7 +5,10 @@
 
 use crate::{
     config::validate_wallet_id,
-    core::execution_plan::{DecimalU256, ExecutionPlan},
+    core::{
+        execution_plan::{DecimalU256, ExecutionPlan},
+        policy::ReviewRequest,
+    },
     policy_store::PolicyStore,
     rpc::MinedFee,
     signature_requests::split_decision,
@@ -219,6 +222,19 @@ pub struct PendingTransaction {
     pub review_digest: Option<String>,
     pub policy_revision: u64,
     pub approval_required: bool,
+    /// Whoever submitted this plan asked for a human to review it, rather than
+    /// the policy having refused to sign it automatically.
+    ///
+    /// Persisted because the review is authored fresh when the owner opens it,
+    /// from a policy evaluation that by then says the plan is perfectly
+    /// allowed. Without this the request would be the one review in the
+    /// application that appears with no stated cause, and a prompt with no
+    /// reason on it is a prompt people learn to clear.
+    ///
+    /// Defaulted for rows written before the column existed: those were queued
+    /// by policy, which is exactly what `false` says.
+    #[serde(default)]
+    pub requested_review: bool,
     pub status: PendingStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -294,6 +310,7 @@ impl PendingStore {
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
         policy_revision: u64,
+        review_request: ReviewRequest,
     ) -> Result<PendingTransaction> {
         validate_plan_source(plan_source)?;
         validate_wallet_id(wallet_id)?;
@@ -334,6 +351,22 @@ impl PendingStore {
             )
             .optional()?;
         if let Some(existing) = existing {
+            // The same plan is already waiting for this wallet, so the send is
+            // already going to a human either way. What can still change is
+            // what that human is told: a caller asking for review after one
+            // that did not gets its reason recorded on the row they will read.
+            //
+            // One direction only, and the `WHERE` clause is what makes that
+            // true rather than a comment. A caller cannot clear another
+            // caller's request for review by resending the same plan without
+            // the flag, which is the one way this could have removed friction.
+            if review_request.is_required() {
+                transaction.execute(
+                    "UPDATE pending_transactions SET requested_review = 1
+                     WHERE request_id = ?1 AND status = 'awaiting_approval'",
+                    params![existing],
+                )?;
+            }
             transaction.commit()?;
             return self.get(existing);
         }
@@ -355,8 +388,8 @@ impl PendingStore {
         transaction.execute(
             "INSERT INTO pending_transactions(
                 request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
-                plan_digest, plan_source, policy_revision, status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11)",
+                plan_digest, plan_source, policy_revision, status, created_at, updated_at, requested_review
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11, ?12)",
             params![
                 request_id,
                 wallet_instance_id.to_string(),
@@ -369,6 +402,7 @@ impl PendingStore {
                 plan_source,
                 policy_revision,
                 Millis(created_at),
+                i64::from(review_request.is_required()),
             ],
         )?;
         transaction.commit()?;
@@ -396,6 +430,7 @@ impl PendingStore {
             plan,
             plan_source,
             policy_revision,
+            ReviewRequest::PolicyDecides,
         )
     }
 
@@ -1248,7 +1283,8 @@ impl PendingStore {
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
                         approval_required, review_digest, cancel_serialized_transaction,
                         cancel_transaction_hashes, gas_used, effective_gas_price, plan_source,
-                        generation, block_hash, settlement_transaction_hash, finalized_at
+                        generation, block_hash, settlement_transaction_hash, finalized_at,
+                        requested_review
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -1280,6 +1316,7 @@ impl PendingStore {
                         block_hash: row.blob_opt(24)?,
                         settlement_transaction_hash: row.blob_opt(25)?,
                         finalized_at: row.time_opt(26)?,
+                        requested_review: row.get(27)?,
                     })
                 },
             )
@@ -1319,6 +1356,7 @@ struct PendingRow {
     block_hash: Option<B256>,
     settlement_transaction_hash: Option<B256>,
     finalized_at: Option<DateTime<Utc>>,
+    requested_review: i64,
 }
 
 impl PendingRow {
@@ -1395,6 +1433,17 @@ impl PendingRow {
             1 => true,
             _ => anyhow::bail!("stored approval requirement is invalid"),
         };
+        let requested_review = match self.requested_review {
+            0 => false,
+            1 => true,
+            _ => anyhow::bail!("stored review request is invalid"),
+        };
+        // A row nobody had to approve cannot be one somebody asked to review:
+        // the request for review is what put it in the approval queue.
+        ensure!(
+            approval_required || !requested_review,
+            "automatic transaction unexpectedly records a request for review"
+        );
         ensure!(
             approval_required || self.review_digest.is_none(),
             "automatic transaction unexpectedly has a review digest"
@@ -1511,6 +1560,7 @@ impl PendingRow {
             review_digest: self.review_digest.map(|digest| format!("{digest:#x}")),
             policy_revision,
             approval_required,
+            requested_review,
             status,
             created_at: self.created_at,
             updated_at: self.updated_at,

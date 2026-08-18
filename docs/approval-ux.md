@@ -25,8 +25,12 @@ human reaches the window, and a signed transaction nobody submits is a decision
 the wallet quietly failed to carry out. If every endpoint refuses the envelope,
 the row stays `signed` and the reviewer is told, so "Send now" can try again.
 
-A policy `review` effect and an unmatched call both enter this same native
-flow. In a batch, calls are checked independently and any review result makes
+A policy `review` effect, an unmatched call, and a sender that asked for review
+of a transaction the policy would have signed all enter this same native flow.
+The last is recorded on the request, because the document is authored fresh
+when the review opens and the policy evaluation behind it says the transaction
+is allowed; the summary names the ask rather than claiming a policy gap that
+does not exist. In a batch, calls are checked independently and any review result makes
 the whole prepared transaction reviewable; any deny result rejects the whole
 transaction. A simulation ID is a short-lived plan handle, not approval or a
 prepared transaction. Sending through one runs fresh real-chain simulation,

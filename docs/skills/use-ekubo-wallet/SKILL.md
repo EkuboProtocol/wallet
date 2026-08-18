@@ -26,6 +26,11 @@ the request reaches a final state. A request unmatched by policy ordinarily
 goes to human review; do not propose a broader policy merely to complete the
 current request. An explicit policy denial cannot be queued.
 
+When the user asks to see a particular transaction before it goes out, and
+their policy would have sent it automatically, send it with `must_review` true.
+That queues this one submission for their review without touching their policy.
+It only adds a review: it approves nothing, and a denied plan stays denied.
+
 Use `wallet://docs/security-model` for trust boundaries and
 `wallet://docs/policy-authoring` only when the user asks to change future
 permissions.

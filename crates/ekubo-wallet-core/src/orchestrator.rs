@@ -30,7 +30,8 @@ use crate::{
     core::{
         execution_plan::ExecutionPlan,
         policy::{
-            FindingSeverity, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
+            FindingSeverity, ReviewRequest, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows,
+            policy_outcome,
         },
     },
     custody::{KeyStore, load_matching_signer},
@@ -176,6 +177,11 @@ pub fn validate_send(
 /// both queue. A plan a `deny` rule matched is the one thing that does
 /// neither: it fails outright, below.
 ///
+/// `review_request` is the caller's own ask for a human to look, and it moves
+/// in one direction: [`ReviewRequest::Required`] queues a plan the policy
+/// would have signed, and nothing here lets any value of it sign a plan the
+/// policy would have queued or refused.
+///
 /// After [`validate_send`], in order: policy and simulation verdicts; the
 /// wallet+chain in-flight slot settled against the chain; and, after signing,
 /// a re-read of wallet and network configuration so a concurrent
@@ -192,6 +198,7 @@ pub async fn execute_automatic(
     plan: &ExecutionPlan,
     plan_source: Option<&str>,
     simulation: &SimulationResult,
+    review_request: ReviewRequest,
 ) -> Result<SendDisposition> {
     validate_send(wallet, network, plan, simulation)?;
     let stored_policy = policies
@@ -233,6 +240,15 @@ pub async fn execute_automatic(
     authoritative_simulation.allowed = authoritative_simulation.simulation.success
         && policy_allows(&authoritative_simulation.policy_findings);
     authoritative_simulation.policy_revision = stored_policy.revision;
+    // Applied to the authoritative result rather than checked beside it, so
+    // the ask travels everywhere a policy verdict travels: the outcome, the
+    // `allowed` flag, and the warnings a reviewer reads. It is applied after
+    // the policy has spoken and cannot displace what it said — a `deny`
+    // finding is recognized by its code, not its position, and still refuses
+    // outright below.
+    if review_request.is_required() {
+        authoritative_simulation.note_requested_review();
+    }
     let simulation = &authoritative_simulation;
 
     // Rejected outright: nothing signs and nothing queues. Creating a pending
@@ -257,6 +273,7 @@ pub async fn execute_automatic(
             plan,
             plan_source,
             stored_policy.revision,
+            review_request,
         )?;
         return Ok(SendDisposition::Queued(request));
     }
@@ -721,10 +738,17 @@ async fn transaction_approval_request(
         .into_iter()
         .sum::<BigUint>();
     let steps = &pending.execution_plan.ordered_steps;
-    let summary = if simulation.simulation.success {
-        "The simulation succeeded, but this transaction is outside the wallet's automatic policy. Review the expected wallet changes before approving."
-    } else {
+    // Why this is in front of a human at all, which is not always the same
+    // sentence. The usual reason is that the policy would not sign it. A
+    // caller that asked for a second look at a plan the policy allows is a
+    // different reason, and saying the usual one there would be false — the
+    // reviewer would go looking for a rule that does not exist.
+    let summary = if !simulation.simulation.success {
         "The simulation failed, so the wallet could not verify this transaction's effects. Approving will still sign the exact transaction shown below."
+    } else if pending.requested_review {
+        "Whoever submitted this transaction asked for you to review it. Review the expected wallet changes before approving."
+    } else {
+        "The simulation succeeded, but this transaction is outside the wallet's automatic policy. Review the expected wallet changes before approving."
     };
     let mut request =
         ApprovalRequest::new(ApprovalKind::PolicyException, "Review transaction", summary)

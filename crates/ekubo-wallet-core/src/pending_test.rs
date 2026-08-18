@@ -87,6 +87,104 @@ fn persists_exact_plan_and_lifecycle_without_spend_state() {
 }
 
 #[test]
+fn a_requested_review_is_recorded_on_the_row_that_will_be_read() {
+    // The reason the owner is being asked has to survive to the moment they
+    // are asked: the review document is authored fresh from a policy that by
+    // then allows the plan outright, so nothing in it can reconstruct this.
+    let (_directory, mut store) = store();
+    let instance = store
+        .database
+        .get("primary")
+        .unwrap()
+        .unwrap()
+        .wallet_instance_id;
+    let request = store
+        .create_for_instance(
+            "primary",
+            instance,
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ReviewRequest::Required,
+        )
+        .unwrap();
+    assert!(request.requested_review);
+    assert!(request.approval_required);
+    assert!(store.get(request.request_id).unwrap().requested_review);
+}
+
+#[test]
+fn a_later_request_for_review_upgrades_the_waiting_row_and_nothing_clears_it() {
+    // The same plan queued twice is one row, so the second caller's ask has
+    // to reach the row the first one made or it is silently dropped. And the
+    // move is one-way: a caller that does not ask cannot clear a review
+    // somebody else asked for, which is the only way this could ever have
+    // removed friction rather than added it.
+    let (_directory, mut store) = store();
+    let instance = store
+        .database
+        .get("primary")
+        .unwrap()
+        .unwrap()
+        .wallet_instance_id;
+    let queue = |store: &mut PendingStore, review| {
+        store
+            .create_for_instance("primary", instance, "ethereum", &plan(), None, 1, review)
+            .unwrap()
+    };
+
+    let first = queue(&mut store, ReviewRequest::PolicyDecides);
+    assert!(!first.requested_review);
+
+    let upgraded = queue(&mut store, ReviewRequest::Required);
+    assert_eq!(upgraded.request_id, first.request_id, "one plan, one row");
+    assert!(upgraded.requested_review);
+
+    let unchanged = queue(&mut store, ReviewRequest::PolicyDecides);
+    assert_eq!(unchanged.request_id, first.request_id);
+    assert!(
+        unchanged.requested_review,
+        "a caller that did not ask must not clear another caller's request"
+    );
+}
+
+#[test]
+fn an_automatic_row_cannot_claim_a_review_was_requested_of_it() {
+    // A row nobody had to approve is a row the request for review never
+    // reached, so the combination describes a database that disagrees with
+    // itself. Refused at the read every caller crosses rather than trusted.
+    let (_directory, mut store) = store();
+    let hash = hash_of(ORIGINAL_BYTES);
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            &hash,
+        )
+        .unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions SET requested_review = 1 WHERE request_id = ?1",
+            rusqlite::params![signed.request_id],
+        )
+        .unwrap();
+    let error = store
+        .get(signed.request_id)
+        .expect_err("the contradictory row is refused");
+    assert!(
+        format!("{error:?}").contains("unexpectedly records a request for review"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn automatic_signatures_are_recorded_but_never_enter_approval_queue() {
     let (_directory, mut store) = store();
     let hash = hash_of(ORIGINAL_BYTES);

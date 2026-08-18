@@ -753,6 +753,58 @@ pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
 /// A `review` rule matched this call and deliberately stopped rule scanning.
 pub const CALL_REVIEW_REQUIRED_CODE: &str = "call_review_required";
 
+/// The caller that submitted this plan asked for it to be reviewed.
+///
+/// Not a policy decision, and deliberately not one: nothing in the owner's
+/// rules produced it, and it can only ever add friction. It is an error
+/// finding because that is what [`policy_outcome`] reads — any error whose
+/// code is neither [`CALL_DENIED_CODE`] nor [`SIMULATION_FAILED_CODE`] makes
+/// the outcome [`PolicyOutcome::RequiresApproval`] — so a plan every rule
+/// allows still goes to a human. It can never reach
+/// [`PolicyOutcome::Rejected`], which only a `deny` rule produces, so asking
+/// for review never turns a permitted plan into a refused one.
+pub const CALLER_REQUESTED_REVIEW_CODE: &str = "caller_requested_review";
+
+/// Whether the caller asked for a human to look at this send even when the
+/// owner's own policy would have signed it automatically.
+///
+/// One direction only. A caller can add a review it would not otherwise get;
+/// it can never remove one, widen the policy, or talk a `deny` rule out of
+/// refusing. That asymmetry is why an agent is allowed to set this at all:
+/// the worst a confused or hostile caller does with it is interrupt the
+/// owner, and the owner is the one who answers that prompt.
+///
+/// It exists because "the policy allows this" and "the user wants to see this
+/// one" are different questions. Someone who asks for a second look at a
+/// routine transfer should get it without editing their policy, waiting out
+/// the revision, and editing it back.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRequest {
+    /// The policy decides, as it always has.
+    #[default]
+    PolicyDecides,
+    /// Queue for human review whatever the policy would have done. A `deny`
+    /// rule still refuses outright: there is no prompt for that outcome.
+    Required,
+}
+
+impl ReviewRequest {
+    /// Read a caller-supplied flag as a request.
+    #[must_use]
+    pub const fn from_flag(requested: bool) -> Self {
+        if requested {
+            Self::Required
+        } else {
+            Self::PolicyDecides
+        }
+    }
+
+    #[must_use]
+    pub const fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
 /// What the policy decided, and therefore what happens next.
 ///
 /// The distinction between the two negative outcomes is the whole point. A

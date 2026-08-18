@@ -350,7 +350,8 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         store
             .connection
             .execute_batch(
-                "DROP INDEX automation_runs_by_automation;
+                "ALTER TABLE pending_transactions DROP COLUMN requested_review;
+                 DROP INDEX automation_runs_by_automation;
                  DROP TABLE automation_runs;
                  ALTER TABLE pending_transactions DROP COLUMN hidden_at;
                  DROP INDEX automations_wallet_key;
@@ -384,6 +385,23 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         )
         .unwrap();
     assert_eq!(hidden, 1, "the migration added the hidden_at column");
+    // And the column that says why a queued transaction is in front of a
+    // human. Every row that predates it was queued because the policy would
+    // not sign it, which is what the default records, so the addition needs
+    // no backfill to be true of the history it joins.
+    let requested: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('pending_transactions')
+             WHERE name = 'requested_review'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        requested, 1,
+        "the migration added the requested_review column"
+    );
     assert_eq!(
         store
             .get("primary")
