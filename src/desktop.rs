@@ -1136,7 +1136,7 @@ fn format_asset_amount(raw: &str, decimals: Option<u8>, base_unit: &str) -> Stri
     ekubo_wallet_core::approval_summary::format_fixed_point(raw, decimals)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct PortfolioBalanceRow {
     chain_id: u64,
     network_name: String,
@@ -1145,7 +1145,79 @@ struct PortfolioBalanceRow {
     token_name: Option<String>,
     native: bool,
     balance: String,
+    /// Roughly what this holding is worth, when the owner has recorded a price
+    /// for the token. Approximate on purpose: the exact number in this row is
+    /// the balance, and this is the figure that decides where the row sorts
+    /// and whether the tab shows it before being asked.
+    approximate_usd_value: Option<f64>,
     explorer_url: Option<String>,
+}
+
+/// Below this, a holding is dust: worth less than the gas it would take to
+/// move it on most chains, and worth less than the row it occupies on a tab
+/// somebody opened to see what they hold.
+const LOW_VALUE_USD_THRESHOLD: f64 = 1.0;
+
+impl PortfolioBalanceRow {
+    /// Whether the tab hides this row until asked.
+    ///
+    /// A native balance never counts as dust: it is what pays for everything
+    /// else on its chain, there is one per network, and no price for it is
+    /// recorded anywhere — so the rule that hides unpriced tokens would hide
+    /// exactly the balance nobody can transact without.
+    fn is_low_value(&self) -> bool {
+        !self.native
+            && self
+                .approximate_usd_value
+                .is_none_or(|value| value < LOW_VALUE_USD_THRESHOLD)
+    }
+}
+
+/// What a raw balance is roughly worth, in dollars, at the price the owner
+/// recorded for one whole token.
+///
+/// Lossy on purpose, and never anywhere near a signature: `f64` cannot hold
+/// every `uint256` exactly, which is fine for ordering rows and hopeless for
+/// deciding what to send. The exact figure stays the decimal string beside it.
+fn approximate_usd_value(balance: &str, decimals: Option<u8>, price: Option<f64>) -> Option<f64> {
+    let price = price?;
+    let decimals = decimals?;
+    let raw = balance.parse::<f64>().ok()?;
+    let value = raw / 10_f64.powi(i32::from(decimals)) * price;
+    value.is_finite().then_some(value)
+}
+
+/// A dollar figure as somebody reads one, rather than as a float prints.
+fn format_usd(value: f64) -> String {
+    if !value.is_finite() || value < 0.0 {
+        return "—".to_owned();
+    }
+    if value == 0.0 {
+        return "$0".to_owned();
+    }
+    // Anything under a cent rounds to "$0.00", which reads as nothing at all
+    // rather than as a very small something.
+    if value < 0.01 {
+        return "<$0.01".to_owned();
+    }
+    let text = if value >= 1000.0 {
+        format!("{:.0}", value.round())
+    } else {
+        format!("{value:.2}")
+    };
+    let (integer, fraction) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    let mut grouped = String::new();
+    for (index, digit) in integer.chars().enumerate() {
+        if index > 0 && (integer.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if fraction.is_empty() {
+        format!("${grouped}")
+    } else {
+        format!("${grouped}.{fraction}")
+    }
 }
 
 fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalanceRow> {
@@ -1175,6 +1247,9 @@ fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalan
                     native.map(|currency| currency.decimals),
                     "wei",
                 ),
+                // No price is recorded for a chain's own currency: it is not a
+                // row in the token database, and it is never hidden anyway.
+                approximate_usd_value: None,
                 explorer_url: None,
             });
         }
@@ -1186,6 +1261,11 @@ fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalan
             token_name: token.name.clone(),
             native: false,
             balance: format_asset_amount(&token.balance, token.decimals, "base units"),
+            approximate_usd_value: approximate_usd_value(
+                &token.balance,
+                token.decimals,
+                token.approximate_usd_price,
+            ),
             explorer_url: block_explorer_token_url(&item.network, &token.address),
         }));
     }
@@ -1199,7 +1279,7 @@ fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalan
 /// Both are rows of the same virtualized list, so a failing network is
 /// reported in place under the balances that did come back rather than
 /// replacing the list with an error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum PortfolioListRow {
     Balance(PortfolioBalanceRow),
     Unavailable {
@@ -1367,37 +1447,83 @@ fn render_portfolio_balance_row(
                         .min_w_0()
                         .max_w_full()
                         .flex_none()
-                        .id(SharedString::from(format!(
-                            "portfolio-balance-scroll-{wallet_id}-{}-{address}",
-                            row.chain_id
-                        )))
-                        .overflow_x_scroll()
-                        .text_right()
-                        .font_family(MONO_FONT_FAMILY)
-                        .text_lg()
-                        .font_semibold()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_0p5()
                         .child(
-                            selectable_text(
-                                SharedString::from(format!(
-                                    "portfolio-asset-balance-{wallet_id}-{}-{address}",
+                            div()
+                                .min_w_0()
+                                .max_w_full()
+                                .id(SharedString::from(format!(
+                                    "portfolio-balance-scroll-{wallet_id}-{}-{address}",
                                     row.chain_id
-                                )),
-                                &row.balance,
+                                )))
+                                .overflow_x_scroll()
+                                .text_right()
+                                .font_family(MONO_FONT_FAMILY)
+                                .text_lg()
+                                .font_semibold()
+                                .child(
+                                    selectable_text(
+                                        SharedString::from(format!(
+                                            "portfolio-asset-balance-{wallet_id}-{}-{address}",
+                                            row.chain_id
+                                        )),
+                                        &row.balance,
+                                    )
+                                    .whitespace_nowrap(),
+                                ),
+                        )
+                        // Under the exact amount, never instead of it: this is
+                        // an estimate from a price the owner typed, and the
+                        // line above is the number the chain agrees with.
+                        .when_some(row.approximate_usd_value, |column, value| {
+                            column.child(
+                                div()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .text_right()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("≈ {}", format_usd(value))),
                             )
-                            .whitespace_nowrap(),
-                        ),
+                        }),
                 ),
         )
         .into_any_element()
 }
 
+/// Biggest holding first, as far as anything is known about size.
+///
+/// Three bands, in this order: each chain's own currency, because it is what
+/// pays for everything else on that chain; then priced tokens, largest value
+/// first; then everything nobody has priced, in the chain-and-address order
+/// this list has always used. Sorting the unpriced tail by anything else would
+/// be inventing a ranking out of an absence.
 fn sort_portfolio_balance_rows(rows: &mut [PortfolioBalanceRow]) {
     rows.sort_by(|left, right| {
-        left.chain_id.cmp(&right.chain_id).then_with(|| {
-            left.asset_address
-                .to_ascii_lowercase()
-                .cmp(&right.asset_address.to_ascii_lowercase())
-        })
+        let band = |row: &PortfolioBalanceRow| match (row.native, row.approximate_usd_value) {
+            (true, _) => 0_u8,
+            (false, Some(_)) => 1,
+            (false, None) => 2,
+        };
+        band(left)
+            .cmp(&band(right))
+            .then_with(
+                || match (left.approximate_usd_value, right.approximate_usd_value) {
+                    (Some(left), Some(right)) => right
+                        .partial_cmp(&left)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                    _ => std::cmp::Ordering::Equal,
+                },
+            )
+            .then_with(|| left.chain_id.cmp(&right.chain_id))
+            .then_with(|| {
+                left.asset_address
+                    .to_ascii_lowercase()
+                    .cmp(&right.asset_address.to_ascii_lowercase())
+            })
     });
 }
 
@@ -2002,6 +2128,15 @@ pub struct WalletWindow {
     token_symbol_input: Option<Entity<InputState>>,
     token_name_input: Option<Entity<InputState>>,
     token_decimals_input: Option<Entity<InputState>>,
+    /// Roughly what one whole token is worth, as the owner has said. Only
+    /// ever read to order the portfolio and to decide which of its rows are
+    /// dust; never a name, and never anything a reviewer is shown.
+    token_price_input: Option<Entity<InputState>>,
+    /// The token whose approximate value is open for editing, exactly as it
+    /// was listed. The write matches on that same metadata, so a row that
+    /// changed underneath the dialog is refused rather than overwritten.
+    token_price_editor: Option<StoredToken>,
+    token_price_busy: bool,
     token_editor_open: bool,
     token_editor_errors: TokenEditorErrors,
     token_editor_busy: bool,
@@ -2084,6 +2219,12 @@ pub struct WalletWindow {
     inbox_waiting_rows: Cell<usize>,
     inbox_decided_list: VariableListState,
     inbox_decided_rows: Cell<usize>,
+    /// Whether the portfolio is showing holdings worth less than a dollar,
+    /// and holdings nobody has priced.
+    ///
+    /// Off by default and not remembered between runs: it is a way to look
+    /// at the dust once, not a setting about what this account holds.
+    show_low_value_balances: bool,
     portfolio_list: VariableListState,
     portfolio_rows: Cell<usize>,
     modal_focus: FocusHandle,
@@ -2976,6 +3117,10 @@ struct RouteListDelegate {
 
 struct TokenListDelegate {
     owner: OwnerApi,
+    /// The window, so a row can open the small dialog that records what a
+    /// token is roughly worth. Rows live in a virtualized list and cannot
+    /// hold an input of their own.
+    wallet: WeakEntity<WalletWindow>,
     all_tokens: Vec<StoredToken>,
     visible_tokens: Vec<StoredToken>,
     query: String,
@@ -2996,7 +3141,25 @@ struct TokenEditorErrors {
     symbol: Option<String>,
     name: Option<String>,
     decimals: Option<String>,
+    price: Option<String>,
     form: Option<String>,
+}
+
+/// Read an approximate value out of the field that asks for one.
+///
+/// Empty means the owner has not said, which is a different answer from zero:
+/// a token priced at zero is worth nothing, a token with no price is worth
+/// something nobody has written down. Both are hidden by the portfolio's dust
+/// filter, and only the first claims to know why.
+fn parse_token_price_field(value: &str) -> Result<Option<f64>, String> {
+    let value = value.trim().trim_start_matches('$').trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.replace(',', "").parse::<f64>() {
+        Ok(price) if price.is_finite() && price >= 0.0 => Ok(Some(price)),
+        _ => Err("Enter an amount in US dollars per whole token, or leave it empty.".to_owned()),
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4220,9 +4383,10 @@ impl TokenProposalListDelegate {
 }
 
 impl TokenListDelegate {
-    fn new(owner: OwnerApi) -> Self {
+    fn new(owner: OwnerApi, wallet: WeakEntity<WalletWindow>) -> Self {
         Self {
             owner,
+            wallet,
             all_tokens: Vec::new(),
             visible_tokens: Vec::new(),
             query: String::new(),
@@ -5113,6 +5277,19 @@ impl ListDelegate for TokenListDelegate {
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
         let address_text_id = SharedString::from(format!("{row_id}-address"));
         let owner = self.owner.clone();
+        let price_token = token.clone();
+        let price_wallet = self.wallet.clone();
+        let value_action = app_button(("set-token-value", index.row))
+            .label(token.approximate_usd_price.map_or_else(
+                || "Set value".to_owned(),
+                |price| format!("≈ {} each", format_usd(price)),
+            ))
+            .on_click(move |_, window, cx| {
+                let token = price_token.clone();
+                let _ = price_wallet.update(cx, |view, cx| {
+                    view.open_token_price_editor(token, window, cx);
+                });
+            });
         let actions = app_button(("remove-token", index.row))
             .label(if removing { "Removing…" } else { "Remove" })
             .danger()
@@ -5249,7 +5426,14 @@ impl ListDelegate for TokenListDelegate {
                                                 )),
                                         ),
                                 )
-                                .child(actions),
+                                .child(
+                                    h_flex()
+                                        .flex_wrap()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(value_action)
+                                        .child(actions),
+                                ),
                         )
                         .when_some(action_error, |row, error| {
                             row.child(
@@ -5538,6 +5722,9 @@ impl WalletWindow {
             token_symbol_input: None,
             token_name_input: None,
             token_decimals_input: None,
+            token_price_input: None,
+            token_price_editor: None,
+            token_price_busy: false,
             token_editor_open: false,
             token_editor_errors: TokenEditorErrors::default(),
             token_editor_busy: false,
@@ -5594,6 +5781,7 @@ impl WalletWindow {
             inbox_waiting_rows: Cell::new(0),
             inbox_decided_list: virtual_inbox_list(0),
             inbox_decided_rows: Cell::new(0),
+            show_low_value_balances: false,
             portfolio_list: virtual_inbox_list(0),
             portfolio_rows: Cell::new(0),
             modal_focus: cx.focus_handle(),
@@ -5750,8 +5938,9 @@ impl WalletWindow {
         }
         if self.token_list.is_none() {
             let owner = self.owner.clone();
+            let wallet = cx.entity().downgrade();
             self.token_list = Some(cx.new(|cx| {
-                ListState::new(TokenListDelegate::new(owner), window, cx).selectable(false)
+                ListState::new(TokenListDelegate::new(owner, wallet), window, cx).selectable(false)
             }));
             token_lists_created = true;
             self.reload_tokens(cx);
@@ -5857,6 +6046,24 @@ impl WalletWindow {
                 },
             ));
             self.token_decimals_input = Some(input);
+        }
+        if self.token_price_input.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("1.00 (optional)"));
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, _, cx| {
+                    if !primary_enter(event) {
+                        return;
+                    }
+                    if view.token_editor_open {
+                        view.save_token_editor(cx);
+                    } else if view.token_price_editor.is_some() {
+                        view.save_token_price_editor(cx);
+                    }
+                },
+            ));
+            self.token_price_input = Some(input);
         }
         if self.account_id_input.is_none() {
             let input = cx.new(|cx| {
@@ -6014,6 +6221,9 @@ impl WalletWindow {
         self.token_symbol_input = None;
         self.token_name_input = None;
         self.token_decimals_input = None;
+        self.token_price_input = None;
+        self.token_price_editor = None;
+        self.token_price_busy = false;
         self.token_editor_open = false;
         self.token_list_generation = self.token_list_generation.wrapping_add(1);
         self.account_id_input = None;
@@ -6355,7 +6565,10 @@ impl WalletWindow {
         let Some(decimals) = self.token_decimals_input.clone() else {
             return;
         };
-        for input in [&chain_id, &address, &symbol, &name, &decimals] {
+        let Some(price) = self.token_price_input.clone() else {
+            return;
+        };
+        for input in [&chain_id, &address, &symbol, &name, &decimals, &price] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         self.token_editor_open = true;
@@ -6507,21 +6720,64 @@ impl WalletWindow {
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(div().text_sm().child("Full name (optional)"))
+                                .flex_wrap()
+                                .gap_3()
                                 .child(
-                                    app_input(&name, cx)
-                                        .aria_label("Full token name")
-                                        .disabled(busy),
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .flex_1()
+                                        .min_w(px(150.0))
+                                        .child(div().text_sm().child("Full name (optional)"))
+                                        .child(
+                                            app_input(&name, cx)
+                                                .aria_label("Full token name")
+                                                .disabled(busy),
+                                        )
+                                        .when_some(errors.name.clone(), |field, error| {
+                                            field.child(field_error(
+                                                "token-editor-name-error",
+                                                error,
+                                                cx,
+                                            ))
+                                        }),
                                 )
-                                .when_some(errors.name.clone(), |field, error| {
-                                    field.child(field_error(
-                                        "token-editor-name-error",
-                                        error,
-                                        cx,
-                                    ))
-                                }),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .flex_1()
+                                        .min_w(px(150.0))
+                                        .child(
+                                            div().text_sm().child("Approximate USD value (optional)"),
+                                        )
+                                        .child(
+                                            app_input(&price, cx)
+                                                .aria_label(
+                                                    "Approximate value in US dollars per whole token",
+                                                )
+                                                .disabled(busy),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .whitespace_normal()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(
+                                                    "Per whole token. Orders the Portfolio tab and \
+                                                     nothing else.",
+                                                ),
+                                        )
+                                        .when_some(errors.price.clone(), |field, error| {
+                                            field.child(field_error(
+                                                "token-editor-price-error",
+                                                error,
+                                                cx,
+                                            ))
+                                        }),
+                                ),
                         )
                         .when_some(errors.form.clone(), |form, error| {
                             form.child(field_error("token-editor-form-error", error, cx))
@@ -6612,6 +6868,201 @@ impl WalletWindow {
         })
     }
 
+    /// Open the one-field dialog that records roughly what a token is worth.
+    ///
+    /// A row in the inventory cannot hold an input of its own — the list is
+    /// virtualized, and the row scrolls out from under whatever was typed into
+    /// it — so the value is edited here, over the list, against the exact row
+    /// that was listed.
+    fn open_token_price_editor(
+        &mut self,
+        token: StoredToken,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.token_price_input.clone() else {
+            return;
+        };
+        if self.token_editor_open || self.token_price_editor.is_some() {
+            return;
+        }
+        let current = token
+            .approximate_usd_price
+            .map(|price| price.to_string())
+            .unwrap_or_default();
+        input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+            input.set_selected_range(0..input.value().len(), cx);
+        });
+        let label = token
+            .symbol
+            .clone()
+            .or_else(|| token.name.clone())
+            .unwrap_or_else(|| token.address.clone());
+        self.token_price_editor = Some(token);
+        self.token_price_busy = false;
+        self.token_editor_errors = TokenEditorErrors::default();
+        let focus_input = input.clone();
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let Some(entity) = view.upgrade() else {
+                return dialog
+                    .title("Approximate value")
+                    .child("Value form unavailable.");
+            };
+            let (busy, errors) = {
+                let window = entity.read(cx);
+                (window.token_price_busy, window.token_editor_errors.clone())
+            };
+            let save_view = view.clone();
+            let close_view = view.clone();
+            let on_close_view = view.clone();
+            dialog
+                .w(px(460.0))
+                .title(format!("Approximate value of {label}"))
+                .overlay_closable(!busy)
+                .keyboard(!busy)
+                .close_button(!busy)
+                .on_close(move |_, _, cx| {
+                    let _ = on_close_view.update(cx, |view, cx| {
+                        view.token_price_editor = None;
+                        view.token_editor_errors = TokenEditorErrors::default();
+                        view.activate_next_waiting_surface(cx);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .whitespace_normal()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(selectable_label(
+                                    "US dollars per whole token, as a rough figure. It orders the \
+                                     Portfolio tab and decides which balances that tab holds back \
+                                     as dust. Nothing about signing reads it, and no amount is \
+                                     ever scaled by it. Leave it empty to record no value.",
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_sm().child("Approximate value in USD"))
+                                .child(
+                                    app_input(&input, cx)
+                                        .aria_label(
+                                            "Approximate value in US dollars per whole token",
+                                        )
+                                        .disabled(busy),
+                                )
+                                .when_some(errors.price.clone(), |field, error| {
+                                    field.child(field_error("token-price-error", error, cx))
+                                })
+                                .when_some(errors.form.clone(), |field, error| {
+                                    field.child(field_error("token-price-form-error", error, cx))
+                                }),
+                        ),
+                )
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            app_button("cancel-token-price")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(move |_, window, cx| {
+                                    let can_close = close_view
+                                        .update(cx, |view, cx| {
+                                            if view.token_price_busy {
+                                                return false;
+                                            }
+                                            view.token_price_editor = None;
+                                            view.token_editor_errors = TokenEditorErrors::default();
+                                            cx.notify();
+                                            true
+                                        })
+                                        .unwrap_or(false);
+                                    if can_close {
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        )
+                        .child(
+                            app_button("save-token-price")
+                                .debug_selector(|| "save-token-price".to_owned())
+                                .label(if busy { "Saving…" } else { "Save value" })
+                                .primary()
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    let _ = save_view.update(cx, |view, cx| {
+                                        view.save_token_price_editor(cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+        focus_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn save_token_price_editor(&mut self, cx: &mut Context<Self>) {
+        if self.token_price_busy {
+            return;
+        }
+        let (Some(token), Some(input)) = (
+            self.token_price_editor.clone(),
+            self.token_price_input.as_ref(),
+        ) else {
+            return;
+        };
+        let price = match parse_token_price_field(&input.read(cx).value()) {
+            Ok(price) => price,
+            Err(error) => {
+                self.token_editor_errors.price = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.token_editor_errors = TokenEditorErrors::default();
+        self.token_price_busy = true;
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.set_token_price(&token, price) },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.token_price_busy = false;
+                match result {
+                    Ok(()) => {
+                        view.token_price_editor = None;
+                        window.close_dialog(cx);
+                        view.reload_tokens(cx);
+                        view.invalidate_portfolio();
+                        view.refresh_portfolio(cx);
+                    }
+                    Err(error) => {
+                        view.token_editor_errors.form =
+                            Some(format!("Could not save the value: {error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn save_token_editor(&mut self, cx: &mut Context<Self>) {
         if self.token_editor_busy {
             return;
@@ -6638,6 +7089,18 @@ impl WalletWindow {
             &name_input.read(cx).value(),
             &decimals_input.read(cx).value(),
         );
+        let price = self.token_price_input.as_ref().map_or(Ok(None), |input| {
+            parse_token_price_field(&input.read(cx).value())
+        });
+        let price = match price {
+            Ok(price) => price,
+            Err(error) => {
+                errors.price = Some(error);
+                self.token_editor_errors = errors;
+                cx.notify();
+                return;
+            }
+        };
         let Some(token) = token else {
             self.token_editor_errors = errors;
             cx.notify();
@@ -6668,7 +7131,8 @@ impl WalletWindow {
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_editor_busy = true;
         let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.add_token(token).await });
+        let task =
+            gpui_tokio::Tokio::spawn_result(cx, async move { owner.add_token(token, price).await });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update_in(cx, |view, window, cx| {
@@ -14116,8 +14580,14 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let wallet_id = account.wallet.id.clone();
-        let mut rows = portfolio_balance_rows(account)
+        let held = portfolio_balance_rows(account);
+        // Dust is hidden rather than dropped, and the count of it is on screen
+        // whether or not it is showing: a tab that quietly omitted holdings
+        // would be a tab that could be made to lie by one wrong price.
+        let hidden = held.iter().filter(|row| row.is_low_value()).count();
+        let mut rows = held
             .into_iter()
+            .filter(|row| self.show_low_value_balances || !row.is_low_value())
             .map(PortfolioListRow::Balance)
             .collect::<Vec<_>>();
         // A network that could not be read is reported under the balances
@@ -14148,14 +14618,18 @@ impl WalletWindow {
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
             .flex()
-            .flex_col();
+            .flex_col()
+            .when(hidden > 0, |card| {
+                card.child(self.render_portfolio_dust_control(hidden, cx))
+            });
         if rows.is_empty() {
-            return card.child(
-                div()
-                    .py_4()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("No balances.")),
-            );
+            return card.child(div().py_4().text_color(cx.theme().muted_foreground).child(
+                selectable_label(if hidden > 0 {
+                    "Every balance here is worth under a dollar or has no recorded value."
+                } else {
+                    "No balances."
+                }),
+            ));
         }
         Self::resize_list(&self.portfolio_list, &self.portfolio_rows, rows.len());
         self.route_overflow_indicator
@@ -14178,6 +14652,58 @@ impl WalletWindow {
                     },
                 )),
         )
+    }
+
+    /// The one line above the balances: how many of them the tab is holding
+    /// back, and the switch that shows them.
+    ///
+    /// It is drawn whenever anything is hidden, in both states of the switch,
+    /// because the count is the whole safeguard: an approximate value is a
+    /// number the owner typed, and a wrong one must never be able to make a
+    /// holding vanish without saying so.
+    fn render_portfolio_dust_control(&self, hidden: usize, cx: &mut Context<Self>) -> gpui::Div {
+        h_flex()
+            .debug_selector(|| "portfolio-dust-control".to_owned())
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .pb_2()
+            .mb_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex_basis(px(240.0))
+                    .whitespace_normal()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(format!(
+                        "{} worth under {} or with no recorded value",
+                        pluralize(hidden, "balance"),
+                        format_usd(LOW_VALUE_USD_THRESHOLD)
+                    ))),
+            )
+            .child(
+                Switch::new("portfolio-show-low-value")
+                    .label(if self.show_low_value_balances {
+                        "Showing them"
+                    } else {
+                        "Show them"
+                    })
+                    .checked(self.show_low_value_balances)
+                    .on_click(cx.listener(|view, checked: &bool, _, cx| {
+                        view.show_low_value_balances = *checked;
+                        view.portfolio_list
+                            .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
+                        cx.notify();
+                    })),
+            )
     }
 
     /// How old the balances on screen are, as the last line of the tab.

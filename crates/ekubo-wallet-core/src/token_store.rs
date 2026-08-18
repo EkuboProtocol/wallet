@@ -161,7 +161,7 @@ sol! {
 }
 
 /// One stored token, addresses rendered checksummed.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 pub struct StoredToken {
     pub chain_id: String,
     pub address: String,
@@ -173,6 +173,20 @@ pub struct StoredToken {
     pub decimals: Option<u8>,
     pub source: String,
     pub added_at: DateTime<Utc>,
+    /// Roughly what one whole token is worth in US dollars, if the owner has
+    /// said.
+    ///
+    /// Per whole token rather than per smallest unit — 1.0 for USDC, not
+    /// 0.000001 — so the number means the same thing whatever the token's
+    /// decimals are, and reading it needs no second field.
+    ///
+    /// It is display data of the weakest kind there is: nothing in the policy,
+    /// signing, or approval path reads it, no amount is scaled by it, and it
+    /// never appears in a review. Its only job is to order the portfolio and
+    /// to let a tab full of dust be collapsed by default, which is why the tab
+    /// always says how many rows that hid. Nothing writes it but the owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approximate_usd_price: Option<f64>,
 }
 
 /// What a token list says about one token, and the only thing the wallet will
@@ -442,15 +456,25 @@ impl TokenStore {
         &mut self,
         token: &ListedToken,
         source: &str,
+        approximate_usd_price: Option<f64>,
         authorization: &OwnerAuthorization,
     ) -> Result<StoredToken> {
         authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
         let fields = normalize_owner_token(token, source)?;
+        if let Some(price) = approximate_usd_price {
+            ensure!(
+                price.is_finite() && price >= 0.0,
+                "an approximate value must be a number at or above zero"
+            );
+        }
         let now = Millis(sql::now());
         let transaction = self.database.connection.transaction()?;
         let inserted = transaction.execute(
-            "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO tokens(
+                 chain_id, address, symbol, name, decimals, source, added_at,
+                 approximate_usd_price
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(chain_id, address) DO NOTHING",
             params![
                 fields.chain_id,
@@ -460,6 +484,7 @@ impl TokenStore {
                 token.decimals,
                 fields.source,
                 now,
+                approximate_usd_price,
             ],
         )?;
         ensure!(
@@ -593,6 +618,56 @@ impl TokenStore {
         Ok(())
     }
 
+    /// Record roughly what one whole token of a reviewed row is worth, or
+    /// clear what was recorded.
+    ///
+    /// Unauthenticated, like removing a row and unlike adding one, and for the
+    /// same reason: what needs the owner's authentication is a *name*, because
+    /// a name is what a reviewer reads when they decide whether to sign. This
+    /// number is read by one tab's sort order and by the filter that hides
+    /// dust from it — never by the policy, the signing path, or a review — and
+    /// the tab always says how many rows the filter hid, so a wrong price
+    /// cannot make a holding disappear quietly.
+    ///
+    /// The row is matched on the exact metadata that was reviewed, so a price
+    /// cannot be attached to a token that changed underneath the screen.
+    pub fn set_approximate_price(
+        &mut self,
+        reviewed: &StoredToken,
+        price: Option<f64>,
+    ) -> Result<()> {
+        let (chain_id, address) = stored_token_identity(reviewed)?;
+        if let Some(price) = price {
+            ensure!(
+                price.is_finite() && price >= 0.0,
+                "an approximate value must be a number at or above zero"
+            );
+        }
+        let updated = self.database.connection.execute(
+            "UPDATE tokens SET approximate_usd_price = ?8
+             WHERE chain_id = ?1 AND address = ?2
+               AND symbol IS ?3 AND name IS ?4 AND decimals IS ?5
+               AND source = ?6 AND added_at = ?7",
+            params![
+                i64::try_from(chain_id).context("chain ID out of range")?,
+                Blob(address),
+                reviewed.symbol,
+                reviewed.name,
+                reviewed.decimals,
+                reviewed.source,
+                Millis(reviewed.added_at),
+                price,
+            ],
+        )?;
+        ensure!(
+            updated == 1,
+            "token {} on chain {} changed after it was reviewed; review the current metadata",
+            address.to_checksum(None),
+            chain_id
+        );
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn remove(&mut self, chain_id: u64, address: Address) -> Result<bool> {
         let removed = self.database.connection.execute(
@@ -609,7 +684,8 @@ impl TokenStore {
         self.database
             .connection
             .query_row(
-                "SELECT chain_id, address, symbol, name, decimals, source, added_at
+                "SELECT chain_id, address, symbol, name, decimals, source, added_at,
+                    approximate_usd_price
                  FROM tokens WHERE chain_id = ?1 AND address = ?2",
                 params![
                     i64::try_from(chain_id).context("chain ID out of range")?,
@@ -920,7 +996,8 @@ impl TokenStore {
             .map(|chain| i64::try_from(chain).context("chain ID out of range"))
             .transpose()?;
         let mut statement = self.database.connection.prepare(
-            "SELECT chain_id, address, symbol, name, decimals, source, added_at
+            "SELECT chain_id, address, symbol, name, decimals, source, added_at,
+                    approximate_usd_price
              FROM tokens
              WHERE (?1 IS NULL OR chain_id = ?1)
                AND (
@@ -961,7 +1038,8 @@ impl TokenStore {
         let mut rows = Vec::new();
         if let Some(chain) = chain_id {
             let mut statement = self.database.connection.prepare(
-                "SELECT chain_id, address, symbol, name, decimals, source, added_at
+                "SELECT chain_id, address, symbol, name, decimals, source, added_at,
+                    approximate_usd_price
                  FROM tokens WHERE chain_id = ?1
                  ORDER BY chain_id, address LIMIT ?2 OFFSET ?3",
             )?;
@@ -978,7 +1056,8 @@ impl TokenStore {
             }
         } else {
             let mut statement = self.database.connection.prepare(
-                "SELECT chain_id, address, symbol, name, decimals, source, added_at
+                "SELECT chain_id, address, symbol, name, decimals, source, added_at,
+                    approximate_usd_price
                  FROM tokens ORDER BY chain_id, address LIMIT ?1 OFFSET ?2",
             )?;
             let mapped = statement.query_map(params![limit, offset], row_to_token)?;
@@ -1021,11 +1100,17 @@ fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredToken> {
             .and_then(|value| u8::try_from(value).ok()),
         source: row.get(5)?,
         added_at: row.time(6)?,
+        // A price that is not finite is not a price. The column check refuses
+        // a negative one, and a stored NaN would sort a row into an arbitrary
+        // place forever, so anything else reads as "the owner has not said".
+        approximate_usd_price: row
+            .get::<_, Option<f64>>(7)?
+            .filter(|price| price.is_finite() && *price >= 0.0),
     })
 }
 
 /// One token balance line in a portfolio.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 pub struct PortfolioToken {
     pub address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1036,10 +1121,15 @@ pub struct PortfolioToken {
     pub decimals: Option<u8>,
     /// Raw balance in the token's smallest unit, as a decimal string.
     pub balance: String,
+    /// Roughly what one whole token is worth, as the owner recorded it. See
+    /// [`StoredToken::approximate_usd_price`]: display data only, and the
+    /// balance beside it is the exact figure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approximate_usd_price: Option<f64>,
 }
 
 /// Balances for one address across the tokens known to the database.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 pub struct Portfolio {
     pub address: String,
     pub chain_id: String,
@@ -1114,6 +1204,7 @@ pub async fn read_portfolio(
                 name: token.name.clone(),
                 decimals: token.decimals,
                 balance: balance.to_string(),
+                approximate_usd_price: token.approximate_usd_price,
             })
         })
         .collect();

@@ -408,49 +408,114 @@ fn portfolio_amounts_preserve_every_significant_digit() {
     assert_eq!(format_asset_amount("7", None, "base units"), "7 base units");
 }
 
+fn balance_row(
+    chain_id: u64,
+    address: &str,
+    native: bool,
+    value: Option<f64>,
+) -> PortfolioBalanceRow {
+    PortfolioBalanceRow {
+        chain_id,
+        network_name: "Network".into(),
+        asset_address: address.into(),
+        token_symbol: Some("T".into()),
+        token_name: Some("Token".into()),
+        native,
+        balance: "1".into(),
+        approximate_usd_value: value,
+        explorer_url: None,
+    }
+}
+
 #[test]
-fn portfolio_rows_are_commingled_by_chain_then_token_address() {
+fn unpriced_portfolio_rows_stay_commingled_by_chain_then_token_address() {
     let mut rows = vec![
-        PortfolioBalanceRow {
-            chain_id: 10,
-            network_name: "Optimism".into(),
-            asset_address: "0xbb".into(),
-            token_symbol: Some("B".into()),
-            token_name: Some("Token B".into()),
-            native: false,
-            balance: "2".into(),
-            explorer_url: None,
-        },
-        PortfolioBalanceRow {
-            chain_id: 1,
-            network_name: "Ethereum".into(),
-            asset_address: "0xcc".into(),
-            token_symbol: Some("C".into()),
-            token_name: Some("Token C".into()),
-            native: false,
-            balance: "3".into(),
-            explorer_url: None,
-        },
-        PortfolioBalanceRow {
-            chain_id: 1,
-            network_name: "Ethereum".into(),
-            asset_address: "0xAA".into(),
-            token_symbol: Some("A".into()),
-            token_name: Some("Token A".into()),
-            native: false,
-            balance: "1".into(),
-            explorer_url: None,
-        },
+        balance_row(10, "0xbb", false, None),
+        balance_row(1, "0xcc", false, None),
+        balance_row(1, "0xAA", false, None),
     ];
 
     sort_portfolio_balance_rows(&mut rows);
 
+    // Nothing is known about the size of these holdings, so the order that
+    // says nothing about it is the honest one.
     assert_eq!(
         rows.iter()
             .map(|row| (row.chain_id, row.asset_address.as_str()))
             .collect::<Vec<_>>(),
         [(1, "0xAA"), (1, "0xcc"), (10, "0xbb")]
     );
+}
+
+#[test]
+fn the_portfolio_leads_with_gas_then_with_whatever_is_worth_most() {
+    let mut rows = vec![
+        balance_row(1, "0xdust", false, Some(0.5)),
+        balance_row(1, "0xunpriced", false, None),
+        balance_row(1, "0xbig", false, Some(4_000.0)),
+        balance_row(1, "0x00", true, None),
+        balance_row(1, "0xsmall", false, Some(12.0)),
+    ];
+
+    sort_portfolio_balance_rows(&mut rows);
+
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.asset_address.as_str())
+            .collect::<Vec<_>>(),
+        ["0x00", "0xbig", "0xsmall", "0xdust", "0xunpriced"],
+        "the chain's own currency pays for everything else on it, so it leads; \
+         then the priced holdings largest first; then what nobody has priced"
+    );
+}
+
+#[test]
+fn dust_is_what_is_worth_under_a_dollar_or_has_no_recorded_value() {
+    assert!(balance_row(1, "0xa", false, Some(0.99)).is_low_value());
+    assert!(balance_row(1, "0xa", false, None).is_low_value());
+    assert!(!balance_row(1, "0xa", false, Some(1.0)).is_low_value());
+    // A chain's own currency is never dust, priced or not: it is the balance
+    // every other row on that chain needs in order to move at all, and no
+    // price is recorded for it anywhere.
+    assert!(!balance_row(1, "0x00", true, None).is_low_value());
+}
+
+#[test]
+fn an_approximate_value_is_the_balance_scaled_by_the_price_of_one_whole_token() {
+    // 1500 USDC at a dollar, with the six decimals USDC actually has: the
+    // price is per whole token, so nothing here needs to know what six means.
+    assert_eq!(
+        approximate_usd_value("1500000000", Some(6), Some(1.0)),
+        Some(1500.0)
+    );
+    assert_eq!(approximate_usd_value("1500000000", Some(6), None), None);
+    assert_eq!(approximate_usd_value("1500000000", None, Some(1.0)), None);
+    assert_eq!(
+        approximate_usd_value("not a number", Some(6), Some(1.0)),
+        None
+    );
+}
+
+#[test]
+fn dollar_figures_read_as_money_rather_than_as_floats() {
+    assert_eq!(format_usd(0.0), "$0");
+    // Rounded to the cent this is "$0.00", which reads as nothing at all
+    // rather than as a very small something.
+    assert_eq!(format_usd(0.004), "<$0.01");
+    assert_eq!(format_usd(12.345), "$12.35");
+    assert_eq!(format_usd(1_234_567.0), "$1,234,567");
+}
+
+#[test]
+fn an_empty_value_field_is_not_a_price_of_zero() {
+    // Nothing recorded and nothing at all are different claims, and only one
+    // of them is the owner saying something.
+    assert_eq!(parse_token_price_field(""), Ok(None));
+    assert_eq!(parse_token_price_field("  "), Ok(None));
+    assert_eq!(parse_token_price_field("0"), Ok(Some(0.0)));
+    assert_eq!(parse_token_price_field("$1,250.5"), Ok(Some(1250.5)));
+    assert!(parse_token_price_field("-1").is_err());
+    assert!(parse_token_price_field("cheap").is_err());
 }
 
 #[test]
@@ -650,6 +715,7 @@ fn token_search_matches_metadata_address_and_chain_id() {
         decimals: Some(6),
         source: "test".into(),
         added_at: chrono::Utc::now(),
+        approximate_usd_price: None,
     };
 
     assert!(token_matches_search(&token, "usd coin"));
@@ -670,6 +736,7 @@ fn token_search_ranks_exact_symbols_before_longer_prefix_matches() {
         decimals: Some(18),
         source: "test".into(),
         added_at: chrono::Utc::now(),
+        approximate_usd_price: None,
     };
     let exact = token("USDe", "0x1111111111111111111111111111111111111111");
     let prefix = token("USDEBT", "0x2222222222222222222222222222222222222222");
@@ -1118,6 +1185,7 @@ fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
         decimals: Some(6),
         source: "test".into(),
         added_at: chrono::Utc::now(),
+        approximate_usd_price: None,
     };
     let source = vec![token; 17_286];
     let mut offsets = Vec::new();

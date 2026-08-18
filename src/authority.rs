@@ -2248,7 +2248,11 @@ impl OwnerApi {
         TokenStore::production(self.config.data_dir())?.list(chain_id, limit, offset)
     }
 
-    pub async fn add_token(&self, token: ListedToken) -> Result<StoredToken> {
+    pub async fn add_token(
+        &self,
+        token: ListedToken,
+        approximate_usd_price: Option<f64>,
+    ) -> Result<StoredToken> {
         ensure!(
             contains_configured_chain(&self.config.load()?, token.chain_id),
             "chain {} is not a configured network",
@@ -2263,10 +2267,32 @@ impl OwnerApi {
         let stored = TokenStore::production(self.config.data_dir())?.add_authorized(
             &token,
             "Manual entry",
+            approximate_usd_price,
             &authorization,
         )?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(stored)
+    }
+
+    /// Record roughly what one whole token is worth, or clear it.
+    ///
+    /// No authentication, for the same reason removing a token needs none:
+    /// what authentication protects is the *name* a reviewer reads when they
+    /// decide whether to sign, and this is not a name. It orders the portfolio
+    /// tab and decides which rows that tab collapses by default, and the tab
+    /// says how many it collapsed.
+    pub fn set_token_price(&self, reviewed: &StoredToken, price: Option<f64>) -> Result<()> {
+        let chain_id = reviewed
+            .chain_id
+            .parse::<u64>()
+            .context("stored token has an invalid chain ID")?;
+        ensure!(
+            contains_configured_chain(&self.config.load()?, chain_id),
+            "chain {chain_id} is not a configured network"
+        );
+        TokenStore::production(self.config.data_dir())?.set_approximate_price(reviewed, price)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
     }
 
     pub fn remove_token(&self, reviewed: &StoredToken) -> Result<()> {

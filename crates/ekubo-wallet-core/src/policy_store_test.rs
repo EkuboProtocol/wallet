@@ -350,7 +350,8 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_transactions DROP COLUMN requested_review;
+                "ALTER TABLE tokens DROP COLUMN approximate_usd_price;
+                 ALTER TABLE pending_transactions DROP COLUMN requested_review;
                  DROP INDEX automation_runs_by_automation;
                  DROP TABLE automation_runs;
                  ALTER TABLE pending_transactions DROP COLUMN hidden_at;
@@ -409,6 +410,22 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
             .expect("policy survived")
             .revision,
         1
+    );
+    // And the column that holds roughly what a token is worth. Every token
+    // that predates it has no recorded value, which is exactly what a null
+    // says, so this addition needs no backfill either.
+    let priced: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('tokens')
+             WHERE name = 'approximate_usd_price'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        priced, 1,
+        "the migration added the approximate value column"
     );
 }
 

@@ -576,7 +576,7 @@ fn owner_authorized_token_create_never_overwrites_an_existing_row() {
         crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
     );
     let original = store
-        .add_authorized(&usdc(1, address), "Manual entry", &authorization)
+        .add_authorized(&usdc(1, address), "Manual entry", None, &authorization)
         .unwrap();
     let conflict = ListedToken {
         symbol: "IMPOSTOR".to_owned(),
@@ -585,7 +585,7 @@ fn owner_authorized_token_create_never_overwrites_an_existing_row() {
 
     assert!(
         store
-            .add_authorized(&conflict, "Manual entry", &authorization)
+            .add_authorized(&conflict, "Manual entry", None, &authorization)
             .unwrap_err()
             .to_string()
             .contains("was added while authentication was open")
@@ -609,7 +609,7 @@ fn owner_authorized_token_create_rejects_an_empty_sanitized_symbol() {
 
     assert!(
         store
-            .add_authorized(&token, "Manual entry", &authorization)
+            .add_authorized(&token, "Manual entry", None, &authorization)
             .is_err()
     );
     assert!(store.get(token.chain_id, token.address).unwrap().is_none());

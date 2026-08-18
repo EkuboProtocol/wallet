@@ -797,6 +797,9 @@ fn the_portfolio_footer_stays_on_screen_under_a_long_list(cx: &mut gpui::TestApp
             name: Some(format!("Token {index}")),
             decimals: Some(18),
             balance: "1000000000000000000".to_owned(),
+            // Priced, so the long list this test lays out is the list the tab
+            // shows by default rather than the one the dust filter hid.
+            approximate_usd_price: Some(12.5),
         })
         .collect::<Vec<_>>();
     cx.update_entity(&view, |wallet, _| {
@@ -1421,6 +1424,101 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
         after[2].is_none(),
         "installing belongs on the screen that shows what is being installed, \
          not in the rail beside the JSON"
+    );
+
+    release(cx, &view);
+}
+
+/// A tab that quietly dropped holdings could be made to lie by one wrong
+/// price, so whenever the dust filter hides anything it says how much, in both
+/// states of its own switch.
+#[gpui::test]
+fn the_portfolio_says_how_much_dust_it_is_holding_back(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let account = WalletMetadata {
+        instance_id: uuid::Uuid::nil(),
+        id: "primary".into(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    };
+    let network = ekubo_wallet_core::config::default_networks()
+        .first()
+        .expect("a shipped network")
+        .clone();
+    let token = |index: u32, price: Option<f64>| ekubo_wallet_core::token_store::PortfolioToken {
+        address: format!("0x{index:040x}"),
+        symbol: Some(format!("TKN{index}")),
+        name: Some(format!("Token {index}")),
+        decimals: Some(18),
+        balance: "1000000000000000000".to_owned(),
+        approximate_usd_price: price,
+    };
+    let portfolio = |tokens: Vec<ekubo_wallet_core::token_store::PortfolioToken>| {
+        ekubo_wallet_core::token_store::Portfolio {
+            address: "0x0000000000000000000000000000000000000000".to_owned(),
+            chain_id: network.chain_id.to_string(),
+            network: network.name.clone(),
+            // Zero, so the native row does not stand in for the priced one
+            // this test is looking for.
+            native_balance: "0".to_owned(),
+            block_number: "1".to_owned(),
+            tokens_checked: tokens.len() as u64,
+            tokens,
+            tokens_skipped: None,
+            fork: None,
+        }
+    };
+    let ready = |wallet: &mut WalletWindow,
+                 tokens: Vec<ekubo_wallet_core::token_store::PortfolioToken>| {
+        wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
+            accounts: vec![OwnerPortfolioAccount {
+                wallet: account.clone(),
+                networks: vec![crate::authority::OwnerPortfolioNetwork {
+                    network: network.clone(),
+                    result: Ok(portfolio(tokens)),
+                }],
+            }],
+        });
+    };
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account.clone()]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        ready(
+            wallet,
+            vec![token(1, Some(500.0)), token(2, Some(0.02)), token(3, None)],
+        );
+        wallet.set_route(Route::Overview);
+    });
+    let hiding = measure(cx, window, &view, &["portfolio-dust-control"]);
+    assert!(
+        hiding[0].is_some(),
+        "hiding a holding must be stated on the tab that hid it"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.show_low_value_balances = true;
+    });
+    let showing = measure(cx, window, &view, &["portfolio-dust-control"]);
+    assert!(
+        showing[0].is_some(),
+        "the count belongs on screen while the dust is showing too — it is what \
+         explains the switch that is now on"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.show_low_value_balances = false;
+        ready(wallet, vec![token(1, Some(500.0))]);
+    });
+    let nothing_hidden = measure(cx, window, &view, &["portfolio-dust-control"]);
+    assert!(
+        nothing_hidden[0].is_none(),
+        "with nothing hidden there is nothing to say, and no switch to offer"
     );
 
     release(cx, &view);

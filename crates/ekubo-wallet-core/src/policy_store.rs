@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1619,6 +1619,15 @@ const MIGRATIONS: &[Migration] = &[
                  DEFAULT 0 CHECK (requested_review IN (0, 1))",
         ],
     },
+    // Display data of the weakest kind: roughly what one whole token is worth,
+    // as the owner has said, read by nothing but the order and the default
+    // visibility of rows on the portfolio tab. Every token that predates the
+    // column has no price, which is exactly what a null says.
+    Migration {
+        to_version: 7,
+        statements: &["ALTER TABLE tokens ADD COLUMN approximate_usd_price REAL
+                 CHECK (approximate_usd_price IS NULL OR approximate_usd_price >= 0.0)"],
+    },
 ];
 
 /// Brings an existing database up to [`SCHEMA_VERSION`], returning the version
@@ -1967,6 +1976,9 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                      CHECK (decimals IS NULL OR (decimals >= 0 AND decimals <= 255)),
                  source TEXT NOT NULL,
                  added_at INTEGER NOT NULL,
+                 approximate_usd_price REAL
+                     CHECK (approximate_usd_price IS NULL
+                         OR approximate_usd_price >= 0.0),
                  PRIMARY KEY (chain_id, address)
              ) STRICT",
             "CREATE TABLE legal_acceptance (
