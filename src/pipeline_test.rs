@@ -98,6 +98,9 @@ use tokio::{
 };
 
 const CHAIN_ID: u64 = 31_337;
+/// Matches `OwnerApi::for_test`, which registers this key for its data
+/// directory: both legs of an approval have to reach the same database.
+const TEST_DATABASE_KEY: [u8; 32] = [0x43; 32];
 const PARENT_NUMBER: u64 = 100;
 const BLOCK_GAS_LIMIT: u64 = 30_000_000;
 const BASE_FEE: u64 = 1_000_000_000;
@@ -400,13 +403,9 @@ fn pipeline_server(
             Ok(())
         })
         .unwrap();
-    let open = || {
-        PolicyStore::open(
-            &directory.path().join("policies.db"),
-            &DatabaseKey::new([9; 32]),
-        )
-        .unwrap()
-    };
+    // The same file and key `OwnerApi::for_test` opens, so a test can drive
+    // the agent leg and the owner leg against one database.
+    let open = || test_store(directory.path());
     let mut policies = open();
     policies.put_for_instance(&wallet, policy, None).unwrap();
     let server = WalletMcpServer::new(
@@ -449,10 +448,19 @@ fn plan_reference(sender: Address) -> ekubo_wallet_core::plan_fetch::ArtifactRef
     }
 }
 
-fn legal_store(directory: &std::path::Path) -> LegalStore {
-    LegalStore::new(
-        PolicyStore::open(&directory.join("policies.db"), &DatabaseKey::new([9; 32])).unwrap(),
+/// The wallet's own encrypted database, opened the way a test build opens it.
+fn test_store(directory: &std::path::Path) -> PolicyStore {
+    ekubo_wallet_core::policy_store::register_test_database_key(directory, TEST_DATABASE_KEY)
+        .unwrap();
+    PolicyStore::open(
+        &directory.join(ekubo_wallet_core::policy_store::DATABASE_FILE),
+        &DatabaseKey::new(TEST_DATABASE_KEY),
     )
+    .unwrap()
+}
+
+fn legal_store(directory: &std::path::Path) -> LegalStore {
+    LegalStore::new(test_store(directory))
 }
 
 fn plan_data_uri(sender: Address) -> String {
@@ -643,20 +651,8 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
     };
     let outcome = crate::orchestrator::approve_transaction(
         &server.config,
-        PendingStore::new(
-            PolicyStore::open(
-                &directory.path().join("policies.db"),
-                &DatabaseKey::new([9; 32]),
-            )
-            .unwrap(),
-        ),
-        TokenStore::new(
-            PolicyStore::open(
-                &directory.path().join("policies.db"),
-                &DatabaseKey::new([9; 32]),
-            )
-            .unwrap(),
-        ),
+        PendingStore::new(test_store(directory.path())),
+        TokenStore::new(test_store(directory.path())),
         &legal_store(directory.path()),
         &read_policy,
         record,
@@ -688,6 +684,157 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
         .0;
     assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
+}
+
+/// Queue a plan the policy will not sign automatically, then approve it the
+/// way the review window does, and return the signed row.
+async fn queue_and_approve(
+    directory: &tempfile::TempDir,
+    server: &WalletMcpServer,
+    wallet: &WalletMetadata,
+) -> PendingTransaction {
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("an uncovered call queues")
+        .0;
+    assert_eq!(
+        output.status,
+        ExecutionStatus::ApprovalRequired,
+        "{output:?}"
+    );
+    let record = server
+        .pending
+        .lock()
+        .unwrap()
+        .get(output.request_id)
+        .unwrap();
+    let read_policy = || -> anyhow::Result<crate::policy_store::StoredPolicy> {
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .get("primary")?
+            .context("policy exists")
+    };
+    let outcome = crate::orchestrator::approve_transaction(
+        &server.config,
+        PendingStore::new(test_store(directory.path())),
+        TokenStore::new(test_store(directory.path())),
+        &legal_store(directory.path()),
+        &read_policy,
+        record,
+        &ApproveEverything,
+        &TestHumanPresence { allow: true },
+        server.execution_authority.key_store_for_test(),
+    )
+    .await
+    .unwrap();
+    let crate::orchestrator::ApprovalOutcome::Signed(signed) = outcome else {
+        panic!("presenter approved, so the outcome must be Signed");
+    };
+    assert_eq!(signed.status, PendingStatus::Signed);
+    signed
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approving_sends_the_signed_bytes_without_waiting_to_be_asked_again() {
+    // The gap this closes: signing used to be the end of the owner's leg, and
+    // the transaction waited for whatever queued it to come back and submit.
+    // An agent whose approval wait timed out never does, so an approved
+    // transaction sat unsent until the owner noticed and pressed "Send now".
+    let (address, chain) = start_stub().await;
+    let (directory, server, wallet) =
+        pipeline_server(address, &WalletPolicy::require_approval_for_everything());
+    let signed = Box::pin(queue_and_approve(&directory, &server, &wallet)).await;
+    assert!(chain.mined.lock().unwrap().is_empty(), "nothing sent yet");
+
+    let owner = crate::authority::OwnerApi::for_test(directory.path()).unwrap();
+    let reviewed = owner.send_approved_transaction(signed).await.unwrap();
+
+    assert!(reviewed.send_error.is_none(), "{:?}", reviewed.send_error);
+    assert!(
+        matches!(
+            reviewed.record.status,
+            PendingStatus::Broadcast | PendingStatus::Confirmed
+        ),
+        "approval put the exact bytes on the wire: {:?}",
+        reviewed.record.status
+    );
+    assert_eq!(chain.mined.lock().unwrap().len(), 1);
+    // And the agent that queued it, coming back later, is told the state
+    // rather than sending anything a second time.
+    let status = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: None,
+            simulation_id: None,
+            request_id: Some(reviewed.record.request_id),
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("a sent request reports its state")
+        .0;
+    assert_eq!(status.status, ExecutionStatus::Submitted, "{status:?}");
+    assert_eq!(chain.mined.lock().unwrap().len(), 1, "sent exactly once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_submission_somebody_else_claimed_is_reported_rather_than_repeated() {
+    // The desktop, the MCP server, and a WalletConnect session reach the same
+    // database without sharing a lock, so the submission lease is what decides
+    // between them. Losing it means the bytes are already going out, which is
+    // the intended outcome and not a failure to show the reviewer.
+    let (address, chain) = start_stub().await;
+    let (directory, server, wallet) =
+        pipeline_server(address, &WalletPolicy::require_approval_for_everything());
+    let signed = Box::pin(queue_and_approve(&directory, &server, &wallet)).await;
+    let claimed = server
+        .pending
+        .lock()
+        .unwrap()
+        .claim_for_submission(signed.request_id)
+        .expect("another sender takes the lease first");
+    assert_eq!(claimed.status, PendingStatus::Submitting);
+
+    let owner = crate::authority::OwnerApi::for_test(directory.path()).unwrap();
+    let reviewed = owner.send_approved_transaction(signed).await.unwrap();
+
+    assert!(
+        reviewed.send_error.is_none(),
+        "losing the lease is not news"
+    );
+    assert_eq!(reviewed.record.status, PendingStatus::Submitting);
+    assert!(
+        chain.mined.lock().unwrap().is_empty(),
+        "the lease holder sends, and nothing sends twice"
+    );
+    // The agent asking about it now gets the in-flight state, not an error.
+    let status = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: None,
+            simulation_id: None,
+            request_id: Some(reviewed.record.request_id),
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("a claimed request reports its state")
+        .0;
+    assert_eq!(
+        status.status,
+        ExecutionStatus::SubmissionPending,
+        "{status:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -836,20 +983,8 @@ async fn a_reviewer_can_re_simulate_before_approving() {
     let presenter = RefreshThenApprove::default();
     let outcome = crate::orchestrator::approve_transaction(
         &server.config,
-        PendingStore::new(
-            PolicyStore::open(
-                &directory.path().join("policies.db"),
-                &DatabaseKey::new([9; 32]),
-            )
-            .unwrap(),
-        ),
-        TokenStore::new(
-            PolicyStore::open(
-                &directory.path().join("policies.db"),
-                &DatabaseKey::new([9; 32]),
-            )
-            .unwrap(),
-        ),
+        PendingStore::new(test_store(directory.path())),
+        TokenStore::new(test_store(directory.path())),
         &legal_store(directory.path()),
         &read_policy,
         record,
@@ -940,20 +1075,8 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
     };
     let outcome = crate::orchestrator::approve_transaction(
         &server.config,
-        PendingStore::new(
-            PolicyStore::open(
-                &directory.path().join("policies.db"),
-                &DatabaseKey::new([9; 32]),
-            )
-            .unwrap(),
-        ),
-        TokenStore::new(
-            PolicyStore::open(
-                &directory.path().join("policies.db"),
-                &DatabaseKey::new([9; 32]),
-            )
-            .unwrap(),
-        ),
+        PendingStore::new(test_store(directory.path())),
+        TokenStore::new(test_store(directory.path())),
         &legal_store(directory.path()),
         &read_policy,
         record,

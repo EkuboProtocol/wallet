@@ -121,6 +121,18 @@ pub struct OwnerTokenListImport {
     pub proposals: Vec<TokenProposal>,
 }
 
+/// How one native transaction review ended.
+///
+/// `record` is the row as it stands after the review: rejected, or signed and
+/// handed to the network. `send_error` is set only when the owner approved and
+/// every endpoint refused the exact bytes — the row is still `signed`, so the
+/// activity list's "Send now" can try again.
+#[derive(Clone, Debug)]
+pub struct ReviewedTransaction {
+    pub record: PendingTransaction,
+    pub send_error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct OwnerTransactionAction {
     pub record: PendingTransaction,
@@ -1685,11 +1697,28 @@ impl OwnerApi {
         })
     }
 
+    /// Review one queued transaction, and — when the owner approves it — put
+    /// the exact signed bytes on the wire before returning.
+    ///
+    /// Approving is the decision to send. Signing and sending used to be two
+    /// steps with different actors: the review window signed, and whatever
+    /// queued the request was expected to come back and submit. A
+    /// `WalletConnect` session does that, because it is still sitting there
+    /// waiting; an agent's `wallet_wait_for_approval` times out long before a
+    /// human gets to the window, so an agent that has moved on never submits
+    /// and the approved transaction waits at `signed` for the owner to notice
+    /// and press "Send now". A wallet that quietly does nothing with an
+    /// approval is worse than one that refuses it.
+    ///
+    /// Sending here expands no authority: these are the bytes the owner just
+    /// read and authenticated, and submitting them is the same exact-byte
+    /// transition `rebroadcast_transaction` performs with no policy check for
+    /// the same reason.
     pub async fn review_transaction(
         &self,
         request_id: Uuid,
         presenter: &dyn ReviewPresenter,
-    ) -> Result<ApprovalOutcome> {
+    ) -> Result<ReviewedTransaction> {
         let pending = PendingStore::production(self.config.data_dir())?;
         let request = pending.get(request_id)?;
         let data_dir = self.config.data_dir().to_path_buf();
@@ -1715,15 +1744,65 @@ impl OwnerApi {
             &OsKeyStore,
         )
         .await?;
-        if matches!(result, ApprovalOutcome::Signed(_)) {
-            self.events.publish(DomainEventKind::Transaction {
-                request_id,
-                stage: crate::events::TransactionStage::Signed,
-            });
-        }
+        let reviewed = match result {
+            ApprovalOutcome::Rejected(record) => ReviewedTransaction {
+                record,
+                send_error: None,
+            },
+            ApprovalOutcome::Signed(record) => {
+                self.events.publish(DomainEventKind::Transaction {
+                    request_id,
+                    stage: crate::events::TransactionStage::Signed,
+                });
+                self.send_approved_transaction(record).await?
+            }
+        };
         self.events
             .publish(DomainEventKind::ReviewChanged { request_id });
-        Ok(result)
+        Ok(reviewed)
+    }
+
+    /// Submit the signed bytes an approval just produced.
+    ///
+    /// The submission lease is the arbiter, not this method: the desktop, the
+    /// MCP server, and a `WalletConnect` session all reach the same database
+    /// without sharing a lock, so any of them can be the one that sends.
+    /// Losing the claim means somebody else already did, which is the intended
+    /// outcome and not an error to report to the reviewer.
+    ///
+    /// A refusal by every endpoint is reported, never raised: `submit_claimed`
+    /// puts an established absence back to `signed`, so the approved bytes
+    /// stay exactly as retryable as they were, and the reviewer is told rather
+    /// than left to discover a transaction that never went anywhere.
+    pub(crate) async fn send_approved_transaction(
+        &self,
+        record: PendingTransaction,
+    ) -> Result<ReviewedTransaction> {
+        let wallet = self.config.wallet(&record.wallet_id)?;
+        let network = self.config.network_by_chain_id(record.chain_id.as_str())?;
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        let claimed = pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+            .claim_for_submission(record.request_id)
+            .ok();
+        let Some(claimed) = claimed else {
+            let current = pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                .get(record.request_id)?;
+            self.publish_transaction_status(&current);
+            return Ok(ReviewedTransaction {
+                record: current,
+                send_error: None,
+            });
+        };
+        let (record, broadcast) = submit_claimed(&pending, &wallet, &network, claimed).await?;
+        self.publish_transaction_status(&record);
+        Ok(ReviewedTransaction {
+            record,
+            send_error: broadcast.broadcast_error,
+        })
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {

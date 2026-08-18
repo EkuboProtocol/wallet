@@ -2472,6 +2472,13 @@ const fn review_decision_labels(
             approve: "Authenticate & remove",
             approve_is_destructive: true,
         },
+        // Approving a transaction submits it, so the button says so rather
+        // than leaving the owner to wonder what a second step would be.
+        Some(ActiveReviewCompletion::Transaction(_)) => ReviewDecisionLabels {
+            reject: "Reject request",
+            approve: "Authenticate & send",
+            approve_is_destructive: false,
+        },
         _ => ReviewDecisionLabels {
             reject: "Reject request",
             approve: "Authenticate & approve",
@@ -8676,7 +8683,28 @@ impl WalletWindow {
                     }
                     view.finish_review_flow(cx);
                     match result {
-                        Ok(_) => view.clear_route_error(Route::Activity),
+                        Ok(reviewed) => {
+                            view.clear_route_error(Route::Activity);
+                            // Approving sends, so a refusal by every endpoint
+                            // is news the reviewer gets here rather than by
+                            // noticing the row never left "signed".
+                            if let Some(error) = reviewed.send_error {
+                                view.selected_record = Some(request_id);
+                                view.set_activity_feedback(
+                                    request_id,
+                                    ActivityFeedback::failure(format!(
+                                        "Approved and signed, but no endpoint accepted the exact \
+                                         signed bytes: {error}. Use Send now to try again."
+                                    )),
+                                    cx,
+                                );
+                            }
+                            view.synchronize_transaction_activity(
+                                request_id,
+                                Some(reviewed.record),
+                                cx,
+                            );
+                        }
                         Err(error) if error.to_string().contains("closed without a decision") => {
                             view.clear_route_error(Route::Activity);
                         }

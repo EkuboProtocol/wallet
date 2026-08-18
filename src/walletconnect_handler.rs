@@ -707,8 +707,13 @@ impl DesktopSession {
                     request_id: queued.request_id,
                 });
                 match self.wait_for_transaction(queued.request_id).await? {
-                    Some(record) => record,
-                    None => {
+                    ReviewedRequest::Signed(record) => record,
+                    // The review window sends what it approves, so by the time
+                    // this session sees the decision the bytes are usually
+                    // already on the wire. Nothing is left to do but report the
+                    // row the owner's approval produced.
+                    ReviewedRequest::AlreadySent(record) => return Ok(Ok(record)),
+                    ReviewedRequest::Declined => {
                         return Ok(Err(RequestOutcome::rejected(
                             "The wallet owner declined this transaction.",
                         )));
@@ -728,22 +733,28 @@ impl DesktopSession {
         ))
     }
 
-    async fn wait_for_transaction(
-        &self,
-        request_id: uuid::Uuid,
-    ) -> Result<Option<PendingTransaction>> {
+    /// Wait for the owner's decision on a queued request.
+    ///
+    /// A decision is not only `signed` or `rejected`: approving in the review
+    /// window submits the signed bytes, and the owner can press "Send now" on
+    /// the activity row, so this session can arrive to find the transaction
+    /// already claimed, broadcast, or even mined. Every one of those is the
+    /// approval this session was waiting for, and treating them as an
+    /// unexpected state failed the dapp's request over a transaction that had
+    /// actually been sent.
+    async fn wait_for_transaction(&self, request_id: uuid::Uuid) -> Result<ReviewedRequest> {
         let mut events = self.owner.event_bus().subscribe();
         loop {
             let record =
                 PendingStore::production(self.owner.config_store().data_dir())?.get(request_id)?;
-            match record.status {
-                PendingStatus::Signed => return Ok(Some(record)),
-                PendingStatus::Rejected => return Ok(None),
-                PendingStatus::AwaitingApproval => {}
-                other => bail!("transaction entered unexpected review state {other:?}"),
+            match classify_reviewed_status(record.status) {
+                ReviewedStatus::Signed => return Ok(ReviewedRequest::Signed(record)),
+                ReviewedStatus::AlreadySent => return Ok(ReviewedRequest::AlreadySent(record)),
+                ReviewedStatus::Declined => return Ok(ReviewedRequest::Declined),
+                ReviewedStatus::Undecided => {}
             }
             tokio::select! {
-                () = self.shutdown.cancelled() => return Ok(None),
+                () = self.shutdown.cancelled() => return Ok(ReviewedRequest::Declined),
                 _ = events.recv() => {}
             }
         }
@@ -758,10 +769,26 @@ impl DesktopSession {
         let pending = Mutex::new(PendingStore::production(
             self.owner.config_store().data_dir(),
         )?);
-        let claimed = pending
+        let claim = pending
             .lock()
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-            .claim_for_submission(request_id)?;
+            .claim_for_submission(request_id);
+        let claimed = match claim {
+            Ok(claimed) => claimed,
+            // The desktop, the MCP server, and this session share the database
+            // but not a lock, and the lease is what decides between them.
+            // Losing it to whoever sent these exact bytes first is success.
+            Err(error) => {
+                let current = pending
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                    .get(request_id)?;
+                if current.broadcast_transaction_hash.is_some() {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
         let (record, broadcast) =
             ekubo_wallet_core::reconcile::submit_claimed(&pending, self.wallet(), network, claimed)
                 .await?;
@@ -776,6 +803,45 @@ impl DesktopSession {
             stage: crate::events::TransactionStage::Broadcast,
         });
         Ok(())
+    }
+}
+
+/// What the owner's review left behind for a session that was waiting on it.
+enum ReviewedRequest {
+    /// Approved and signed, and nothing has claimed the submission yet.
+    Signed(PendingTransaction),
+    /// Approved and already handed to the network by whoever got there first.
+    AlreadySent(PendingTransaction),
+    /// Rejected, or the session went away before a decision arrived.
+    Declined,
+}
+
+/// The same reading of a lifecycle status, without the row, so the rule this
+/// session waits on can be stated once and checked directly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewedStatus {
+    Undecided,
+    Signed,
+    AlreadySent,
+    Declined,
+}
+
+/// Every status spelled out rather than caught by a wildcard: a new lifecycle
+/// state has to be classified deliberately, because guessing here either hangs
+/// a dapp on a decision that already happened or reports a sent transaction as
+/// a failure.
+const fn classify_reviewed_status(status: PendingStatus) -> ReviewedStatus {
+    match status {
+        PendingStatus::AwaitingApproval => ReviewedStatus::Undecided,
+        PendingStatus::Signed => ReviewedStatus::Signed,
+        PendingStatus::Rejected => ReviewedStatus::Declined,
+        PendingStatus::Submitting
+        | PendingStatus::Broadcast
+        | PendingStatus::Confirmed
+        | PendingStatus::Reverted
+        | PendingStatus::Cancelling
+        | PendingStatus::Cancelled
+        | PendingStatus::Replaced => ReviewedStatus::AlreadySent,
     }
 }
 

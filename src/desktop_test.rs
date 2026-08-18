@@ -1925,10 +1925,18 @@ fn removing_an_account_puts_the_danger_on_the_button_that_destroys_the_key() {
     assert_eq!(removal.approve, "Authenticate & remove");
     assert_eq!(removal.reject, "Keep this account");
 
-    let transaction = review_decision_labels(None);
+    // Approving a transaction is what sends it, and the button is the only
+    // place the owner is told that before they press it.
+    let (response, _receiver) = oneshot::channel();
+    let transaction = review_decision_labels(Some(&ActiveReviewCompletion::Transaction(response)));
     assert!(!transaction.approve_is_destructive);
-    assert_eq!(transaction.approve, "Authenticate & approve");
+    assert_eq!(transaction.approve, "Authenticate & send");
     assert_eq!(transaction.reject, "Reject request");
+
+    let other = review_decision_labels(None);
+    assert!(!other.approve_is_destructive);
+    assert_eq!(other.approve, "Authenticate & approve");
+    assert_eq!(other.reject, "Reject request");
 }
 
 /// A session summary in whichever state a test needs, with the fields it does

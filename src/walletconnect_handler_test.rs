@@ -94,3 +94,38 @@ fn internal_failures_never_publish_cause_chains_to_dapps() {
         assert!(!message.contains(private_detail));
     }
 }
+
+#[test]
+fn a_transaction_the_review_window_already_sent_is_not_an_unexpected_state() {
+    // Approving in the review window submits the signed bytes, and the owner
+    // can also press "Send now" on the activity row. A session waiting on its
+    // own request therefore wakes to a row that is already past `signed`, and
+    // every one of those states is the approval it was waiting for.
+    for sent in [
+        PendingStatus::Submitting,
+        PendingStatus::Broadcast,
+        PendingStatus::Confirmed,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelling,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+    ] {
+        assert_eq!(
+            classify_reviewed_status(sent),
+            ReviewedStatus::AlreadySent,
+            "{sent:?} is a decision that already reached the network"
+        );
+    }
+    assert_eq!(
+        classify_reviewed_status(PendingStatus::AwaitingApproval),
+        ReviewedStatus::Undecided
+    );
+    assert_eq!(
+        classify_reviewed_status(PendingStatus::Signed),
+        ReviewedStatus::Signed
+    );
+    assert_eq!(
+        classify_reviewed_status(PendingStatus::Rejected),
+        ReviewedStatus::Declined
+    );
+}

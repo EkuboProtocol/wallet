@@ -15,6 +15,16 @@ the authority reloads the request and policy, verifies the review identity and
 digest, and only then signs. Cancelling authentication leaves the request
 pending. Notifications and tray menus never contain approval actions.
 
+Approving a transaction also sends it: the signed envelope is submitted before
+the review closes, which is why the button reads "Authenticate & send".
+Submitting the exact bytes the owner just authenticated expands nothing the
+approval did not already authorize, and it is the same exact-byte transition
+the activity list's "Send now" performs. Nothing else has to come back and ask
+for it — an agent whose approval wait timed out is usually gone by the time a
+human reaches the window, and a signed transaction nobody submits is a decision
+the wallet quietly failed to carry out. If every endpoint refuses the envelope,
+the row stays `signed` and the reviewer is told, so "Send now" can try again.
+
 A policy `review` effect and an unmatched call both enter this same native
 flow. In a batch, calls are checked independently and any review result makes
 the whole prepared transaction reviewable; any deny result rejects the whole
