@@ -11,7 +11,7 @@ use super::*;
 use crate::{
     approval::{ApprovalDecision, ReviewDocument, ReviewPresenter},
     config::{NetworkConfig, WalletMetadata, WalletSource},
-    custody::{MemoryKeyStore, PrivateKeyMaterial},
+    custody::{KeyStore, MemoryKeyStore, PrivateKeyMaterial},
     human_presence::TestHumanPresence,
     policy_store::DatabaseKey,
     simulation::SimulationResult,
@@ -442,6 +442,8 @@ fn pipeline_server(
     let open = || test_store(directory.path());
     let mut policies = open();
     policies.put_for_instance(&wallet, policy, None).unwrap();
+    let policies = Arc::new(Mutex::new(policies));
+    let execution_authority = AgentExecutionAuthority::over(keys, Arc::clone(&policies));
     let server = WalletMcpServer::new(
         config,
         policies,
@@ -451,7 +453,7 @@ fn pipeline_server(
         LegalStore::new(open()),
         TokenStore::new(open()),
         AutomationStore::new(open()),
-        keys,
+        execution_authority,
     )
     .unwrap();
     let legal = server.legal.lock().unwrap();
@@ -669,6 +671,12 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
         ExecutionStatus::ApprovalRequired,
         "{output:?}"
     );
+    let instruction = output
+        .instruction
+        .as_deref()
+        .expect("next step is explicit");
+    assert!(instruction.contains("Approval itself attempts to submit"));
+    assert!(!instruction.contains("On approved, submit with"));
     assert!(chain.mined.lock().unwrap().is_empty(), "nothing signed yet");
     let request_id = output.request_id;
 

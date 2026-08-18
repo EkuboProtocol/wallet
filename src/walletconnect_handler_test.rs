@@ -46,6 +46,8 @@ fn dapp_review_identity_is_stable_for_exactly_the_same_proposal_and_account() {
     let first = DesktopSession::proposal_document(review_id, &proposal, Some(&account), &scope);
     let second = DesktopSession::proposal_document(review_id, &proposal, Some(&account), &scope);
     assert_eq!(first.identity, second.identity);
+    assert!(first.request.summary.contains("may send automatically"));
+    assert!(first.request.summary.contains("still require owner review"));
 
     // The form the review window opens in names no account, because the owner
     // has not chosen one. Drawing the first account's document there would

@@ -8,6 +8,7 @@ use alloy::primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use ekubo_wallet_core::{
+    agent_authority::AgentExecutionAuthority,
     approval::{
         ApprovalKind, ApprovalRequest, ApprovalSectionKind, ReviewDocument, ReviewPresenter,
     },
@@ -15,7 +16,7 @@ use ekubo_wallet_core::{
     automation::{Automation, AutomationState, PollFailure, PolledCall},
     automation_store::{AutomationRun, AutomationStore},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
-    core::policy::WalletPolicy,
+    core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{AgentKind, AppearancePreference, DesktopStore, GuidedSetupState},
     execution::BroadcastResult,
@@ -26,7 +27,8 @@ use ekubo_wallet_core::{
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage},
     orchestrator::{
-        ApprovalOutcome, approve_transaction, sign_reviewed_message, sign_reviewed_typed_data,
+        ApprovalOutcome, SendDisposition, approve_transaction, sign_reviewed_message,
+        sign_reviewed_typed_data,
     },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     plan_fetch::{FetchPolicy, fetch_token_list_url},
@@ -34,6 +36,7 @@ use ekubo_wallet_core::{
     reconcile::{attempt_cancellation, reconcile_record, submit_claimed},
     rpc::{ReceiptDetails, transaction_known, transaction_receipt_details},
     signature_review,
+    simulation::{SimulationResult, simulate_external_execution},
     token_store::{
         ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
         TokenProposal, TokenStore, read_portfolio,
@@ -609,11 +612,11 @@ impl OwnerActivityRecord {
 /// The restricted capability cloned into authenticated MCP sessions.
 ///
 /// It intentionally exposes only server construction. The constructed server
-/// receives narrow typed stores and a key-store capability so it can persist
-/// agent requests and sign transactions that the active policy permits
-/// automatically. It receives no `OwnerApi`, owner authorization, raw-key
-/// export, native-review decision, policy installation, or client-registration
-/// capability.
+/// receives narrow typed stores and a core execution authority so it can
+/// persist agent requests and ask core to sign transactions that the active
+/// policy permits automatically. It receives no directly callable `KeyStore`,
+/// `OwnerApi`, owner authorization, raw-key export, native-review decision,
+/// policy installation, or client-registration capability.
 #[derive(Clone)]
 pub struct AgentApi {
     config: ConfigStore,
@@ -635,7 +638,204 @@ impl AgentApi {
     }
 }
 
-/// Owner-only operations. Only the GPUI application receives this value.
+/// The restricted capability cloned into live `WalletConnect` sessions.
+///
+/// It can read the account and network state granted to a session, queue
+/// message and typed-data requests for native review, and pass one exact
+/// simulated transaction into core's policy path. It cannot authenticate as
+/// the owner, decide a review, mutate owner settings, manage custody, or export
+/// protected material.
+#[derive(Clone)]
+pub(crate) struct DappApi {
+    config: ConfigStore,
+    events: EventBus,
+}
+
+impl DappApi {
+    pub(crate) fn require_legal_acceptance(&self) -> Result<()> {
+        require_current_acceptance(self.config.data_dir())
+    }
+
+    pub(crate) fn accounts(&self) -> Result<Vec<WalletMetadata>> {
+        Ok(self.config.load()?.wallets)
+    }
+
+    pub(crate) fn account(&self, wallet_id: &str) -> Result<WalletMetadata> {
+        self.config.wallet(wallet_id)
+    }
+
+    pub(crate) fn network(&self, requested: &str) -> Result<NetworkConfig> {
+        self.config.network(requested)
+    }
+
+    pub(crate) fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
+        self.config.network_by_chain_id(&chain_id.to_string())
+    }
+
+    pub(crate) fn event_bus(&self) -> EventBus {
+        self.events.clone()
+    }
+
+    pub(crate) fn pending_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
+        PendingStore::production(self.config.data_dir())?.get(request_id)
+    }
+
+    pub(crate) fn message(&self, request_id: Uuid) -> Result<PendingMessage> {
+        MessageStore::production(self.config.data_dir())?.get(request_id)
+    }
+
+    pub(crate) fn typed_data(&self, request_id: Uuid) -> Result<PendingTypedData> {
+        TypedDataStore::production(self.config.data_dir())?.get(request_id)
+    }
+
+    pub(crate) fn queue_message(
+        &self,
+        wallet_id: &str,
+        chain_id: u64,
+        message: &[u8],
+        encoding: ekubo_wallet_core::message::MessageEncoding,
+        requester: &str,
+    ) -> Result<PendingMessage> {
+        let wallet = self.account(wallet_id)?;
+        let queued = MessageStore::production(self.config.data_dir())?.create_for_wallet(
+            &wallet,
+            Some(&chain_id.to_string()),
+            message,
+            encoding,
+            Some(requester),
+        )?;
+        publish_signature(
+            &self.events,
+            queued.request_id,
+            SignatureKind::Message,
+            SignatureStage::Queued,
+        );
+        Ok(queued)
+    }
+
+    pub(crate) fn queue_typed_data(
+        &self,
+        wallet_id: &str,
+        chain_id: u64,
+        payload: &serde_json::Value,
+        requester: &str,
+    ) -> Result<PendingTypedData> {
+        let wallet = self.account(wallet_id)?;
+        let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
+        ensure!(
+            parsed_chain_id == chain_id,
+            "typed-data domain chain does not match the request chain"
+        );
+        let queued = TypedDataStore::production(self.config.data_dir())?.create_for_wallet(
+            &wallet,
+            chain_id,
+            payload,
+            digest,
+            Some(requester),
+        )?;
+        publish_signature(
+            &self.events,
+            queued.request_id,
+            SignatureKind::TypedData,
+            SignatureStage::Queued,
+        );
+        Ok(queued)
+    }
+
+    pub(crate) async fn execute_transaction(
+        &self,
+        wallet: &WalletMetadata,
+        network: &NetworkConfig,
+        plan: &ExecutionPlan,
+        plan_source: &str,
+        simulation: &SimulationResult,
+    ) -> Result<SendDisposition> {
+        let policies = Arc::new(Mutex::new(PolicyStore::production(self.config.data_dir())?));
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        AgentExecutionAuthority::production(policies)
+            .execute(
+                &self.config,
+                &pending,
+                wallet,
+                network,
+                plan,
+                Some(plan_source),
+                simulation,
+                ekubo_wallet_core::core::policy::ReviewRequest::PolicyDecides,
+            )
+            .await
+    }
+
+    pub(crate) async fn simulate_transaction(
+        &self,
+        wallet: &WalletMetadata,
+        network: &NetworkConfig,
+        plan: &ExecutionPlan,
+    ) -> Result<SimulationResult> {
+        let policies = Mutex::new(PolicyStore::production(self.config.data_dir())?);
+        let stored_policy = policies
+            .lock()
+            .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
+            .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
+        let policy_context = ekubo_wallet_core::core::predicate::PolicyContext {
+            wallet: wallet.address,
+        };
+        simulate_external_execution(wallet, network, plan, &stored_policy, &policy_context, None)
+            .await
+    }
+
+    pub(crate) async fn reconcile_transaction(
+        &self,
+        network: &NetworkConfig,
+        record: PendingTransaction,
+    ) -> Result<PendingTransaction> {
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        reconcile_record(&pending, network, record, false).await
+    }
+
+    pub(crate) async fn submit_transaction(
+        &self,
+        wallet: &WalletMetadata,
+        network: &NetworkConfig,
+        record: PendingTransaction,
+    ) -> Result<PendingTransaction> {
+        let request_id = record.request_id;
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        let claim = pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+            .claim_for_submission(request_id);
+        let claimed = match claim {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                let current = pending
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                    .get(request_id)?;
+                if current.broadcast_transaction_hash.is_some() {
+                    return Ok(current);
+                }
+                return Err(error);
+            }
+        };
+        let (record, broadcast) = submit_claimed(&pending, wallet, network, claimed).await?;
+        if let Some(error) = broadcast.broadcast_error {
+            anyhow::bail!("the transaction was signed but the node refused it: {error}");
+        }
+        let _ = record
+            .signed_transaction_hash
+            .as_ref()
+            .context("broadcast transaction has no hash")?;
+        self.events.publish(DomainEventKind::Transaction {
+            request_id,
+            stage: crate::events::TransactionStage::Broadcast,
+        });
+        Ok(record)
+    }
+}
+
+/// Owner-only operations. Only GPUI owner flows receive this value.
 #[derive(Clone)]
 pub struct OwnerApi {
     config: ConfigStore,
@@ -665,7 +865,29 @@ fn transaction_observation_changed(
     before.status != after.status || (before.finalized_at.is_none() && after.finalized_at.is_some())
 }
 
+fn publish_signature(
+    events: &EventBus,
+    request_id: Uuid,
+    kind: SignatureKind,
+    stage: SignatureStage,
+) {
+    events.publish(DomainEventKind::Signature {
+        request_id,
+        kind,
+        stage,
+    });
+    events.publish(DomainEventKind::ReviewChanged { request_id });
+}
+
 impl OwnerApi {
+    #[must_use]
+    pub(crate) fn dapp_api(&self) -> DappApi {
+        DappApi {
+            config: self.config.clone(),
+            events: self.events.clone(),
+        }
+    }
+
     pub async fn authorize_update_install(
         &self,
         review: &ekubo_wallet_core::update_trust::UpdateReview,
@@ -1919,10 +2141,6 @@ impl OwnerApi {
         Ok(queued)
     }
 
-    pub(crate) fn config_store(&self) -> &ConfigStore {
-        &self.config
-    }
-
     pub(crate) fn event_bus(&self) -> EventBus {
         self.events.clone()
     }
@@ -1936,13 +2154,7 @@ impl OwnerApi {
     /// without ever telling anyone, and every publisher goes through here so
     /// the next one cannot repeat that.
     fn publish_signature(&self, request_id: Uuid, kind: SignatureKind, stage: SignatureStage) {
-        self.events.publish(DomainEventKind::Signature {
-            request_id,
-            kind,
-            stage,
-        });
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
+        publish_signature(&self.events, request_id, kind, stage);
     }
 
     pub async fn sign_message(

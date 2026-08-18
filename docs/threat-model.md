@@ -28,10 +28,11 @@ dependency or OS, and control of the wallet process are out of scope.
 
 ## Critical Windows and Linux credential-store limitation
 
-The current `keyring` v1 defaults persist both the SQLCipher database key and
-raw account private keys in the macOS User keychain, Windows generic Credential
-Manager, or the Linux Secret Service default collection. The service and
-account strings are lookup identifiers, not application authorization.
+The current `keyring` crate's default `v1` feature persists both the SQLCipher
+database key and raw account private keys in the macOS User keychain, Windows
+generic Credential Manager, or the Linux Secret Service default collection.
+The service and account strings are lookup identifiers, not application
+authorization.
 
 On Windows, Microsoft documents that
 [generic credentials can be read and written by user processes](https://learn.microsoft.com/en-us/windows/win32/secauthn/kinds-of-credentials).
@@ -95,11 +96,12 @@ Each bridge connection creates a fresh restricted MCP server and session UUID.
 Only `AgentApi`, not `OwnerApi`, crosses the IPC boundary. It constructs a
 server with typed SQLCipher-backed stores and a narrow core execution authority
 so tools can persist requests and request only guarded automatic execution or
-exact cancellation. The MCP server never receives a `KeyStore`, arbitrary
-signature operation, owner authorization, raw key export, native-review
-decisions, unrestricted storage, or owner-only mutation
-capabilities. Harness kind is informational activity attribution only. The
-local stack has no HTTP or OAuth surface.
+exact cancellation. The MCP server never receives a directly callable
+`KeyStore`, arbitrary signature operation, owner authorization, raw key export,
+native-review decisions, unrestricted storage, or owner-only mutation
+capabilities; the core authority privately owns the key-store dependency behind
+its two guarded methods. Harness kind is informational activity attribution
+only. The local stack has no HTTP or OAuth surface.
 Managed configurations contain only the installed helper command with a fixed
 `--client` argument and, where that file format supports remote MCP, the
 independent hosted companion URL. Claude Desktop keeps the remote companion in
@@ -112,6 +114,18 @@ separate; a settled session accepts only approved accounts, chains, and
 methods. Approval authenticates the exact proposal-derived review and account,
 then re-reads account, network, and review state. Sessions have a fixed
 seven-day deadline; incoming extension requests cannot move it.
+
+WalletConnect transaction requests enter the same account policy engine as
+local MCP requests and scheduled automations. Policy rules match calls and the
+prepared transaction envelope, not the request source, harness, dapp identity,
+or WalletConnect session. A matching `allow` rule can therefore sign and submit
+the same transaction automatically when any connected dapp requests it;
+`plan_source` is display and audit context only. A dapp cannot force an
+otherwise allowed transaction into review or override a deny. Personal-message
+and typed-data requests always require native review. The WalletConnect adapter
+receives only `DappApi`, not `OwnerApi` or a `KeyStore`; that capability can
+re-read session state, queue review-only signatures, and delegate the exact
+simulated plan into core's guarded execution authority.
 
 ## RPC, transactions, and policy
 
@@ -127,6 +141,16 @@ nothing: send always freshly simulates, prepares, and evaluates current policy.
 Policy cannot reveal raw key
 material or grant exports, settings mutation, review decisions, owner
 authorization, or other owner capabilities.
+
+An MCP sender may request native review for one transaction that policy would
+otherwise allow automatically. This only adds a review: it cannot approve a
+request, remove a policy-required review, or make a denied transaction
+sendable. It does let a hostile local client create owner interruptions, just
+as it can already do by submitting unmatched or review-matched plans. After the
+owner authenticates an approved transaction, core signs and submits those exact
+bytes before closing the review; if every endpoint refuses them, the durable
+row remains signed for an explicit retry rather than silently treating the
+approval as completed.
 
 RPC-reported balance changes and simulation success are not policy inputs, but
 the native review displays them as expected effects to help a person decide.

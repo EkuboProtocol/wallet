@@ -24,7 +24,9 @@ A simulation is not approval. If an action is queued, direct the user to its
 review in the Ekubo Wallet app and keep using the corresponding wait tool until
 the request reaches a final state. A request unmatched by policy ordinarily
 goes to human review; do not propose a broader policy merely to complete the
-current request. An explicit policy denial cannot be queued.
+current request. An explicit policy denial cannot be queued. Approval itself
+attempts to submit the exact signed bytes; follow the returned lifecycle
+instruction, and retry by `request_id` only if the row remains signed.
 
 When the user asks to see a particular transaction before it goes out, and
 their policy would have sent it automatically, send it with `must_review` true.

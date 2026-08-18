@@ -1,6 +1,6 @@
 //! In-memory multi-session `WalletConnect` coordination.
 
-use crate::{authority::OwnerApi, events::EventBus};
+use crate::{authority::DappApi, events::EventBus};
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use ekubo_wallet_core::{
@@ -296,14 +296,14 @@ impl ProposalPresenter {
     }
 }
 
-pub async fn run_session(
+pub(crate) async fn run_session(
     start: SessionStart,
-    owner: OwnerApi,
+    dapp: DappApi,
     presenter: ProposalPresenter,
     manager: Arc<Mutex<WalletConnectManager>>,
     events: EventBus,
 ) -> Result<()> {
-    crate::walletconnect_handler::run(start, owner, presenter, manager, events).await
+    crate::walletconnect_handler::run(start, dapp, presenter, manager, events).await
 }
 
 #[cfg(test)]

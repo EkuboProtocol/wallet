@@ -24,6 +24,9 @@ make a denied plan sendable, and it is not accepted with a `request_id`, whose
 bytes are already reviewed and signed. Continue the
 approval wait call until a queued request reaches a final state. The rule is:
 wallet_wait_for_execution does not cover this phase. Also, never hand back a request-id and stop.
+Approval itself attempts to submit the exact signed bytes. Follow the lifecycle
+instruction returned by the wait; call `wallet_send_execution_plan` with the
+`request_id` only when the row remains signed and needs a submission retry.
 
 When a request is queued, direct the user to its review in the Ekubo Wallet
 application and continue polling the corresponding wait tool. The MCP client

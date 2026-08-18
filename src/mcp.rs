@@ -10,7 +10,6 @@ use crate::{
         execution_plan::ExecutionPlan,
         policy::{ReviewRequest, WalletPolicy},
     },
-    custody::KeyStore,
     execution::ReceiptStatus,
     fork::{ForkSession, ForkStore, MAX_FORKS, MAX_PLANS_PER_FORK, pin_parent_block},
     input_validation::{parse_chain_id, validate_timeout_seconds},
@@ -191,7 +190,8 @@ impl WalletMcpServer {
         // same database that the stores below open. No plaintext configuration
         // file participates in startup or request handling.
         config.load()?;
-        let policies = PolicyStore::production(config.data_dir())?;
+        let policies = Arc::new(Mutex::new(PolicyStore::production(config.data_dir())?));
+        let execution_authority = AgentExecutionAuthority::production(Arc::clone(&policies));
         let pending = PendingStore::production(config.data_dir())?;
         let typed_data = TypedDataStore::production(config.data_dir())?;
         let messages = MessageStore::production(config.data_dir())?;
@@ -207,7 +207,7 @@ impl WalletMcpServer {
             legal,
             tokens,
             automations,
-            Arc::new(ekubo_wallet_core::custody::OsKeyStore),
+            execution_authority,
         )?;
         server.requesting_client = Some((harness, desktop));
         server.client_namespace = client_id;
@@ -219,26 +219,28 @@ impl WalletMcpServer {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: ConfigStore,
-        policies: PolicyStore,
+        policies: Arc<Mutex<PolicyStore>>,
         pending: PendingStore,
         typed_data: TypedDataStore,
         messages: MessageStore,
         legal: LegalStore,
         tokens: TokenStore,
         automations: AutomationStore,
-        keys: Arc<dyn KeyStore>,
+        execution_authority: AgentExecutionAuthority,
     ) -> Result<Self> {
+        let policy_store = policies
+            .lock()
+            .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?;
         for wallet in config.load()?.wallets {
             ensure!(
-                policies
+                policy_store
                     .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
                     .is_some(),
                 "wallet {} has no policy in the encrypted database",
                 wallet.id
             );
         }
-        let policies = Arc::new(Mutex::new(policies));
-        let execution_authority = AgentExecutionAuthority::over(keys, Arc::clone(&policies));
+        drop(policy_store);
         Ok(Self {
             config,
             policies,
@@ -2152,7 +2154,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. Set must_review true when the user asked to look at this particular transaction before it is sent: it queues the plan for their review even where their policy would have signed it automatically, and it can only add that review — it never approves, widens the policy, or makes a denied plan sendable. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or re-submit the exact signed bytes for a separately approved request_id that remains signed after its approval-time submission attempt. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. Set must_review true when the user asked to look at this particular transaction before it is sent: it queues the plan for their review even where their policy would have signed it automatically, and it can only add that review — it never approves, widens the policy, or makes a denied plan sendable. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2386,7 +2388,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_wait_for_approval",
-        description = "Wait for a pending transaction to be approved and signed or rejected through the native wallet review window. This tool cannot approve, reject, sign, or submit it.",
+        description = "Wait for a pending transaction's native review to resolve. Approval signs the exact envelope and the owner flow attempts submission, so the returned row may already be in flight; if submission failed it remains signed for an exact-byte retry. This tool cannot approve, reject, sign, or submit it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn wallet_wait_for_approval(
@@ -3474,7 +3476,7 @@ impl WalletMcpServer {
             let mut output = execution_status_output(request);
             output.instruction = Some(if simulation.simulation.success {
                 format!(
-                    "The plan needs explicit human approval before it can sign. Tell the user to open review {} in the wallet application (never attempt to approve it on their behalf), then immediately call wallet_wait_for_approval with this request_id and keep calling it after each timeout until the request is approved, rejected, or expired. On approved, submit with wallet_send_execution_plan and this request_id. Do not ask the user to report the approval in chat.",
+                    "The plan needs explicit human approval before it can sign. Tell the user to open review {} in the wallet application (never attempt to approve it on their behalf), then immediately call wallet_wait_for_approval with this request_id and keep calling it after each timeout until the request is approved, rejected, or expired. Approval itself attempts to submit the exact signed bytes; follow the returned lifecycle instruction, and retry with wallet_send_execution_plan only if the request remains signed. Do not ask the user to report the approval in chat.",
                     output.request_id
                 )
             } else {

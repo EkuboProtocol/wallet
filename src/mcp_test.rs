@@ -107,6 +107,11 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
         &DatabaseKey::new([4; 32]),
     )
     .unwrap();
+    let policies = Arc::new(Mutex::new(policies));
+    let execution_authority = AgentExecutionAuthority::over(
+        Arc::new(crate::custody::MemoryKeyStore::default()),
+        Arc::clone(&policies),
+    );
     let server = WalletMcpServer::new(
         config,
         policies,
@@ -116,7 +121,7 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
         LegalStore::new(legal_database),
         TokenStore::new(token_database),
         AutomationStore::new(automation_database),
-        Arc::new(crate::custody::MemoryKeyStore::default()),
+        execution_authority,
     )
     .unwrap();
     (directory, server)
@@ -1030,6 +1035,11 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
         &DatabaseKey::new([5; 32]),
     )
     .unwrap();
+    let policies = Arc::new(Mutex::new(policies));
+    let execution_authority = AgentExecutionAuthority::over(
+        Arc::new(crate::custody::MemoryKeyStore::default()),
+        Arc::clone(&policies),
+    );
     let result = WalletMcpServer::new(
         config,
         policies,
@@ -1039,7 +1049,7 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
         LegalStore::new(legal_database),
         TokenStore::new(token_database),
         AutomationStore::new(automation_database),
-        std::sync::Arc::new(crate::custody::MemoryKeyStore::default()),
+        execution_authority,
     );
     assert!(result.is_err());
     assert!(result.err().unwrap().to_string().contains("has no policy"));

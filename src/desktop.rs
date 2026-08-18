@@ -6181,14 +6181,14 @@ impl WalletWindow {
             .publish(crate::events::DomainEventKind::WalletConnectChanged {
                 session_id: start.id.to_string(),
             });
-        let owner = self.owner.clone();
+        let dapp = self.owner.dapp_api();
         let presenter = self.walletconnect_presenter.clone();
         let manager = self.walletconnect.clone();
         let events = self.owner.event_bus();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
                 tokio::runtime::Handle::current()
-                    .block_on(run_session(start, owner, presenter, manager, events))
+                    .block_on(run_session(start, dapp, presenter, manager, events))
             })
             .await
             .context("WalletConnect session task failed")?

@@ -35,7 +35,9 @@ typed SQLCipher-backed stores and a narrow core execution authority. Those
 capabilities let MCP tools read agent-visible wallet state, persist proposals
 and transaction lifecycle records, and ask core only to run the guarded
 automatic-transaction or exact-cancellation path. MCP never receives a
-`KeyStore`, raw-key load, or arbitrary-signature operation.
+directly callable `KeyStore`, raw-key load, or arbitrary-signature operation;
+the core authority privately owns the key-store dependency behind its two
+guarded methods.
 
 The server receives no owner-authorization capability and no operation that
 exports raw key material, decides a native review, installs a signing policy,
@@ -74,4 +76,12 @@ Recorded simulation IDs are short-lived plan handles only: consuming one runs
 fresh simulation, exact envelope preparation, and current-policy evaluation.
 There is no local EVM or `eth_getProof` reconstruction; no simulated state is stored or reconstructed locally.
 In particular, a simulation fork cannot create a pending request.
+
+Signing policy is scoped to the wallet account, not the requesting MCP session.
+The policy schema has no caller, harness, automation, dapp, WalletConnect
+session, or plan-source matcher; recorded source text is informational activity
+context. An allow rule proposed for an agent therefore also permits an
+equivalent transaction requested by an installed automation or connected dapp.
+MCP can ask for one otherwise allowed submission to receive native review, but
+that request can only add review and cannot override a deny or approve anything.
 Token symbols and decimals are owner-confirmed display metadata and are never read from the contract.

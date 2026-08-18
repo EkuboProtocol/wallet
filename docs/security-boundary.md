@@ -8,9 +8,13 @@ Within the wallet process API, private keys and signing remain inside the core
 authority. MCP never receives `OwnerApi`. Its constructed server has typed
 storage capabilities and a narrow core execution authority that can only run
 the guarded automatic-transaction and exact-cancellation paths. It never
-receives a `KeyStore`, raw-key load, or arbitrary-signature method. It has no
+receives a directly callable `KeyStore`, raw-key load, or arbitrary-signature
+method; the core authority privately owns the key-store dependency. It has no
 methods for raw-key export, native-review decisions, policy installation,
 legal acceptance, owner authorization, or owner-only settings mutation.
+WalletConnect receives a separate `DappApi`, not `OwnerApi`; it can re-read its
+session state, queue message or typed-data requests for owner review, and pass
+an exact simulated transaction through the same guarded policy path.
 
 That compile-time boundary does not protect the generic OS credential entries
 from a separate same-user process. Current Windows and common GNOME Linux
@@ -54,6 +58,12 @@ transaction instead reaches the signer only when the current core-owned policy
 allows its exact call and prepared-envelope fields. Every send, including one
 using a prior simulation ID, freshly simulates, prepares, and evaluates the
 current policy; preview identifiers are not durable authorization.
+
+Transaction policy is account-scoped rather than requester-scoped. Its schema
+has no harness, automation, dapp, WalletConnect-session, or plan-source matcher;
+the recorded source is display and audit context only. The same matching allow
+rule therefore applies to equivalent transactions submitted through local MCP,
+an installed automation, or a connected WalletConnect dapp.
 
 Exact calldata, message bytes, complete typed data, digest, warnings, Unicode
 controls, bidi controls, and confusable characters remain available in the

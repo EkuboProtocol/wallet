@@ -8,6 +8,14 @@ policy at the persistence boundary. A widening or ambiguous transition requires
 OS owner authentication; a transition that core proves only tightens authority
 can be installed from the owner UI without an additional OS challenge.
 
+The installed policy belongs to the wallet account, not to the agent that
+proposed it. Rules match calls and prepared-envelope fields; there is no matcher
+for MCP client, harness, automation, dapp, WalletConnect session, or recorded
+plan source. A rule that allows a transaction from an agent also allows the
+same matching transaction from an installed automation or connected dapp. If
+request origin matters, keep the action on native review or constrain the exact
+transaction fields narrowly enough that every source is safe to use it.
+
 Policy version 1 is intentionally small. It contains one ordered `rules` list.
 Every rule must have an `effect` of `allow`, `review`, or `deny`. Matchers are
 flat fields on the rule: `chain_id`, `to`, `native_value`, and `calldata`

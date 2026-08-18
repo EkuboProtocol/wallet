@@ -2,7 +2,7 @@
 
 use crate::{
     BUILD_VERSION,
-    authority::OwnerApi,
+    authority::DappApi,
     dapp_identity::DappIdentity,
     events::{DomainEventKind, EventBus},
     walletconnect::{
@@ -11,21 +11,17 @@ use crate::{
     },
 };
 use alloy::primitives::Address;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use ekubo_wallet_core::{
     approval::{ApprovalKind, ApprovalRequest, ReviewDocument},
     core::execution_plan::{
         DecimalU256, ExecutionPlan, ExecutionStep, ExecutionStepKind, PlannedTransaction,
     },
-    custody::OsKeyStore,
-    legal,
-    message::{MessageEncoding, MessageStatus, MessageStore, parse_siwe},
-    pending::{PendingStatus, PendingStore, PendingTransaction},
-    policy_store::PolicyStore,
+    message::{MessageEncoding, MessageStatus, parse_siwe},
+    pending::{PendingStatus, PendingTransaction},
     sanitize::terminal_safe_line,
-    simulation::simulate_external_execution,
-    typed_data::{TypedDataStatus, TypedDataStore},
+    typed_data::TypedDataStatus,
 };
 use serde_json::{Value, json};
 use std::{
@@ -91,14 +87,14 @@ impl Drop for Farewell {
 
 pub async fn run(
     start: SessionStart,
-    owner: OwnerApi,
+    dapp: DappApi,
     presenter: ProposalPresenter,
     manager: Arc<Mutex<WalletConnectManager>>,
     events: EventBus,
 ) -> Result<()> {
     let _farewell = Farewell(start.farewell.clone());
-    legal::require_current_acceptance(owner.config_store().data_dir())?;
-    let accounts = owner.accounts()?;
+    dapp.require_legal_acceptance()?;
+    let accounts = dapp.accounts()?;
     ensure!(
         !accounts.is_empty(),
         "create an account before connecting a dapp"
@@ -111,7 +107,7 @@ pub async fn run(
     );
     let handler = DesktopSession {
         id: start.id,
-        owner,
+        dapp,
         accounts,
         selected: Cell::new(0),
         presenter,
@@ -138,7 +134,7 @@ pub async fn run(
 
 struct DesktopSession {
     id: uuid::Uuid,
-    owner: OwnerApi,
+    dapp: DappApi,
     accounts: Vec<ekubo_wallet_core::config::WalletMetadata>,
     selected: Cell<usize>,
     presenter: ProposalPresenter,
@@ -159,7 +155,7 @@ impl DesktopSession {
 
     fn network_for(&self, caip2: &str) -> Option<ekubo_wallet_core::config::NetworkConfig> {
         let chain_id = walletconnect_session::session::numeric_chain_id(caip2)?;
-        self.owner.network_by_chain_id(chain_id).ok()
+        self.dapp.network_by_chain_id(chain_id).ok()
     }
 
     fn update(
@@ -231,7 +227,7 @@ impl DesktopSession {
         let mut request = ApprovalRequest::new(
             ApprovalKind::PolicyException,
             "Approve a dapp connection",
-            "Expose one of your accounts to the dapp. Signing requests still pass through wallet policy and owner review.",
+            "Expose one of your accounts to the dapp. Transactions follow this account's policy and may send automatically when it allows them; messages and typed data still require owner review.",
         )
         .fact("Site", dapp.host_or_unknown())
         .fact("Claimed name", dapp.name.clone().unwrap_or_else(|| "not stated".into()))
@@ -289,7 +285,7 @@ impl DesktopSession {
     fn refuse_replaced_account(&self) -> Option<RequestOutcome> {
         let settled = self.wallet();
         if self
-            .owner
+            .dapp
             .account(&settled.id)
             .is_ok_and(|current| current == *settled)
         {
@@ -302,7 +298,7 @@ impl DesktopSession {
     }
 
     async fn dispatch(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
-        legal::require_current_acceptance(self.owner.config_store().data_dir())?;
+        self.dapp.require_legal_acceptance()?;
         if let Some(refusal) = self.refuse_replaced_account() {
             return Ok(refusal);
         }
@@ -363,7 +359,7 @@ impl DesktopSession {
             ));
         }
         let requester = DappIdentity::of(request.dapp).headline();
-        let queued = self.owner.queue_message(
+        let queued = self.dapp.queue_message(
             &self.wallet().id,
             request.chain_id,
             &message,
@@ -378,10 +374,9 @@ impl DesktopSession {
     }
 
     async fn wait_for_message(&self, request_id: uuid::Uuid) -> Result<RequestOutcome> {
-        let mut events = self.owner.event_bus().subscribe();
+        let mut events = self.dapp.event_bus().subscribe();
         loop {
-            let record =
-                MessageStore::production(self.owner.config_store().data_dir())?.get(request_id)?;
+            let record = self.dapp.message(request_id)?;
             match record.status {
                 MessageStatus::Signed => {
                     return Ok(RequestOutcome::Result(json!(
@@ -410,16 +405,15 @@ impl DesktopSession {
             return Ok(refusal);
         }
         let requester = DappIdentity::of(request.dapp).headline();
-        let queued = self.owner.queue_typed_data(
+        let queued = self.dapp.queue_typed_data(
             &self.wallet().id,
             request.chain_id,
             &payload,
             &requester,
         )?;
-        let mut events = self.owner.event_bus().subscribe();
+        let mut events = self.dapp.event_bus().subscribe();
         loop {
-            let record = TypedDataStore::production(self.owner.config_store().data_dir())?
-                .get(queued.request_id)?;
+            let record = self.dapp.typed_data(queued.request_id)?;
             match record.status {
                 TypedDataStatus::Signed => {
                     return Ok(RequestOutcome::Result(json!(
@@ -563,22 +557,14 @@ impl DesktopSession {
         {
             return Ok(unknown());
         }
-        let Ok(record) =
-            PendingStore::production(self.owner.config_store().data_dir())?.get(request_id)
-        else {
+        let Ok(record) = self.dapp.pending_transaction(request_id) else {
             return Ok(unknown());
         };
         if record.wallet_id != self.wallet().id {
             return Ok(unknown());
         }
-        let network = self.owner.config_store().network(&record.network_name)?;
-        let record = {
-            let pending = Mutex::new(PendingStore::production(
-                self.owner.config_store().data_dir(),
-            )?);
-            ekubo_wallet_core::reconcile::reconcile_record(&pending, &network, record, false)
-                .await?
-        };
+        let network = self.dapp.network(&record.network_name)?;
+        let record = self.dapp.reconcile_transaction(&network, record).await?;
         let receipts = match record.broadcast_transaction_hash.as_deref() {
             Some(hash)
                 if matches!(
@@ -664,53 +650,20 @@ impl DesktopSession {
         plan: &ExecutionPlan,
         plan_source: &str,
     ) -> Result<std::result::Result<PendingTransaction, RequestOutcome>> {
-        let config = self.owner.config_store();
-        let network = config.network_by_chain_id(&chain_id.to_string())?;
-        let policies = Mutex::new(PolicyStore::production(config.data_dir())?);
-        let stored_policy = policies
-            .lock()
-            .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
-            .get_for_wallet(
-                &self.wallet().id,
-                self.wallet().instance_id,
-                self.wallet().address,
-            )?
-            .with_context(|| format!("wallet {} has no local policy", self.wallet().id))?;
-        let policy_context = ekubo_wallet_core::core::predicate::PolicyContext {
-            wallet: self.wallet().address,
-        };
-        let simulation = simulate_external_execution(
-            self.wallet(),
-            &network,
-            plan,
-            &stored_policy,
-            &policy_context,
-            None,
-        )
-        .await?;
+        let network = self.dapp.network_by_chain_id(chain_id)?;
+        let simulation = self
+            .dapp
+            .simulate_transaction(self.wallet(), &network, plan)
+            .await?;
         if self.shutdown.is_cancelled() {
             return Ok(Err(RequestOutcome::rejected(
                 "The WalletConnect session was disconnected.",
             )));
         }
-        let pending = Mutex::new(PendingStore::production(config.data_dir())?);
-        let disposition = ekubo_wallet_core::orchestrator::execute_automatic(
-            config,
-            &pending,
-            &policies,
-            &OsKeyStore,
-            self.wallet(),
-            &network,
-            plan,
-            Some(plan_source),
-            &simulation,
-            // A dapp is not the wallet's agent and gets no say in how closely
-            // the owner looks at what it asked for. Only the policy decides
-            // here, exactly as it did before the ask existed.
-            ekubo_wallet_core::core::policy::ReviewRequest::PolicyDecides,
-        )
-        .await?;
-        drop(pending);
+        let disposition = self
+            .dapp
+            .execute_transaction(self.wallet(), &network, plan, plan_source, &simulation)
+            .await?;
         let signed = match disposition {
             ekubo_wallet_core::orchestrator::SendDisposition::Signed(record) => {
                 self.events.publish(DomainEventKind::Transaction {
@@ -747,11 +700,11 @@ impl DesktopSession {
                 "The WalletConnect session was disconnected.",
             )));
         }
-        let request_id = signed.request_id;
-        self.broadcast(&network, signed).await?;
-        Ok(Ok(
-            PendingStore::production(config.data_dir())?.get(request_id)?
-        ))
+        let record = self
+            .dapp
+            .submit_transaction(self.wallet(), &network, signed)
+            .await?;
+        Ok(Ok(record))
     }
 
     /// Wait for the owner's decision on a queued request.
@@ -764,10 +717,9 @@ impl DesktopSession {
     /// unexpected state failed the dapp's request over a transaction that had
     /// actually been sent.
     async fn wait_for_transaction(&self, request_id: uuid::Uuid) -> Result<ReviewedRequest> {
-        let mut events = self.owner.event_bus().subscribe();
+        let mut events = self.dapp.event_bus().subscribe();
         loop {
-            let record =
-                PendingStore::production(self.owner.config_store().data_dir())?.get(request_id)?;
+            let record = self.dapp.pending_transaction(request_id)?;
             match classify_reviewed_status(record.status) {
                 ReviewedStatus::Signed => return Ok(ReviewedRequest::Signed(record)),
                 ReviewedStatus::AlreadySent => return Ok(ReviewedRequest::AlreadySent(record)),
@@ -784,51 +736,6 @@ impl DesktopSession {
                 () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
             }
         }
-    }
-
-    async fn broadcast(
-        &self,
-        network: &ekubo_wallet_core::config::NetworkConfig,
-        record: PendingTransaction,
-    ) -> Result<()> {
-        let request_id = record.request_id;
-        let pending = Mutex::new(PendingStore::production(
-            self.owner.config_store().data_dir(),
-        )?);
-        let claim = pending
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-            .claim_for_submission(request_id);
-        let claimed = match claim {
-            Ok(claimed) => claimed,
-            // The desktop, the MCP server, and this session share the database
-            // but not a lock, and the lease is what decides between them.
-            // Losing it to whoever sent these exact bytes first is success.
-            Err(error) => {
-                let current = pending
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-                    .get(request_id)?;
-                if current.broadcast_transaction_hash.is_some() {
-                    return Ok(());
-                }
-                return Err(error);
-            }
-        };
-        let (record, broadcast) =
-            ekubo_wallet_core::reconcile::submit_claimed(&pending, self.wallet(), network, claimed)
-                .await?;
-        if let Some(error) = broadcast.broadcast_error {
-            bail!("the transaction was signed but the node refused it: {error}");
-        }
-        let _ = record
-            .signed_transaction_hash
-            .context("broadcast transaction has no hash")?;
-        self.events.publish(DomainEventKind::Transaction {
-            request_id,
-            stage: crate::events::TransactionStage::Broadcast,
-        });
-        Ok(())
     }
 }
 
@@ -998,7 +905,7 @@ impl SessionHandler for DesktopSession {
                     "review selected an unknown account"
                 );
                 let expected = &self.accounts[index];
-                let account = self.owner.account(&expected.id)?;
+                let account = self.dapp.account(&expected.id)?;
                 ensure!(
                     account == *expected,
                     "the selected account changed after owner authentication"

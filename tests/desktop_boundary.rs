@@ -23,8 +23,18 @@ fn mcp_has_no_owner_capability_or_local_file_transport() {
     let source = fs::read_to_string(root().join("src/mcp.rs")).unwrap();
     for forbidden in [
         "OwnerApi",
+        "KeyStore",
+        "OsKeyStore",
         "export_account",
         "approve_request",
+        "set_network_disabled(",
+        "install_policy_for_instance(",
+        "apply_proposal(",
+        "remove_reviewed(",
+        "add_authorized(",
+        "consume_proposals_authorized(",
+        "record_acceptance(",
+        "set_detailed_notification_previews(",
         "transport::stdio",
     ] {
         assert!(
@@ -58,6 +68,60 @@ fn local_ipc_transport_has_only_the_restricted_agent_capability() {
     assert!(source.contains("ConvertStringSecurityDescriptorToSecurityDescriptorW"));
     assert!(source.contains("GetNamedPipeClientProcessId"));
     assert!(source.contains("token_sid_string"));
+}
+
+#[test]
+fn walletconnect_adapter_has_only_the_restricted_dapp_capability() {
+    let source = fs::read_to_string(root().join("src/walletconnect_handler.rs")).unwrap();
+    for forbidden in [
+        "OwnerApi",
+        "KeyStore",
+        "OsKeyStore",
+        "execute_automatic",
+        "PolicyStore",
+        "PendingStore",
+        "MessageStore",
+        "TypedDataStore",
+        "config_store",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "WalletConnect adapter contains privileged surface {forbidden}"
+        );
+    }
+    assert!(source.contains("DappApi"));
+    assert!(source.contains("execute_transaction"));
+}
+
+#[test]
+fn restricted_dapp_capability_has_no_owner_or_custody_operations() {
+    let source = fs::read_to_string(root().join("src/authority.rs")).unwrap();
+    let dapp = source
+        .split_once("impl DappApi {")
+        .and_then(|(_, rest)| rest.split_once("/// Owner-only operations."))
+        .map(|(dapp, _)| dapp)
+        .expect("DappApi implementation remains a distinct capability block");
+    for forbidden in [
+        "authorize_owner",
+        "OwnerAuthorization",
+        "CustodyService",
+        "OsKeyStore",
+        "PrivateKeyMaterial",
+        "export_account",
+        "set_network_disabled(",
+        "install_policy_for_instance(",
+        "apply_proposal(",
+        "remove_reviewed(",
+        "add_authorized(",
+        "consume_proposals_authorized(",
+        "record_acceptance(",
+        "set_detailed_notification_previews(",
+    ] {
+        assert!(
+            !dapp.contains(forbidden),
+            "DappApi contains privileged surface {forbidden}"
+        );
+    }
 }
 
 #[test]
