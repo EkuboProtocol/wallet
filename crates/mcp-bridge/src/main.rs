@@ -252,6 +252,158 @@ fn current_user_sid_string() -> Result<String> {
     }
 }
 
+/// The wallet's own answers to the two catalog requests the bridge makes on
+/// its own behalf. Ids the harness never sees, so its own request ids can
+/// never collide with them.
+const TOOLS_SENTINEL: &str = "__ekubo_bridge_tools";
+const RESOURCES_SENTINEL: &str = "__ekubo_bridge_resources";
+
+/// How long the harness waits for the wallet to describe itself before the
+/// bridge answers `initialize` on its own. Long enough for a local socket
+/// round trip on a loaded machine, short enough that a hung wallet costs a
+/// pause rather than a session that never starts.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What the bridge claims when it has to answer `initialize` alone.
+///
+/// It must name every capability the wallet has, not every capability the
+/// bridge can service while the wallet is down: a harness asks once, at
+/// startup, and holds the answer for the session. Claiming less here makes
+/// the wallet's resources unreachable for that whole session even after it
+/// starts. The wallet's own advertisement is checked against this file by
+/// `capabilities_cover_every_wallet_capability` in the wallet's MCP tests,
+/// so a capability added there cannot silently go unannounced here.
+const OFFLINE_CAPABILITIES: &str = include_str!("offline_capabilities.json");
+
+/// One live wallet connection, and everything the harness learns from it.
+struct WalletSession<S> {
+    read: BufReader<tokio::io::ReadHalf<S>>,
+    write: tokio::io::WriteHalf<S>,
+    initialize_result: Value,
+    tools: Value,
+    resources: Value,
+}
+
+fn catalog_request(id: &str, method: &str) -> Vec<u8> {
+    let mut frame =
+        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":{}}))
+            .expect("JSON catalog request");
+    frame.push(b'\n');
+    frame
+}
+
+/// Initialize a wallet connection and read both catalogs from it.
+///
+/// The returned `initialize_result` is the wallet's, not a restatement of it,
+/// so the instructions and capabilities the harness records are the ones the
+/// wallet actually publishes. Only `listChanged` is the bridge's to add: the
+/// wallet cannot promise a notification it has no connection to send, while
+/// the bridge does emit one whenever a reconnect turns up a different
+/// catalog.
+async fn handshake<S>(
+    stream: S,
+    initialize_frame: &[u8],
+    initialized: Option<&[u8]>,
+) -> Result<WalletSession<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
+    let (read, mut write) = tokio::io::split(stream);
+    let mut read = BufReader::new(read);
+    write.write_all(initialize_frame).await?;
+    let initialize_response = read_frame(&mut read)
+        .await?
+        .context("wallet closed during MCP initialization")?;
+    let initialize_response: Value = serde_json::from_slice(&initialize_response)
+        .context("invalid wallet initialize response")?;
+    ensure!(
+        initialize_response.get("result").is_some(),
+        "wallet rejected MCP initialization"
+    );
+    let wallet_version = reported_wallet_version(&initialize_response);
+    if wallet_version != BUILD_VERSION {
+        return Err(VersionMismatch { wallet_version }.into());
+    }
+    let mut initialize_result = initialize_response["result"].clone();
+    for capability in ["tools", "resources"] {
+        if let Some(entry) = initialize_result.pointer_mut(&format!("/capabilities/{capability}"))
+            && entry.is_object()
+        {
+            entry["listChanged"] = json!(true);
+        }
+    }
+    if let Some(frame) = initialized {
+        write.write_all(frame).await?;
+    }
+    write
+        .write_all(&catalog_request(TOOLS_SENTINEL, "tools/list"))
+        .await?;
+    write
+        .write_all(&catalog_request(RESOURCES_SENTINEL, "resources/list"))
+        .await?;
+    let mut tools = None;
+    let mut resources = None;
+    // Responses to concurrent requests may arrive in either order, and a
+    // notification may land between them, so match on the id rather than on
+    // arrival. The bound is a guard against a wallet that answers neither.
+    for _ in 0..64 {
+        if tools.is_some() && resources.is_some() {
+            break;
+        }
+        let frame = read_frame(&mut read)
+            .await?
+            .context("wallet closed while listing its catalogs")?;
+        let message: Value =
+            serde_json::from_slice(&frame).context("invalid wallet catalog frame")?;
+        match message.get("id").and_then(Value::as_str) {
+            Some(TOOLS_SENTINEL) => {
+                let listed = message
+                    .get("result")
+                    .cloned()
+                    .context("wallet rejected tools/list")?;
+                ensure!(
+                    listed.get("tools").and_then(Value::as_array).is_some(),
+                    "wallet returned an invalid tool catalog"
+                );
+                tools = Some(listed);
+            }
+            // A wallet build with nothing to publish is a wallet with an
+            // empty shelf, not a broken connection: keep the session and let
+            // every tool work.
+            Some(RESOURCES_SENTINEL) => {
+                resources = Some(
+                    message
+                        .get("result")
+                        .filter(|listed| {
+                            listed.get("resources").and_then(Value::as_array).is_some()
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| json!({"resources":[]})),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(WalletSession {
+        read,
+        write,
+        initialize_result,
+        tools: tools.context("wallet did not answer tools/list")?,
+        resources: resources.unwrap_or_else(|| json!({"resources":[]})),
+    })
+}
+
+/// The handshake for a harness that started before the wallet did.
+fn offline_initialize_result(protocol: &Value) -> Value {
+    json!({
+        "protocolVersion": protocol,
+        "capabilities": serde_json::from_str::<Value>(OFFLINE_CAPABILITIES)
+            .expect("offline capabilities are valid JSON"),
+        "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":BUILD_VERSION},
+        "instructions":"Ekubo Wallet tools appear automatically whenever the wallet application is running."
+    })
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -281,65 +433,75 @@ async fn run() -> Result<()> {
         .pointer("/params/protocolVersion")
         .cloned()
         .unwrap_or_else(|| json!("2025-11-25"));
-    emit(&mut stdout, &response(&initialize_id, &json!({
-        "protocolVersion": protocol,
-        "capabilities": {"tools":{"listChanged":true}},
-        "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":BUILD_VERSION},
-        "instructions":"Ekubo Wallet tools appear automatically whenever the wallet application is running."
-    }))).await?;
 
     let mut initialized: Option<Vec<u8>> = None;
     let mut upstream = None;
     let mut last_tools = json!({"tools":[]});
+    let mut last_resources = json!({"resources":[]});
     let mut in_flight = BTreeSet::<String>::new();
-    let mut catalog_refresh_pending = false;
+    let mut tools_refresh_pending = false;
+    let mut resources_refresh_pending = false;
     let mut backoff = Duration::from_millis(250);
+
+    // Ask the wallet for the handshake before answering the harness, because
+    // a harness records what it is told here for the whole session and never
+    // asks again. Anything the bridge invents instead — capabilities, the
+    // server instructions — is what the model is stuck with even after the
+    // wallet comes up, so the invented answer is the fallback and not the
+    // rule. A wallet that is down, hung, or version-mismatched simply misses
+    // its turn; the reconnect below applies the ordinary policy to it.
+    let wallet_handshake = match tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+        let stream = connect(client).await?;
+        handshake(stream, &initialize_frame, None).await
+    })
+    .await
+    {
+        Ok(Ok(session)) => Some(session),
+        // A bridge that does not match the wallet may not serve this session
+        // at all, and saying so before the harness has recorded a handshake
+        // is the earliest the user can be told to restart the agent.
+        Ok(Err(error)) if error.downcast_ref::<VersionMismatch>().is_some() => {
+            return Err(error);
+        }
+        Ok(Err(_)) | Err(_) => None,
+    };
+    let initialize_result = match wallet_handshake {
+        Some(session) => {
+            last_tools = session.tools;
+            last_resources = session.resources;
+            upstream = Some((session.read, session.write));
+            session.initialize_result
+        }
+        None => offline_initialize_result(&protocol),
+    };
+    emit(&mut stdout, &response(&initialize_id, &initialize_result)).await?;
 
     loop {
         if upstream.is_none()
             && initialized.is_some()
             && let Ok(stream) = connect(client).await
         {
-            let connected: Result<_> = async {
-                        let (read, mut write) = tokio::io::split(stream);
-                        let mut read = BufReader::new(read);
-                        write.write_all(&initialize_frame).await?;
-                        let initialize_response = read_frame(&mut read)
-                            .await?
-                            .context("wallet closed during MCP initialization")?;
-                        let initialize_response: Value = serde_json::from_slice(&initialize_response)
-                            .context("invalid wallet initialize response")?;
-                        ensure!(initialize_response.get("result").is_some(), "wallet rejected MCP initialization");
-                        let wallet_version = reported_wallet_version(&initialize_response);
-                        if wallet_version != BUILD_VERSION {
-                            return Err(VersionMismatch { wallet_version }.into());
-                        }
-                        if let Some(frame) = &initialized {
-                            write.write_all(frame).await?;
-                        }
-                        write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"__ekubo_bridge_tools\",\"method\":\"tools/list\",\"params\":{}}\n").await?;
-                        let catalog_frame = read_frame(&mut read)
-                            .await?
-                            .context("wallet closed while listing tools")?;
-                        let catalog: Value = serde_json::from_slice(&catalog_frame)
-                            .context("invalid wallet tool catalog")?;
-                        let refreshed = catalog.get("result").cloned().context("wallet rejected tools/list")?;
-                        ensure!(refreshed.get("tools").and_then(Value::as_array).is_some(), "wallet returned an invalid tool catalog");
-                        Ok((read, write, refreshed))
-                    }
-                    .await;
-            match connected {
-                Ok((read, write, refreshed)) => {
-                    if refreshed != last_tools {
-                        last_tools = refreshed;
+            match handshake(stream, &initialize_frame, initialized.as_deref()).await {
+                Ok(session) => {
+                    if session.tools != last_tools {
+                        last_tools = session.tools;
                         emit(
                             &mut stdout,
                             br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
                         )
                         .await?;
                     }
-                    upstream = Some((read, write));
-                    catalog_refresh_pending = false;
+                    if session.resources != last_resources {
+                        last_resources = session.resources;
+                        emit(
+                            &mut stdout,
+                            br#"{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}"#,
+                        )
+                        .await?;
+                    }
+                    upstream = Some((session.read, session.write));
+                    tools_refresh_pending = false;
+                    resources_refresh_pending = false;
                     backoff = Duration::from_millis(250);
                 }
                 Err(error) => {
@@ -371,7 +533,8 @@ async fn run() -> Result<()> {
                             if let Ok(id) = serde_json::from_str(&id) { emit(&mut stdout, &error(&id, "Ekubo Wallet stopped while the request was in flight; the bridge will reconnect automatically" )).await?; }
                         }
                         upstream = None;
-                        catalog_refresh_pending = false;
+                        tools_refresh_pending = false;
+                        resources_refresh_pending = false;
                         continue;
                     };
                             let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
@@ -381,26 +544,39 @@ async fn run() -> Result<()> {
                                     }
                                 }
                                 upstream = None;
-                                catalog_refresh_pending = false;
+                                tools_refresh_pending = false;
+                                resources_refresh_pending = false;
                                 continue;
                             };
-                            if catalog_refresh_pending
-                                && message.get("id").and_then(Value::as_str) == Some("__ekubo_bridge_tools")
-                            {
-                                catalog_refresh_pending = false;
+                            let sentinel = message.get("id").and_then(Value::as_str);
+                            if tools_refresh_pending && sentinel == Some(TOOLS_SENTINEL) {
+                                tools_refresh_pending = false;
                                 if message.get("result").and_then(|result| result.get("tools")).is_some() {
                                     last_tools = message["result"].clone();
                                 }
                                 continue;
                             }
+                            if resources_refresh_pending && sentinel == Some(RESOURCES_SENTINEL) {
+                                resources_refresh_pending = false;
+                                if message.get("result").and_then(|result| result.get("resources")).is_some() {
+                                    last_resources = message["result"].clone();
+                                }
+                                continue;
+                            }
                             if let Some(id) = message.get("id") { in_flight.remove(&id.to_string()); }
                             if message.get("result").and_then(|r| r.get("tools")).is_some() { last_tools = message["result"].clone(); }
+                            if message.get("result").and_then(|r| r.get("resources")).is_some() { last_resources = message["result"].clone(); }
                             emit(&mut stdout, frame.strip_suffix(b"\n").unwrap_or(&frame)).await?;
-                            if message.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed")
-                                && !catalog_refresh_pending
-                            {
-                                up_write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"__ekubo_bridge_tools\",\"method\":\"tools/list\",\"params\":{}}\n").await?;
-                                catalog_refresh_pending = true;
+                            match message.get("method").and_then(Value::as_str) {
+                                Some("notifications/tools/list_changed") if !tools_refresh_pending => {
+                                    up_write.write_all(&catalog_request(TOOLS_SENTINEL, "tools/list")).await?;
+                                    tools_refresh_pending = true;
+                                }
+                                Some("notifications/resources/list_changed") if !resources_refresh_pending => {
+                                    up_write.write_all(&catalog_request(RESOURCES_SENTINEL, "resources/list")).await?;
+                                    resources_refresh_pending = true;
+                                }
+                                _ => {}
                             }
                 }
             }
@@ -423,12 +599,35 @@ async fn run() -> Result<()> {
             };
             match message.get("method").and_then(Value::as_str) {
                 Some("notifications/initialized") => initialized = Some(frame),
+                // A harness that pings a stopped wallet is checking on the
+                // bridge, which is answering — so this is not an outage.
+                Some("ping") => {
+                    if let Some(id) = request_id(&message) {
+                        emit(&mut stdout, &response(&id, &json!({}))).await?;
+                    }
+                }
                 Some("tools/list") => {
                     if let Some(id) = request_id(&message) {
                         emit(&mut stdout, &response(&id, &last_tools)).await?;
                     }
                 }
-                Some("tools/call") => {
+                Some("resources/list") => {
+                    if let Some(id) = request_id(&message) {
+                        emit(&mut stdout, &response(&id, &last_resources)).await?;
+                    }
+                }
+                // The wallet publishes fixed URIs rather than templates, so
+                // the empty answer is the true one and not a stand-in.
+                Some("resources/templates/list") => {
+                    if let Some(id) = request_id(&message) {
+                        emit(
+                            &mut stdout,
+                            &response(&id, &json!({"resourceTemplates":[]})),
+                        )
+                        .await?;
+                    }
+                }
+                Some("tools/call" | "resources/read") => {
                     if let Some(id) = request_id(&message) {
                         emit(&mut stdout, &error(&id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
                     }

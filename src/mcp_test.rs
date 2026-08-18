@@ -1910,6 +1910,38 @@ fn legal_tool_reports_status_and_document_text() {
     assert!(output.document.is_none());
 }
 
+/// No agent speaks to this server directly: every one of them speaks to the
+/// bridge, which answers `initialize` alone whenever the wallet is not yet
+/// running. A harness records that answer for the whole session, so a
+/// capability this server gains without the bridge's offline answer gaining
+/// it too is a capability no agent can use until it restarts — which is
+/// exactly how `wallet://` resources went unreachable.
+#[test]
+fn the_bridge_offline_handshake_names_every_capability_this_server_has() {
+    let advertised =
+        serde_json::to_value(ServerHandler::get_info(&server().1).capabilities).unwrap();
+    let offline: serde_json::Value = serde_json::from_str(include_str!(
+        "../crates/mcp-bridge/src/offline_capabilities.json"
+    ))
+    .unwrap();
+    let named = |capabilities: &serde_json::Value| {
+        capabilities
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    // Only the names have to agree. The values cannot: `listChanged` is the
+    // bridge's promise to make, since it is the side holding the harness
+    // connection when a reconnect turns up a different catalog.
+    assert_eq!(
+        named(&advertised),
+        named(&offline),
+        "add the new capability to crates/mcp-bridge/src/offline_capabilities.json"
+    );
+}
+
 #[test]
 fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
     let (_directory, server) = server();

@@ -47,6 +47,13 @@ fn initializes_and_stays_useful_before_wallet_startup() {
         initialized["result"]["capabilities"]["tools"]["listChanged"],
         true
     );
+    // Announced even with no wallet to serve them: a harness records this
+    // answer once and never asks again, so a session that starts before the
+    // wallet must still be able to read wallet:// resources afterwards.
+    assert_eq!(
+        initialized["result"]["capabilities"]["resources"]["listChanged"],
+        true
+    );
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -59,12 +66,41 @@ fn initializes_and_stays_useful_before_wallet_startup() {
     assert_eq!(tools["result"], json!({"tools":[]}));
     send(
         &mut stdin,
+        &json!({"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}),
+    );
+    assert_eq!(receive(&mut stdout)["result"], json!({"resources":[]}));
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":4,"method":"resources/templates/list","params":{}}),
+    );
+    assert_eq!(
+        receive(&mut stdout)["result"],
+        json!({"resourceTemplates":[]})
+    );
+    send(&mut stdin, &json!({"jsonrpc":"2.0","id":5,"method":"ping"}));
+    let ping = receive(&mut stdout);
+    assert_eq!(ping["id"], 5);
+    assert_eq!(ping["result"], json!({}));
+    send(
+        &mut stdin,
         &json!({"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":"missing","arguments":{}}}),
     );
     let call = receive(&mut stdout);
     assert_eq!(call["id"], "call");
     assert!(
         call["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not running")
+    );
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":"read","method":"resources/read","params":{"uri":"wallet://docs/policy-authoring"}}),
+    );
+    let read = receive(&mut stdout);
+    assert_eq!(read["id"], "read");
+    assert!(
+        read["error"]["message"]
             .as_str()
             .unwrap()
             .contains("not running")
@@ -191,7 +227,18 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         stream.write_all(b"\n").unwrap();
         stream.flush().unwrap();
     }
-    fn handshake(stream: UnixStream, catalog: &Value) -> (BufReader<UnixStream>, UnixStream) {
+    /// Answer one bridge connection the way the wallet does.
+    ///
+    /// `expect_initialized` distinguishes the two shapes a connection takes.
+    /// The first happens while the harness is still waiting for its own
+    /// `initialize` answer, so no `notifications/initialized` has been sent
+    /// yet; a reconnect replays the one the bridge kept.
+    fn handshake(
+        stream: UnixStream,
+        catalog: &Value,
+        resources: &Value,
+        expect_initialized: bool,
+    ) -> (BufReader<UnixStream>, UnixStream) {
         let mut writer = stream.try_clone().unwrap();
         let mut reader = BufReader::new(stream);
         let hello = read(&mut reader);
@@ -199,15 +246,28 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         let initialize = read(&mut reader);
         write(
             &mut writer,
-            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fake-wallet","version":BUILD_VERSION}}}),
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
+                "protocolVersion":"2025-11-25",
+                "capabilities":{"tools":{},"resources":{}},
+                "serverInfo":{"name":"fake-wallet","version":BUILD_VERSION},
+                "instructions":"Wallet instructions the agent must actually receive."
+            }}),
         );
-        assert_eq!(read(&mut reader)["method"], "notifications/initialized");
-        let list = read(&mut reader);
-        assert_eq!(list["method"], "tools/list");
-        write(
-            &mut writer,
-            &json!({"jsonrpc":"2.0","id":list["id"],"result":catalog}),
-        );
+        if expect_initialized {
+            assert_eq!(read(&mut reader)["method"], "notifications/initialized");
+        }
+        for _ in 0..2 {
+            let list = read(&mut reader);
+            let result = match list["method"].as_str().unwrap() {
+                "tools/list" => catalog,
+                "resources/list" => resources,
+                other => panic!("unexpected catalog request {other}"),
+            };
+            write(
+                &mut writer,
+                &json!({"jsonrpc":"2.0","id":list["id"],"result":result}),
+            );
+        }
         (reader, writer)
     }
 
@@ -215,18 +275,31 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let listener = UnixListener::bind(home.path().join("mcp.sock")).unwrap();
     let catalog = json!({"tools":[{"name":"wallet_test","description":"test","inputSchema":{"type":"object"}}]});
+    let resources =
+        json!({"resources":[{"uri":"wallet://docs/policy-authoring","name":"policy-authoring"}]});
     let (ready_tx, ready_rx) = mpsc::channel();
     let fake_catalog = catalog.clone();
+    let fake_resources = resources.clone();
     let wallet = thread::spawn(move || {
         let (first, _) = listener.accept().unwrap();
-        let (mut first_read, mut first_write) = handshake(first, &fake_catalog);
+        let (mut first_read, mut first_write) =
+            handshake(first, &fake_catalog, &fake_resources, false);
         ready_tx.send(1).unwrap();
 
+        // Forwarded once the harness answers the handshake the wallet just
+        // supplied, rather than replayed by the bridge beforehand.
+        assert_eq!(read(&mut first_read)["method"], "notifications/initialized");
         let list = read(&mut first_read);
         assert_eq!(list["id"], 10);
         write(
             &mut first_write,
             &json!({"jsonrpc":"2.0","id":10,"result":fake_catalog}),
+        );
+        let listed_resources = read(&mut first_read);
+        assert_eq!(listed_resources["method"], "resources/list");
+        write(
+            &mut first_write,
+            &json!({"jsonrpc":"2.0","id":listed_resources["id"],"result":fake_resources}),
         );
         write(
             &mut first_write,
@@ -244,7 +317,8 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         drop(first_write);
 
         let (second, _) = listener.accept().unwrap();
-        let (mut second_read, mut second_write) = handshake(second, &fake_catalog);
+        let (mut second_read, mut second_write) =
+            handshake(second, &fake_catalog, &fake_resources, true);
         ready_tx.send(2).unwrap();
         let first_call = read(&mut second_read);
         let second_call = read(&mut second_read);
@@ -273,21 +347,36 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
     );
-    assert_eq!(receive(&mut stdout)["id"], 1);
+    // The wallet describes itself: its instructions are the ones the model
+    // reads, and the capabilities it declares are the ones the harness
+    // records — with the change notifications the bridge, not the wallet,
+    // is the one able to send.
+    let initialized = receive(&mut stdout);
+    assert_eq!(initialized["id"], 1);
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "fake-wallet");
+    assert_eq!(
+        initialized["result"]["instructions"],
+        "Wallet instructions the agent must actually receive."
+    );
+    assert_eq!(
+        initialized["result"]["capabilities"],
+        json!({"tools":{"listChanged":true},"resources":{"listChanged":true}})
+    );
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     );
     ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(
-        receive(&mut stdout)["method"],
-        "notifications/tools/list_changed"
-    );
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}),
     );
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":11,"method":"resources/list","params":{}}),
+    );
     assert_eq!(receive(&mut stdout)["result"], catalog);
+    assert_eq!(receive(&mut stdout)["result"], resources);
     assert_eq!(receive(&mut stdout)["method"], "notifications/progress");
     let server_request = receive(&mut stdout);
     assert_eq!(server_request["id"], 99);
@@ -375,6 +464,9 @@ fn standard_server_version_mismatch_terminates_the_bridge() {
         // Return immediately: after reading the standard serverInfo.version,
         // the bridge must not forward initialized, tools/list, or tool calls.
     });
+    // The mismatch is found while answering `initialize`, so the harness is
+    // told the session cannot start instead of recording a handshake from a
+    // bridge that is about to stop.
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
         .args(["--client", "codex"])
@@ -385,20 +477,16 @@ fn standard_server_version_mismatch_terminates_the_bridge() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let stdout = BufReader::new(child.stdout.take().unwrap());
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
-    );
-    assert_eq!(receive(&mut stdout)["id"], 1);
-    send(
-        &mut stdin,
-        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
     );
     drop(stdin);
     drop(stdout);
     let output = child.wait_with_output().unwrap();
     assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("Start a new agent session"), "{stderr}");
     assert!(stderr.contains("999.0.0"), "{stderr}");
