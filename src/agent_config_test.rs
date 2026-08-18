@@ -15,6 +15,25 @@ fn bridge_helper_path_is_fixed_outside_the_application_bundle() {
     assert!(!filename.contains(env!("CARGO_PKG_VERSION")));
 }
 
+/// An update leaves every managed config untouched by design, so the config
+/// can no longer answer whether an agent reaches this build. These bytes can.
+#[test]
+fn a_helper_from_another_build_is_not_reported_as_the_current_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join(BRIDGE_FILE_NAME);
+    let packaged = b"bridge 1.3.0".as_slice();
+
+    assert!(!installed_image_matches(&installed, packaged).unwrap());
+    fs::write(&installed, b"bridge 1.2.0-longer").unwrap();
+    assert!(!installed_image_matches(&installed, packaged).unwrap());
+    // Same length, different build: the cheap length check must not be the
+    // only one that runs.
+    fs::write(&installed, b"bridge 1.2.9").unwrap();
+    assert!(!installed_image_matches(&installed, packaged).unwrap());
+    fs::write(&installed, packaged).unwrap();
+    assert!(installed_image_matches(&installed, packaged).unwrap());
+}
+
 #[test]
 fn superseded_helper_path_skips_names_already_taken() {
     let directory = tempfile::tempdir().unwrap();

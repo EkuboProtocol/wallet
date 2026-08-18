@@ -1569,7 +1569,27 @@ fn set_agent_installed(kind: AgentKind, installed: bool) -> Result<()> {
     Ok(())
 }
 
+/// Put this build's bridge at the path every managed config names.
+///
+/// Launch already does this, so ordinarily there is nothing to repair. It is
+/// checked again here because the answer this function protects — whether an
+/// agent is installed — is about whether that agent can reach *this* wallet,
+/// and the config alone cannot say: it names a fixed path and keeps naming
+/// it whichever build's bytes are there. A wallet that finds someone else's
+/// helper replaces it rather than reporting a state the owner has no action
+/// for.
+fn repair_bridge_helper() -> Result<()> {
+    if crate::agent_config::bridge_helper_is_current()? {
+        return Ok(());
+    }
+    crate::agent_config::install_bridge_helper().context(
+        "the bridge installed for agents is from another build and could not be replaced",
+    )?;
+    Ok(())
+}
+
 fn detect_agents() -> Result<Vec<DetectedAgent>> {
+    let helper = repair_bridge_helper().map_err(|error| SharedString::from(format!("{error:#}")));
     Ok(AgentAdapter::supported()?
         .into_iter()
         .filter(AgentAdapter::detected)
@@ -1577,10 +1597,12 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
             kind: adapter.kind,
             display_name: adapter.display_name,
             config_path: adapter.config_path.display().to_string(),
-            installed: adapter
-                .preview_install()
-                .map(|preview| !preview.has_changes())
-                .map_err(|error| format!("{error:#}").into()),
+            installed: helper.clone().and_then(|()| {
+                adapter
+                    .preview_install()
+                    .map(|preview| !preview.has_changes())
+                    .map_err(|error| format!("{error:#}").into())
+            }),
         })
         .collect())
 }

@@ -53,9 +53,57 @@ fn installed_bridge_path() -> Result<PathBuf> {
     Ok(helpers_dir()?.join(BRIDGE_FILE_NAME))
 }
 
+/// The helper image this build would install. Release builds use the one
+/// shipped beside the wallet executable; debug builds may use the workspace
+/// build-tree binary.
+fn packaged_bridge_bytes() -> Result<Vec<u8>> {
+    let executable = std::env::current_exe().context("could not locate the wallet executable")?;
+    let packaged = executable.with_file_name(BRIDGE_FILE_NAME);
+    #[cfg(debug_assertions)]
+    let source = if packaged.is_file() {
+        packaged
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/debug")
+            .join(BRIDGE_FILE_NAME)
+    };
+    #[cfg(not(debug_assertions))]
+    let source = packaged;
+    ensure!(source.is_file(), "the packaged MCP bridge is missing");
+    let bytes = fs::read(&source).context("failed to read the packaged MCP bridge")?;
+    ensure!(!bytes.is_empty(), "the packaged MCP bridge is empty");
+    Ok(bytes)
+}
+
+/// Whether the helper a harness would execute is the one this build ships.
+///
+/// Every managed config names one fixed path, which is what lets a config
+/// written once survive an update — and also what makes an agent look
+/// installed no matter which build's bytes are sitting at that path. Only a
+/// comparison of the bytes distinguishes an agent that reaches this wallet
+/// from one that will be told its bridge is the wrong version.
+///
+/// A symlink into the application bundle would make the question moot, but
+/// it would also put the bundle's own binary behind every long-lived bridge
+/// process, which is exactly what [`install_bridge_helper`] copies to avoid
+/// while the updater swaps that bundle underneath.
+pub fn bridge_helper_is_current() -> Result<bool> {
+    installed_image_matches(&installed_bridge_path()?, &packaged_bridge_bytes()?)
+}
+
+fn installed_image_matches(installed: &Path, packaged: &[u8]) -> Result<bool> {
+    let Ok(metadata) = fs::metadata(installed) else {
+        return Ok(false);
+    };
+    // Different lengths settle it without reading a megabyte twice.
+    if metadata.len() != packaged.len() as u64 {
+        return Ok(false);
+    }
+    Ok(fs::read(installed)? == packaged)
+}
+
 /// Atomically install the helper at its fixed path in the wallet's private
-/// per-user directory. Release builds use the helper shipped beside the wallet
-/// executable; debug builds may use the workspace build-tree binary.
+/// per-user directory.
 ///
 /// Harnesses execute this copy, never the binary inside the installed
 /// application. A long-lived bridge therefore holds no executable or file
@@ -70,21 +118,7 @@ fn installed_bridge_path() -> Result<PathBuf> {
 pub fn install_bridge_helper() -> Result<PathBuf> {
     let parent = helpers_dir()?;
     let installed = parent.join(BRIDGE_FILE_NAME);
-    let executable = std::env::current_exe().context("could not locate the wallet executable")?;
-    let packaged = executable.with_file_name(BRIDGE_FILE_NAME);
-    #[cfg(debug_assertions)]
-    let source = if packaged.is_file() {
-        packaged.clone()
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/debug")
-            .join(BRIDGE_FILE_NAME)
-    };
-    #[cfg(not(debug_assertions))]
-    let source = packaged;
-    ensure!(source.is_file(), "the packaged MCP bridge is missing");
-    let bytes = fs::read(&source).context("failed to read the packaged MCP bridge")?;
-    ensure!(!bytes.is_empty(), "the packaged MCP bridge is empty");
+    let bytes = packaged_bridge_bytes()?;
     fs::create_dir_all(&parent)?;
     #[cfg(unix)]
     {
