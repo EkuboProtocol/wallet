@@ -10197,6 +10197,7 @@ impl WalletWindow {
             || self.review_flow.is_in_progress()
             || self.account_export.is_some()
             || self.token_editor_open
+            || self.token_price_editor.is_some()
             || self.network_editor_open
     }
 
