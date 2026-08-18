@@ -48,6 +48,7 @@ pub mod simulation;
 pub mod simulation_store;
 pub mod sql;
 pub mod token_list;
+pub mod token_prices;
 pub mod token_store;
 pub mod typed_data;
 pub mod update_trust;

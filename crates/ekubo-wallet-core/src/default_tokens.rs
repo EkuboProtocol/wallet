@@ -96,8 +96,11 @@ fn insert_all(
     added_at: DateTime<Utc>,
 ) -> Result<usize> {
     let mut statement = connection.prepare(
-        "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO tokens(
+             chain_id, address, symbol, name, decimals, source, added_at,
+             approximate_usd_price
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(chain_id, address) DO NOTHING",
     )?;
     let mut seeded = 0;
@@ -119,6 +122,12 @@ fn insert_all(
             token.decimals,
             SOURCE,
             Millis(added_at),
+            // Roughly what it was worth when this build was cut, so a fresh
+            // wallet's Portfolio tab can sort by holding size and hold back
+            // the dust on the first read rather than after the owner has
+            // typed a few hundred numbers. Absent for anything the snapshot
+            // does not carry, which is what an unpriced row means.
+            crate::token_prices::seeded_token_price(token.chain_id, token.address),
         ])?;
     }
     Ok(seeded)

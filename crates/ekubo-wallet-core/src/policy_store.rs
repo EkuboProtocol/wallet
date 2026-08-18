@@ -12,7 +12,7 @@ use crate::{
     },
     core::policy::WalletPolicy,
     human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
-    sql::{Millis, RowExt},
+    sql::{Blob, Millis, RowExt},
 };
 use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1584,6 +1584,13 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
 struct Migration {
     to_version: i64,
     statements: &'static [&'static str],
+    /// Data this step writes, for a migration whose content is a table the
+    /// build ships rather than a change to the schema.
+    ///
+    /// Runs after the statements and inside the same transaction as the
+    /// version bump, so a step that seeds is as all-or-nothing as one that
+    /// only adds a column.
+    seed: Option<fn(&Connection) -> Result<()>>,
 }
 
 /// The ordered path from any schema this build can upgrade to the current one.
@@ -1600,6 +1607,7 @@ const MIGRATIONS: &[Migration] = &[
             AUTOMATIONS_WALLET_INDEX,
             AUTOMATIONS_KEY_INDEX,
         ],
+        seed: None,
     },
     Migration {
         to_version: 5,
@@ -1608,6 +1616,7 @@ const MIGRATIONS: &[Migration] = &[
             AUTOMATION_RUNS_TABLE,
             AUTOMATION_RUNS_INDEX,
         ],
+        seed: None,
     },
     // Every row that existed before this column did was queued because the
     // policy would not sign it, which is exactly what the default says, so
@@ -1618,6 +1627,7 @@ const MIGRATIONS: &[Migration] = &[
             "ALTER TABLE pending_transactions ADD COLUMN requested_review INTEGER NOT NULL
                  DEFAULT 0 CHECK (requested_review IN (0, 1))",
         ],
+        seed: None,
     },
     // Display data of the weakest kind: roughly what one whole token is worth,
     // as the owner has said, read by nothing but the order and the default
@@ -1627,8 +1637,37 @@ const MIGRATIONS: &[Migration] = &[
         to_version: 7,
         statements: &["ALTER TABLE tokens ADD COLUMN approximate_usd_price REAL
                  CHECK (approximate_usd_price IS NULL OR approximate_usd_price >= 0.0)"],
+        seed: None,
+    },
+    // A column nobody has filled in orders nothing, so the values this build
+    // ships are written into the rows that have none. A database created after
+    // this seeds the same values as it inserts the default token list, which is
+    // why this step exists only for the databases that came before it.
+    //
+    // Where a row already carries a value, it is the owner's and is left alone.
+    Migration {
+        to_version: 8,
+        statements: &[],
+        seed: Some(seed_token_prices),
     },
 ];
+
+/// Write the shipped approximate values into confirmed tokens that have none.
+///
+/// Display data of the weakest kind — it orders the portfolio tab and decides
+/// which of its rows are dust, and is read by nothing else — so a token the
+/// snapshot has never heard of is left unpriced rather than guessed at.
+fn seed_token_prices(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare(
+        "UPDATE tokens SET approximate_usd_price = ?3
+         WHERE chain_id = ?1 AND address = ?2 AND approximate_usd_price IS NULL",
+    )?;
+    for price in crate::token_prices::seeded_prices() {
+        let chain_id = i64::try_from(price.chain_id).context("chain ID out of range")?;
+        statement.execute(params![chain_id, Blob(price.address), price.usd_price])?;
+    }
+    Ok(())
+}
 
 /// Brings an existing database up to [`SCHEMA_VERSION`], returning the version
 /// it ends at.
@@ -1654,7 +1693,7 @@ fn migrate(connection: &Connection, from_version: i64) -> Result<i64> {
         );
         let mut statements = migration.statements.to_vec();
         statements.push(record_version.as_str());
-        run_transaction(connection, &statements).with_context(|| {
+        run_transaction_with(connection, &statements, migration.seed).with_context(|| {
             format!(
                 "failed to migrate the policy database from schema {version} to {}",
                 migration.to_version
@@ -2154,12 +2193,29 @@ const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals 
  ) STRICT";
 
 fn run_transaction(connection: &Connection, statements: &[&str]) -> Result<()> {
+    run_transaction_with(connection, statements, None)
+}
+
+/// The statements, then whatever data step the caller carries, then the
+/// commit — one transaction over all of it, so a migration that ships a table
+/// is as all-or-nothing as one that only adds a column.
+fn run_transaction_with(
+    connection: &Connection,
+    statements: &[&str],
+    seed: Option<fn(&Connection) -> Result<()>>,
+) -> Result<()> {
     connection.execute_batch("BEGIN IMMEDIATE")?;
     for statement in statements {
         if let Err(error) = connection.execute_batch(statement) {
             let _ = connection.execute_batch("ROLLBACK");
             return Err(error).context("schema statement failed");
         }
+    }
+    if let Some(seed) = seed
+        && let Err(error) = seed(connection)
+    {
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(error).context("schema seed failed");
     }
     if let Err(error) = connection.execute_batch("COMMIT") {
         let _ = connection.execute_batch("ROLLBACK");

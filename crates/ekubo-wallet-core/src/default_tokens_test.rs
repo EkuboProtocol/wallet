@@ -85,6 +85,34 @@ fn a_new_database_starts_with_the_default_list() {
     assert_eq!(store.count_proposals().unwrap(), 0);
 }
 
+/// A fresh wallet's Portfolio tab has to be able to sort its holdings and hold
+/// back the dust on the very first read, which it cannot do from a column that
+/// is null in every row of a list seventeen thousand long.
+#[test]
+fn a_new_database_carries_the_values_this_build_ships() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = TokenStore::new(
+        PolicyStore::open_with(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([9; 32]),
+            SeedDefaults::Yes,
+        )
+        .unwrap(),
+    );
+    let priced = *crate::token_prices::seeded_prices()
+        .iter()
+        .find(|price| {
+            embedded()
+                .unwrap()
+                .tokens
+                .iter()
+                .any(|token| token.chain_id == price.chain_id && token.address == price.address)
+        })
+        .expect("the default list and the price snapshot must overlap");
+    let stored = store.get(priced.chain_id, priced.address).unwrap().unwrap();
+    assert_eq!(stored.approximate_usd_price, Some(priced.usd_price));
+}
+
 #[test]
 fn seeded_rows_use_the_default_tokens_source() {
     let directory = tempfile::tempdir().unwrap();

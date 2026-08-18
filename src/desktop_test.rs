@@ -448,12 +448,14 @@ fn unpriced_portfolio_rows_stay_commingled_by_chain_then_token_address() {
 }
 
 #[test]
-fn the_portfolio_leads_with_gas_then_with_whatever_is_worth_most() {
+fn the_portfolio_leads_with_whatever_is_worth_most() {
     let mut rows = vec![
         balance_row(1, "0xdust", false, Some(0.5)),
         balance_row(1, "0xunpriced", false, None),
         balance_row(1, "0xbig", false, Some(4_000.0)),
-        balance_row(1, "0x00", true, None),
+        // A chain's own currency, worth less here than two of the tokens
+        // beside it, and placed by that rather than by being native.
+        balance_row(1, "0x00", true, Some(30.0)),
         balance_row(1, "0xsmall", false, Some(12.0)),
     ];
 
@@ -463,20 +465,21 @@ fn the_portfolio_leads_with_gas_then_with_whatever_is_worth_most() {
         rows.iter()
             .map(|row| row.asset_address.as_str())
             .collect::<Vec<_>>(),
-        ["0x00", "0xbig", "0xsmall", "0xdust", "0xunpriced"],
-        "the chain's own currency pays for everything else on it, so it leads; \
-         then the priced holdings largest first; then what nobody has priced"
+        ["0xbig", "0x00", "0xsmall", "0xdust", "0xunpriced"],
+        "worth is the whole order, and what nobody could value goes last"
     );
 }
 
 #[test]
-fn dust_is_what_is_worth_under_a_dollar_or_has_no_recorded_value() {
+fn dust_is_what_is_worth_under_a_dollar() {
     assert!(balance_row(1, "0xa", false, Some(0.99)).is_low_value());
-    assert!(balance_row(1, "0xa", false, None).is_low_value());
     assert!(!balance_row(1, "0xa", false, Some(1.0)).is_low_value());
-    // A chain's own currency is never dust, priced or not: it is the balance
-    // every other row on that chain needs in order to move at all, and no
-    // price is recorded for it anywhere.
+    // A chain's own currency is dust on the same terms as anything else.
+    assert!(balance_row(1, "0x00", true, Some(0.01)).is_low_value());
+    // A token nothing could put a value on is held back with the dust; a gas
+    // balance in the same position is not, because hiding it would hide the
+    // balance every other row on that chain needs in order to move.
+    assert!(balance_row(1, "0xa", false, None).is_low_value());
     assert!(!balance_row(1, "0x00", true, None).is_low_value());
 }
 

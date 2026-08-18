@@ -1161,15 +1161,17 @@ const LOW_VALUE_USD_THRESHOLD: f64 = 1.0;
 impl PortfolioBalanceRow {
     /// Whether the tab hides this row until asked.
     ///
-    /// A native balance never counts as dust: it is what pays for everything
-    /// else on its chain, there is one per network, and no price for it is
-    /// recorded anywhere — so the rule that hides unpriced tokens would hide
-    /// exactly the balance nobody can transact without.
+    /// A chain's own currency is dust on the same terms as anything else: an
+    /// empty gas balance on a chain nobody uses is exactly the row a person
+    /// opening this tab did not come to read. What is never hidden is a row
+    /// whose worth is *unknown* — the shipped values do not cover every chain,
+    /// and hiding a gas balance for want of a number would hide the balance
+    /// every other row on that chain needs in order to move.
     fn is_low_value(&self) -> bool {
-        !self.native
-            && self
-                .approximate_usd_value
-                .is_none_or(|value| value < LOW_VALUE_USD_THRESHOLD)
+        match self.approximate_usd_value {
+            Some(value) => value < LOW_VALUE_USD_THRESHOLD,
+            None => !self.native,
+        }
     }
 }
 
@@ -1247,9 +1249,16 @@ fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalan
                     native.map(|currency| currency.decimals),
                     "wei",
                 ),
-                // No price is recorded for a chain's own currency: it is not a
-                // row in the token database, and it is never hidden anyway.
-                approximate_usd_value: None,
+                // A chain's own currency has no row in the token database to
+                // carry a value, so its worth comes from the snapshot this
+                // build ships. Chains the snapshot does not cover stay
+                // unvalued, which is the one case a balance is never hidden
+                // for: it is what pays for everything else on that chain.
+                approximate_usd_value: approximate_usd_value(
+                    &portfolio.native_balance,
+                    native.map(|currency| currency.decimals),
+                    ekubo_wallet_core::token_prices::native_usd_price(item.network.chain_id),
+                ),
                 explorer_url: None,
             });
         }
@@ -1488,20 +1497,16 @@ fn render_portfolio_balance_row(
 
 /// Biggest holding first, as far as anything is known about size.
 ///
-/// Three bands, in this order: each chain's own currency, because it is what
-/// pays for everything else on that chain; then priced tokens, largest value
-/// first; then everything nobody has priced, in the chain-and-address order
-/// this list has always used. Sorting the unpriced tail by anything else would
-/// be inventing a ranking out of an absence.
+/// What a row is worth is the whole order: a chain's own currency is a holding
+/// like any other and takes its place among them rather than ahead of them.
+/// Rows nobody could put a value on go last, in the chain-and-address order
+/// this list has always used, because sorting an absence by anything else
+/// would be inventing a ranking out of it.
 fn sort_portfolio_balance_rows(rows: &mut [PortfolioBalanceRow]) {
     rows.sort_by(|left, right| {
-        let band = |row: &PortfolioBalanceRow| match (row.native, row.approximate_usd_value) {
-            (true, _) => 0_u8,
-            (false, Some(_)) => 1,
-            (false, None) => 2,
-        };
-        band(left)
-            .cmp(&band(right))
+        left.approximate_usd_value
+            .is_none()
+            .cmp(&right.approximate_usd_value.is_none())
             .then_with(
                 || match (left.approximate_usd_value, right.approximate_usd_value) {
                     (Some(left), Some(right)) => right

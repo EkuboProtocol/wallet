@@ -347,6 +347,24 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         // Wind the database all the way back to the schema that shipped
         // before automations existed, undoing every migration in order so the
         // forward path is exercised end to end rather than from its last step.
+        // One confirmed token the shipped snapshot has a value for, recorded
+        // the way a database from before the column would hold it: named, and
+        // worth an unknown amount.
+        let priced = *crate::token_prices::seeded_prices()
+            .first()
+            .expect("the build ships at least one value");
+        store
+            .connection
+            .execute(
+                "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
+                 VALUES (?1, ?2, 'SEED', NULL, 18, 'test', 0)
+                 ON CONFLICT(chain_id, address) DO NOTHING",
+                params![
+                    i64::try_from(priced.chain_id).unwrap(),
+                    Blob(priced.address)
+                ],
+            )
+            .unwrap();
         store
             .connection
             .execute_batch(
@@ -426,6 +444,74 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
     assert_eq!(
         priced, 1,
         "the migration added the approximate value column"
+    );
+    // And filled it in for the tokens this build ships a value for. A column
+    // nobody has filled in orders nothing, and an owner who upgraded should
+    // not have to type a few hundred numbers to get a sorted portfolio.
+    let seeded: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM tokens WHERE approximate_usd_price IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        seeded > 0,
+        "the migration must seed the values this build ships"
+    );
+}
+
+/// A value the owner recorded is theirs. The seed fills in what is missing and
+/// never argues with what is already there.
+#[test]
+fn seeding_approximate_values_never_overwrites_one_the_owner_recorded() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let priced = *crate::token_prices::seeded_prices()
+        .first()
+        .expect("the build ships at least one value");
+    {
+        let store = PolicyStore::open(&path, &key(23)).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO tokens(
+                     chain_id, address, symbol, name, decimals, source, added_at,
+                     approximate_usd_price
+                 )
+                 VALUES (?1, ?2, 'OWN', NULL, 18, 'test', 0, 4242.0)
+                 ON CONFLICT(chain_id, address)
+                 DO UPDATE SET approximate_usd_price = 4242.0",
+                params![
+                    i64::try_from(priced.chain_id).unwrap(),
+                    Blob(priced.address)
+                ],
+            )
+            .unwrap();
+        // Wind back to the schema before the seeding step so opening the
+        // database runs it again over a row that now has an owner's value.
+        store
+            .connection
+            .execute_batch("UPDATE schema_metadata SET version = 7 WHERE singleton = 1")
+            .unwrap();
+    }
+
+    let store = PolicyStore::open(&path, &key(23)).unwrap();
+    let recorded: f64 = store
+        .connection
+        .query_row(
+            "SELECT approximate_usd_price FROM tokens WHERE chain_id = ?1 AND address = ?2",
+            params![
+                i64::try_from(priced.chain_id).unwrap(),
+                Blob(priced.address)
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        (recorded - 4242.0).abs() < f64::EPSILON,
+        "the seed overwrote a value the owner recorded: {recorded}"
     );
 }
 
