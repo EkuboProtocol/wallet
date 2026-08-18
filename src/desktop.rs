@@ -12522,6 +12522,11 @@ impl WalletWindow {
             .child(
                 div()
                     .debug_selector(|| "automation-cadence".to_owned())
+                    // A shape with no sentence falls back to its expression,
+                    // and an expression is code wherever it is drawn: the
+                    // asterisks and spaces of a cron field only line up in the
+                    // mono face.
+                    .when(cadence.is_none(), |line| line.font_family(MONO_FONT_FAMILY))
                     .child(selectable_text(
                         format!("automation-cadence-{id}"),
                         cadence.as_ref().unwrap_or(&expression),
