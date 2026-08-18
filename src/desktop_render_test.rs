@@ -2024,6 +2024,60 @@ fn every_guided_setup_row_draws_and_dismissal_takes_the_card_away(cx: &mut gpui:
 }
 
 #[gpui::test]
+fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestAppContext) {
+    // The window can be dragged down to 660x500. Five tasks with their
+    // explanations come to more than that, so the card has to give somewhere —
+    // and the place it must not give is the top, where the count and the way
+    // out live.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let smallest = gpui::size(px(660.0), px(500.0));
+    // The card sizes itself from the window rather than from the space it is
+    // handed, because the window is what its margins are measured off — so the
+    // window itself has to shrink for this to be the real case.
+    cx.simulate_window_resize(window, smallest);
+    let bounds = measure_at(
+        cx,
+        window,
+        &view,
+        smallest,
+        &["guided-setup", "guided-setup-header", "guided-setup-tasks"],
+    );
+    let card = bounds[0].expect("the card must draw in a minimum-size window");
+    let header = bounds[1].expect("the card header must draw");
+    let tasks = bounds[2].expect("the task list must draw");
+
+    assert!(
+        card.origin.y >= px(0.0) && card.origin.y + card.size.height <= smallest.height,
+        "the card does not fit a 660x500 window: {card:?}"
+    );
+    assert!(
+        card.origin.x >= px(0.0) && card.origin.x + card.size.width <= smallest.width,
+        "the card does not fit across a 660x500 window: {card:?}"
+    );
+    assert!(
+        header.origin.y >= px(0.0) && header.origin.y + header.size.height <= smallest.height,
+        "the header left the window: {header:?}"
+    );
+    // Shrinking must land on the list, and must leave enough of it to read a
+    // task from: a card whose list collapsed to nothing is a header with a
+    // paragraph under it.
+    assert!(
+        tasks.size.height >= px(80.0),
+        "the task list was crushed instead of scrolled: {tasks:?}"
+    );
+    let scroll = cx.read_entity(&view, |wallet, _| {
+        wallet.guided_setup_scroll_handle.max_offset()
+    });
+    assert!(
+        scroll.y > px(0.0),
+        "a list too tall for a 660x500 window must actually scroll: {scroll:?}"
+    );
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn a_stopped_automation_leads_with_why_and_offers_to_run_it_again(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);

@@ -2193,6 +2193,65 @@ fn dismissal_outlasts_any_amount_of_remaining_work() {
 }
 
 #[test]
+fn the_guided_setup_card_fits_every_window_the_wallet_can_be_dragged_to() {
+    // 660x500 is the window minimum, so it is the smallest the card ever has
+    // to survive, and the card is pinned 20px off two edges.
+    for (width, height) in [(660.0, 500.0), (960.0, 650.0), (1400.0, 900.0)] {
+        let viewport = gpui::size(px(width), px(height));
+        let metrics = guided_setup_metrics(viewport);
+
+        assert!(
+            metrics.max_height + px(40.0) <= viewport.height,
+            "the card outgrows a {width}x{height} window: {:?}",
+            metrics.max_height
+        );
+        assert!(
+            metrics.width + px(40.0) <= viewport.width,
+            "the card is wider than a {width}x{height} window: {:?}",
+            metrics.width
+        );
+    }
+}
+
+#[test]
+fn a_roomy_window_does_not_make_the_guided_setup_card_enormous() {
+    // The card is an aside, not the page: past the point where every task
+    // fits, more window is not more checklist.
+    let opening = guided_setup_metrics(gpui::size(px(960.0), px(650.0)));
+    let huge = guided_setup_metrics(gpui::size(px(3840.0), px(2160.0)));
+
+    assert_eq!(huge.width, px(400.0));
+    assert_eq!(huge.max_height, px(560.0));
+    assert!(opening.max_height <= huge.max_height);
+}
+
+#[test]
+fn the_guided_setup_scrolls_its_tasks_and_keeps_its_header() {
+    let source = include_str!("desktop.rs");
+    let card = source
+        .split_once("fn render_guided_setup")
+        .expect("guided setup card exists")
+        .1
+        .split_once("impl Render for WalletWindow")
+        .expect("guided setup card has an end marker")
+        .0;
+
+    // Exactly one scrolling box, and it is the task list. A second one on the
+    // card would take the count and the way out off the top of the screen,
+    // and two nested scroll boxes would argue over the wheel.
+    assert_eq!(card.matches("overflow_y_scroll()").count(), 1);
+    let list = card
+        .split_once("guided-setup-tasks")
+        .expect("the task list is the box that scrolls")
+        .1;
+    assert!(list.contains("track_scroll(&self.guided_setup_scroll_handle)"));
+    assert!(list.contains("overflow_y_scroll()"));
+    // The theme draws no scrollbar track, so a clipped list says nothing
+    // about being scrollable unless the indicator says it.
+    assert!(list.contains("self.guided_setup_overflow_indicator.element()"));
+}
+
+#[test]
 fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
     // The stored name is what survives a rename of the variant, so two tasks
     // sharing one would silently tick each other's box.

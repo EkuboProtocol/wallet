@@ -999,6 +999,33 @@ fn network_editor_metrics(viewport: gpui::Size<gpui::Pixels>) -> NetworkEditorMe
     }
 }
 
+struct GuidedSetupMetrics {
+    width: gpui::Pixels,
+    max_height: gpui::Pixels,
+}
+
+/// How large the getting-started card may be in a window of this size.
+///
+/// The card is pinned 20px off two edges, so a card taller than the window
+/// less those margins runs its own header off the top — the failure the
+/// scrolling task list exists to prevent, moved rather than fixed. The wallet
+/// opens at 960x650 but can be dragged down to 660x500, and both dimensions
+/// have to give: a 400px card on a 660px window is most of the width.
+fn guided_setup_metrics(viewport: gpui::Size<gpui::Pixels>) -> GuidedSetupMetrics {
+    const MARGIN: gpui::Pixels = px(20.0);
+    GuidedSetupMetrics {
+        width: (viewport.width - MARGIN * 2.0)
+            .min(px(400.0))
+            .max(px(240.0)),
+        // A card with room for the header, the summary, and one task is still
+        // worth drawing; below that it would be a scroll box with nothing
+        // around it, so the floor stops shrinking rather than the card.
+        max_height: (viewport.height - MARGIN * 2.0)
+            .min(px(560.0))
+            .max(px(200.0)),
+    }
+}
+
 fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
     div().w_full().child(content.title(title))
 }
@@ -1732,6 +1759,8 @@ pub struct WalletWindow {
     legal_review: Option<LegalReview>,
     legal_gate: bool,
     guided_setup: GuidedSetup,
+    guided_setup_scroll_handle: ScrollHandle,
+    guided_setup_overflow_indicator: ScrollOverflowIndicator,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
     testnet_mode: bool,
@@ -4676,6 +4705,12 @@ impl WalletWindow {
         // annoyance; hiding it from somebody who has not is the whole feature
         // failing silently.
         let guided_setup = GuidedSetup::new(owner.guided_setup().unwrap_or_default());
+        // Five explanations do not fit a short window, and a card that clipped
+        // one mid-sentence with nothing to say so would read as broken rather
+        // than as scrollable — the theme draws no scrollbar track.
+        let guided_setup_scroll_handle = ScrollHandle::new();
+        let guided_setup_overflow_indicator =
+            ScrollOverflowIndicator::new(guided_setup_scroll_handle.clone(), cx);
         let route_scroll_handle = ScrollHandle::new();
         let route_overflow_indicator =
             ScrollOverflowIndicator::new(route_scroll_handle.clone(), cx);
@@ -4768,6 +4803,8 @@ impl WalletWindow {
             legal_review: None,
             legal_gate: false,
             guided_setup,
+            guided_setup_scroll_handle,
+            guided_setup_overflow_indicator,
             route_errors: BTreeMap::new(),
             appearance_preference,
             testnet_mode,
@@ -14867,7 +14904,8 @@ impl WalletWindow {
     /// its own footprint so a press lands on the row rather than whatever is
     /// underneath, and is drawn before the decision surfaces so a review that
     /// arrives mid-checklist covers it rather than fighting it for the screen.
-    fn render_guided_setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_guided_setup(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let metrics = guided_setup_metrics(window.viewport_size());
         let completed = self.guided_setup.completed_count();
         let total = SetupTask::ALL.len();
         let rows = SetupTask::ALL.into_iter().map(|task| {
@@ -14941,15 +14979,42 @@ impl WalletWindow {
                 .child(marker)
                 .child(text)
         });
+        // The header and the summary line stay put; only the tasks scroll.
+        // Losing "3 of 5" and the way out off the top of a scrolled list is
+        // how a card becomes something somebody has to fight.
+        // The list is the only part of the card that gives: it takes what the
+        // header and the summary leave, and scrolls the rest. `min_h_0` is
+        // what lets it shrink past its content at all — without it the tasks
+        // would push the card past the cap and take the header off the top.
+        let list = div()
+            .relative()
+            .w_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("guided-setup-tasks")
+                    .debug_selector(|| "guided-setup-tasks".to_owned())
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .track_scroll(&self.guided_setup_scroll_handle)
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(rows),
+            )
+            .child(self.guided_setup_overflow_indicator.element());
         let card = div()
             .id("guided-setup")
             .debug_selector(|| "guided-setup".to_owned())
             .absolute()
             .right(px(20.0))
             .bottom(px(20.0))
-            .w(px(400.0))
-            .max_h(px(560.0))
-            .overflow_y_scroll()
+            .w(metrics.width)
+            .max_h(metrics.max_height)
             .p_3()
             .rounded(cx.theme().radius_lg)
             .shadow_lg()
@@ -14962,7 +15027,9 @@ impl WalletWindow {
             .gap_1()
             .child(
                 h_flex()
+                    .debug_selector(|| "guided-setup-header".to_owned())
                     .w_full()
+                    .flex_shrink_0()
                     .items_center()
                     .justify_between()
                     .gap_2()
@@ -14993,6 +15060,7 @@ impl WalletWindow {
             .child(
                 div()
                     .text_xs()
+                    .flex_shrink_0()
                     .whitespace_normal()
                     .pb_1()
                     .text_color(cx.theme().muted_foreground)
@@ -15002,7 +15070,7 @@ impl WalletWindow {
                          of them.",
                     ),
             )
-            .children(rows);
+            .child(list);
         div()
             .absolute()
             .inset_0()
@@ -15122,7 +15190,7 @@ impl Render for WalletWindow {
             // ahead of the overlays below also settles the layering: a review,
             // a legal document, or an export covers it, as they must.
             .when(self.guided_setup.visible() && !self.legal_gate, |view| {
-                view.child(self.render_guided_setup(cx))
+                view.child(self.render_guided_setup(window, cx))
             })
             .when(self.command_palette, |view| {
                 view.child(self.render_palette(cx))
