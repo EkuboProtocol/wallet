@@ -22,6 +22,14 @@ pub enum SessionStatus {
     Pairing,
     AwaitingProposal,
     Connected,
+    /// The relay connection dropped and the session is dialing again.
+    ///
+    /// A distinct state rather than a silent one, because the session is still
+    /// the owner's and the dapp still believes in it — what has gone away is
+    /// the socket in between, and a row that went on saying "Connected"
+    /// through an outage would be the wallet asserting something it cannot
+    /// currently do.
+    Reconnecting,
     Disconnecting,
 }
 
@@ -33,6 +41,7 @@ impl SessionStatus {
             Self::Pairing => "Connecting",
             Self::AwaitingProposal => "Waiting for the dapp",
             Self::Connected => "Connected",
+            Self::Reconnecting => "Reconnecting",
             Self::Disconnecting => "Disconnecting",
         }
     }

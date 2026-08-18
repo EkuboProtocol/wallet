@@ -229,6 +229,9 @@ pub enum SessionEvent<'a> {
         code: i64,
         message: &'a str,
     },
+    /// The relay connection dropped and the session is dialing again. The
+    /// session is still the owner's; only the socket under it went away.
+    RelayDisconnected,
     RelayReconnected,
 }
 
@@ -287,8 +290,87 @@ enum Woke {
 /// What both refusals say, because they are the same refusal: whatever the
 /// dapp asked for, the answer is that this session is over.
 const EXPIRED_REFUSAL: &str = "This session has expired. Reconnect to continue.";
+
+/// What to tell the owner when a relay outage outlives the session.
+///
+/// The old wording said the dapp would show the session as disconnected, which
+/// is the opposite of what happens. A dapp's own client reconnects to the relay
+/// and never hears that the wallet stopped, so it goes on showing a live
+/// session — which is precisely why someone reading this needs to be sent to
+/// the dapp to clear it.
+const STALE_AFTER_OUTAGE: &str = "The dapp will most likely still show the session as connected: disconnect it there, then \
+     open Connections → WalletConnect and use a fresh link.";
+
+/// How long to wait before the first reconnect attempt.
+///
+/// Long enough that a socket dropped by a network that is still settling is
+/// not dialed into the same failure immediately, short enough that a blip
+/// costs the owner nothing they would notice.
+const RECONNECT_MIN_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The longest the backoff climbs to.
+///
+/// A relay that has been down for minutes is not helped by being dialed every
+/// second, and the owner is not helped by a wallet that waits ten minutes
+/// after it comes back. Half a minute is the compromise, and matches the order
+/// of the relay's own call timeout.
+const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long the farewell to a dapp may take when the owner is disconnecting.
+///
+/// Publishing reconnects if the connection is gone, and a relay that is
+/// unreachable takes the full handshake deadline to say so. That wait is worth
+/// it for an answer the dapp is waiting on; it is not worth it for a goodbye
+/// on the way out, where the owner has already closed the connection and the
+/// wallet is holding the window open to talk to a relay that is not there.
+const DISCONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const EXTEND_REFUSAL: &str =
     "This wallet controls the session lifetime. Disconnect and reconnect to approve a new session.";
+
+/// Why a relay outage should end the session rather than be waited out, if it
+/// should.
+///
+/// Both deadlines are the reason. A settled session past its expiry can no
+/// longer answer anything, and an unsettled pairing past the dapp's own
+/// deadline is a proposal nobody is coming to make; dialing again for either
+/// would spend the owner's connection on a conversation that is over. A
+/// session still inside its deadline is worth waiting for, however long the
+/// relay takes — the topics and their keys outlive any one socket.
+///
+/// Both messages say the dapp will most likely still show the session as
+/// connected, because it will. A dapp's own client reconnects to the relay and
+/// has been told nothing, and the wallet cannot tell it: saying so would take
+/// the relay that just went away. The wording this replaced promised the
+/// opposite, and sent people looking for a disconnected dapp that was sitting
+/// there looking connected.
+fn outage_refusal(
+    settled_expiry: Option<i64>,
+    pairing_expiry: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> Option<String> {
+    match settled_expiry {
+        Some(expiry) if lapsed(expiry, now.timestamp()) => Some(format!(
+            "the relay connection dropped and this session reached its deadline before the relay \
+             came back. {STALE_AFTER_OUTAGE}"
+        )),
+        Some(_) => None,
+        None => pairing_refusal(pairing_expiry, now).map(|_| {
+            format!(
+                "the relay connection dropped and this pairing expired before the relay came \
+                 back. {STALE_AFTER_OUTAGE}"
+            )
+        }),
+    }
+}
+
+/// How long to wait before the next reconnect attempt, given the last wait.
+///
+/// Doubling with a ceiling: a relay that is down for a moment is dialed again
+/// almost at once, and one that is down for an hour is not dialed three
+/// thousand times while it is.
+fn backoff(previous: std::time::Duration) -> std::time::Duration {
+    (previous * 2).min(RECONNECT_MAX_DELAY)
+}
 
 /// The refusal to send for a pairing whose deadline is `expiry`, at `now`, or
 /// `None` when it has not passed or the dapp never named one.
@@ -415,6 +497,14 @@ struct Settled {
 /// Drive one pairing all the way from a pasted URI to a closed session.
 pub struct Session<'a> {
     relay: RelayConnection,
+    /// How to dial the relay again.
+    ///
+    /// A relay connection is not the session. The session is a pair of topics
+    /// and the keys that open them, and it outlives any one socket: the relay
+    /// holds what it could not deliver and redelivers it to whoever subscribes
+    /// next. Keeping the configuration is what lets a dropped socket be a
+    /// pause rather than the end of the conversation.
+    relay_config: RelayConfig,
     handler: &'a dyn SessionHandler,
     wallet_metadata: AppMetadata,
     pairing_topic: String,
@@ -460,6 +550,7 @@ impl<'a> Session<'a> {
         let relay = RelayConnection::connect(relay_config, &identity).await?;
         Ok(Self {
             relay,
+            relay_config: relay_config.clone(),
             handler,
             wallet_metadata,
             pairing_topic: pairing.topic,
@@ -508,10 +599,9 @@ impl<'a> Session<'a> {
                     return Ok(());
                 }
                 Woke::Delivered(None) => {
-                    bail!(
-                        "the relay connection closed. The dapp will show the session as \
-                         disconnected; open Connections → WalletConnect and use a fresh link."
-                    );
+                    if !self.restore_connection(&mut shutdown).await? {
+                        return Ok(());
+                    }
                 }
                 Woke::Delivered(Some(message)) => {
                     if self.receive(&message.topic, &message.message).await? {
@@ -520,6 +610,92 @@ impl<'a> Session<'a> {
                 }
             }
         }
+    }
+
+    /// Dial the relay again after a drop, and keep trying until it answers,
+    /// the owner asks to stop, or the session has nothing left to reconnect
+    /// for.
+    ///
+    /// Returns whether the session should keep running: `false` is the owner
+    /// stopping, and `Err` is the session ending for a reason worth showing.
+    ///
+    /// The wait is inside the same `select!` the idle loop uses, because a
+    /// relay that is down stays down for as long as it likes and the person
+    /// must be able to close the connection during the retries rather than
+    /// after them.
+    async fn restore_connection<F>(&mut self, shutdown: &mut std::pin::Pin<&mut F>) -> Result<bool>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        self.handler.notify(&SessionEvent::RelayDisconnected);
+        let mut delay = RECONNECT_MIN_DELAY;
+        loop {
+            // Checked before each attempt rather than once: the deadline can
+            // pass during the retries, and a session whose authority has
+            // lapsed has nothing to come back to.
+            if let Some(reason) = self.outage_is_terminal() {
+                bail!("{reason}");
+            }
+            let handler = self.handler;
+            let slept = tokio::select! {
+                () = &mut *shutdown => false,
+                () = handler.quit_requested() => false,
+                () = tokio::time::sleep(delay) => true,
+            };
+            if !slept {
+                self.disconnect("The wallet closed the session.").await;
+                return Ok(false);
+            }
+            match self.reopen().await {
+                Ok(()) => {
+                    self.handler.notify(&SessionEvent::RelayReconnected);
+                    return Ok(true);
+                }
+                // Nothing here distinguishes a relay that is down from one
+                // that refused the connection, and neither is worth ending a
+                // live session over while its deadline still stands. The
+                // backoff is what keeps a long outage from becoming a dial
+                // loop.
+                Err(_) => delay = backoff(delay),
+            }
+        }
+    }
+
+    /// One reconnect attempt: a fresh connection, then the topics this session
+    /// is listening on.
+    ///
+    /// The relay identity is ephemeral and is generated again here. It
+    /// authenticates the socket, not the session — the topics and their keys
+    /// are what the dapp is talking to, and neither changes.
+    ///
+    /// Resubscribing is not optional bookkeeping. A subscription belongs to
+    /// the connection that made it, so a session that reconnected without
+    /// resubscribing would sit on a healthy socket hearing nothing, which
+    /// looks exactly like a quiet dapp.
+    async fn reopen(&mut self) -> Result<()> {
+        let identity = ClientIdentity::generate()?;
+        self.relay = RelayConnection::connect(&self.relay_config, &identity).await?;
+        self.relay
+            .subscribe(&self.pairing_topic)
+            .await
+            .context("could not resubscribe to the pairing topic")?;
+        if let Some(topic) = self.settled.as_ref().map(|settled| settled.topic.clone()) {
+            self.relay
+                .subscribe(&topic)
+                .await
+                .context("could not resubscribe to the session topic")?;
+        }
+        Ok(())
+    }
+
+    /// Why an outage should end the session rather than be waited out, if it
+    /// should. See [`outage_refusal`].
+    fn outage_is_terminal(&self) -> Option<String> {
+        outage_refusal(
+            self.settled.as_ref().map(|settled| settled.expiry),
+            self.pairing_expiry,
+            Utc::now(),
+        )
     }
 
     /// Handle one delivered envelope. Returns whether the session is over.
@@ -905,7 +1081,11 @@ impl<'a> Session<'a> {
     /// the application down, and a relay that has already gone away must not
     /// turn an explicit disconnect into an error.
     async fn disconnect(&mut self, reason: &str) {
-        let Some(settled) = self.settled.as_ref() else {
+        let Some((topic, key)) = self
+            .settled
+            .as_ref()
+            .map(|settled| (settled.topic.clone(), settled.key.clone()))
+        else {
             return;
         };
         let request = OutgoingRequest::new(
@@ -914,17 +1094,20 @@ impl<'a> Session<'a> {
             json!({ "code": error_code::USER_DISCONNECTED, "message": reason }),
         );
         if let Ok(body) = serde_json::to_string(&request) {
-            let topic = settled.topic.clone();
-            let key = settled.key.clone();
-            let _ = self
-                .publish(
+            // Bounded, because publishing now dials a new connection when the
+            // old one is gone, and this call sits between the owner asking to
+            // disconnect and the wallet acting on it.
+            let _ = tokio::time::timeout(
+                DISCONNECT_TIMEOUT,
+                self.publish(
                     &topic,
                     &key,
                     &body,
                     tag::SESSION_DELETE_REQUEST,
                     ttl::SESSION_DELETE,
-                )
-                .await;
+                ),
+            )
+            .await;
         }
     }
 
@@ -932,16 +1115,27 @@ impl<'a> Session<'a> {
     ///
     /// The refusal is published first, so the dapp is told why before the
     /// wallet stops listening.
-    async fn refuse_pairing(&self, id: u64, code: i64, message: impl Into<String>) -> Result<bool> {
+    async fn refuse_pairing(
+        &mut self,
+        id: u64,
+        code: i64,
+        message: impl Into<String>,
+    ) -> Result<bool> {
         self.reject_proposal(id, code, message).await?;
         Ok(true)
     }
 
-    async fn reject_proposal(&self, id: u64, code: i64, message: impl Into<String>) -> Result<()> {
+    async fn reject_proposal(
+        &mut self,
+        id: u64,
+        code: i64,
+        message: impl Into<String>,
+    ) -> Result<()> {
         let response = OutgoingResponse::error(id, code, message);
         let key = self.pairing_key.clone();
+        let topic = self.pairing_topic.clone();
         self.publish(
-            &self.pairing_topic,
+            &topic,
             &key,
             &serde_json::to_string(&response)?,
             tag::SESSION_PROPOSE_RESPONSE_REJECT,
@@ -950,7 +1144,11 @@ impl<'a> Session<'a> {
         .await
     }
 
-    async fn respond_on_session(&self, response: OutgoingResponse, publish_tag: u32) -> Result<()> {
+    async fn respond_on_session(
+        &mut self,
+        response: OutgoingResponse,
+        publish_tag: u32,
+    ) -> Result<()> {
         let Some(settled) = self.settled.as_ref() else {
             return Ok(());
         };
@@ -966,8 +1164,21 @@ impl<'a> Session<'a> {
         .await
     }
 
+    /// Seal one body and hand it to the relay, dialing again first if the
+    /// connection went away while the wallet was busy.
+    ///
+    /// This is the other half of the reconnect, and the half a session notices
+    /// most. The wallet publishes when it has an answer, and an answer is what
+    /// it has after a review that took the owner minutes — which is exactly
+    /// how long a socket needs to be left alone to die. Without the retry, a
+    /// dropped connection turned every approval that outlasted it into a
+    /// failed session and an answer the dapp never received.
+    ///
+    /// One retry, and only when the connection is actually gone. A relay that
+    /// answered and refused is answering; redialing would not change its mind
+    /// and the caller's error should say what it said.
     async fn publish(
-        &self,
+        &mut self,
         topic: &str,
         key: &SymKey,
         body: &str,
@@ -975,6 +1186,18 @@ impl<'a> Session<'a> {
         publish_ttl: u64,
     ) -> Result<()> {
         let envelope = seal(key, body)?;
+        let first = self
+            .relay
+            .publish(topic, &envelope, publish_tag, publish_ttl)
+            .await;
+        if first.is_ok() || !self.relay.is_closed() {
+            return first;
+        }
+        self.handler.notify(&SessionEvent::RelayDisconnected);
+        self.reopen()
+            .await
+            .context("the relay connection closed and could not be reopened")?;
+        self.handler.notify(&SessionEvent::RelayReconnected);
         self.relay
             .publish(topic, &envelope, publish_tag, publish_ttl)
             .await

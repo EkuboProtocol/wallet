@@ -631,3 +631,92 @@ fn a_peer_cannot_evict_an_answered_id() {
     );
     assert!(!remember(&mut answered, high));
 }
+
+#[test]
+fn a_relay_outage_is_waited_out_while_the_session_is_still_alive() {
+    // The bug this replaces: any relay close ended the session outright. A
+    // socket dies for reasons that have nothing to do with the conversation —
+    // a laptop sleeping, a network changing, a relay retiring a connection —
+    // and the session it carried is a pair of topics that outlive it.
+    let now = chrono::Utc::now();
+    assert!(
+        outage_refusal(Some(now.timestamp() + 600), None, now).is_none(),
+        "a session inside its deadline must be reconnected to, not abandoned"
+    );
+    assert!(
+        outage_refusal(None, Some(now + chrono::Duration::minutes(5)), now).is_none(),
+        "a pairing still inside the dapp's own deadline is still worth waiting on"
+    );
+}
+
+#[test]
+fn an_outage_that_outlives_the_deadline_ends_the_session() {
+    let now = chrono::Utc::now();
+    let expired = outage_refusal(Some(now.timestamp() - 1), None, now)
+        .expect("a session past its deadline has nothing to reconnect for");
+    assert!(expired.contains("reached its deadline"), "{expired}");
+
+    let stale = outage_refusal(None, Some(now - chrono::Duration::seconds(1)), now)
+        .expect("a pairing past the dapp's deadline has nothing to reconnect for");
+    assert!(stale.contains("pairing expired"), "{stale}");
+}
+
+#[test]
+fn a_settled_session_is_judged_on_its_own_deadline_rather_than_the_pairings() {
+    // The pairing URI is short-lived by design and is long dead by the time a
+    // week-long session drops a socket. Reading its deadline here would end
+    // every reconnect of every settled session.
+    let now = chrono::Utc::now();
+    assert!(
+        outage_refusal(
+            Some(now.timestamp() + 604_800),
+            Some(now - chrono::Duration::hours(1)),
+            now,
+        )
+        .is_none(),
+        "a settled session must survive the expiry of the pairing that introduced it"
+    );
+}
+
+#[test]
+fn the_outage_message_does_not_promise_the_dapp_will_look_disconnected() {
+    // It will not. A dapp's client reconnects to the relay on its own and is
+    // told nothing, so it goes on showing a live session — which is exactly
+    // why the message has to send the reader to the dapp to clear it. The
+    // wording this replaced said the opposite and sent people looking for a
+    // disconnected dapp that was sitting there looking connected.
+    let now = chrono::Utc::now();
+    let message = outage_refusal(Some(now.timestamp() - 1), None, now).expect("a refusal");
+    assert!(
+        message.contains("still show the session as connected"),
+        "{message}"
+    );
+    assert!(message.contains("disconnect it there"), "{message}");
+    assert!(
+        !message.contains("will show the session as disconnected"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_reconnect_backoff_climbs_and_then_stops_climbing() {
+    let mut delay = RECONNECT_MIN_DELAY;
+    let mut waits = Vec::new();
+    for _ in 0..12 {
+        delay = backoff(delay);
+        waits.push(delay);
+    }
+    assert!(
+        waits[0] > RECONNECT_MIN_DELAY,
+        "a relay that refused once should not be dialed again immediately"
+    );
+    assert!(
+        waits.iter().all(|wait| *wait <= RECONNECT_MAX_DELAY),
+        "an outage must not stretch the wait past the ceiling: {waits:?}"
+    );
+    assert_eq!(
+        waits.last().copied(),
+        Some(RECONNECT_MAX_DELAY),
+        "a long outage should settle at the ceiling rather than below it"
+    );
+}

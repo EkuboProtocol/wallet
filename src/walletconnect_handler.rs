@@ -102,6 +102,7 @@ pub async fn run(
         events: events.clone(),
         shutdown: start.shutdown.clone(),
         submitted_batches: Mutex::new(BTreeSet::new()),
+        settled: Cell::new(false),
     };
     let session = Session::connect(&relay, start.pairing, wallet_metadata(), &handler).await?;
     let result = session.run(start.shutdown.cancelled()).await;
@@ -128,6 +129,10 @@ struct DesktopSession {
     events: EventBus,
     shutdown: tokio_util::sync::CancellationToken,
     submitted_batches: Mutex<BTreeSet<uuid::Uuid>>,
+    /// Whether the session settled, so a reconnect can put the row back into
+    /// the state it left rather than announcing a connection that was never
+    /// approved.
+    settled: Cell<bool>,
 }
 
 impl DesktopSession {
@@ -952,12 +957,15 @@ impl SessionHandler for DesktopSession {
             }
             SessionEvent::Settled {
                 metadata, expiry, ..
-            } => self.update(
-                SessionStatus::Connected,
-                Some(DappIdentity::of(metadata).headline()),
-                0,
-                Some(*expiry),
-            ),
+            } => {
+                self.settled.set(true);
+                self.update(
+                    SessionStatus::Connected,
+                    Some(DappIdentity::of(metadata).headline()),
+                    0,
+                    Some(*expiry),
+                );
+            }
             SessionEvent::RequestReceived { .. } => {
                 self.update(SessionStatus::Connected, None, 1, None);
             }
@@ -967,7 +975,21 @@ impl SessionHandler for DesktopSession {
             SessionEvent::DappDisconnected { .. } => {
                 self.update(SessionStatus::Disconnecting, None, 0, None);
             }
-            SessionEvent::Ping | SessionEvent::RelayReconnected => {}
+            SessionEvent::RelayDisconnected => {
+                self.update(SessionStatus::Reconnecting, None, 0, None);
+            }
+            // Back to whatever the session was doing before the socket went
+            // away. A settled session is connected again; one that had not
+            // settled is still waiting on the dapp it never met.
+            SessionEvent::RelayReconnected => {
+                let status = if self.settled.get() {
+                    SessionStatus::Connected
+                } else {
+                    SessionStatus::AwaitingProposal
+                };
+                self.update(status, None, 0, None);
+            }
+            SessionEvent::Ping => {}
         }
     }
 }

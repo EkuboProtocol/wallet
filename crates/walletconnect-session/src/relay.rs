@@ -312,6 +312,19 @@ impl RelayConnection {
     /// Close the socket and stop both tasks.
     pub fn close(self) {}
 
+    /// Whether the socket behind this connection has gone away.
+    ///
+    /// A relay drops connections for reasons that have nothing to do with the
+    /// session running over them — a laptop sleeping, a network changing, the
+    /// relay retiring a socket it has held for hours. The caller uses this to
+    /// tell "this connection is gone, dial another" apart from "the relay
+    /// answered and said no", which are the same `Err` at the call site and
+    /// want opposite responses.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.reader.is_finished() || self.outgoing.is_closed()
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let id = next_call_id(&self.salt);
         let (sender, receiver) = oneshot::channel();
