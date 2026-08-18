@@ -221,6 +221,222 @@ impl CronSchedule {
     pub fn preview(&self, after: DateTime<Utc>, count: usize) -> Vec<DateTime<Utc>> {
         self.schedule.after(&after).take(count).collect()
     }
+
+    /// The same cadence in words, for an owner who does not read cron.
+    ///
+    /// Derived from the parsed field sets rather than from the text, because
+    /// the text is the thing being explained: `1-5` in the day-of-week column
+    /// means Sunday through Thursday here, not the Monday-to-Friday a reader of
+    /// ordinary crontabs assumes, and a sentence built by re-reading the string
+    /// would repeat the author's mistake instead of exposing it.
+    ///
+    /// `None` for any shape this cannot state exactly. A schedule described
+    /// approximately is worse than one shown as its expression, because the
+    /// owner would be comparing what runs against a sentence that only nearly
+    /// means it; callers show the expression itself in that case.
+    #[must_use]
+    pub fn describe(&self) -> Option<String> {
+        // A month-restricted schedule is rare enough that spelling it out
+        // earns less than the ways it could be spelled out wrongly.
+        if !matches!(field_cadence(self.schedule.months(), 1, 12), Cadence::All) {
+            return None;
+        }
+        let seconds = field_cadence(self.schedule.seconds(), 0, 59);
+        let minutes = field_cadence(self.schedule.minutes(), 0, 59);
+        let hours = field_cadence(self.schedule.hours(), 0, 23);
+        let days = describe_days(
+            &field_cadence(self.schedule.days_of_month(), 1, 31),
+            &field_cadence(self.schedule.days_of_week(), 1, 7),
+        )?;
+
+        // A fixed time of day is the one shape whose sentence leads with the
+        // day — "Every Monday at 09:30 UTC", not "at 09:30 UTC, on Mondays".
+        if let (Cadence::Exact(second), Cadence::Exact(minute)) = (&seconds, &minutes) {
+            let at = |hour: u32| clock_label(hour, *minute, *second);
+            match &hours {
+                Cadence::Exact(hour) => {
+                    return Some(format!("{} at {} UTC", days.leading, at(*hour)));
+                }
+                Cadence::Some(list) if list.len() <= MAX_LISTED_HOURS => {
+                    let times: Vec<String> = list.iter().map(|hour| at(*hour)).collect();
+                    return Some(format!("{} at {} UTC", days.leading, join_readable(&times)));
+                }
+                _ => {}
+            }
+        }
+
+        let repeats = match (&seconds, &minutes, &hours) {
+            (Cadence::All, Cadence::All, Cadence::All) => "Every second".to_owned(),
+            (Cadence::Step(step), Cadence::All, Cadence::All) => format!("Every {step} seconds"),
+            (Cadence::Exact(second), Cadence::All, Cadence::All) => {
+                format!("Every minute{}", seconds_qualifier(*second))
+            }
+            (Cadence::Exact(second), Cadence::Step(step), Cadence::All) => {
+                format!("Every {step} minutes{}", seconds_qualifier(*second))
+            }
+            (Cadence::Exact(0), Cadence::Exact(0), Cadence::All) => {
+                "Every hour, on the hour".to_owned()
+            }
+            (Cadence::Exact(second), Cadence::Exact(minute), Cadence::All) => {
+                format!("Every hour at :{minute:02}{}", second_suffix(*second))
+            }
+            (Cadence::Exact(second), Cadence::Exact(minute), Cadence::Step(step)) => {
+                format!(
+                    "Every {step} hours at :{minute:02}{}",
+                    second_suffix(*second)
+                )
+            }
+            _ => return None,
+        };
+        Some(format!("{repeats}{}", days.trailing))
+    }
+}
+
+/// How many distinct hours a sentence will name before it stops being easier to
+/// read than the expression it replaces.
+const MAX_LISTED_HOURS: usize = 4;
+
+/// One cron field, reduced to the shapes a sentence has a name for.
+#[derive(Debug, PartialEq, Eq)]
+enum Cadence {
+    /// Every value the field can hold, however it was written.
+    All,
+    /// Exactly one value.
+    Exact(u32),
+    /// Every `n`th value counting from the field's floor, whether written
+    /// `*/n` or enumerated by hand.
+    Step(u32),
+    /// A handful of values that are neither of the above.
+    Some(Vec<u32>),
+}
+
+impl Cadence {
+    /// The values themselves, for the fields whose sentence names each one.
+    fn values(&self, min: u32, max: u32) -> Vec<u32> {
+        match self {
+            Self::All => (min..=max).collect(),
+            Self::Exact(value) => vec![*value],
+            Self::Step(step) => (min..=max).step_by(*step as usize).collect(),
+            Self::Some(values) => values.clone(),
+        }
+    }
+}
+
+fn field_cadence(spec: &impl cron::TimeUnitSpec, min: u32, max: u32) -> Cadence {
+    let values: Vec<u32> = spec.iter().collect();
+    if values.len() == (max - min + 1) as usize {
+        return Cadence::All;
+    }
+    if let [only] = values[..] {
+        return Cadence::Exact(only);
+    }
+    // A step is recognized by the set it produces rather than by the `*/n` that
+    // usually writes it, so a hand-enumerated `0,15,30,45` reads as the every
+    // fifteen minutes it is.
+    if values.first() == Some(&min) {
+        let step = values[1] - values[0];
+        if step > 1 && values == (min..=max).step_by(step as usize).collect::<Vec<_>>() {
+            return Cadence::Step(step);
+        }
+    }
+    Cadence::Some(values)
+}
+
+/// Which days a schedule runs on, in the two grammatical positions the sentence
+/// needs it: leading a fixed time of day, or trailing a repeating cadence.
+struct DayPhrase {
+    leading: String,
+    trailing: String,
+}
+
+fn describe_days(days_of_month: &Cadence, days_of_week: &Cadence) -> Option<DayPhrase> {
+    match (days_of_month, days_of_week) {
+        (Cadence::All, Cadence::All) => Some(DayPhrase {
+            leading: "Every day".to_owned(),
+            trailing: String::new(),
+        }),
+        // Day of month alone. A schedule restricted on both columns fires on
+        // the union of them in cron, which no short phrase states correctly.
+        (Cadence::Exact(day), Cadence::All) => Some(DayPhrase {
+            leading: format!("Day {day} of each month"),
+            trailing: format!(", on day {day} of each month"),
+        }),
+        (Cadence::All, weekly) => {
+            let days = weekly.values(1, 7);
+            let names: Vec<&'static str> = days.iter().map(|day| weekday_name(*day)).collect();
+            match names.as_slice() {
+                [] => None,
+                [only] => Some(DayPhrase {
+                    leading: format!("Every {only}"),
+                    trailing: format!(", on {only}s"),
+                }),
+                [first, .., last] if consecutive(&days) => Some(DayPhrase {
+                    leading: format!("{first} to {last}"),
+                    trailing: format!(", {first} to {last}"),
+                }),
+                names => Some(DayPhrase {
+                    leading: join_readable(names),
+                    trailing: format!(", on {}", join_readable(names)),
+                }),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn consecutive(values: &[u32]) -> bool {
+    values
+        .windows(2)
+        .all(|pair| pair[1].saturating_sub(pair[0]) == 1)
+}
+
+/// The `cron` crate numbers Sunday 1 through Saturday 7, one higher than the
+/// crontab convention most authors carry in their heads. That off-by-one is
+/// exactly what a written-out day name exists to catch.
+const fn weekday_name(ordinal: u32) -> &'static str {
+    match ordinal {
+        1 => "Sunday",
+        2 => "Monday",
+        3 => "Tuesday",
+        4 => "Wednesday",
+        5 => "Thursday",
+        6 => "Friday",
+        _ => "Saturday",
+    }
+}
+
+fn clock_label(hour: u32, minute: u32, second: u32) -> String {
+    format!("{hour:02}:{minute:02}{}", second_suffix(second))
+}
+
+fn second_suffix(second: u32) -> String {
+    if second == 0 {
+        String::new()
+    } else {
+        format!(":{second:02}")
+    }
+}
+
+fn seconds_qualifier(second: u32) -> String {
+    if second == 0 {
+        String::new()
+    } else {
+        format!(", at :{second:02} seconds")
+    }
+}
+
+fn join_readable(items: &[impl fmt::Display]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [rest @ .., last] => format!(
+            "{} and {last}",
+            rest.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 impl PartialEq for CronSchedule {

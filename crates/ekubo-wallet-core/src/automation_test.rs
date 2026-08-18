@@ -37,6 +37,96 @@ fn a_schedule_keeps_the_exact_text_it_was_given() {
 }
 
 #[test]
+fn a_cadence_reads_as_a_sentence() {
+    let described = |expression: &str| schedule(expression).describe().expect(expression);
+    assert_eq!(described("* * * * * *"), "Every second");
+    assert_eq!(described("*/12 * * * * *"), "Every 12 seconds");
+    assert_eq!(described("0 * * * * *"), "Every minute");
+    assert_eq!(described("30 * * * * *"), "Every minute, at :30 seconds");
+    assert_eq!(described("0 */5 * * * *"), "Every 5 minutes");
+    assert_eq!(
+        described("15 */5 * * * *"),
+        "Every 5 minutes, at :15 seconds"
+    );
+    assert_eq!(described("0 0 * * * *"), "Every hour, on the hour");
+    assert_eq!(described("0 30 * * * *"), "Every hour at :30");
+    assert_eq!(described("45 30 * * * *"), "Every hour at :30:45");
+    assert_eq!(described("0 30 */6 * * *"), "Every 6 hours at :30");
+    assert_eq!(described("0 30 9 * * *"), "Every day at 09:30 UTC");
+    assert_eq!(described("5 30 9 * * *"), "Every day at 09:30:05 UTC");
+    assert_eq!(
+        described("0 0 9,17 * * *"),
+        "Every day at 09:00 and 17:00 UTC"
+    );
+    assert_eq!(described("0 0 0 1 * *"), "Day 1 of each month at 00:00 UTC");
+    assert_eq!(
+        described("0 */10 * 1 * *"),
+        "Every 10 minutes, on day 1 of each month"
+    );
+}
+
+/// A set written by hand is the same cadence as the `*/n` that usually writes
+/// it, and the sentence has no reason to know which one the author typed.
+#[test]
+fn an_enumerated_step_reads_as_the_step_it_is() {
+    assert_eq!(
+        schedule("0 0,15,30,45 * * * *").describe().as_deref(),
+        Some("Every 15 minutes")
+    );
+}
+
+/// The whole reason this is derived from the parsed sets: `1-5` is the range an
+/// author transplants from a five-field crontab meaning Monday through Friday,
+/// and in this dialect it is Sunday through Thursday. A description that
+/// repeated the intent instead of the meaning would hide the mistake it exists
+/// to surface.
+#[test]
+fn weekdays_are_named_from_this_dialect_not_the_familiar_one() {
+    let described = |expression: &str| schedule(expression).describe().expect(expression);
+    assert_eq!(
+        described("0 30 9 * * 1-5"),
+        "Sunday to Thursday at 09:30 UTC"
+    );
+    assert_eq!(described("0 30 9 * * 2-6"), "Monday to Friday at 09:30 UTC");
+    assert_eq!(described("0 30 9 * * MON"), "Every Monday at 09:30 UTC");
+    assert_eq!(
+        described("0 30 9 * * MON,WED,FRI"),
+        "Monday, Wednesday and Friday at 09:30 UTC"
+    );
+    assert_eq!(
+        described("*/30 * * * * SAT,SUN"),
+        "Every 30 seconds, on Sunday and Saturday"
+    );
+    assert_eq!(
+        described("0 0 * * * MON"),
+        "Every hour, on the hour, on Mondays"
+    );
+}
+
+/// Anything this cannot say exactly says nothing, and the tab falls back to the
+/// expression the owner approved.
+#[test]
+fn a_shape_without_an_exact_sentence_is_left_to_the_expression() {
+    for expression in [
+        // Restricted to one month.
+        "0 0 9 * 3 *",
+        // Both day columns restricted, which cron unions rather than
+        // intersects — no short phrase states that correctly.
+        "0 0 9 1 * MON",
+        // An hour set that neither steps from midnight nor lists briefly.
+        "0 0 9-17 * * *",
+        // A minute set that is neither one value nor a step.
+        "0 3,7,42 * * * *",
+    ] {
+        assert_eq!(
+            schedule(expression).describe(),
+            None,
+            "{expression} must fall back to its expression"
+        );
+    }
+}
+
+#[test]
 fn next_after_is_strict() {
     let parsed = schedule("0 * * * * *");
     let on_the_minute = Utc.with_ymd_and_hms(2026, 1, 1, 0, 1, 0).unwrap();
