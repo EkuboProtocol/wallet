@@ -7687,7 +7687,9 @@ impl WalletWindow {
         self.network_editor_disabled = network.disabled;
         self.network_editor_testnet = network.testnet;
         self.network_editor_rpc_strategy = network.rpc_strategy;
-        self.network_editor_advanced_open = !network.aliases.is_empty();
+        self.network_editor_advanced_open = !network.aliases.is_empty()
+            || network.finality_confirmations
+                != ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS;
         self.network_editor_errors = NetworkEditorErrors::default();
         focus.update(cx, |input, cx| {
             input.set_selected_range(0..input.value().len(), cx);
