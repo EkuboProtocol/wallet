@@ -26,7 +26,9 @@ fn manager_keeps_multiple_sessions_only_in_memory() {
         manager.begin_uri(&uri).unwrap();
     }
     assert_eq!(manager.sessions().len(), 2);
-    manager.disconnect_all();
+    // Nothing settled, so there is no dapp to say goodbye to and nothing for
+    // the application shutdown to wait on.
+    assert!(manager.disconnect_all().is_empty());
     assert!(manager.sessions().is_empty());
 }
 
@@ -143,4 +145,30 @@ fn a_session_that_ends_cleanly_leaves_nothing_behind() {
     manager.update(connected, SessionStatus::Connected, None, 0, None);
     manager.finish(connected);
     assert!(manager.sessions().is_empty());
+}
+
+#[test]
+fn quitting_leaves_something_to_wait_on_for_every_settled_dapp() {
+    // The dapp is told the session is over by a publish to the relay, and the
+    // quit used to cancel the sessions and let the process exit out from under
+    // it — so the dapp went on showing a connection to a wallet that had
+    // closed. The shutdown waits on these, so there has to be one per dapp
+    // that was ever actually connected.
+    let mut manager = WalletConnectManager::default();
+    let settled = paired(&mut manager, "88");
+    let never_settled = paired(&mut manager, "99");
+    manager.update(settled, SessionStatus::Connected, None, 0, None);
+
+    let farewells = manager.disconnect_all();
+    assert_eq!(
+        farewells.len(),
+        1,
+        "one settled dapp is owed a goodbye; the pairing that never settled is not"
+    );
+    assert!(
+        !farewells[0].is_cancelled(),
+        "the shutdown must wait for the session task to say it is done, not assume it"
+    );
+    assert!(manager.sessions().is_empty());
+    let _ = never_settled;
 }

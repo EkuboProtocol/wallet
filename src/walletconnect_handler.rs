@@ -73,6 +73,22 @@ fn wallet_metadata() -> AppMetadata {
     }
 }
 
+/// Cancels a session's farewell token however its task leaves.
+///
+/// The application shutdown waits on that token to let the goodbye reach the
+/// relay, so every exit has to reach it — including the early ones that never
+/// opened a connection at all, and a panic. A guard is the only construction
+/// that covers all of them; a cancel at the end of `run` would leave the
+/// shutdown waiting out its whole budget for a session that failed on its
+/// first line.
+struct Farewell(tokio_util::sync::CancellationToken);
+
+impl Drop for Farewell {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 pub async fn run(
     start: SessionStart,
     owner: OwnerApi,
@@ -80,6 +96,7 @@ pub async fn run(
     manager: Arc<Mutex<WalletConnectManager>>,
     events: EventBus,
 ) -> Result<()> {
+    let _farewell = Farewell(start.farewell.clone());
     legal::require_current_acceptance(owner.config_store().data_dir())?;
     let accounts = owner.accounts()?;
     ensure!(

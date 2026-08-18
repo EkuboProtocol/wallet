@@ -116,6 +116,13 @@ const PORTFOLIO_REFRESH_INTERVAL: chrono::TimeDelta = chrono::TimeDelta::minutes
 /// label's own resolution keeps it from lagging a minute behind.
 const PORTFOLIO_CLOCK_INTERVAL: Duration = Duration::from_secs(30);
 const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the wallet may spend telling connected dapps it is closing.
+///
+/// A `wc_sessionDelete` is one publish to the relay, so this is a round trip
+/// and not a conversation. It is a deadline rather than a promise: a relay
+/// that has gone away must not hold the quit open, and a dapp whose goodbye
+/// misses it sees the session lapse on its own deadline instead.
+const DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT: Duration = Duration::from_secs(3);
 const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
@@ -16427,7 +16434,32 @@ fn perform_desktop_shutdown(
     prepared: Option<PreparedUpdate>,
     instance_slot: Arc<Mutex<Option<SingleInstance>>>,
     data_dir: &Path,
+    walletconnect_farewells: &[tokio_util::sync::CancellationToken],
 ) -> Result<bool> {
+    // First, because it is the only part of shutdown someone else is watching.
+    // A dapp is told the session is over by a publish to the relay, and the
+    // quit used to cancel the sessions and let the process exit out from under
+    // that publish — so the dapp went on showing a wallet that had closed.
+    if !walletconnect_farewells.is_empty() {
+        let waited = block_on_with_timeout(
+            tokio,
+            DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT,
+            futures::future::join_all(
+                walletconnect_farewells
+                    .iter()
+                    .map(tokio_util::sync::CancellationToken::cancelled),
+            ),
+        );
+        if waited.is_err() {
+            let _ = crate::release_check::record_update_diagnostic(
+                data_dir,
+                &format!(
+                    "WalletConnect disconnect notices exceeded {} seconds",
+                    DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT.as_secs()
+                ),
+            );
+        }
+    }
     if let Some(server) = server {
         let stopped = block_on_with_timeout(tokio, DESKTOP_SERVER_SHUTDOWN_TIMEOUT, server.stop());
         let failure = match stopped {
@@ -16660,9 +16692,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             cx.on_app_quit(move |_| {
                 let update_data_dir = update_data_dir.clone();
                 let shutdown_instance = shutdown_instance.clone();
-                if let Ok(mut sessions) = shutdown_walletconnect.lock() {
-                    sessions.disconnect_all();
-                }
+                let farewells = shutdown_walletconnect
+                    .lock()
+                    .map(|mut sessions| sessions.disconnect_all())
+                    .unwrap_or_default();
                 let server = shutdown_server
                     .lock()
                     .ok()
@@ -16692,6 +16725,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             prepared,
                             shutdown_instance,
                             &worker_data_dir,
+                            &farewells,
                         )
                     });
                 async move {

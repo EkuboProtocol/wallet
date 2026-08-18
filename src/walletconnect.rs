@@ -75,12 +75,27 @@ pub struct WalletConnectManager {
 struct ManagedSession {
     summary: SessionSummary,
     shutdown: CancellationToken,
+    farewell: CancellationToken,
 }
 
 pub struct SessionStart {
     pub id: Uuid,
     pub pairing: PairingUri,
     pub shutdown: CancellationToken,
+    /// Cancelled by the session task on its way out, whatever ended it.
+    ///
+    /// The wallet tells a dapp the session is over by publishing
+    /// `wc_sessionDelete`, and a dapp that never receives one goes on showing
+    /// a live session — its client reconnects to the relay by itself and is
+    /// told nothing. On the way out of the application that publish is a race
+    /// against the process exiting, which it lost: the token was cancelled and
+    /// the runtime was gone a moment later. This is what the shutdown waits
+    /// on, so the goodbye reaches the relay before the wallet stops existing.
+    ///
+    /// It only has to reach the *relay*. A `wc_sessionDelete` is retained and
+    /// delivered to a dapp that is not currently connected, so the dapp being
+    /// closed at the time costs nothing.
+    pub farewell: CancellationToken,
 }
 
 impl WalletConnectManager {
@@ -92,6 +107,7 @@ impl WalletConnectManager {
         let pairing = PairingUri::parse(uri, Utc::now())?;
         let id = Uuid::new_v4();
         let shutdown = CancellationToken::new();
+        let farewell = CancellationToken::new();
         let summary = SessionSummary {
             id,
             status: SessionStatus::Pairing,
@@ -106,6 +122,7 @@ impl WalletConnectManager {
             ManagedSession {
                 summary: summary.clone(),
                 shutdown: shutdown.clone(),
+                farewell: farewell.clone(),
             },
         );
         Ok((
@@ -113,6 +130,7 @@ impl WalletConnectManager {
                 id,
                 pairing,
                 shutdown,
+                farewell,
             },
             summary,
         ))
@@ -141,11 +159,27 @@ impl WalletConnectManager {
         Ok(session.summary)
     }
 
-    pub fn disconnect_all(&mut self) {
+    /// Ask every session to end, and hand back what to wait on.
+    ///
+    /// Each returned token is cancelled once that session's task has finished
+    /// saying goodbye to its dapp. The caller is the application shutdown,
+    /// which waits on them briefly: cancelling the sessions and exiting
+    /// immediately is what left dapps showing a connection to a wallet that
+    /// was no longer running.
+    #[must_use]
+    pub fn disconnect_all(&mut self) -> Vec<CancellationToken> {
+        let mut farewells = Vec::with_capacity(self.sessions.len());
         for session in self.sessions.values() {
             session.shutdown.cancel();
+            // An unsettled pairing has no dapp to tell and no session to
+            // delete, so waiting on one would only spend the shutdown's
+            // budget on a task with nothing to publish.
+            if session.summary.settled {
+                farewells.push(session.farewell.clone());
+            }
         }
         self.sessions.clear();
+        farewells
     }
 
     pub fn update(

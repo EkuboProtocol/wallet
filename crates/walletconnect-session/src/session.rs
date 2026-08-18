@@ -324,7 +324,11 @@ const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// it for an answer the dapp is waiting on; it is not worth it for a goodbye
 /// on the way out, where the owner has already closed the connection and the
 /// wallet is holding the window open to talk to a relay that is not there.
-const DISCONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+///
+/// Deliberately shorter than the deadline the application's shutdown gives
+/// this: the session gives up and reports that it finished, rather than being
+/// cut off half way and leaving the shutdown to time out on it.
+const DISCONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const EXTEND_REFUSAL: &str =
     "This wallet controls the session lifetime. Disconnect and reconnect to approve a new session.";
 
