@@ -1403,18 +1403,128 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
         &view,
         &[
             "policy-full-screen-json-control",
+            "policy-change-summary",
             "install-policy-draft-full-screen",
         ],
     );
     let after_control = after[0].expect("policy JSON editor must remain laid out after review");
     assert!(
         after_control.size.height >= before.size.height,
-        "the independently scrolling review sidebar must not shrink the JSON editor: \
+        "the checked draft's summary must not shrink the JSON editor: \
          before {before:?}, after {after_control:?}"
     );
     assert!(
         after[1].is_some(),
-        "an exact preview must expose the install action in the review sidebar"
+        "a checked draft must say how much it changes without leaving the editor"
+    );
+    assert!(
+        after[2].is_none(),
+        "installing belongs on the screen that shows what is being installed, \
+         not in the rail beside the JSON"
+    );
+
+    release(cx, &view);
+}
+
+/// The permission diff used to be read in the 264-pixel rail beside the JSON:
+/// the narrowest column on the page, holding the longest lines on it. It is
+/// its own state of the screen now, and it has to actually take the screen.
+#[gpui::test]
+fn reviewing_a_policy_change_takes_the_whole_frame(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, cx| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        let policy = WalletPolicy::require_approval_for_everything();
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            current_policy: Some(policy.clone()),
+            history: Vec::new(),
+            history_selection: None,
+            proposal: None,
+            validation: Some(Ok(PolicyDraftReview {
+                wallet_id: "primary".into(),
+                source_revision: Some(2),
+                document: String::new(),
+                policy,
+                diff: vec![
+                    "+ rule 1: starts allowing: to any address; any calldata, including \
+                     batched calls to other contracts"
+                        .to_owned(),
+                    "~ rule 2 changed: allow: to 0xaaaa; calldata any → allow: to 0xbbbb; \
+                     calldata any"
+                        .to_owned(),
+                    "- rule 3: stops allowing: to 0xcccc; calldata any".to_owned(),
+                ],
+            })),
+        });
+        wallet.open_policy_review(cx);
+    });
+
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "policy-review",
+            "policy-review-changes",
+            "policy-change-summary",
+            "close-policy-review",
+            "install-policy-draft-full-screen",
+            "policy-full-screen-json-control",
+        ],
+    );
+    let review = bounds[0].expect("the review must draw");
+    let changes = bounds[1].expect("the changed rules must draw");
+    assert!(
+        bounds[2].is_some(),
+        "the review must open with a tally of how far the change moves"
+    );
+    assert!(
+        bounds[3].is_some(),
+        "the review must offer the way back to the draft it describes"
+    );
+    assert!(
+        bounds[4].is_some(),
+        "installing belongs under the changes being installed"
+    );
+    assert!(
+        bounds[5].is_none(),
+        "reviewing replaces the JSON editor rather than sharing the window with it"
+    );
+    assert!(
+        changes.size.width > px(600.0),
+        "the changes must get the frame's width rather than a rail's: {:?}",
+        changes.size.width
+    );
+    assert!(
+        changes.bottom() <= review.bottom() + px(1.0),
+        "the changed rules must scroll inside the review rather than past its bottom: \
+         {:?} against {:?}",
+        changes.bottom(),
+        review.bottom()
+    );
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.close_policy_review(cx);
+    });
+    let back = measure(cx, window, &view, &["policy-full-screen-json-control"]);
+    assert!(
+        back[0].is_some(),
+        "leaving the review must land back on the draft it was describing"
     );
 
     release(cx, &view);

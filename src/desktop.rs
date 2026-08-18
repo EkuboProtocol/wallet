@@ -2137,6 +2137,15 @@ pub struct WalletWindow {
     policy_account_id: Option<String>,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
+    /// Whether the editor is showing the permission diff rather than the JSON.
+    ///
+    /// A policy change is read, not typed, and the two need opposite shapes:
+    /// the draft wants a wide monospace field, the diff wants prose width and
+    /// the install action under it. They are the same screen in two states
+    /// rather than two columns fighting over one window.
+    policy_review_open: bool,
+    policy_diff_list: VariableListState,
+    policy_diff_drawn_for: Cell<usize>,
     token_proposal_busy: bool,
     network_proposal_busy: bool,
     /// The automation whose stop or restart is in flight, so its own row shows
@@ -2480,6 +2489,133 @@ struct PolicyDraftReview {
     document: String,
     policy: WalletPolicy,
     diff: Vec<String>,
+}
+
+/// Which way one diff line moves the authority the policy grants.
+///
+/// The kernel already decides this and says so with the marker it puts in
+/// front of each line — a `deny` that disappears widens, a `deny` that appears
+/// narrows — so this reads that decision rather than making a second one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyDiffDirection {
+    Widens,
+    Narrows,
+    Rewrites,
+    Unchanged,
+}
+
+impl PolicyDiffDirection {
+    const fn marker(self) -> &'static str {
+        match self {
+            Self::Widens => "+",
+            Self::Narrows => "−",
+            Self::Rewrites => "~",
+            Self::Unchanged => "=",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Widens => "Grants more",
+            Self::Narrows => "Grants less",
+            Self::Rewrites => "Rewritten",
+            Self::Unchanged => "No change",
+        }
+    }
+
+    fn color(self, cx: &App) -> gpui::Hsla {
+        match self {
+            // Widening is the direction that can cost the owner something, so
+            // it carries the warning colour and narrowing does not.
+            Self::Widens => cx.theme().danger,
+            Self::Narrows => cx.theme().success,
+            Self::Rewrites => cx.theme().warning,
+            Self::Unchanged => cx.theme().muted_foreground,
+        }
+    }
+}
+
+/// One line of the permission diff, split into the parts a reader compares.
+///
+/// A rewritten rule arrives as `old → new` on a single line, which is exactly
+/// the shape that is unreadable in a narrow column: the two halves are long,
+/// nearly identical, and the difference between them is somewhere in the
+/// middle. Stacked and labelled, they can be read against each other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolicyDiffRow {
+    direction: PolicyDiffDirection,
+    summary: String,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+/// How much this change moves, one line per direction.
+///
+/// The tally is the first thing a reviewer wants and the last thing a list of
+/// rules gives them: "two rules grant more authority" is the sentence that
+/// decides whether the rest needs reading closely.
+fn policy_change_summary(rows: &[PolicyDiffRow]) -> Vec<(PolicyDiffDirection, String)> {
+    let mut lines = Vec::new();
+    for direction in [
+        PolicyDiffDirection::Widens,
+        PolicyDiffDirection::Rewrites,
+        PolicyDiffDirection::Narrows,
+    ] {
+        let count = rows.iter().filter(|row| row.direction == direction).count();
+        if count == 0 {
+            continue;
+        }
+        let subject = if count == 1 { "rule" } else { "rules" };
+        let verb = match (direction, count == 1) {
+            (PolicyDiffDirection::Widens, true) => "grants more authority",
+            (PolicyDiffDirection::Widens, false) => "grant more authority",
+            (PolicyDiffDirection::Narrows, true) => "grants less authority",
+            (PolicyDiffDirection::Narrows, false) => "grant less authority",
+            (PolicyDiffDirection::Rewrites, true) => "is rewritten",
+            _ => "are rewritten",
+        };
+        lines.push((direction, format!("{count} {subject} {verb}")));
+    }
+    if lines.is_empty() {
+        lines.push((
+            PolicyDiffDirection::Unchanged,
+            "No permission changes".to_owned(),
+        ));
+    }
+    lines
+}
+
+fn policy_diff_rows(diff: &[String]) -> Vec<PolicyDiffRow> {
+    diff.iter().map(|line| policy_diff_row(line)).collect()
+}
+
+fn policy_diff_row(line: &str) -> PolicyDiffRow {
+    let (direction, rest) = match line.split_at_checked(2) {
+        Some(("+ ", rest)) => (PolicyDiffDirection::Widens, rest),
+        Some(("- ", rest)) => (PolicyDiffDirection::Narrows, rest),
+        Some(("~ ", rest)) => (PolicyDiffDirection::Rewrites, rest),
+        _ => (PolicyDiffDirection::Unchanged, line),
+    };
+    // Only a rewritten rule carries both states, and only the kernel's diff
+    // writes this arrow, so splitting on it cannot cut a rule description in
+    // half.
+    if direction == PolicyDiffDirection::Rewrites
+        && let Some((summary, states)) = rest.split_once(": ")
+        && let Some((before, after)) = states.split_once(" → ")
+    {
+        return PolicyDiffRow {
+            direction,
+            summary: summary.to_owned(),
+            before: Some(before.to_owned()),
+            after: Some(after.to_owned()),
+        };
+    }
+    PolicyDiffRow {
+        direction,
+        summary: rest.to_owned(),
+        before: None,
+        after: None,
+    }
 }
 
 struct PolicyEditor {
@@ -3394,6 +3530,105 @@ fn render_inbox_waiting_card(
             button,
             cx,
         ))
+        .into_any_element()
+}
+
+/// One changed rule: which way it moves authority, and what it now says.
+fn render_policy_diff_row(index: usize, row: &PolicyDiffRow, cx: &App) -> AnyElement {
+    let color = row.direction.color(cx);
+    let state = |id: &str, label: &'static str, text: &str| {
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(
+                div()
+                    .text_xs()
+                    .font_medium()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_sm()
+                    .font_family(MONO_FONT_FAMILY)
+                    .child(selectable_text(SharedString::from(id.to_owned()), text)),
+            )
+    };
+    div()
+        .w_full()
+        .min_w_0()
+        .pb_2()
+        .child(
+            div()
+                .id(SharedString::from(format!("policy-diff-{index}")))
+                .w_full()
+                .min_w_0()
+                .p_3()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(color.opacity(0.4))
+                .bg(cx.theme().background)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .flex_wrap()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_none()
+                                .px_1p5()
+                                .rounded(cx.theme().radius)
+                                .bg(color.opacity(0.16))
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(color)
+                                .child(format!(
+                                    "{} {}",
+                                    row.direction.marker(),
+                                    row.direction.label()
+                                )),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .whitespace_normal()
+                                .text_sm()
+                                .child(selectable_text(
+                                    SharedString::from(format!("policy-diff-summary-{index}")),
+                                    &row.summary,
+                                )),
+                        ),
+                )
+                // A rewritten rule is two long, nearly identical sentences.
+                // Run together on one line they are unreadable; stacked and
+                // labelled, they can be compared.
+                .when_some(row.before.as_deref(), |card, before| {
+                    card.child(state(
+                        &format!("policy-diff-before-{index}"),
+                        "Currently",
+                        before,
+                    ))
+                })
+                .when_some(row.after.as_deref(), |card, after| {
+                    card.child(state(
+                        &format!("policy-diff-after-{index}"),
+                        "Would become",
+                        after,
+                    ))
+                }),
+        )
         .into_any_element()
 }
 
@@ -5400,6 +5635,9 @@ impl WalletWindow {
             policy_editor: None,
             policy_account_id: None,
             policy_installing: false,
+            policy_review_open: false,
+            policy_diff_list: virtual_inbox_list(0),
+            policy_diff_drawn_for: Cell::new(0),
             policy_action_error: None,
             token_proposal_busy: false,
             network_proposal_busy: false,
@@ -7121,6 +7359,11 @@ impl WalletWindow {
                             proposal: Some(proposal),
                             validation: Some(Ok(review)),
                         });
+                        // A proposal arrives already checked, and the question
+                        // it raises is what it changes — so opening one lands
+                        // on the diff rather than on somebody else's JSON.
+                        self.policy_review_open = true;
+                        self.policy_diff_drawn_for.set(0);
                         self.policy_action_error = None;
                     }
                     Err(error) => {
@@ -7245,6 +7488,32 @@ impl WalletWindow {
         cx.notify();
     }
 
+    /// Show the permission diff for the draft that was just checked.
+    ///
+    /// Only a draft that validated has changes to show, so a failed check
+    /// leaves the reader in the editor with the error rather than switching
+    /// them to a screen with nothing on it.
+    fn open_policy_review(&mut self, cx: &mut Context<Self>) {
+        let reviewable = self.policy_editor.as_ref().is_some_and(|editor| {
+            matches!(editor.validation.as_ref(), Some(Ok(_))) && !self.policy_installing
+        });
+        if !reviewable {
+            return;
+        }
+        self.policy_review_open = true;
+        self.policy_diff_list
+            .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
+        cx.notify();
+    }
+
+    fn close_policy_review(&mut self, cx: &mut Context<Self>) {
+        if !self.policy_review_open {
+            return;
+        }
+        self.policy_review_open = false;
+        cx.notify();
+    }
+
     fn validate_policy_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
@@ -7352,6 +7621,10 @@ impl WalletWindow {
                             editor.proposal = None;
                             editor.validation = None;
                         }
+                        // The change on screen is the installed policy now, so
+                        // there is nothing left to review: the editor comes
+                        // back holding what was just installed.
+                        view.policy_review_open = false;
                         view.policy_action_error = proposal_cleanup.err().map(|error| {
                             format!(
                                 "Installed policy revision {} for {}, but could not clear the superseded proposal: {error:#}",
@@ -7508,6 +7781,12 @@ impl WalletWindow {
             self.selected_record = None;
             self.activate_next_waiting_surface(cx);
             cx.notify();
+        }
+        // Escape returns from the permission diff to the draft it describes.
+        // Nothing is decided by leaving: the diff is a reading of a draft that
+        // is still sitting in the editor behind it.
+        if self.policy_review_open && !self.policy_installing {
+            self.close_policy_review(cx);
         }
         // Escape also closes the export panel. Leaving it open was the one
         // modal in the app that trapped focus with no keyboard way out, and
@@ -9416,6 +9695,7 @@ impl WalletWindow {
                 // policy for the selected account.
                 self.policy_editor = None;
                 self.policy_action_error = None;
+                self.policy_review_open = false;
             }
         }
         reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
@@ -15428,6 +15708,274 @@ impl WalletWindow {
         Some(div().w_full().child(switcher))
     }
 
+    /// The frame both states of this page share: its title band, the account
+    /// selector, and the surface the content sits on.
+    ///
+    /// Editing a draft and reading what it changes are the same screen for the
+    /// same account, so switching between them must not look like navigating
+    /// anywhere.
+    fn policy_editor_frame(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .debug_selector(|| "policy-editor-layout".to_owned())
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().background)
+            .child(
+                div()
+                    .flex_none()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xl().font_semibold().child("Policy editor"))
+                            .child(
+                                div()
+                                    .debug_selector(|| "policy-editor-description".to_owned())
+                                    .w_full()
+                                    .min_w_0()
+                                    // The sentence is long enough to outrun a
+                                    // narrow window, and the header band does
+                                    // not scroll, so it has to fold onto a
+                                    // second line rather than run off the edge.
+                                    .whitespace_normal()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(POLICY_EDITOR_DESCRIPTION)),
+                            ),
+                    ),
+            )
+            .when_some(self.route_account_selector(cx), |editor, selector| {
+                editor.child(
+                    div()
+                        .flex_none()
+                        .px_4()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(selector),
+                )
+            })
+    }
+
+    /// What this draft changes, on the whole screen.
+    ///
+    /// The permission diff used to be read in the 264-pixel rail beside the
+    /// editor — the narrowest column on the page, carrying the longest lines
+    /// on it, in a window that is often 960 wide. Reviewing is its own state
+    /// of this screen now: the rows get the frame's width, a rewritten rule is
+    /// stacked as before-and-after rather than run together on one line, and
+    /// the action that installs it sits under the thing it installs.
+    fn render_policy_review(
+        &self,
+        editor: &PolicyEditor,
+        review: &PolicyDraftReview,
+        allow_anything_draft: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let rows = policy_diff_rows(&review.diff);
+        let revision = review.source_revision.map_or_else(
+            || "no installed policy".to_owned(),
+            |r| format!("revision {r}"),
+        );
+        Self::resize_list(
+            &self.policy_diff_list,
+            &self.policy_diff_drawn_for,
+            rows.len(),
+        );
+        let rows = Arc::<[PolicyDiffRow]>::from(rows);
+        let summary_rows = rows.clone();
+        let review = div()
+            .debug_selector(|| "policy-review".to_owned())
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .flex_wrap()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        // Width is load-bearing here: a text block with no
+                        // width to grow into wraps a word at a time and turns
+                        // one sentence into a column.
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex_basis(px(320.0))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_lg().font_semibold().child("What this changes"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(format!(
+                                        "{} · against {revision} · nothing is installed until you authenticate",
+                                        editor.wallet_id
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        app_button("close-policy-review")
+                            .debug_selector(|| "close-policy-review".to_owned())
+                            .label("Back to editing")
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.close_policy_review(cx);
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .debug_selector(|| "policy-change-summary".to_owned())
+                    .flex_none()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .text_sm()
+                    .children(policy_change_summary(&summary_rows).into_iter().map(
+                        |(direction, line)| {
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(direction.color(cx).opacity(0.5))
+                                .text_color(direction.color(cx))
+                                .child(line)
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "policy-review-changes".to_owned())
+                    .w_full()
+                    .min_w_0()
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("policy-review-changes-list")
+                            .size_full()
+                            .child(variable_list(
+                                self.policy_diff_list.clone(),
+                                move |index, _, cx| {
+                                    let Some(row) = rows.get(index) else {
+                                        return div().into_any_element();
+                                    };
+                                    render_policy_diff_row(index, row, cx)
+                                },
+                            )),
+                    ),
+            )
+            .when(allow_anything_draft, |review| {
+                review.child(
+                    div()
+                        .id("policy-review-unrestricted-warning")
+                        .role(Role::Alert)
+                        .flex_none()
+                        .p_2()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(cx.theme().danger)
+                        .text_sm()
+                        .whitespace_normal()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(
+                            "Danger: this policy automatically signs every call on every chain.",
+                        )),
+                )
+            })
+            .when_some(self.policy_action_error.clone(), |review, error| {
+                review.child(
+                    div()
+                        .id("policy-review-action-error")
+                        .role(Role::Alert)
+                        .flex_none()
+                        .text_sm()
+                        .whitespace_normal()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
+                )
+            })
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .whitespace_normal()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(
+                                "Installing asks for your authentication first.",
+                            )),
+                    )
+                    .child(
+                        app_button("install-policy-draft-full-screen")
+                            .debug_selector(|| "install-policy-draft-full-screen".to_owned())
+                            .label(if self.policy_installing {
+                                "Authenticating…"
+                            } else {
+                                "Authenticate & install"
+                            })
+                            .primary()
+                            .loading(self.policy_installing)
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.install_policy_editor(cx);
+                            })),
+                    ),
+            );
+        self.policy_editor_frame(cx).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .p_4()
+                .flex()
+                .flex_col()
+                .child(review),
+        )
+    }
+
     fn render_policy_editor(&self, cx: &mut Context<Self>) -> gpui::Div {
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_ref(), self.policy_json_input.as_ref())
@@ -15454,6 +16002,17 @@ impl WalletWindow {
         let can_view_previous =
             previous_policy_revision(editor.history_selection, editor.history.len()).is_some();
 
+        // Reviewing a change and writing one want opposite shapes, so they are
+        // two states of this screen rather than two columns of it: the diff
+        // takes the whole frame, at prose width, with the install action under
+        // it.
+        if self.policy_review_open
+            && let Some(review) = validated
+            && reviewed_exact_document
+        {
+            return self.render_policy_review(editor, review, allow_anything_draft, cx);
+        }
+
         let mut preview = GroupBox::new()
             .id("policy-full-screen-preview")
             .title("Review changes")
@@ -15463,16 +16022,16 @@ impl WalletWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(selectable_label(match editor.validation.as_ref() {
                         Some(Ok(_)) if reviewed_exact_document => {
-                            "The permission changes below match this exact draft."
+                            "This draft has been checked. Read what it changes before installing it."
                         }
                         Some(Ok(_)) => {
-                            "This draft changed after its last preview. Validate it again."
+                            "This draft changed after its last preview. Check it again."
                         }
                         Some(Err(_)) => {
-                            "Fix the policy validation error, then preview its changes."
+                            "Fix the policy validation error, then read what the draft changes."
                         }
                         None => {
-                            "Validate the JSON and review its permission changes before installation."
+                            "Validate the JSON and read its permission changes before installation."
                         }
                     })),
             )
@@ -15480,63 +16039,41 @@ impl WalletWindow {
                 app_button("validate-policy-draft-full-screen")
                     .self_start()
                     .label(if reviewed_exact_document {
-                        "Refresh preview"
+                        "Review changes"
                     } else {
-                        "Validate & preview"
+                        "Validate & review changes"
                     })
-                    .when(!reviewed_exact_document, ButtonVariants::primary)
+                    .primary()
                     .disabled(self.policy_installing)
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.validate_policy_editor(window, cx);
+                        view.open_policy_review(cx);
                     })),
             );
 
-        if let Some(Ok(review)) = editor.validation.as_ref()
+        // What the checked draft changes, as a count rather than as the
+        // changes themselves: the rail is the wrong width to read a permission
+        // in, and reading one is what the review screen is for.
+        if let Some(review) = validated
             && reviewed_exact_document
         {
-            let mut changes = div().flex().flex_col().gap_2();
-            if review.diff.is_empty() {
-                changes = changes.child(
+            let rows = policy_diff_rows(&review.diff);
+            preview =
+                preview.child(
                     div()
+                        .debug_selector(|| "policy-change-summary".to_owned())
                         .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(selectable_label("No permission changes.")),
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(policy_change_summary(&rows).into_iter().map(
+                            |(direction, line)| {
+                                div()
+                                    .text_color(direction.color(cx))
+                                    .child(selectable_label(line))
+                            },
+                        )),
                 );
-            } else {
-                for (index, line) in review.diff.iter().enumerate() {
-                    changes = changes.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "policy-full-screen-diff-{index}"
-                            )))
-                            .p_2()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().secondary)
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_sm()
-                            .child(selectable_text(
-                                ("policy-full-screen-diff-line", index),
-                                line,
-                            )),
-                    );
-                }
-            }
-            preview = preview.child(changes).child(
-                app_button("install-policy-draft-full-screen")
-                    .debug_selector(|| "install-policy-draft-full-screen".to_owned())
-                    .self_start()
-                    .label(if self.policy_installing {
-                        "Authenticating…"
-                    } else {
-                        "Authenticate & install"
-                    })
-                    .primary()
-                    .loading(self.policy_installing)
-                    .disabled(self.policy_installing)
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.install_policy_editor(cx);
-                    })),
-            );
         }
 
         let proposal_panel: Option<AnyElement> = match self.cached_reviews().map(|reviews| {
@@ -15737,61 +16274,7 @@ impl WalletWindow {
             )
             .child(preview);
 
-        div()
-            .debug_selector(|| "policy-editor-layout".to_owned())
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .min_h_0()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .bg(cx.theme().background)
-            .child(
-                div()
-                    .flex_none()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_xl().font_semibold().child("Policy editor"))
-                            .child(
-                                div()
-                                    .debug_selector(|| "policy-editor-description".to_owned())
-                                    .w_full()
-                                    .min_w_0()
-                                    // The sentence is long enough to outrun a
-                                    // narrow window, and the header band does
-                                    // not scroll, so it has to fold onto a
-                                    // second line rather than run off the edge.
-                                    .whitespace_normal()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_label(POLICY_EDITOR_DESCRIPTION)),
-                            ),
-                    ),
-            )
-            .when_some(self.route_account_selector(cx), |editor, selector| {
-                editor.child(
-                    div()
-                        .flex_none()
-                        .px_4()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(selector),
-                )
-            })
-            .child(
+        self.policy_editor_frame(cx).child(
                 div()
                     .flex_1()
                     .min_w_0()

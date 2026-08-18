@@ -1899,6 +1899,74 @@ fn a_source_cannot_draw_outside_its_line() {
 }
 
 #[test]
+fn a_permission_diff_is_read_by_the_direction_its_kernel_marked() {
+    let rows = policy_diff_rows(&[
+        "+ rule 1: starts allowing: to any address".to_owned(),
+        "- rule 2: stops allowing: to 0xaaaa".to_owned(),
+        "~ rule 3 changed: allow: to 0xaaaa → allow: to 0xbbbb".to_owned(),
+        "No permission changes: the proposed policy is identical.".to_owned(),
+    ]);
+
+    // The marker is the kernel's own judgement about which way authority
+    // moved — a `deny` that disappears is a widening — so the screen reads it
+    // rather than inferring a second, possibly opposite, answer.
+    assert_eq!(rows[0].direction, PolicyDiffDirection::Widens);
+    assert_eq!(rows[0].summary, "rule 1: starts allowing: to any address");
+    assert_eq!(rows[0].before, None);
+    assert_eq!(rows[1].direction, PolicyDiffDirection::Narrows);
+
+    // A rewritten rule arrives as two long, nearly identical sentences joined
+    // by an arrow. Stacked and labelled they can be compared; on one line
+    // they cannot.
+    assert_eq!(rows[2].direction, PolicyDiffDirection::Rewrites);
+    assert_eq!(rows[2].summary, "rule 3 changed");
+    assert_eq!(rows[2].before.as_deref(), Some("allow: to 0xaaaa"));
+    assert_eq!(rows[2].after.as_deref(), Some("allow: to 0xbbbb"));
+
+    assert_eq!(rows[3].direction, PolicyDiffDirection::Unchanged);
+    assert_eq!(
+        rows[3].summary,
+        "No permission changes: the proposed policy is identical."
+    );
+}
+
+#[test]
+fn the_change_summary_counts_each_direction_separately() {
+    let rows = policy_diff_rows(&[
+        "+ rule 1: starts allowing: to any address".to_owned(),
+        "+ rule 2: stops denying: to 0xaaaa".to_owned(),
+        "- rule 3: stops allowing: to 0xbbbb".to_owned(),
+    ]);
+    let summary = policy_change_summary(&rows);
+
+    assert_eq!(
+        summary,
+        vec![
+            (
+                PolicyDiffDirection::Widens,
+                "2 rules grant more authority".to_owned()
+            ),
+            (
+                PolicyDiffDirection::Narrows,
+                "1 rule grants less authority".to_owned()
+            ),
+        ],
+        "widening is the direction that can cost the owner something, so it is \
+         counted first"
+    );
+
+    assert_eq!(
+        policy_change_summary(&policy_diff_rows(&[
+            "No permission changes: the proposed policy is identical.".to_owned()
+        ])),
+        vec![(
+            PolicyDiffDirection::Unchanged,
+            "No permission changes".to_owned()
+        )]
+    );
+}
+
+#[test]
 fn a_digest_is_only_described_as_signed_when_something_signed_it() {
     assert_eq!(digest_label(true), "Digest that was signed");
     // A rejected request sits under an explanation reading "no signature was
