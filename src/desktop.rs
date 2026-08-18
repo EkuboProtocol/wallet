@@ -10723,43 +10723,6 @@ impl WalletWindow {
                             ),
                     ),
             ))
-            // No section heading here: the row's own "Testnet mode" label
-            // already names it, and a "Test networks" title above it just
-            // said the same thing twice.
-            .child(untitled_settings_section(
-                GroupBox::new()
-                    .id("testnet-mode-settings")
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(div().font_medium().child("Testnet mode"))
-                                    .child(
-                                        div()
-                                            .debug_selector(|| "settings-prose".to_owned())
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-.max_w(PROSE_MEASURE)
-                                            .child(selectable_label("Show configured test networks and their linked balances, tokens, requests, and activity. Testnet mode is off by default.")),
-                                    ),
-                            )
-                            .child(
-                                Switch::new("testnet-mode")
-                                    .checked(self.testnet_mode)
-                                    .on_click(cx.listener(|view, enabled, _, cx| {
-                                        view.set_testnet_mode(*enabled, cx);
-                                    })),
-                            ),
-                    ),
-            ))
             .child(settings_section(
                 "Detected agents",
                 GroupBox::new()
@@ -10831,6 +10794,49 @@ impl WalletWindow {
                     }),
             ))
             .child(self.render_updates(cx))
+            // Last of the settings proper, under updates, because it is the
+            // one nobody reaches for: appearance, agents, and updates are
+            // things every owner touches, while test networks matter only to
+            // somebody who already knows they want them — and somebody who
+            // knows that will find the switch wherever it is.
+            //
+            // No section heading here: the row's own "Testnet mode" label
+            // already names it, and a "Test networks" title above it just
+            // said the same thing twice.
+            .child(untitled_settings_section(
+                GroupBox::new()
+                    .id("testnet-mode-settings")
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(div().font_medium().child("Testnet mode"))
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "settings-prose".to_owned())
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
+                                            .child(selectable_label("Show configured test networks and their linked balances, tokens, requests, and activity. Testnet mode is off by default.")),
+                                    ),
+                            )
+                            .child(
+                                Switch::new("testnet-mode")
+                                    .checked(self.testnet_mode)
+                                    .on_click(cx.listener(|view, enabled, _, cx| {
+                                        view.set_testnet_mode(*enabled, cx);
+                                    })),
+                            ),
+                    ),
+            ))
             .child(self.render_legal(cx))
     }
 
