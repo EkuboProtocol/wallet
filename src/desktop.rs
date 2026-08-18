@@ -7001,6 +7001,10 @@ impl WalletWindow {
     fn reset_inbox_scroll(&self) {
         self.route_scroll_handle
             .set_offset(gpui::point(px(0.0), px(0.0)));
+        self.inbox_waiting_list
+            .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
+        self.inbox_decided_list
+            .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
     }
 
     fn set_inbox_tab(&mut self, tab: InboxTab, cx: &mut Context<Self>) {
@@ -7009,8 +7013,7 @@ impl WalletWindow {
         }
         self.inbox_tab = tab;
         self.selected_record = None;
-        self.route_scroll_handle
-            .set_offset(gpui::point(px(0.0), px(0.0)));
+        self.reset_inbox_scroll();
         if tab == InboxTab::Decided {
             self.refresh_visible_pending_transactions(cx);
         }
