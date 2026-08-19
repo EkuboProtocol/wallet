@@ -44,6 +44,7 @@ use ekubo_wallet_core::{
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -2272,6 +2273,27 @@ impl OwnerApi {
         )?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(stored)
+    }
+
+    /// What the owner has said each chain's own currency is worth.
+    pub fn native_token_prices(&self) -> Result<BTreeMap<u64, f64>> {
+        TokenStore::production(self.config.data_dir())?.native_prices()
+    }
+
+    /// Record what a chain's own currency is roughly worth, or clear it back
+    /// to the value this build shipped.
+    ///
+    /// No authentication, like the token values it sits beside: it orders one
+    /// tab and decides which of its rows are dust, and nothing that decides
+    /// what may be signed reads it.
+    pub fn set_native_token_price(&self, chain_id: u64, price: Option<f64>) -> Result<()> {
+        ensure!(
+            contains_configured_chain(&self.config.load()?, chain_id),
+            "chain {chain_id} is not a configured network"
+        );
+        TokenStore::production(self.config.data_dir())?.set_native_price(chain_id, price)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
     }
 
     /// Record roughly what one whole token is worth, or clear it.

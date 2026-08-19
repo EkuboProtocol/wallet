@@ -662,6 +662,34 @@ fn policy_proposal_for_account<'a>(
 /// each bar the height of the text it stands in for. Widths vary because
 /// equal-length bars read as a rendered table rather than as a placeholder for
 /// one.
+/// The frame the balances are read in, whether or not they have arrived yet.
+///
+/// Loading and loaded are the same screen: the same card in the same place,
+/// filling the same height, with the list region inside it. Only what is in
+/// that region changes, so nothing about the page moves when the balances
+/// land.
+fn portfolio_balances_card(cx: &App) -> gpui::Div {
+    div()
+        .debug_selector(|| "portfolio-balances-card".to_owned())
+        .w_full()
+        .min_w_0()
+        .flex_1()
+        .min_h_0()
+        .p_4()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
+        .flex()
+        .flex_col()
+}
+
+/// Where the balances are about to appear, inside the region they appear in.
+///
+/// The rows are the real row's geometry — the same padding, the same divider,
+/// identity over metadata on the left and the amount on the right, each bar
+/// the height of the text it stands in for. Widths vary because equal-length
+/// bars read as a rendered table rather than as a placeholder for one.
 fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
     const ROWS: [(gpui::Pixels, gpui::Pixels, gpui::Pixels); 4] = [
         (px(184.0), px(248.0), px(132.0)),
@@ -669,50 +697,65 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
         (px(208.0), px(264.0), px(148.0)),
         (px(160.0), px(232.0), px(112.0)),
     ];
-    let mut card = div()
+    let mut rows = div()
         .debug_selector(|| "portfolio-loading-placeholder".to_owned())
+        // The list region: the placeholder rows sit at the top of it, exactly
+        // as an account holding four balances would.
         .w_full()
         .min_w_0()
-        .p_4()
-        .rounded(cx.theme().radius_lg)
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().secondary)
+        .flex_1()
+        .min_h_0()
+        .overflow_hidden()
         .flex()
         .flex_col();
     for (index, (identity, metadata, balance)) in ROWS.into_iter().enumerate() {
-        card = card.child(
-            // The balance row's own frame: `py_2`, and a divider under every
-            // row but the last.
-            div()
-                .w_full()
-                .min_w_0()
-                .py_2()
-                .when(index + 1 < ROWS.len(), |row| {
-                    row.border_b_1().border_color(cx.theme().border)
-                })
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .min_w(px(180.0))
-                        .flex_1()
-                        .flex_basis(px(260.0))
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        // The identity line is `font_medium` at the base size;
-                        // the metadata under it is `text_xs`.
-                        .child(Skeleton::new().h_5().w(identity).max_w_full())
-                        .child(Skeleton::new().secondary().h_3().w(metadata).max_w_full()),
-                )
-                // The amount is `text_lg` and sits hard right.
-                .child(Skeleton::new().h_6().w(balance).flex_none()),
-        );
+        rows =
+            rows.child(
+                // The balance row's own frame: `py_2`, and a divider under every
+                // row but the last.
+                div()
+                    .debug_selector(|| "portfolio-placeholder-row".to_owned())
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .py_2()
+                    .when(index + 1 < ROWS.len(), |row| {
+                        row.border_b_1().border_color(cx.theme().border)
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w(px(180.0))
+                            .flex_1()
+                            .flex_basis(px(260.0))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            // Each bar sits in a box the height of the line it
+                            // stands in for: the identity is one line of
+                            // base-size text, and the metadata under it is a row
+                            // whose height comes from the explorer link in it.
+                            .child(
+                                div()
+                                    .h(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .child(Skeleton::new().h_5().w(identity).max_w_full()),
+                            )
+                            .child(
+                                div().h(px(22.0)).flex().items_center().child(
+                                    Skeleton::new().secondary().h_3().w(metadata).max_w_full(),
+                                ),
+                            ),
+                    )
+                    // The amount is `text_lg` and sits hard right.
+                    .child(Skeleton::new().h_6().w(balance).flex_none()),
+            );
     }
-    card
+    rows
 }
 
 fn account_switcher(
@@ -1236,7 +1279,23 @@ fn format_usd(value: f64) -> String {
     }
 }
 
-fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalanceRow> {
+/// Stands in for the recorded values before the first snapshot has landed.
+static EMPTY_NATIVE_PRICES: BTreeMap<u64, f64> = BTreeMap::new();
+
+/// What one unit of a chain's own currency is worth, as far as this wallet
+/// knows: what the owner recorded for that chain, and otherwise the value the
+/// build shipped.
+fn native_price(chain_id: u64, recorded: &BTreeMap<u64, f64>) -> Option<f64> {
+    recorded
+        .get(&chain_id)
+        .copied()
+        .or_else(|| ekubo_wallet_core::token_prices::native_usd_price(chain_id))
+}
+
+fn portfolio_balance_rows(
+    account: &OwnerPortfolioAccount,
+    native_prices: &BTreeMap<u64, f64>,
+) -> Vec<PortfolioBalanceRow> {
     const NATIVE_ASSET_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
     let mut rows = Vec::new();
     for item in &account.networks {
@@ -1271,7 +1330,7 @@ fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalan
                 approximate_usd_value: approximate_usd_value(
                     &portfolio.native_balance,
                     native.map(|currency| currency.decimals),
-                    ekubo_wallet_core::token_prices::native_usd_price(item.network.chain_id),
+                    native_price(item.network.chain_id, native_prices),
                 ),
                 explorer_url: None,
             });
@@ -2147,7 +2206,7 @@ pub struct WalletWindow {
     /// The token whose approximate value is open for editing, exactly as it
     /// was listed. The write matches on that same metadata, so a row that
     /// changed underneath the dialog is refused rather than overwritten.
-    token_price_editor: Option<StoredToken>,
+    token_price_editor: Option<PriceEditorTarget>,
     token_price_busy: bool,
     token_editor_open: bool,
     token_editor_errors: TokenEditorErrors,
@@ -2231,6 +2290,16 @@ pub struct WalletWindow {
     inbox_waiting_rows: Cell<usize>,
     inbox_decided_list: VariableListState,
     inbox_decided_rows: Cell<usize>,
+    /// The chevron that says a list runs past its own bottom edge, one per
+    /// list rather than one per page.
+    ///
+    /// Drawn inside the frame it belongs to: a chevron at the bottom of the
+    /// window says only that something scrolls, while one inside the bordered
+    /// card says which thing does. Only one inbox queue is on screen at a
+    /// time, so the two queues share an indicator.
+    inbox_overflow_indicator: ScrollOverflowIndicator,
+    portfolio_overflow_indicator: ScrollOverflowIndicator,
+    policy_diff_overflow_indicator: ScrollOverflowIndicator,
     /// Whether the portfolio is showing holdings worth less than a dollar,
     /// and holdings nobody has priced.
     ///
@@ -2363,6 +2432,10 @@ struct DesktopSnapshot {
     automation_runs: BTreeMap<uuid::Uuid, Vec<AutomationRun>>,
     message_documents: BTreeMap<uuid::Uuid, std::result::Result<ReviewDocument, SharedString>>,
     typed_data_documents: BTreeMap<uuid::Uuid, std::result::Result<ReviewDocument, SharedString>>,
+    /// What the owner says each chain's own currency is worth. Read here
+    /// rather than at render time, like everything else the portfolio draws:
+    /// nothing on the drawing path may open the database.
+    native_token_prices: BTreeMap<u64, f64>,
 }
 
 impl DesktopSnapshot {
@@ -2442,6 +2515,7 @@ impl DesktopSnapshot {
             automation_runs,
             message_documents,
             typed_data_documents,
+            native_token_prices: owner.native_token_prices().unwrap_or_default(),
         }
     }
 }
@@ -3144,6 +3218,44 @@ struct TokenListDelegate {
     network_names: BTreeMap<u64, SharedString>,
     visible_chain_ids: BTreeSet<u64>,
     configured_chain_ids: BTreeSet<u64>,
+}
+
+/// Whose approximate value the one-field dialog is editing.
+///
+/// A token's value lives on its row in the token database. A chain's own
+/// currency has no such row — it has no contract — so it is recorded per chain
+/// instead, and clearing it returns that chain to the value this build
+/// shipped rather than to nothing.
+#[derive(Clone, Debug, PartialEq)]
+enum PriceEditorTarget {
+    Token(Box<StoredToken>),
+    NativeCurrency {
+        chain_id: u64,
+        label: SharedString,
+        recorded: Option<f64>,
+    },
+}
+
+impl PriceEditorTarget {
+    fn label(&self) -> SharedString {
+        match self {
+            Self::Token(token) => SharedString::from(
+                token
+                    .symbol
+                    .clone()
+                    .or_else(|| token.name.clone())
+                    .unwrap_or_else(|| token.address.clone()),
+            ),
+            Self::NativeCurrency { label, .. } => label.clone(),
+        }
+    }
+
+    fn recorded(&self) -> Option<f64> {
+        match self {
+            Self::Token(token) => token.approximate_usd_price,
+            Self::NativeCurrency { recorded, .. } => *recorded,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4475,6 +4587,17 @@ impl TokenListDelegate {
     }
 }
 
+/// Put the token inventory back at its first row.
+///
+/// The component scrolls itself when its own built-in search runs, and this
+/// screen searches through a field of its own — so without this a query typed
+/// two hundred rows down answered with a list nobody could see the top of.
+fn scroll_token_list_to_top(list: &ListState<TokenListDelegate>) {
+    list.scroll_handle()
+        .base_handle()
+        .set_offset(point(px(0.0), px(0.0)));
+}
+
 fn token_network_names(networks: &[NetworkConfig]) -> BTreeMap<u64, SharedString> {
     networks
         .iter()
@@ -5307,9 +5430,9 @@ impl ListDelegate for TokenListDelegate {
                 |price| format!("Value {}", format_usd(price)),
             ))
             .on_click(move |_, window, cx| {
-                let token = price_token.clone();
+                let target = PriceEditorTarget::Token(Box::new(price_token.clone()));
                 let _ = price_wallet.update(cx, |view, cx| {
-                    view.open_token_price_editor(token, window, cx);
+                    view.open_token_price_editor(target, window, cx);
                 });
             });
         let actions = app_button(("remove-token", index.row))
@@ -5803,6 +5926,9 @@ impl WalletWindow {
             inbox_waiting_rows: Cell::new(0),
             inbox_decided_list: virtual_inbox_list(0),
             inbox_decided_rows: Cell::new(0),
+            inbox_overflow_indicator: ScrollOverflowIndicator::new(virtual_inbox_list(0), cx),
+            portfolio_overflow_indicator: ScrollOverflowIndicator::new(virtual_inbox_list(0), cx),
+            policy_diff_overflow_indicator: ScrollOverflowIndicator::new(virtual_inbox_list(0), cx),
             show_low_value_balances: false,
             portfolio_list: virtual_inbox_list(0),
             portfolio_rows: Cell::new(0),
@@ -5986,6 +6112,10 @@ impl WalletWindow {
                         let delegate = list.delegate_mut();
                         delegate.query = query;
                         delegate.apply_filters();
+                        // A search answers with a different list, and the
+                        // reader is at its first row whether or not they were
+                        // halfway down the last one.
+                        scroll_token_list_to_top(list);
                         cx.notify();
                     });
                 },
@@ -6898,7 +7028,7 @@ impl WalletWindow {
     /// that was listed.
     fn open_token_price_editor(
         &mut self,
-        token: StoredToken,
+        target: PriceEditorTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -6908,20 +7038,16 @@ impl WalletWindow {
         if self.token_editor_open || self.token_price_editor.is_some() {
             return;
         }
-        let current = token
-            .approximate_usd_price
+        let current = target
+            .recorded()
             .map(|price| price.to_string())
             .unwrap_or_default();
         input.update(cx, |input, cx| {
             input.set_value(current, window, cx);
             input.set_selected_range(0..input.value().len(), cx);
         });
-        let label = token
-            .symbol
-            .clone()
-            .or_else(|| token.name.clone())
-            .unwrap_or_else(|| token.address.clone());
-        self.token_price_editor = Some(token);
+        let label = target.label();
+        self.token_price_editor = Some(target);
         self.token_price_busy = false;
         self.token_editor_errors = TokenEditorErrors::default();
         let focus_input = input.clone();
@@ -7039,7 +7165,7 @@ impl WalletWindow {
         if self.token_price_busy {
             return;
         }
-        let (Some(token), Some(input)) = (
+        let (Some(target), Some(input)) = (
             self.token_price_editor.clone(),
             self.token_price_input.as_ref(),
         ) else {
@@ -7056,11 +7182,14 @@ impl WalletWindow {
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_price_busy = true;
         let owner = self.owner.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(
-                cx,
-                async move { owner.set_token_price(&token, price) },
-            );
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            match target {
+                PriceEditorTarget::Token(token) => owner.set_token_price(&token, price),
+                PriceEditorTarget::NativeCurrency { chain_id, .. } => {
+                    owner.set_native_token_price(chain_id, price)
+                }
+            }
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update_in(cx, |view, window, cx| {
@@ -7070,6 +7199,10 @@ impl WalletWindow {
                         view.token_price_editor = None;
                         window.close_dialog(cx);
                         view.reload_tokens(cx);
+                        // The value the portfolio sorts by lives in the
+                        // background snapshot, so the tab has to be told to
+                        // read it again before it can sort by the new one.
+                        view.reload_desktop_snapshot(cx);
                         view.invalidate_portfolio();
                         view.refresh_portfolio(cx);
                     }
@@ -7952,6 +8085,38 @@ impl WalletWindow {
             Err(error) => {
                 self.policy_action_error =
                     Some(format!("Could not prepare the disable-signing policy: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Put the draft back to the policy that is actually installed.
+    ///
+    /// The editor opens on the installed policy, and until now the only way
+    /// back to it was to leave the tab and return — which rebuilds the editor
+    /// as a side effect nobody could be expected to guess. The history
+    /// selection follows, because after this the draft is the latest revision
+    /// again rather than wherever browsing had left it.
+    fn restore_current_policy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(editor), Some(input)) =
+            (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
+        else {
+            return;
+        };
+        let Some(current) = editor.current_policy.as_ref() else {
+            return;
+        };
+        match serde_json::to_string_pretty(current) {
+            Ok(document) => {
+                input.update(cx, |input, cx| input.set_value(document, window, cx));
+                editor.validation = None;
+                editor.history_selection = latest_policy_revision(editor.history.len());
+                self.policy_review_open = false;
+                self.policy_action_error = None;
+            }
+            Err(error) => {
+                self.policy_action_error =
+                    Some(format!("Could not read the installed policy: {error:#}").into());
             }
         }
         cx.notify();
@@ -10815,26 +10980,32 @@ impl WalletWindow {
             &self.inbox_waiting_rows,
             cards.len(),
         );
-        self.route_overflow_indicator
+        self.inbox_overflow_indicator
             .set_scroll_handle(self.inbox_waiting_list.clone());
         let blocked = self.review_flow.is_in_progress();
         let view = cx.entity().downgrade();
         let cards = Arc::<[InboxWaitingCard]>::from(cards);
         content.child(
             div()
-                .id("inbox-waiting-list")
-                .debug_selector(|| "inbox-waiting-list".to_owned())
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .child(
-                    variable_list(self.inbox_waiting_list.clone(), move |index, _, cx| {
-                        let Some(card) = cards.get(index) else {
-                            return div().into_any_element();
-                        };
-                        render_inbox_waiting_card(card, blocked, &view, cx)
-                    })
-                    .size_full(),
-                ),
+                    div()
+                        .id("inbox-waiting-list")
+                        .debug_selector(|| "inbox-waiting-list".to_owned())
+                        .size_full()
+                        .child(
+                            variable_list(self.inbox_waiting_list.clone(), move |index, _, cx| {
+                                let Some(card) = cards.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                render_inbox_waiting_card(card, blocked, &view, cx)
+                            })
+                            .size_full(),
+                        ),
+                )
+                .child(self.inbox_overflow_indicator.element()),
         )
     }
 
@@ -11770,7 +11941,7 @@ impl WalletWindow {
             &self.inbox_decided_rows,
             row_count,
         );
-        self.route_overflow_indicator
+        self.inbox_overflow_indicator
             .set_scroll_handle(self.inbox_decided_list.clone());
         // History only grows. Drawing every row of it laid out a card per
         // record on every frame, so the list keeps the window's height and
@@ -11806,11 +11977,17 @@ impl WalletWindow {
             )
             .child(
                 div()
-                    .id("activity-records")
-                    .debug_selector(|| "activity-records".to_owned())
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(rows),
+                    .child(
+                        div()
+                            .id("activity-records")
+                            .debug_selector(|| "activity-records".to_owned())
+                            .size_full()
+                            .child(rows),
+                    )
+                    .child(self.inbox_overflow_indicator.element()),
             )
     }
 
@@ -14442,6 +14619,81 @@ impl WalletWindow {
                                         ),
                                 ),
                         )
+                        // A chain's own currency has no row in the token
+                        // database — it has no contract — so this is where its
+                        // approximate value is set, beside the currency it
+                        // belongs to. Like a token's, it decides only where
+                        // the balance sorts on the Portfolio tab and whether
+                        // that tab holds it back as dust.
+                        .when_some(network.native_currency.as_ref(), |card, currency| {
+                            let chain_id = network.chain_id;
+                            let symbol = currency.symbol.clone();
+                            let recorded = self
+                                .snapshot()
+                                .ok()
+                                .and_then(|snapshot| {
+                                    snapshot.native_token_prices.get(&chain_id).copied()
+                                });
+                            let shipped =
+                                ekubo_wallet_core::token_prices::native_usd_price(chain_id);
+                            let label = SharedString::from(symbol.clone());
+                            card.child(
+                                h_flex()
+                                    .w_full()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_text(
+                                        format!("network-native-value-{name}"),
+                                        &match (recorded, shipped) {
+                                            (Some(price), _) => format!(
+                                                "1 {symbol} ≈ {} · your value",
+                                                format_usd(price)
+                                            ),
+                                            (None, Some(price)) => format!(
+                                                "1 {symbol} ≈ {} · shipped estimate",
+                                                format_usd(price)
+                                            ),
+                                            (None, None) => format!(
+                                                "1 {symbol} has no approximate value"
+                                            ),
+                                        },
+                                    ))
+                                    .child(
+                                        app_button(SharedString::from(format!(
+                                            "set-native-value-{name}"
+                                        )))
+                                        .debug_selector({
+                                            let name = name.clone();
+                                            move || format!("set-native-value-{name}")
+                                        })
+                                        .label(if recorded.is_some() {
+                                            "Change value"
+                                        } else {
+                                            "Set value"
+                                        })
+                                        .link()
+                                        .h(px(22.0))
+                                        .px_0()
+                                        .text_sm()
+                                        .font_normal()
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            cx.stop_propagation();
+                                            view.open_token_price_editor(
+                                                PriceEditorTarget::NativeCurrency {
+                                                    chain_id,
+                                                    label: label.clone(),
+                                                    recorded,
+                                                },
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                    ),
+                            )
+                        })
                         .when_some(action_error, |card, error| {
                             card.child(div().text_sm().text_color(cx.theme().danger).child(
                                 selectable_text(format!("network-action-error-{name}"), &error),
@@ -14527,12 +14779,13 @@ impl WalletWindow {
             ));
         }
         let (body, holdings) = match &self.portfolio {
-            // Placeholder rows shaped like balance rows, so the page shows
-            // where the token list is about to appear instead of a spinner
-            // that says only that something, somewhere, is happening.
+            // The loaded page, with placeholder rows where the balances go:
+            // the same card, in the same place, at the same height, so the
+            // arrival of the balances moves nothing. A spinner would say only
+            // that something, somewhere, is happening.
             PortfolioState::Idle | PortfolioState::Loading => (
-                div().flex_none().child(portfolio_loading_placeholder(cx)),
-                false,
+                portfolio_balances_card(cx).child(portfolio_loading_placeholder(cx)),
+                true,
             ),
             PortfolioState::Failed(error) => (
                 div().flex_none().child(
@@ -14545,8 +14798,8 @@ impl WalletWindow {
             // the selected account.
             PortfolioState::Ready(snapshot) => match snapshot.accounts.first() {
                 None => (
-                    div().flex_none().child(portfolio_loading_placeholder(cx)),
-                    false,
+                    portfolio_balances_card(cx).child(portfolio_loading_placeholder(cx)),
+                    true,
                 ),
                 Some(account) => (self.render_portfolio_balances(account, cx), true),
             },
@@ -14610,7 +14863,12 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let wallet_id = account.wallet.id.clone();
-        let held = portfolio_balance_rows(account);
+        let held = portfolio_balance_rows(
+            account,
+            self.snapshot().map_or(&EMPTY_NATIVE_PRICES, |snapshot| {
+                &snapshot.native_token_prices
+            }),
+        );
         // The filter engages only once it has something to go on. An account
         // whose tokens are all unpriced — which is every account until someone
         // records a value — would otherwise open onto a tab holding back
@@ -14647,22 +14905,9 @@ impl WalletWindow {
                     error: error.clone(),
                 })
         }));
-        let card = div()
-            .debug_selector(|| "portfolio-balances-card".to_owned())
-            .w_full()
-            .min_w_0()
-            .flex_1()
-            .min_h_0()
-            .p_4()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .flex()
-            .flex_col()
-            .when(hidden > 0, |card| {
-                card.child(self.render_portfolio_dust_control(hidden, cx))
-            });
+        let card = portfolio_balances_card(cx).when(hidden > 0, |card| {
+            card.child(self.render_portfolio_dust_control(hidden, cx))
+        });
         if rows.is_empty() {
             return card.child(div().py_4().text_color(cx.theme().muted_foreground).child(
                 selectable_label(if hidden > 0 {
@@ -14673,25 +14918,39 @@ impl WalletWindow {
             ));
         }
         Self::resize_list(&self.portfolio_list, &self.portfolio_rows, rows.len());
-        self.route_overflow_indicator
+        self.portfolio_overflow_indicator
             .set_scroll_handle(self.portfolio_list.clone());
         let row_count = rows.len();
         let rows = Arc::<[PortfolioListRow]>::from(rows);
         card.child(
             div()
-                .id("portfolio-balances")
-                .debug_selector(|| "portfolio-balances".to_owned())
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .child(
-                    variable_list(self.portfolio_list.clone(), move |index, _, cx| {
-                        let Some(row) = rows.get(index) else {
-                            return div().into_any_element();
-                        };
-                        render_portfolio_list_row(row, &wallet_id, index + 1 < row_count, cx)
-                    })
-                    .size_full(),
-                ),
+                    div()
+                        .id("portfolio-balances")
+                        .debug_selector(|| "portfolio-balances".to_owned())
+                        .size_full()
+                        .child(
+                            variable_list(self.portfolio_list.clone(), move |index, _, cx| {
+                                let Some(row) = rows.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                render_portfolio_list_row(
+                                    row,
+                                    &wallet_id,
+                                    index + 1 < row_count,
+                                    cx,
+                                )
+                            })
+                            .size_full(),
+                        ),
+                )
+                // Inside the card the balances are in, rather than at the
+                // bottom of the window: the chevron has to say which list runs
+                // past its own edge, and the page holds three frames now.
+                .child(self.portfolio_overflow_indicator.element()),
         )
     }
 
@@ -15090,6 +15349,7 @@ impl WalletWindow {
                             let delegate = list.delegate_mut();
                             delegate.query = String::new();
                             delegate.apply_filters();
+                            scroll_token_list_to_top(list);
                             cx.notify();
                         });
                     }),
@@ -16454,18 +16714,31 @@ impl WalletWindow {
                     .flex_col()
                     .child(
                         div()
-                            .id("policy-review-changes-list")
-                            .size_full()
-                            .child(variable_list(
-                                self.policy_diff_list.clone(),
-                                move |index, _, cx| {
-                                    let Some(row) = rows.get(index) else {
-                                        return div().into_any_element();
-                                    };
-                                    render_policy_diff_row(index, row, cx)
-                                },
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(
+                                div()
+                                    .id("policy-review-changes-list")
+                                    .size_full()
+                                    .child(
+                                        variable_list(
+                                            self.policy_diff_list.clone(),
+                                            move |index, _, cx| {
+                                                let Some(row) = rows.get(index) else {
+                                                    return div().into_any_element();
+                                                };
+                                                render_policy_diff_row(index, row, cx)
+                                            },
+                                        )
+                                        .size_full(),
+                                    ),
                             )
-                            .size_full()),
+                            .child({
+                                self.policy_diff_overflow_indicator
+                                    .set_scroll_handle(self.policy_diff_list.clone());
+                                self.policy_diff_overflow_indicator.element()
+                            }),
                     ),
             )
             .when(allow_anything_draft, |review| {
@@ -16556,10 +16829,18 @@ impl WalletWindow {
         };
 
         let document = input.read(cx).value().to_string();
-        let allow_anything_draft = serde_json::from_str(&document)
+        let draft_policy = serde_json::from_str(&document)
             .ok()
-            .and_then(|value| WalletPolicy::parse(value).ok())
-            .is_some_and(|policy| policy == WalletPolicy::allow_anything());
+            .and_then(|value| WalletPolicy::parse(value).ok());
+        let allow_anything_draft = draft_policy
+            .as_ref()
+            .is_some_and(|policy| *policy == WalletPolicy::allow_anything());
+        // A draft that says exactly what the installed policy says is not a
+        // draft to come back from, and one that does not parse always is.
+        let can_restore_current = editor
+            .current_policy
+            .as_ref()
+            .is_some_and(|current| draft_policy.as_ref().is_none_or(|draft| draft != current));
         let validated = editor
             .validation
             .as_ref()
@@ -16822,6 +17103,22 @@ impl WalletWindow {
                                     .disabled(self.policy_installing)
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.apply_allow_anything_policy(window, cx);
+                                    })),
+                            )
+                            // The way back from a draft nobody wants to keep.
+                            // Leaving the tab and returning also rebuilds the
+                            // editor from the installed policy, which is a
+                            // strange thing to have to know, and impossible to
+                            // guess. Disabled when the draft already says what
+                            // the installed policy says, because then there is
+                            // nothing to come back from.
+                            .child(
+                                app_button("restore-current-policy")
+                                    .debug_selector(|| "restore-current-policy".to_owned())
+                                    .label("Current policy")
+                                    .disabled(!can_restore_current || self.policy_installing)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.restore_current_policy(window, cx);
                                     })),
                             )
                             // An installed revision is a starting point for the

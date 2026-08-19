@@ -538,14 +538,16 @@ fn any_other_schema_is_refused_and_left_untouched() {
     // cannot reach by migration is refused, and the refusal writes nothing.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
-    write_unknown_schema(&path, &key(11), 9);
+    // A version far beyond anything this build could migrate to, so the test
+    // keeps meaning "foreign" as the schema moves forward.
+    write_unknown_schema(&path, &key(11), 99);
     let before = std::fs::read(&path).unwrap();
 
     let error = PolicyStore::open(&path, &key(11))
         .err()
         .expect("a foreign schema must be refused")
         .to_string();
-    assert!(error.contains("schema 9 is not the schema"), "{error}");
+    assert!(error.contains("schema 99 is not the schema"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 

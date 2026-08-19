@@ -585,6 +585,32 @@ fn a_confirmed_proposal_carries_the_value_this_build_ships() {
     assert_eq!(stored.approximate_usd_price, Some(priced.usd_price));
 }
 
+/// A chain's own currency has no contract and therefore no token row, so its
+/// value is recorded per chain. Clearing it returns that chain to the value
+/// this build shipped rather than to nothing.
+#[test]
+fn a_chains_own_currency_is_valued_per_chain_and_can_be_cleared() {
+    let (_directory, mut store) = store();
+    assert!(store.native_prices().unwrap().is_empty());
+
+    store.set_native_price(1, Some(1900.0)).unwrap();
+    store.set_native_price(8453, Some(1900.0)).unwrap();
+    assert_eq!(store.native_prices().unwrap().get(&1), Some(&1900.0));
+
+    // Recording again replaces rather than duplicating: there is one answer
+    // per chain, and it is the latest one.
+    store.set_native_price(1, Some(2000.0)).unwrap();
+    assert_eq!(store.native_prices().unwrap().len(), 2);
+    assert_eq!(store.native_prices().unwrap().get(&1), Some(&2000.0));
+
+    store.set_native_price(1, None).unwrap();
+    assert_eq!(store.native_prices().unwrap().get(&1), None);
+    assert_eq!(store.native_prices().unwrap().get(&8453), Some(&1900.0));
+
+    assert!(store.set_native_price(1, Some(-1.0)).is_err());
+    assert!(store.set_native_price(1, Some(f64::NAN)).is_err());
+}
+
 #[test]
 fn reviewed_token_removal_does_not_require_human_presence() {
     let (_directory, mut store) = store();

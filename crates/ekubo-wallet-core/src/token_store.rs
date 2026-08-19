@@ -49,7 +49,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 
 /// Balance reads per Multicall3 request.
 const BALANCE_CHUNK: usize = 200;
@@ -682,6 +682,63 @@ impl TokenStore {
             address.to_checksum(None),
             chain_id
         );
+        Ok(())
+    }
+
+    /// What the owner says one unit of each chain's own currency is worth.
+    ///
+    /// Only the chains they have answered for. A chain with no row here falls
+    /// back to the value this build shipped, and a chain neither covers has no
+    /// value at all — which is why an unvalued gas balance is shown rather than
+    /// held back as dust.
+    pub fn native_prices(&self) -> Result<BTreeMap<u64, f64>> {
+        let mut statement = self
+            .database
+            .connection
+            .prepare("SELECT chain_id, approximate_usd_price FROM native_token_prices")?;
+        let mapped =
+            statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)))?;
+        let mut prices = BTreeMap::new();
+        for row in mapped {
+            let (chain_id, price) = row?;
+            if let Ok(chain_id) = u64::try_from(chain_id)
+                && price.is_finite()
+                && price >= 0.0
+            {
+                prices.insert(chain_id, price);
+            }
+        }
+        Ok(prices)
+    }
+
+    /// Record what a chain's own currency is roughly worth, or forget it.
+    ///
+    /// Unauthenticated for the same reason a token's value is: it is read by
+    /// the order of one tab and by which of its rows are dust, and by nothing
+    /// that decides what may be signed. Clearing it returns the chain to the
+    /// value this build shipped.
+    pub fn set_native_price(&mut self, chain_id: u64, price: Option<f64>) -> Result<()> {
+        let chain = i64::try_from(chain_id).context("chain ID out of range")?;
+        match price {
+            Some(price) => {
+                ensure!(
+                    price.is_finite() && price >= 0.0,
+                    "an approximate value must be a number at or above zero"
+                );
+                self.database.connection.execute(
+                    "INSERT INTO native_token_prices(chain_id, approximate_usd_price)
+                     VALUES (?1, ?2)
+                     ON CONFLICT(chain_id) DO UPDATE SET approximate_usd_price = ?2",
+                    params![chain, price],
+                )?;
+            }
+            None => {
+                self.database.connection.execute(
+                    "DELETE FROM native_token_prices WHERE chain_id = ?1",
+                    params![chain],
+                )?;
+            }
+        }
         Ok(())
     }
 

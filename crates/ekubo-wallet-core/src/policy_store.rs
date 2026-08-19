@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1650,6 +1650,14 @@ const MIGRATIONS: &[Migration] = &[
         statements: &[],
         seed: Some(seed_token_prices),
     },
+    // A chain's own currency needed somewhere of its own to be worth
+    // something: it has no token row, and the shipped snapshot covers the
+    // chains it covers.
+    Migration {
+        to_version: 9,
+        statements: &[NATIVE_TOKEN_PRICES_TABLE],
+        seed: None,
+    },
 ];
 
 /// Write the shipped approximate values into confirmed tokens that have none.
@@ -2038,6 +2046,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  FOREIGN KEY (wallet_instance_id) REFERENCES wallet_instances(instance_id)
              ) STRICT",
             TOKEN_PROPOSALS_TABLE,
+            NATIVE_TOKEN_PRICES_TABLE,
             NETWORK_PROPOSALS_TABLE,
             AUTOMATIONS_TABLE,
             AUTOMATIONS_WALLET_INDEX,
@@ -2180,6 +2189,17 @@ const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_propos
 ///
 /// `source` is the list the suggestion came from, so the review screen can
 /// group a hundred suggestions into the handful of decisions they really are.
+/// What the owner says a chain's own currency is roughly worth.
+///
+/// Its own table rather than a row in `tokens`, because a chain's currency has
+/// no token contract and the zero address is a sentinel every balance read
+/// uses: a row there would name that address in the one place names matter —
+/// the review screen — in exchange for a number that only orders a list.
+const NATIVE_TOKEN_PRICES_TABLE: &str = "CREATE TABLE IF NOT EXISTS native_token_prices (
+     chain_id INTEGER PRIMARY KEY CHECK (chain_id > 0),
+     approximate_usd_price REAL NOT NULL CHECK (approximate_usd_price >= 0.0)
+ ) STRICT";
+
 const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals (
      chain_id INTEGER NOT NULL CHECK (chain_id > 0),
      address BLOB NOT NULL CHECK (length(address) = 20),

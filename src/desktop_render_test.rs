@@ -150,6 +150,7 @@ fn quiet_snapshot() -> DesktopSnapshot {
         networks: Ok(ekubo_wallet_core::config::default_networks()),
         message_documents: BTreeMap::new(),
         typed_data_documents: BTreeMap::new(),
+        native_token_prices: BTreeMap::new(),
     }
 }
 
@@ -1549,6 +1550,92 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
     release(cx, &view);
 }
 
+/// A chain's own currency has no token row to carry a value, so the question
+/// "where do I set this one?" had no answer on any screen. It is set beside
+/// the currency it belongs to, on the network's own card.
+#[gpui::test]
+fn a_chains_own_currency_is_valued_on_its_network_card(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Networks));
+
+    let bounds = measure(cx, window, &view, &["set-native-value-ethereum"]);
+    assert!(
+        bounds[0].is_some(),
+        "the network card must offer somewhere to record what its currency is worth"
+    );
+    release(cx, &view);
+}
+
+/// The editor opens on the installed policy, and the only way back to it was
+/// to leave the tab and return — which rebuilds the editor as a side effect
+/// nobody could be expected to guess.
+#[gpui::test]
+fn the_policy_editor_can_be_put_back_to_the_installed_policy(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let installed = WalletPolicy::require_approval_for_everything();
+    cx.update_entity(&view, |wallet, cx| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(1),
+            current_policy: Some(installed.clone()),
+            history: Vec::new(),
+            history_selection: None,
+            proposal: None,
+            validation: None,
+        });
+        let _ = cx;
+    });
+
+    // A draft nobody wants to keep, and the one control that undoes it.
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet
+                .policy_json_input
+                .as_ref()
+                .expect("policy input is initialized")
+                .update(cx, |input, cx| {
+                    input.set_value("{ \"version\": 1, \"rules\": [] }", window, cx);
+                });
+            wallet.restore_current_policy(window, cx);
+        });
+    })
+    .expect("the wallet window is open");
+
+    let restored = cx.update_entity(&view, |wallet, cx| {
+        wallet
+            .policy_json_input
+            .as_ref()
+            .expect("policy input is initialized")
+            .read(cx)
+            .value()
+            .to_string()
+    });
+    let restored: WalletPolicy = WalletPolicy::parse(serde_json::from_str(&restored).unwrap())
+        .expect("the restored draft must be a policy");
+    assert_eq!(
+        restored, installed,
+        "the draft must come back to exactly what is installed"
+    );
+    draw(cx, window, &view);
+
+    release(cx, &view);
+}
+
 /// A placeholder earns its place by being replaced without anything moving.
 /// This one was a different shape from the rows it stood in for, so the tab
 /// rearranged itself the moment the balances landed.
@@ -1577,8 +1664,19 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
         wallet.portfolio = PortfolioState::Loading;
         wallet.set_route(Route::Overview);
     });
-    let loading = measure(cx, window, &view, &["portfolio-loading-placeholder"])[0]
-        .expect("the placeholder must draw while the balances are being read");
+    let loading = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "portfolio-balances-card",
+            "portfolio-loading-placeholder",
+            "portfolio-placeholder-row",
+        ],
+    );
+    let loading_card = loading[0].expect("the card must draw while the balances are being read");
+    let placeholder = loading[1].expect("the placeholder rows must draw inside it");
+    let placeholder_row = loading[2].expect("a placeholder row must draw");
 
     cx.update_entity(&view, |wallet, _| {
         wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
@@ -1605,27 +1703,44 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
         cx,
         window,
         &view,
-        &["portfolio-balances-card", "portfolio-balance-row"],
+        &[
+            "portfolio-balances-card",
+            "portfolio-balances",
+            "portfolio-balance-row",
+        ],
     );
-    let balances = ready[0].expect("the balances must draw once they land");
-    let row = ready[1].expect("the balance row must draw");
+    let ready_card = ready[0].expect("the card must still draw once the balances land");
+    let list = ready[1].expect("the list must draw inside it");
+    let row = ready[2].expect("the balance row must draw");
 
     assert_eq!(
-        loading.origin, balances.origin,
-        "the balances must land where the placeholder stood"
+        loading_card, ready_card,
+        "the balances must land in the card the placeholder was already in, \
+         at the same place and the same size"
     );
     assert_eq!(
-        loading.size.width, balances.size.width,
-        "and be the same width as it"
+        placeholder.origin, list.origin,
+        "the placeholder rows must stand where the list stands"
     );
-    // Each placeholder row is the real row's frame, so one of them is the
-    // height of one balance rather than of some other card's line.
-    let placeholder_row = loading.size.height / 4.0;
+    assert_eq!(
+        placeholder.size.width, list.size.width,
+        "and be as wide as it"
+    );
+    // A placeholder row is the real row's frame, so it stands the same height
+    // as one balance rather than the height of some other card's line.
     assert!(
-        (placeholder_row - row.size.height).abs() < px(12.0),
+        (placeholder_row.size.height - row.size.height).abs() < px(12.0),
         "a placeholder row must be about the height of the row it stands in \
-         for: {placeholder_row:?} against {:?}",
+         for: {:?} against {:?}",
+        placeholder_row.size.height,
         row.size.height
+    );
+    // Only the left edge: this selector matches every placeholder row, so the
+    // bounds read back are the last one's, and the first row's position is
+    // already pinned by the region assertions above.
+    assert_eq!(
+        placeholder_row.origin.x, row.origin.x,
+        "and start at the same left edge as that row"
     );
 
     release(cx, &view);
