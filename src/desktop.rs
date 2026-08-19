@@ -3613,6 +3613,17 @@ fn notification_context(
             (record.wallet_id, chain_id)
         }
         DomainEventKind::WalletConnectProposed { .. } => return Some(NotificationContext::Dapp),
+        // A policy binds no single chain, so there is no network to name and
+        // none to filter the banner out on: the rules it rewrites apply
+        // wherever the account signs. It returns here rather than falling into
+        // the visibility check below, which exists to keep a banner from
+        // naming a network the owner has hidden.
+        DomainEventKind::PolicyProposed { wallet_id } => {
+            return Some(NotificationContext::Wallet(WalletContext {
+                account: wallet_id.clone(),
+                network: None,
+            }));
+        }
         _ => return None,
     };
     let networks = owner.networks().ok()?;
@@ -10521,6 +10532,15 @@ impl WalletWindow {
                 // arrives, so there is nothing to open — this lands the window
                 // on the screen the connection will show up on once settled.
                 self.set_route(Route::WalletConnect);
+            }
+            NotificationRoute::PolicyProposal { wallet_id } => {
+                // Selecting the account is the whole job: the Policies screen
+                // shows one account at a time, and the proposal card is drawn
+                // from whichever account's tab is open. Landing on the screen
+                // without choosing the tab would leave the owner looking at
+                // somebody else's policy.
+                self.policy_account_id = Some(wallet_id);
+                self.set_route(Route::Policies);
             }
         }
         cx.notify();
@@ -18677,7 +18697,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind,
                                 crate::events::DomainEventKind::ConfigurationChanged
                                     | crate::events::DomainEventKind::ReviewChanged { .. }
-                                    | crate::events::DomainEventKind::PolicyProposalChanged { .. }
+                                    | crate::events::DomainEventKind::PolicyProposed { .. }
                                     | crate::events::DomainEventKind::AutomationsChanged { .. }
                                     | crate::events::DomainEventKind::Transaction { .. }
                             );

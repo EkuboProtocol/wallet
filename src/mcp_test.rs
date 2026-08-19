@@ -1865,7 +1865,7 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     assert!(output.instruction.contains("open policy proposal primary"));
     assert!(matches!(
         events.try_recv().unwrap().kind,
-        DomainEventKind::PolicyProposalChanged { wallet_id }
+        DomainEventKind::PolicyProposed { wallet_id }
             if wallet_id == "primary"
     ));
 
@@ -1882,7 +1882,7 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     assert!(second.replaced_previous_proposal);
     assert!(matches!(
         events.try_recv().unwrap().kind,
-        DomainEventKind::PolicyProposalChanged { wallet_id }
+        DomainEventKind::PolicyProposed { wallet_id }
             if wallet_id == "primary"
     ));
     let policies = server.policies.lock().unwrap();

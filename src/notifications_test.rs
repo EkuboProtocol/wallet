@@ -304,6 +304,92 @@ fn private_previews_hide_account_and_network_names() {
     assert!(!notification.body.contains("Ethereum"));
 }
 
+/// A policy binds no single chain, so the context a proposal is described
+/// against never names a network.
+fn policy_context() -> NotificationContext {
+    NotificationContext::Wallet(WalletContext {
+        account: "trading".into(),
+        network: None,
+    })
+}
+
+fn policy_event(wallet_id: &str) -> DomainEvent {
+    DomainEvent {
+        occurred_at: Utc::now(),
+        kind: DomainEventKind::PolicyProposed {
+            wallet_id: wallet_id.to_owned(),
+        },
+    }
+}
+
+#[test]
+fn a_proposed_policy_change_asks_the_owner_and_routes_to_its_own_account() {
+    // The wallet asking for more authority than it has is a decision, and it
+    // used to be the only decision that arrived in silence: the event fell
+    // through to `_ => None` and the owner found the proposal by opening the
+    // screen and looking.
+    let notification = notification_for(&policy_event("trading"), &policy_context(), detailed())
+        .expect("a decision the owner has to make raises a banner");
+
+    assert_eq!(notification.title, "Policy change proposed");
+    assert_eq!(
+        notification.body,
+        "trading. Nothing changes until you approve it."
+    );
+    assert_eq!(
+        notification.route,
+        NotificationRoute::PolicyProposal {
+            wallet_id: "trading".into()
+        },
+        "the banner has to open the account whose policy is being rewritten"
+    );
+}
+
+#[test]
+fn a_policy_banner_carries_no_agent_authored_text() {
+    // `PolicyProposal::rationale` is the agent's own case for the change and
+    // is documented as untrusted display data. A banner is drawn by the
+    // operating system, outside every surface this wallet sanitizes text for,
+    // so the rationale must not reach one — an agent that could write there
+    // would be arguing to the owner with the diff nowhere in sight.
+    //
+    // The event carries no rationale at all, which is what makes that
+    // structural rather than a rule someone has to remember. This pins it:
+    // the banner is composed from the wallet id and fixed prose.
+    let notification =
+        notification_for(&policy_event("trading"), &policy_context(), detailed()).unwrap();
+    let DomainEventKind::PolicyProposed { wallet_id } = &policy_event("trading").kind else {
+        panic!("the proposal event names only the wallet");
+    };
+    assert_eq!(wallet_id, "trading");
+    assert!(
+        notification.body.starts_with("trading. "),
+        "{}",
+        notification.body
+    );
+}
+
+#[test]
+fn a_private_policy_preview_still_says_a_decision_is_waiting() {
+    let notification = notification_for(
+        &policy_event("trading"),
+        &policy_context(),
+        NotificationPreferences {
+            detailed_previews: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        notification.body,
+        "Open Ekubo Wallet for details. Nothing changes until you approve it."
+    );
+    assert!(!notification.body.contains("trading"));
+    // Turning previews down hides which account, never that something is
+    // waiting: the owner still has to know to come and look.
+    assert_eq!(notification.title, "Policy change proposed");
+}
+
 #[test]
 fn only_the_platform_default_action_opens_a_notification_route() {
     assert!(notification_action_opens("default"));

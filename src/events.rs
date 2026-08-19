@@ -71,7 +71,16 @@ pub enum DomainEventKind {
     ReviewChanged {
         request_id: Uuid,
     },
-    PolicyProposalChanged {
+    /// An agent proposed a policy change and it is now waiting on the owner.
+    ///
+    /// Published only where a proposal is written. The owner's own decisions
+    /// about one — applying it, rejecting it — publish `ConfigurationChanged`
+    /// instead, so this never fires for a question the owner has already
+    /// answered and a banner raised from it cannot interrupt them with their
+    /// own press. It was called `PolicyProposalChanged`, which described the
+    /// three of those together and so read as the one event that could not be
+    /// notified on.
+    PolicyProposed {
         wallet_id: String,
     },
     /// An automation was installed, replaced, or stopped. Carries the wallet

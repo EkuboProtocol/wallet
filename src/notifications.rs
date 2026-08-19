@@ -37,8 +37,10 @@ pub enum NotificationSubject {
 /// Where a click on the notification should land.
 ///
 /// The request UUID stays here because this is addressing, not prose: it is
-/// how the window finds the row again. It is never shown to the reader.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// how the window finds the row again. It is never shown to the reader. The
+/// same is true of the wallet id a policy proposal carries, which is how the
+/// Policies screen knows whose tab to open.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotificationRoute {
     /// Something is waiting on the owner: open its review.
     Review {
@@ -54,6 +56,10 @@ pub enum NotificationRoute {
     /// moment it arrives, so this only has to raise the window and land on the
     /// screen the connection belongs to.
     WalletConnect,
+    /// An agent's policy proposal is waiting. Addressed by wallet rather than
+    /// by request id: a proposal is the account's pending one, not a row in a
+    /// queue, and the Policies screen shows one account at a time.
+    PolicyProposal { wallet_id: String },
 }
 
 /// Deliberately has no action-button field. Approval and rejection are only
@@ -126,6 +132,11 @@ pub fn notification_for(
         DomainEventKind::WalletConnectProposed { dapp, .. } => {
             Some(pairing_notification(dapp, preferences))
         }
+        DomainEventKind::PolicyProposed { wallet_id } => Some(policy_proposal_notification(
+            wallet_id,
+            context,
+            preferences,
+        )),
         _ => None,
     }
 }
@@ -262,6 +273,29 @@ fn pairing_notification(dapp: &str, preferences: NotificationPreferences) -> Wal
         title: "Connection request".to_owned(),
         body,
         route: NotificationRoute::WalletConnect,
+    }
+}
+
+/// A policy proposal names the account and stops.
+///
+/// The proposal's `rationale` is agent-authored and explicitly untrusted, so
+/// it is the one thing this must not carry: a banner is drawn by the operating
+/// system, outside every surface the wallet sanitizes text for, and an agent
+/// that could write there would be able to put its own case to the owner
+/// without the diff beside it. What the proposal actually does is read on the
+/// Policies screen, where the permission diff is.
+fn policy_proposal_notification(
+    wallet_id: &str,
+    context: &NotificationContext,
+    preferences: NotificationPreferences,
+) -> WalletNotification {
+    let where_from = where_from(context, preferences);
+    WalletNotification {
+        title: "Policy change proposed".to_owned(),
+        body: format!("{where_from}. Nothing changes until you approve it."),
+        route: NotificationRoute::PolicyProposal {
+            wallet_id: wallet_id.to_owned(),
+        },
     }
 }
 
