@@ -507,10 +507,93 @@ fn diffs_are_position_aware_because_order_is_authority() {
         {"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}},
         {"effect": "allow", "chain_id": {"eq": "1"}}
     ]}));
+    // Reordering is a permission change, not a no-op: moving the deny above
+    // the allow is what decides which one a matching call hits first. Neither
+    // rule was edited, so the move is reported as the deny arriving ahead of
+    // the allow and leaving the position it used to hold, rather than as a
+    // rewrite of both positions.
     let diff = diff_policies(&current, &proposed);
-    assert_eq!(diff.len(), 2);
-    assert!(diff[0].contains("rule 1 changed"));
-    assert!(diff[1].contains("rule 2 changed"));
+    assert_eq!(diff.len(), 2, "{diff:?}");
+    assert!(diff[0].starts_with("- rule 1: starts denying"), "{diff:?}");
+    assert!(diff[1].starts_with("+ rule 2: stops denying"), "{diff:?}");
+}
+
+#[test]
+fn inserting_a_rule_at_the_head_reports_only_that_rule() {
+    let tail = [
+        json!({"effect": "allow", "chain_id": {"eq": "1"}}),
+        json!({"effect": "allow", "chain_id": {"eq": "8453"}}),
+        json!({"effect": "review", "to": {"eq": format!("{ROUTER:#x}")}}),
+    ];
+    let current = policy(json!({"version": 1, "rules": tail}));
+    let inserted = json!({"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}});
+    let proposed = policy(json!({"version": 1, "rules": [
+        inserted,
+        tail[0].clone(),
+        tail[1].clone(),
+        tail[2].clone()
+    ]}));
+
+    // Comparing position against position called this four changes: the new
+    // rule plus every rule it displaced. Only one rule actually changed.
+    let diff = diff_policies(&current, &proposed);
+    assert_eq!(diff.len(), 1, "{diff:?}");
+    assert!(diff[0].starts_with("- rule 1: starts denying"), "{diff:?}");
+}
+
+#[test]
+fn deleting_a_rule_from_the_head_reports_only_that_rule() {
+    let kept = [
+        json!({"effect": "allow", "chain_id": {"eq": "1"}}),
+        json!({"effect": "allow", "chain_id": {"eq": "8453"}}),
+    ];
+    let current = policy(json!({"version": 1, "rules": [
+        json!({"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}}),
+        kept[0].clone(),
+        kept[1].clone()
+    ]}));
+    let proposed = policy(json!({"version": 1, "rules": kept}));
+
+    let diff = diff_policies(&current, &proposed);
+    assert_eq!(diff.len(), 1, "{diff:?}");
+    // Numbered where it sat in the policy it is being removed from, since it
+    // has no position in the one the owner would be installing.
+    assert!(diff[0].starts_with("+ rule 1: stops denying"), "{diff:?}");
+}
+
+#[test]
+fn editing_a_rule_in_place_stays_one_changed_line() {
+    let current = policy(json!({"version": 1, "rules": [
+        {"effect": "allow", "chain_id": {"eq": "1"}},
+        {"effect": "allow", "to": {"eq": format!("{TOKEN:#x}")}},
+        {"effect": "allow", "chain_id": {"eq": "8453"}}
+    ]}));
+    let proposed = policy(json!({"version": 1, "rules": [
+        {"effect": "allow", "chain_id": {"eq": "1"}},
+        {"effect": "allow", "to": {"eq": format!("{ROUTER:#x}")}},
+        {"effect": "allow", "chain_id": {"eq": "8453"}}
+    ]}));
+
+    // Pairing a removal with an addition inside the same unaligned run is what
+    // keeps this from decaying into "rule 2 removed" plus "rule 2 added".
+    let diff = diff_policies(&current, &proposed);
+    assert_eq!(diff.len(), 1, "{diff:?}");
+    assert!(diff[0].starts_with("~ rule 2 changed: "), "{diff:?}");
+    assert!(diff[0].contains(" → "), "{diff:?}");
+}
+
+#[test]
+fn an_unchanged_policy_still_reports_no_permission_changes() {
+    let document = json!({"version": 1, "rules": [
+        {"effect": "allow", "chain_id": {"eq": "1"}},
+        {"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}}
+    ]});
+    let current = policy(document.clone());
+    let proposed = policy(document);
+    assert_eq!(
+        diff_policies(&current, &proposed),
+        vec!["No permission changes: the proposed policy is identical.".to_owned()]
+    );
 }
 
 #[test]

@@ -949,31 +949,117 @@ pub fn policy_object_schema(generator: &mut schemars::SchemaGenerator) -> schema
 /// relative to the current one, so a reviewer reads the signing authority they
 /// are about to add or remove rather than comparing JSON documents.
 ///
-/// Order is authority, so the diff reports every changed position rather than
-/// treating rules as an unordered set.
+/// Order is authority, so this is a sequence diff and not a set diff: a rule
+/// that moves is reported, and the lines read in the order the proposed policy
+/// does.
+///
+/// Rules are aligned on equality before anything is described. Comparing
+/// position against position instead — which is what this did originally —
+/// meant a single rule inserted at the head reported every rule below it as
+/// rewritten, so the one line that said what actually changed arrived buried
+/// under a screen of lines that had not. `is_tightening` has always aligned
+/// the two sequences to prove an edit only narrows authority; the diff the
+/// owner reads now agrees with it about the shape of that edit.
+///
+/// Positions are read from the policy the rule survives in: an added or
+/// rewritten rule is numbered where it sits in the proposed policy, a removed
+/// one where it sat in the current policy.
 #[must_use]
 pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<String> {
     let mut lines = Vec::new();
-    let count = current.rules.len().max(proposed.rules.len());
-    for index in 0..count {
-        match (current.rules.get(index), proposed.rules.get(index)) {
-            (Some(previous), Some(next)) if previous != next => {
-                lines.push(format!(
-                    "~ rule {} changed: {} → {}",
-                    index + 1,
-                    previous.describe(),
-                    next.describe()
-                ));
-            }
-            (None, Some(next)) => lines.push(next.describe_change(index + 1, true)),
-            (Some(previous), None) => lines.push(previous.describe_change(index + 1, false)),
-            _ => {}
-        }
+    for edit in align_rules(&current.rules, &proposed.rules) {
+        lines.push(match edit {
+            RuleEdit::Changed {
+                current_index,
+                proposed_index,
+            } => format!(
+                "~ rule {} changed: {} → {}",
+                proposed_index + 1,
+                current.rules[current_index].describe(),
+                proposed.rules[proposed_index].describe()
+            ),
+            RuleEdit::Added(index) => proposed.rules[index].describe_change(index + 1, true),
+            RuleEdit::Removed(index) => current.rules[index].describe_change(index + 1, false),
+        });
     }
     if lines.is_empty() {
         lines.push("No permission changes: the proposed policy is identical.".into());
     }
     lines
+}
+
+/// One rule's fate between two policies, already resolved against the
+/// alignment so the caller only has to phrase it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleEdit {
+    /// The rule at `current_index` was replaced by the one at `proposed_index`.
+    Changed {
+        current_index: usize,
+        proposed_index: usize,
+    },
+    Added(usize),
+    Removed(usize),
+}
+
+/// Match the two rule sequences up and report only what differs.
+///
+/// Rules that are equal anchor the alignment, so an insertion or a deletion
+/// costs one line rather than shifting every rule after it. Inside a run that
+/// did not anchor, removals and additions are paired off in order and reported
+/// as rewrites: editing a rule in place is the common case, and a reviewer
+/// reads `old → new` on one line far more easily than a removal and an
+/// addition they have to notice belong together. Whatever is left over once
+/// the pairs are taken is a genuine addition or removal.
+fn align_rules(current: &[Rule], proposed: &[Rule]) -> Vec<RuleEdit> {
+    // `common[i][j]` is the length of the longest common subsequence of
+    // `current[i..]` and `proposed[j..]`, which is what lets the walk below
+    // decide whether skipping a current rule or a proposed one keeps more of
+    // the alignment intact.
+    let mut common = vec![vec![0usize; proposed.len() + 1]; current.len() + 1];
+    for i in (0..current.len()).rev() {
+        for j in (0..proposed.len()).rev() {
+            common[i][j] = if current[i] == proposed[j] {
+                common[i + 1][j + 1] + 1
+            } else {
+                common[i + 1][j].max(common[i][j + 1])
+            };
+        }
+    }
+
+    let mut edits = Vec::new();
+    let mut removed: Vec<usize> = Vec::new();
+    let mut added: Vec<usize> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < current.len() || j < proposed.len() {
+        if i < current.len() && j < proposed.len() && current[i] == proposed[j] {
+            drain_gap(&mut edits, &mut removed, &mut added);
+            i += 1;
+            j += 1;
+        } else if j < proposed.len() && (i == current.len() || common[i][j + 1] >= common[i + 1][j])
+        {
+            added.push(j);
+            j += 1;
+        } else {
+            removed.push(i);
+            i += 1;
+        }
+    }
+    drain_gap(&mut edits, &mut removed, &mut added);
+    edits
+}
+
+/// Close off a run of unaligned rules, pairing what can be read as a rewrite
+/// and reporting the remainder as outright additions or removals.
+fn drain_gap(edits: &mut Vec<RuleEdit>, removed: &mut Vec<usize>, added: &mut Vec<usize>) {
+    let paired = removed.len().min(added.len());
+    for position in 0..paired {
+        edits.push(RuleEdit::Changed {
+            current_index: removed[position],
+            proposed_index: added[position],
+        });
+    }
+    edits.extend(removed.drain(..).skip(paired).map(RuleEdit::Removed));
+    edits.extend(added.drain(..).skip(paired).map(RuleEdit::Added));
 }
 
 /// Whether `proposed` can be obtained solely through operations that never
