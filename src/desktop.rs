@@ -4,8 +4,8 @@ use crate::{
     assets::{PENCIL_ICON, REFRESH_ICON, WalletAssets},
     authority::{
         ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerApi,
-        OwnerPortfolioAccount, OwnerPortfolioSnapshot, OwnerReviewQueues,
-        OwnerTransactionInspection, PRIVATE_KEY_REVEAL_DURATION,
+        OwnerEkuboPosition, OwnerPortfolioAccount, OwnerPortfolioAsset, OwnerPortfolioSnapshot,
+        OwnerReviewQueues, OwnerTransactionInspection, PRIVATE_KEY_REVEAL_DURATION,
     },
     automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
@@ -1287,6 +1287,78 @@ struct PortfolioBalanceRow {
     explorer_url: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortfolioPositionRow {
+    chain_id: u64,
+    network_name: String,
+    id: String,
+    token0: String,
+    token1: String,
+    lower_tick: i64,
+    upper_tick: i64,
+    current_tick: Option<i64>,
+}
+
+impl PortfolioPositionRow {
+    fn range_label(&self) -> &'static str {
+        match self.current_tick {
+            Some(tick) if self.lower_tick <= tick && tick < self.upper_tick => "In range",
+            Some(_) => "Out of range",
+            None => "Range unavailable",
+        }
+    }
+}
+
+fn compact_identity(value: &str) -> String {
+    if value.len() > 18 {
+        format!("{}…{}", &value[..10], &value[value.len() - 6..])
+    } else {
+        value.to_owned()
+    }
+}
+
+fn position_asset_label(asset: &OwnerPortfolioAsset) -> String {
+    asset
+        .symbol
+        .clone()
+        .or_else(|| asset.name.clone())
+        .unwrap_or_else(|| compact_identity(&asset.address))
+}
+
+fn portfolio_position_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioPositionRow> {
+    account
+        .networks
+        .iter()
+        .filter_map(|item| {
+            item.ekubo_positions
+                .as_ref()
+                .ok()
+                .map(|positions| (item, positions))
+        })
+        .flat_map(|(item, positions)| {
+            let network_name = item
+                .network
+                .display_name
+                .as_deref()
+                .unwrap_or(&item.network.name)
+                .to_owned();
+            positions
+                .positions
+                .iter()
+                .map(move |position: &OwnerEkuboPosition| PortfolioPositionRow {
+                    chain_id: position.chain_id,
+                    network_name: network_name.clone(),
+                    id: position.id.clone(),
+                    token0: position_asset_label(&position.token0),
+                    token1: position_asset_label(&position.token1),
+                    lower_tick: position.lower_tick,
+                    upper_tick: position.upper_tick,
+                    current_tick: position.current_tick,
+                })
+        })
+        .collect()
+}
+
 /// Below this, a holding is dust: worth less than the gas it would take to
 /// move it on most chains, and worth less than the row it occupies on a tab
 /// somebody opened to see what they hold.
@@ -1483,11 +1555,21 @@ struct PortfolioRowKey {
 /// replacing the list with an error.
 #[derive(Clone, Debug, PartialEq)]
 enum PortfolioListRow {
+    Position(PortfolioPositionRow),
     Balance(PortfolioBalanceRow),
     Unavailable {
         chain_id: u64,
         network_name: String,
         error: String,
+    },
+    PositionsUnavailable {
+        chain_id: u64,
+        network_name: String,
+        error: String,
+    },
+    Notice {
+        id: String,
+        text: String,
     },
 }
 
@@ -1498,6 +1580,9 @@ fn render_portfolio_list_row(
     cx: &App,
 ) -> AnyElement {
     match row {
+        PortfolioListRow::Position(row) => {
+            render_portfolio_position_row(row, wallet_id, divider, cx)
+        }
         PortfolioListRow::Balance(row) => render_portfolio_balance_row(row, wallet_id, divider, cx),
         PortfolioListRow::Unavailable {
             chain_id,
@@ -1513,7 +1598,134 @@ fn render_portfolio_list_row(
                 &format!("{network_name} · Chain {chain_id}: {error}"),
             ))
             .into_any_element(),
+        PortfolioListRow::PositionsUnavailable {
+            chain_id,
+            network_name,
+            error,
+        } => div()
+            .w_full()
+            .py_2()
+            .text_sm()
+            .text_color(cx.theme().warning)
+            .child(selectable_text(
+                format!("portfolio-position-error-{wallet_id}-{chain_id}"),
+                &format!("{network_name} · Ekubo positions unavailable: {error}"),
+            ))
+            .into_any_element(),
+        PortfolioListRow::Notice { id, text } => div()
+            .w_full()
+            .py_2()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(selectable_text(
+                format!("portfolio-notice-{wallet_id}-{id}"),
+                text,
+            ))
+            .into_any_element(),
     }
+}
+
+fn render_portfolio_position_row(
+    row: &PortfolioPositionRow,
+    wallet_id: &str,
+    divider: bool,
+    cx: &App,
+) -> AnyElement {
+    let range_color = match row.current_tick {
+        Some(tick) if row.lower_tick <= tick && tick < row.upper_tick => cx.theme().success,
+        Some(_) => cx.theme().warning,
+        None => cx.theme().muted_foreground,
+    };
+    let current_tick = row.current_tick.map_or_else(
+        || "Current tick unavailable".to_owned(),
+        |tick| format!("Current tick {tick}"),
+    );
+    div()
+        .debug_selector(|| "portfolio-position-row".to_owned())
+        .w_full()
+        .min_w_0()
+        .py_2()
+        .when(divider, |position| {
+            position.border_b_1().border_color(cx.theme().border)
+        })
+        .flex()
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .min_w(px(180.0))
+                        .flex_1()
+                        .flex_basis(px(260.0))
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            selectable_text(
+                                format!("portfolio-position-pair-{wallet_id}-{}", row.id),
+                                &format!("{} / {}", row.token0, row.token1),
+                            )
+                            .min_w_0()
+                            .truncate()
+                            .font_medium(),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .flex_wrap()
+                                .justify_start()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(selectable_text(
+                                    format!("portfolio-position-network-{wallet_id}-{}", row.id),
+                                    &format!(
+                                        "{} · Ekubo liquidity · {}",
+                                        row.network_name,
+                                        compact_identity(&row.id)
+                                    ),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w_full()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_0p5()
+                        .child(
+                            selectable_text(
+                                format!("portfolio-position-range-{wallet_id}-{}", row.id),
+                                row.range_label(),
+                            )
+                            .font_medium()
+                            .text_color(range_color),
+                        )
+                        .child(
+                            selectable_text(
+                                format!("portfolio-position-ticks-{wallet_id}-{}", row.id),
+                                &format!(
+                                    "Ticks {}–{} · {current_tick}",
+                                    row.lower_tick, row.upper_tick
+                                ),
+                            )
+                            .text_xs()
+                            .font_family(MONO_FONT_FAMILY)
+                            .text_color(cx.theme().muted_foreground),
+                        ),
+                ),
+        )
+        .into_any_element()
 }
 
 /// One asset: what it is called and where it lives on the left, how much of it
@@ -15633,7 +15845,7 @@ impl WalletWindow {
                     // The question this answers — "why is my token missing?" —
                     // only comes up once a list of balances is on screen.
                     .when(holdings, |hint| {
-                        hint.child(selectable_label("Only non-zero balances are shown."))
+                        hint.child(selectable_label("Non-zero balances · open Ekubo LPs."))
                             .child(
                                 // A ghost Button rather than the link it used
                                 // to be. This switches tab, and in-app
@@ -15687,6 +15899,7 @@ impl WalletWindow {
         #[cfg(test)]
         self.portfolio_rows_derived
             .set(self.portfolio_rows_derived.get() + 1);
+        let positions = portfolio_position_rows(account);
         let held = portfolio_balance_rows(
             account,
             self.snapshot().map_or(&EMPTY_NATIVE_PRICES, |snapshot| {
@@ -15707,11 +15920,15 @@ impl WalletWindow {
             .iter()
             .filter(|row| sortable && row.is_low_value())
             .count();
-        let mut rows = held
+        let mut rows = positions
             .into_iter()
-            .filter(|row| !sortable || self.show_low_value_balances || !row.is_low_value())
-            .map(PortfolioListRow::Balance)
+            .map(PortfolioListRow::Position)
             .collect::<Vec<_>>();
+        rows.extend(
+            held.into_iter()
+                .filter(|row| !sortable || self.show_low_value_balances || !row.is_low_value())
+                .map(PortfolioListRow::Balance),
+        );
         // A network that could not be read is reported under the balances
         // that could, rather than replacing them.
         rows.extend(account.networks.iter().filter_map(|item| {
@@ -15728,6 +15945,44 @@ impl WalletWindow {
                         .to_owned(),
                     error: error.clone(),
                 })
+        }));
+        rows.extend(account.networks.iter().filter_map(|item| {
+            item.ekubo_positions.as_ref().err().map(|error| {
+                PortfolioListRow::PositionsUnavailable {
+                    chain_id: item.network.chain_id,
+                    network_name: item
+                        .network
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&item.network.name)
+                        .to_owned(),
+                    error: error.clone(),
+                }
+            })
+        }));
+        rows.extend(account.networks.iter().filter_map(|item| {
+            item.ekubo_positions.as_ref().ok().and_then(|positions| {
+                let omitted = positions
+                    .total_items
+                    .saturating_sub(positions.positions.len());
+                (omitted > 0).then(|| PortfolioListRow::Notice {
+                    id: format!("ekubo-positions-{}", item.network.chain_id),
+                    text: format!(
+                        "{} more open Ekubo {} on {}. Only the first {} are shown.",
+                        omitted,
+                        if omitted == 1 {
+                            "position"
+                        } else {
+                            "positions"
+                        },
+                        item.network
+                            .display_name
+                            .as_deref()
+                            .unwrap_or(&item.network.name),
+                        positions.positions.len()
+                    ),
+                })
+            })
         }));
         let rows = Arc::<[PortfolioListRow]>::from(rows);
         *self.portfolio_row_cache.borrow_mut() = Some(PortfolioRowCache {
@@ -15755,7 +16010,7 @@ impl WalletWindow {
                 selectable_label(if hidden > 0 {
                     "Every balance here is worth under a dollar or has no recorded value."
                 } else {
-                    "No balances."
+                    "No balances or open Ekubo positions."
                 }),
             ));
         }

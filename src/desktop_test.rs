@@ -408,6 +408,42 @@ fn portfolio_amounts_preserve_every_significant_digit() {
     assert_eq!(format_asset_amount("7", None, "base units"), "7 base units");
 }
 
+#[test]
+fn ekubo_position_range_status_uses_the_indexed_pool_tick() {
+    let mut row = PortfolioPositionRow {
+        chain_id: 1,
+        network_name: "Ethereum".into(),
+        id: "0x01".into(),
+        token0: "ETH".into(),
+        token1: "EKUBO".into(),
+        lower_tick: 100,
+        upper_tick: 200,
+        current_tick: Some(150),
+    };
+    assert_eq!(row.range_label(), "In range");
+    row.current_tick = Some(200);
+    assert_eq!(row.range_label(), "Out of range");
+    row.current_tick = None;
+    assert_eq!(row.range_label(), "Range unavailable");
+}
+
+#[test]
+fn ekubo_position_pairs_prefer_locally_trusted_symbols() {
+    let asset = OwnerPortfolioAsset {
+        address: "0x0000000000000000000000000000000000000001".into(),
+        symbol: Some("EKUBO".into()),
+        name: Some("Ekubo Protocol".into()),
+    };
+    assert_eq!(position_asset_label(&asset), "EKUBO");
+
+    let unlabeled = OwnerPortfolioAsset {
+        symbol: None,
+        name: None,
+        ..asset
+    };
+    assert_eq!(position_asset_label(&unlabeled), "0x00000000…000001");
+}
+
 fn balance_row(
     chain_id: u64,
     address: &str,
