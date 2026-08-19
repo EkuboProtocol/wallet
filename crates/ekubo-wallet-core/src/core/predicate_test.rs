@@ -331,6 +331,73 @@ fn a_predicate_applied_to_the_wrong_shape_is_a_non_match_not_a_panic() {
     );
 }
 
+// -------------------------------------------------------- signed integers
+
+/// `lt`/`lte`/`gt`/`gte` are signed exactly when the ABI type they meet is,
+/// so there is no `slt`/`sgt` to reach for and no way to ask for the wrong
+/// one. The signature declares `int24`, the decoded value is an `int24`, and
+/// the comparison is signed because of that and nothing else.
+///
+/// The failure this rules out is the expensive one: a two's-complement
+/// `int24` of -200 read as an unsigned 16777016 satisfies every upper bound a
+/// rule could write, so a tick range meant to bound a position would admit
+/// anything below it.
+#[test]
+fn ordered_comparisons_are_signed_when_the_abi_type_is() {
+    let ctx = context();
+    let abi = "updateBounds(int24 lower, int24 upper)";
+    let call = |lower: i32, upper: i32| {
+        bytes(encode(
+            abi,
+            &[
+                DynSolValue::Int(I256::try_from(lower).unwrap(), 24),
+                DynSolValue::Int(I256::try_from(upper).unwrap(), 24),
+            ],
+        ))
+    };
+
+    // The bounds a real position uses: negative, and ordered against zero.
+    let in_range = selector(
+        abi,
+        &serde_json::json!({ "lower": { "gte": "-140" }, "upper": { "lte": "0" } }),
+    );
+    assert!(in_range.matches(&call(-140, 0), &ctx), "the exact bounds");
+    assert!(in_range.matches(&call(-100, -1), &ctx), "inside them");
+    assert!(
+        !in_range.matches(&call(-200, 0), &ctx),
+        "-200 is below -140 and must not read as a large unsigned number"
+    );
+    assert!(!in_range.matches(&call(-140, 1), &ctx), "above zero");
+
+    // And the sign is compared, not just the magnitude.
+    let below_zero = selector(abi, &serde_json::json!({ "lower": { "lt": "0" } }));
+    assert!(below_zero.matches(&call(-1, 0), &ctx));
+    assert!(!below_zero.matches(&call(0, 0), &ctx));
+    assert!(!below_zero.matches(&call(1, 0), &ctx));
+
+    // A literal outside the declared width is refused where it is written,
+    // rather than wrapping into a bound that means something else.
+    assert!(check_literal("-8388608", &DynSolType::Int(24)).is_ok());
+    assert!(check_literal("-8388609", &DynSolType::Int(24)).is_err());
+    assert!(check_literal("-1", &DynSolType::Uint(256)).is_err());
+}
+
+/// Coverage analysis has to order negative bounds the same way matching does,
+/// or the permission diff calls a widening a narrowing on signed arguments.
+#[test]
+fn coverage_orders_negative_bounds_the_way_matching_does() {
+    let tighter = predicate(serde_json::json!({ "gte": "-140" }));
+    let looser = predicate(serde_json::json!({ "gte": "-500" }));
+    assert!(tighter.is_narrower_than(&looser));
+    assert!(!looser.is_narrower_than(&tighter));
+
+    // Across zero, where an unsigned reading would invert the answer.
+    let negative = predicate(serde_json::json!({ "lte": "-1" }));
+    let positive = predicate(serde_json::json!({ "lte": "10" }));
+    assert!(negative.is_narrower_than(&positive));
+    assert!(!positive.is_narrower_than(&negative));
+}
+
 // ------------------------------------------------------------ selector/ABI
 
 #[test]
