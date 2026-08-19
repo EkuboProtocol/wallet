@@ -2361,7 +2361,7 @@ fn the_card_stays_up_until_every_task_is_done_or_it_is_sent_away() {
 }
 
 #[test]
-fn dismissal_lasts_the_run_and_still_records_what_the_run_saw() {
+fn finishing_a_task_brings_a_dismissed_card_back_and_records_what_it_saw() {
     let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
     setup.dismiss();
     assert!(!setup.visible());
@@ -2372,8 +2372,60 @@ fn dismissal_lasts_the_run_and_still_records_what_the_run_saw() {
         dapp: true,
         ..SetupObservation::default()
     }));
-    assert!(!setup.visible(), "dismissal holds for the rest of the run");
     assert!(setup.is_complete(SetupTask::ConnectDapp));
+    // Somebody who sent the card away and then went and did one of the things
+    // on it is working the list, so the card comes back with the next step up.
+    assert!(
+        setup.visible(),
+        "finishing a task reopens the card it was dismissed from"
+    );
+}
+
+#[test]
+fn a_dismissed_card_stays_away_while_nothing_new_is_finished() {
+    // The reopen keys on a task becoming finished, not on a reading arriving:
+    // render latches on every frame, and a card that came back on each of them
+    // could not be sent away at all.
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
+    setup.latch(SetupObservation {
+        dapp: true,
+        ..SetupObservation::default()
+    });
+    setup.dismiss();
+
+    assert!(!setup.latch(SetupObservation {
+        dapp: true,
+        ..SetupObservation::default()
+    }));
+    assert!(
+        !setup.visible(),
+        "re-reading a task that was already ticked is not news"
+    );
+}
+
+#[test]
+fn finishing_the_last_task_retires_a_dismissed_card_rather_than_reopening_it() {
+    // Nothing is left to come back for, and a card that reappeared to say so
+    // would be asking for attention to tell somebody they are done.
+    let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
+    setup.latch(SetupObservation {
+        account: true,
+        agent: true,
+        signature: true,
+        dapp: true,
+        policy: false,
+    });
+    setup.dismiss();
+
+    assert!(setup.latch(SetupObservation {
+        account: true,
+        agent: true,
+        signature: true,
+        dapp: true,
+        policy: true,
+    }));
+    assert!(!setup.visible());
+    assert_eq!(setup.completed_count(), SetupTask::ALL.len());
 }
 
 #[test]

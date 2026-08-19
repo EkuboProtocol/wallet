@@ -4369,7 +4369,10 @@ struct GuidedSetup {
     state: Option<GuidedSetupState>,
     /// Set when the owner sends the card away. Deliberately not stored: it
     /// means "not now", so the checklist starts over on the next launch while
-    /// anything is left to do.
+    /// anything is left to do — and it is cleared again as soon as this run
+    /// watches a task get finished, unless that task was the last one. Somebody
+    /// who sent the card away and then went and did one of the things on it is
+    /// working through the list, and the next step is worth showing them.
     dismissed: bool,
     /// Set when the owner folds the card down to its header.
     ///
@@ -4422,6 +4425,20 @@ impl GuidedSetup {
     /// Fold a fresh reading into the record, and say whether anything changed
     /// so a caller knows when the result is worth storing.
     ///
+    /// Finishing a task while the card is away brings it back, so long as
+    /// something is still left afterwards. Dismissal is "not now", and a run
+    /// that has just watched a task get done is a different "now": the person
+    /// is working the list, and what is next is the one thing the card is for.
+    /// Finishing the *last* task is the exception — there is nothing left to
+    /// come back for, and `visible` retires the card on its own.
+    ///
+    /// Only a task that was not already ticked reopens anything, so a reading
+    /// that merely repeats what is known leaves a dismissed card away. The
+    /// evidence can arrive on its own, from a snapshot or a session list
+    /// rather than from something the owner just pressed — that still counts,
+    /// because the card is about the state of the wallet and not about who
+    /// moved it.
+    ///
     /// An unread checklist latches nothing. Folding a reading into a fresh
     /// default and storing that would overwrite progress that is on disk and
     /// merely unavailable.
@@ -4435,10 +4452,13 @@ impl GuidedSetup {
                 changed = true;
             }
         }
+        if changed && !self.all_complete() {
+            self.dismissed = false;
+        }
         changed
     }
 
-    /// Send the card away for the rest of this run.
+    /// Send the card away until this run watches another task get finished.
     fn dismiss(&mut self) {
         self.dismissed = true;
     }
@@ -4464,7 +4484,8 @@ impl GuidedSetup {
     }
 
     /// The card is up once its progress is known, until every task is
-    /// finished or the owner sends it away. The legal gate is handled by the
+    /// finished or the owner sends it away — and a dismissal lasts only until
+    /// the next task is finished. The legal gate is handled by the
     /// caller: nothing may share the screen with a document that has to be
     /// accepted before the wallet runs at all.
     fn visible(&self) -> bool {
@@ -6529,10 +6550,13 @@ impl WalletWindow {
             };
             self.guided_setup.load(state);
         }
-        // A dismissed card keeps latching. It is coming back at the next
-        // launch, and the evidence for a task can be gone by then — a settled
-        // session ends, a history gets cleared — so a run that watched
-        // somebody finish something has to be the run that records it.
+        // A dismissed card keeps latching, and for two reasons now. It is
+        // coming back — at the next launch, or the moment a task is finished —
+        // and the evidence for a task can be gone by then, a settled session
+        // ends, a history gets cleared, so a run that watched somebody finish
+        // something has to be the run that records it. Latching is also the
+        // path that undoes the dismissal, so a card that stopped watching
+        // would be a card that never came back.
         let snapshot = self.desktop_snapshot.clone();
         let observation = observe_setup(
             snapshot
@@ -6557,10 +6581,13 @@ impl WalletWindow {
         }
     }
 
-    /// Send the checklist away for the rest of this run.
+    /// Send the checklist away until the next task is finished.
     ///
     /// Nothing is stored: the wallet asks again at the next launch while any
     /// task is left, and stops asking on its own once they are all done.
+    /// Within the run, finishing a task brings the card back with the next one
+    /// up — unless it was the last, which retires the card rather than
+    /// reopening it.
     fn dismiss_guided_setup(&mut self, cx: &mut Context<Self>) {
         self.guided_setup.dismiss();
         cx.notify();
@@ -17635,11 +17662,11 @@ impl WalletWindow {
                                 .font_normal()
                                 .text_color(cx.theme().muted_foreground)
                                 .label("Dismiss")
-                                .tooltip("Hide this. It comes back next launch.")
+                                .tooltip("Hide this. It comes back when you finish the next step.")
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.dismiss_guided_setup(cx);
                                 })),
-                            "Hide the getting-started checklist until the next launch",
+                            "Hide the getting-started checklist until the next step is finished",
                         )),
                 )
             });
