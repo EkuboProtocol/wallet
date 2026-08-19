@@ -2392,7 +2392,22 @@ impl WalletMcpServer {
         for endpoint in &candidate.rpc_urls {
             ekubo_wallet_core::plan_fetch::ensure_public_endpoint(endpoint, "RPC URL")
                 .await
-                .map_err(|error| tool_error(&error))?;
+                // Say who *can* do this, not only that the caller cannot.
+                // An owner running their own node hits this by asking an
+                // agent to use it, and the bare refusal reads as the wallet
+                // being unable to reach the node rather than as a boundary:
+                // they carry on against the default endpoint believing they
+                // switched. The endpoint decides what a simulation reports
+                // and what the owner is shown, so it is owner-entered by
+                // design — which is worth one sentence at the point it stops
+                // somebody.
+                .map_err(|error| {
+                    tool_error(&error.context(
+                        "an agent may only propose a public endpoint; ask the owner to add a \
+                         local or private one themselves under Networks in the wallet, where it \
+                         is trusted because they entered it",
+                    ))
+                })?;
         }
         self.policies
             .lock()

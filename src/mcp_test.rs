@@ -978,6 +978,16 @@ async fn network_add_admits_an_endpoint_before_contacting_it() {
             "{rpc_url} rejected for the wrong reason: {}",
             error.message
         );
+        // The refusal is correct, but an owner running their own node meets
+        // it by asking an agent to use that node. A message that only says
+        // "no" reads as the wallet being unable to reach the endpoint, and
+        // they keep transacting against the default one believing they
+        // switched. It has to name who can do this instead.
+        assert!(
+            error.message.contains("Networks"),
+            "{rpc_url} was refused without saying the owner can add it: {}",
+            error.message
+        );
     }
 }
 
