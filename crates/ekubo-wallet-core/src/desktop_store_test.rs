@@ -89,16 +89,14 @@ fn every_harness_column_accepts_every_harness_the_bridge_admits() {
     }
 }
 
-/// A database created before the vocabulary was fixed still refuses the kinds
-/// it was created without, and that has to stay survivable rather than
-/// become an error the caller sees.
+/// A column built with a narrower vocabulary refuses what it was not built
+/// for, rather than storing something else.
 ///
-/// The constraint cannot be widened in place — every mechanism `SQLite` offers
-/// for it rewrites the table — so an existing wallet keeps the narrow column.
-/// What changed is the consequence: `WalletMcpServer::with_attribution`
-/// returns nothing, so a refused label leaves the request it was describing
-/// exactly as it was. This pins the refusal itself, which is the input that
-/// path has to tolerate.
+/// Schema 11 widens every real one of these, so this builds its own. The
+/// refusal is still worth pinning because it is the input
+/// `WalletMcpServer::with_attribution` has to tolerate: that path returns
+/// nothing precisely so a label a column will not take leaves the request it
+/// was describing exactly as it was, whatever the schema happens to say.
 #[test]
 fn a_narrow_column_refuses_a_newer_harness_rather_than_storing_something_else() {
     let (_directory, store) = store();

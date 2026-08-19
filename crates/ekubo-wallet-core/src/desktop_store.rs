@@ -85,14 +85,11 @@ impl AgentKind {
     /// while every `requesting_harness_kind` column still listed the six
     /// kinds that predated it, so attribution from a Grok Build session
     /// failed its own constraint — after the request was stored, and for an
-    /// automatic send after the key had signed. A database created from this
-    /// build lists all of these. One created before it cannot be widened in
-    /// place, because every mechanism `SQLite` offers for changing a `CHECK`
-    /// rewrites the table, and this crate's migrations are additive by rule.
-    /// Those databases keep the narrow column and simply leave such a request
-    /// unlabelled, which they can now afford to do because
-    /// `WalletMcpServer::with_attribution` no longer lets a caption failure
-    /// reach the work it was captioning.
+    /// automatic send after the key had signed. Schema 11 widens every one of
+    /// those columns, so a database this build has opened stores all of
+    /// these. `WalletMcpServer::with_attribution` separately stopped letting
+    /// a failure to write a label reach the work being labelled, which is
+    /// what keeps the next such drift cosmetic.
     pub const ALL: [Self; 8] = [
         Self::Codex,
         Self::ClaudeCode,

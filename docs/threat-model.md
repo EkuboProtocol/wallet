@@ -108,13 +108,11 @@ through `source.agent.client`. It remains untrusted: a same-user process is in
 scope and can pass any harness name, so such a rule separates one honest
 harness from another rather than excluding a hostile one. Because naming a
 source only ever shrinks what a rule matches, a harness claim can restrict a
-permission and can never create one. Recording that attribution cannot fail
-the request it describes: it is written after the request is stored, and for
-an automatic send after signing, so a storage refusal leaves the row
-unlabelled rather than reporting completed work as an error. A database
-created before a harness kind existed keeps a column that refuses it and
-leaves those requests unlabelled. The local stack has no HTTP or OAuth
-surface.
+permission and can never create one. Attribution cannot fail the request it
+describes: it is written after the request is stored, and for an automatic
+send after signing, so a storage refusal leaves the row unlabelled rather
+than reporting completed work as an error. The local stack has no HTTP or
+OAuth surface.
 Managed configurations contain only the installed helper command with a fixed
 `--client` argument and, where that file format supports remote MCP, the
 independent hosted companion URL. Claude Desktop keeps the remote companion in

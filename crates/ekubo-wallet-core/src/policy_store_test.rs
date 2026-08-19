@@ -1175,3 +1175,162 @@ mod first_policy_clears_residue_tests {
         );
     }
 }
+
+/// The vocabulary the widening migration replaces has to be the one the
+/// schema actually writes, or the migration matches nothing and reports
+/// success on a database it did not touch.
+#[test]
+fn the_widening_migration_names_the_vocabulary_the_schema_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PolicyStore::open(&directory.path().join("wallet.db"), &key(31)).unwrap();
+    let complete: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+            [COMPLETE_HARNESS_KINDS],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(complete, 6, "a fresh schema writes the complete vocabulary");
+    let narrow: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+            [NARROW_HARNESS_KINDS],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(narrow, 0, "and none of the old one");
+}
+
+/// Widening the harness-kind constraint keeps everything else exactly as it
+/// was.
+///
+/// This is the one migration that writes `sqlite_master`, so the things a
+/// table rebuild would have put at risk are the things worth asserting: the
+/// rows, the indexes — including the unique index that allows one wallet and
+/// chain a single transaction in flight — the foreign keys, and the
+/// database's own opinion of its integrity. Then the point of the exercise:
+/// a kind the old constraint refused now stores.
+#[test]
+fn widening_the_harness_vocabulary_moves_no_rows_and_keeps_every_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("wallet.db");
+
+    let (indexes_before, rows_before) = {
+        let store = PolicyStore::open(&path, &key(32)).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO wallet_instances(instance_id, wallet_id, wallet_address, created_at)
+                 VALUES ('11111111-1111-1111-1111-111111111111', 'primary',
+                         '0x1111111111111111111111111111111111111111', 0);",
+            )
+            .unwrap();
+        let indexes = index_definitions(&store.connection);
+        assert!(
+            indexes
+                .iter()
+                .any(|(name, _)| name == "pending_transactions_wallet_chain_in_flight"),
+            "the in-flight index is what a rebuild would have had to re-declare"
+        );
+        let rows: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM wallet_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        // Wind the constraint back to what a database created before
+        // `grok_build` carried, and the version with it.
+        store
+            .connection
+            .execute_batch("PRAGMA writable_schema = ON")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                 WHERE type = 'table' AND instr(sql, ?1) > 0",
+                params![COMPLETE_HARNESS_KINDS, NARROW_HARNESS_KINDS],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch("PRAGMA writable_schema = OFF")
+            .unwrap();
+        store
+            .connection
+            .execute_batch("UPDATE schema_metadata SET version = 10 WHERE singleton = 1")
+            .unwrap();
+        (indexes, rows)
+    };
+
+    let store = PolicyStore::open(&path, &key(32)).unwrap();
+    store.assert_schema_current().unwrap();
+
+    // Nothing moved.
+    assert_eq!(index_definitions(&store.connection), indexes_before);
+    let rows_after: i64 = store
+        .connection
+        .query_row("SELECT count(*) FROM wallet_instances", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows_after, rows_before);
+    let integrity: String = store
+        .connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    // `policy_proposals` is both rewritten by the migration and the one
+    // attribution table with a foreign key, so it is where a rewrite that
+    // dropped one would show.
+    let foreign_keys: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM pragma_foreign_key_list('policy_proposals')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(foreign_keys, 1, "the foreign key survived");
+
+    // And the constraint now admits what it refused.
+    let narrow: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+            [NARROW_HARNESS_KINDS],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(narrow, 0, "every column was widened");
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO policy_proposals(
+                 wallet_instance_id, wallet_id, wallet_address, source_revision,
+                 policy_json, rationale, requesting_harness_kind, created_at
+             ) VALUES ('11111111-1111-1111-1111-111111111111', 'primary',
+                       '0x1111111111111111111111111111111111111111', 1, '{}', 'why',
+                       'grok_build', 0)",
+        )
+        .expect("a widened column stores the kind the bridge admits");
+}
+
+/// Every index the database defines, by name and definition, so a migration
+/// that claims to move nothing can be held to it.
+fn index_definitions(connection: &Connection) -> Vec<(String, String)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name, coalesce(sql, '') FROM sqlite_master
+             WHERE type = 'index' ORDER BY name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}

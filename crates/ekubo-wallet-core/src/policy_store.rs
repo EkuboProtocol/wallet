@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1673,7 +1673,100 @@ const MIGRATIONS: &[Migration] = &[
         statements: &["ALTER TABLE pending_transactions ADD COLUMN request_source TEXT"],
         seed: None,
     },
+    // Six columns were created listing the harness kinds that existed at the
+    // time, and `grok_build` arrived after them. See
+    // [`widen_harness_kind_vocabulary`] for why this one step writes the
+    // schema rather than a table.
+    Migration {
+        to_version: 11,
+        statements: &[],
+        seed: Some(widen_harness_kind_vocabulary),
+    },
 ];
+
+/// The harness-kind vocabulary as the six attribution columns were first
+/// written, and as they read now.
+///
+/// Kept as the exact substring each `CREATE TABLE` contains, because the
+/// migration below rewrites by replacing one with the other. Nothing enforces
+/// that the schema statements still spell it this way, so
+/// `policy_store_test` reads it back out of a fresh database.
+const NARROW_HARNESS_KINDS: &str = "requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')";
+const COMPLETE_HARNESS_KINDS: &str = "requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')";
+
+/// Widen the harness-kind `CHECK` on every column that carries one.
+///
+/// The only migration here that is not additive, and the only one that
+/// touches `sqlite_master`. Both need arguing for.
+///
+/// A `CHECK` cannot be altered in `SQLite`. The documented way to change one is
+/// to rebuild the table: create a replacement, copy every row, drop the
+/// original, rename, and recreate the indexes. For `pending_transactions`
+/// that means re-declaring the unique index that allows one wallet and chain
+/// exactly one transaction in flight — a rule the signing path depends on —
+/// from a second copy of its definition living in this list. A copy that
+/// drifts from the real one does not fail loudly; it silently stops being an
+/// index, and the wallet signs a second transaction on a nonce that is
+/// already spent. Copying tens of thousands of rows of signing history to
+/// widen a display column is the smaller half of that cost.
+///
+/// Replacing the text instead moves nothing. Every row, index, and foreign
+/// key stays exactly where it is, and the schema differs from what was there
+/// before by precisely the two names being added. The replacement is a
+/// substring swap rather than an authored `CREATE TABLE`, so there is no
+/// second copy of anything to get wrong: what is not the vocabulary is
+/// byte-identical to what the database already had. A database whose text
+/// does not contain the old substring — one created by this build, or one
+/// already migrated — matches nothing and is left alone.
+///
+/// The bump to `schema_version` is what makes the change visible: this wrote
+/// a row rather than running DDL, so `SQLite` has no reason to invalidate the
+/// schema every connection has cached, and would go on enforcing the old
+/// constraint from memory until something else forced a reload.
+fn widen_harness_kind_vocabulary(connection: &Connection) -> Result<()> {
+    let narrow: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+        [NARROW_HARNESS_KINDS],
+        |row| row.get(0),
+    )?;
+    if narrow == 0 {
+        return Ok(());
+    }
+    connection.execute_batch("PRAGMA writable_schema = ON")?;
+    // Held so the pragma is turned back off on the way out whichever way this
+    // goes. A connection left writable would let an ordinary bug rewrite the
+    // schema, and the transaction this runs inside rolls the rows back
+    // without touching connection state.
+    let rewrite = || -> Result<()> {
+        let widened = connection.execute(
+            "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+             WHERE type = 'table' AND instr(sql, ?1) > 0",
+            params![NARROW_HARNESS_KINDS, COMPLETE_HARNESS_KINDS],
+        )?;
+        ensure!(
+            i64::try_from(widened).unwrap_or(i64::MAX) == narrow,
+            "widened {widened} harness-kind columns but found {narrow}"
+        );
+        let version: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+        connection.execute_batch(&format!("PRAGMA schema_version = {}", version + 1))?;
+        // Re-read rather than trust the write: this is the one statement in
+        // the crate that can leave a database that will not open, and it is
+        // still inside the transaction that would roll it back.
+        let remaining: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+            [NARROW_HARNESS_KINDS],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            remaining == 0,
+            "{remaining} harness-kind columns are still narrow"
+        );
+        Ok(())
+    };
+    let result = rewrite();
+    connection.execute_batch("PRAGMA writable_schema = OFF")?;
+    result
+}
 
 /// Write the shipped approximate values into confirmed tokens that have none.
 ///
