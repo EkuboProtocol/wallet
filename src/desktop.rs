@@ -17065,8 +17065,17 @@ impl WalletWindow {
                                         .flex_wrap()
                                         .gap_2()
                                         .child(
+                                            // Named for what it opens. This
+                                            // said "Review in editor", which
+                                            // promised somebody else's JSON —
+                                            // the one thing opening a proposal
+                                            // deliberately does not do, since
+                                            // it lands on the permission diff.
+                                            // The draft is still reachable
+                                            // from inside, so nothing is lost
+                                            // by not advertising it here.
                                             app_button("review-policy-proposal-full-screen")
-                                                .label("Review in editor")
+                                                .label("Review changes")
                                                 .primary()
                                                 .disabled(!applicable)
                                                 .on_click(cx.listener(
