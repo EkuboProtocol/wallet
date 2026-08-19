@@ -2363,6 +2363,17 @@ pub struct WalletWindow {
     policy_account_id: Option<String>,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
+    /// A note that a policy decision was carried out, which then leaves.
+    ///
+    /// Rejecting a proposal used to render nothing at all: the card closed and
+    /// the proposal vanished, which is also what a proposal disappearing
+    /// underneath the owner looks like. Only the failures ever spoke, so the
+    /// one outcome the owner chose deliberately was the one the screen had no
+    /// words for.
+    policy_status: Option<SharedString>,
+    /// Names the newest note, so a timer set for an older one cannot take a
+    /// newer one off the screen with it.
+    policy_status_seq: u64,
     /// Whether the editor is showing the permission diff rather than the JSON.
     ///
     /// A policy change is read, not typed, and the two need opposite shapes:
@@ -6000,6 +6011,8 @@ impl WalletWindow {
             policy_diff_list: virtual_inbox_list(0),
             policy_diff_drawn_for: Cell::new(0),
             policy_action_error: None,
+            policy_status: None,
+            policy_status_seq: 0,
             token_proposal_busy: false,
             network_proposal_busy: false,
             automation_busy: None,
@@ -8018,6 +8031,10 @@ impl WalletWindow {
                         self.policy_review_open = true;
                         self.policy_diff_drawn_for.set(0);
                         self.policy_action_error = None;
+                        // A receipt for the last proposal must not be left
+                        // standing over the next one, which is a different
+                        // decision about a different document.
+                        self.policy_status = None;
                     }
                     Err(error) => {
                         self.policy_action_error =
@@ -8071,6 +8088,11 @@ impl WalletWindow {
                 {
                     self.policy_editor = None;
                 }
+                // The card is gone by the time this is read, so the note has
+                // to carry the whole outcome: which way it was decided, and
+                // that deciding it that way left the policy alone. "It's gone"
+                // is otherwise the only thing the screen has said.
+                self.set_policy_status("Proposal rejected. The active policy is unchanged.", cx);
                 None
             }
             Ok(false) => {
@@ -8079,6 +8101,27 @@ impl WalletWindow {
             Err(error) => Some(format!("Could not reject proposal: {error:#}").into()),
         };
         cx.notify();
+    }
+
+    /// A note that a policy decision was carried out, which then leaves.
+    ///
+    /// Follows the account form's receipt: it reports a press whose effect is
+    /// already visible beside it, so it says so briefly and then gets out of
+    /// the way rather than sitting there being read again later.
+    fn set_policy_status(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.policy_status_seq = self.policy_status_seq.wrapping_add(1);
+        let seq = self.policy_status_seq;
+        self.policy_status = Some(message.into());
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(SUCCESS_NOTE_LIFETIME).await;
+            let _ = view.update(cx, |view, cx| {
+                if view.policy_status_seq == seq {
+                    view.policy_status = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn apply_allow_anything_policy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -12776,6 +12819,19 @@ impl WalletWindow {
                         .text_color(cx.theme().danger)
                         .child(selectable_label(error)),
                 )
+            })
+            // Rejecting from the proposal card closes the editor, so this is
+            // where the owner is standing when the note has to be read.
+            .when_some(self.policy_status.clone(), |content, status| {
+                content.child(
+                    div()
+                        .id("policy-action-status")
+                        .debug_selector(|| "policy-action-status".to_owned())
+                        .role(Role::Alert)
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(selectable_label(status)),
+                )
             });
         let accounts = match self.cached_accounts() {
             Ok(accounts) => accounts,
@@ -17071,6 +17127,17 @@ impl WalletWindow {
                         .text_sm()
                         .text_color(cx.theme().danger)
                         .child(selectable_label(error)),
+                )
+            })
+            .when_some(self.policy_status.clone(), |sidebar, status| {
+                sidebar.child(
+                    div()
+                        .id("policy-full-screen-status")
+                        .debug_selector(|| "policy-full-screen-status".to_owned())
+                        .role(Role::Alert)
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(selectable_label(status)),
                 )
             })
             .when_some(

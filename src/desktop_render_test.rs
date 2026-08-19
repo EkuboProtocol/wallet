@@ -3338,6 +3338,35 @@ fn every_run_is_listed_and_the_ones_that_sent_link_to_their_transaction(
     release(cx, &view);
 }
 
+/// Deciding a proposal used to render nothing at all.
+///
+/// Only the failures ever spoke, so a rejection the owner chose and a proposal
+/// disappearing underneath them drew exactly the same screen — which is why
+/// the first person to try it said "I don't know, man. It's gone."
+#[gpui::test]
+fn deciding_a_policy_proposal_says_what_was_decided(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Policies));
+
+    let quiet = measure(cx, window, &view, &["policy-action-status"])[0];
+    assert!(
+        quiet.is_none(),
+        "nothing has been decided, so there is nothing to report"
+    );
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_policy_status("Proposal rejected. The active policy is unchanged.", cx);
+    });
+
+    let reported = measure(cx, window, &view, &["policy-action-status"])[0];
+    assert!(
+        reported.is_some(),
+        "the owner has to be able to read what their own decision did"
+    );
+    release(cx, &view);
+}
+
 fn run_fixture(
     automation_id: uuid::Uuid,
     outcome: RunOutcome,
