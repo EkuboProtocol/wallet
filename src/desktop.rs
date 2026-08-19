@@ -10484,6 +10484,13 @@ impl WalletWindow {
             || self.token_editor_open
             || self.token_price_editor.is_some()
             || self.network_editor_open
+            // The policy editor owns the window the way the token and network
+            // editors do, and it holds an unsaved draft. A policy banner names
+            // an account and selects its tab, so without this a proposal for
+            // one account could pull the tab out from under an open editor on
+            // another — taking the draft with it. The intent is retained and
+            // resumes when the editor closes.
+            || self.policy_editor.is_some()
     }
 
     fn take_pending_notification_route(&mut self) -> Option<NotificationRoute> {

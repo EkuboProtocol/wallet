@@ -3338,6 +3338,39 @@ fn every_run_is_listed_and_the_ones_that_sent_link_to_their_transaction(
     release(cx, &view);
 }
 
+/// A policy banner names an account and selects its tab on the way in.
+///
+/// An editor open on another account holds a draft nobody saved, so the click
+/// has to wait for it the way it already waits for the token and network
+/// editors, rather than pulling the tab out from under it.
+#[gpui::test]
+fn an_open_policy_editor_holds_a_notification_click(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    assert!(
+        !cx.read_entity(&view, |wallet, _| wallet.notification_navigation_blocked()),
+        "nothing owns the window yet"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(1),
+            current_policy: Some(WalletPolicy::require_approval_for_everything()),
+            history: Vec::new(),
+            history_selection: None,
+            proposal: None,
+            validation: None,
+        });
+    });
+
+    assert!(
+        cx.read_entity(&view, |wallet, _| wallet.notification_navigation_blocked()),
+        "an unsaved policy draft must not be swapped out from under the owner"
+    );
+    release(cx, &view);
+}
+
 /// Deciding a proposal used to render nothing at all.
 ///
 /// Only the failures ever spoke, so a rejection the owner chose and a proposal
