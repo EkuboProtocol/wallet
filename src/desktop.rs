@@ -2076,7 +2076,15 @@ impl Route {
             Self::Activity => {
                 "Requests waiting on your decision, and everything this wallet has signed or sent."
             }
-            Self::Overview => "What each account holds, across every network you have enabled.",
+            // Says "token balances", not "what each account holds". This
+            // screen reads balances and nothing else, so capital deposited
+            // into a protocol leaves it and the total drops — which reads as
+            // a loss rather than as a move if the line above claims to show
+            // everything. The first person to add liquidity through an agent
+            // and then open this page said their portfolio "went way down".
+            Self::Overview => {
+                "The token balances each account holds, across every network you have enabled. Value deposited into a protocol — liquidity, lending, staking — is not counted here; ask your agent about those."
+            }
             Self::Policies => {
                 "The rules that decide which agent requests go through, which need you, and which are refused."
             }
