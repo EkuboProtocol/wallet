@@ -19,7 +19,9 @@ use crate::{
         parse_message_input, parse_siwe, siwe_warnings,
     },
     pending::{PendingStatus, PendingStore, PendingTransaction},
-    plan_fetch::{ArtifactReference, FetchPolicy, resolve_execution_plan_reference},
+    plan_fetch::{
+        ArtifactReference, ArtifactSource, FetchPolicy, resolve_execution_plan_reference,
+    },
     policy_store::PolicyStore,
     release_check::{self, ReleaseCheck},
     rpc::{WalletStatus, transaction_known, wallet_status},
@@ -1479,11 +1481,13 @@ impl WalletMcpServer {
         }
         let preface = session.as_ref().map(ForkSession::preface);
         let policy_context = Self::policy_context(&wallet);
+        let source = self.request_source(Some(&plan_source));
         let mut result = simulate_external_execution(
             &wallet,
             &network,
             &execution_plan,
             &stored_policy,
+            &source,
             &policy_context,
             preface.as_ref(),
         )
@@ -1504,6 +1508,7 @@ impl WalletMcpServer {
                 &input.chain_id,
                 execution_plan.clone(),
                 Some(plan_source.to_string()),
+                source,
                 result.clone(),
                 Utc::now(),
             );
@@ -2202,11 +2207,13 @@ impl WalletMcpServer {
                     resolve_execution_plan_reference(&reference, FetchPolicy::production())
                         .await
                         .map_err(|error| tool_error(&error))?;
+                let source = self.request_source(Some(&plan_source));
                 Box::pin(self.send_new_plan(
                     wallet,
                     network,
                     plan,
                     Some(plan_source.to_string()),
+                    source,
                     input.on_simulation_failure,
                     review_request,
                 ))
@@ -2907,6 +2914,15 @@ impl WalletMcpServer {
             &network,
             &plan,
             &stored_policy,
+            // This dry run is of bytecode that is not installed, so the
+            // automation it would run as has no id yet and there is nothing
+            // truthful to put here. Not the calling agent's source either:
+            // this previews a scheduled tick, and reporting a verdict from
+            // rules that only ever match an agent would be worse than
+            // reporting none. `Unknown` matches no source rule, so a policy
+            // that grants this automation authority by id reads here as not
+            // yet granting it — the safe direction to be wrong in.
+            &crate::core::source::RequestSource::Unknown,
             &policy_context,
             None,
         )
@@ -3276,6 +3292,27 @@ impl WalletMcpServer {
         }
     }
 
+    /// Where this request came from, as a policy rule may match on it.
+    ///
+    /// The channel is proved — this is the MCP server, so an agent asked. The
+    /// harness kind is the `--client` argument whatever launched the bridge
+    /// passed, which is a claim and is matched as one; a same-user process is
+    /// in scope in the threat model and may pass any of them. `plan_host` is
+    /// the one part with evidence behind it: it is set only when the plan's
+    /// bytes were fetched over the pinned TLS client, and stays absent for a
+    /// plan handed over inline.
+    fn request_source(&self, plan: Option<&ArtifactSource>) -> crate::core::source::RequestSource {
+        crate::core::source::RequestSource::agent(
+            self.requesting_client
+                .as_ref()
+                .map(|(harness, _)| harness.as_policy_claim()),
+            match plan {
+                Some(ArtifactSource::Https { host }) => Some(host.as_str()),
+                Some(ArtifactSource::InlineDataUri) | None => None,
+            },
+        )
+    }
+
     fn pending_record_by_id(&self, request_id: uuid::Uuid) -> Result<PendingTransaction> {
         let record = self
             .pending
@@ -3329,6 +3366,7 @@ impl WalletMcpServer {
         network: NetworkConfig,
         plan: ExecutionPlan,
         plan_source: Option<String>,
+        source: crate::core::source::RequestSource,
         on_simulation_failure: OnSimulationFailure,
         review_request: ReviewRequest,
     ) -> Result<ExecutionStatusOutput> {
@@ -3344,6 +3382,7 @@ impl WalletMcpServer {
             &network,
             &plan,
             &stored_policy,
+            &source,
             &policy_context,
             None,
         )
@@ -3353,6 +3392,7 @@ impl WalletMcpServer {
             network,
             plan,
             plan_source,
+            source,
             simulation,
             on_simulation_failure,
             review_request,
@@ -3395,6 +3435,11 @@ impl WalletMcpServer {
             network,
             recorded.plan,
             recorded.plan_source,
+            // The source recorded with the simulation, not one derived again
+            // here. Only the recording knows whether those plan bytes were
+            // fetched from a host or handed over inline, and the send
+            // re-evaluates the policy against exactly that.
+            recorded.request_source,
             on_simulation_failure,
             review_request,
         ))
@@ -3411,6 +3456,7 @@ impl WalletMcpServer {
         network: NetworkConfig,
         plan: ExecutionPlan,
         plan_source: Option<String>,
+        source: crate::core::source::RequestSource,
         mut simulation: SimulationResult,
         on_simulation_failure: OnSimulationFailure,
         review_request: ReviewRequest,
@@ -3465,6 +3511,7 @@ impl WalletMcpServer {
                 &network,
                 &plan,
                 plan_source.as_deref(),
+                &source,
                 &simulation,
                 review_request,
             )

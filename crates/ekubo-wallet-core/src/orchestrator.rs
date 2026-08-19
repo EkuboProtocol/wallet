@@ -197,6 +197,7 @@ pub async fn execute_automatic(
     network: &NetworkConfig,
     plan: &ExecutionPlan,
     plan_source: Option<&str>,
+    source: &crate::core::source::RequestSource,
     simulation: &SimulationResult,
     review_request: ReviewRequest,
 ) -> Result<SendDisposition> {
@@ -222,6 +223,7 @@ pub async fn execute_automatic(
     let mut findings = evaluate_policy(
         plan,
         prepared_facts.as_ref(),
+        source,
         &stored_policy.policy,
         &policy_context,
     );
@@ -272,6 +274,7 @@ pub async fn execute_automatic(
             &network.name,
             plan,
             plan_source,
+            source,
             stored_policy.revision,
             review_request,
         )?;
@@ -319,6 +322,7 @@ pub async fn execute_automatic(
         &network.name,
         plan,
         plan_source,
+        source,
         stored_policy.revision,
         &signed.serialized_transaction,
         &signed.transaction_hash,
@@ -594,6 +598,10 @@ impl TransactionReview<'_> {
             self.network,
             &self.request.execution_plan,
             self.stored_policy,
+            // The source the row was queued with, not a fresh reading of it:
+            // the request being reviewed is the one that arrived, and the
+            // findings the reviewer reads have to be about that request.
+            &self.request.request_source,
             self.policy_context,
             None,
         )

@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1658,6 +1658,21 @@ const MIGRATIONS: &[Migration] = &[
         statements: &[NATIVE_TOKEN_PRICES_TABLE],
         seed: None,
     },
+    // Which channel delivered a plan, and what that channel knew about who
+    // asked, as the closed structure `RequestSource` serializes to. Policy
+    // rules may match on it, so it is kept apart from the `plan_source` line
+    // beside it, which is display text a requester half-authored.
+    //
+    // Deliberately not backfilled. Every row that predates the column was
+    // decided by a policy that had no source matcher in it, so there is no
+    // value that would make the history more true than a null does — and a
+    // guess written here would be a guess a rule could later match on. Null
+    // reads back as `RequestSource::Unknown`, which no matcher covers.
+    Migration {
+        to_version: 10,
+        statements: &["ALTER TABLE pending_transactions ADD COLUMN request_source TEXT"],
+        seed: None,
+    },
 ];
 
 /// Write the shipped approximate values into confirmed tokens that have none.
@@ -1778,6 +1793,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
                  plan_source TEXT,
                  requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+                 request_source TEXT,
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed', 'submitting',

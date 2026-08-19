@@ -1140,3 +1140,83 @@ fn a_literal_outside_its_declared_width_is_refused_where_it_is_written() {
         .is_ok()
     );
 }
+
+/// The schema a typed predicate publishes has to accept exactly what the
+/// parser does. A schema *stricter* than the parser marks documents invalid
+/// that the wallet installs happily; a looser one promises authority the
+/// wallet refuses. Every form is tried against both, and they must agree.
+#[test]
+fn a_typed_predicate_publishes_exactly_the_forms_it_parses() {
+    // One representative document per `Predicate` variant, so a variant added
+    // later without a decision about these slots shows up as a failure here
+    // rather than as a schema that quietly omits it.
+    let forms = [
+        ("any_value", serde_json::json!("any_value")),
+        ("eq", serde_json::json!({"eq": "1"})),
+        ("in", serde_json::json!({"in": ["1"]})),
+        ("lt", serde_json::json!({"lt": "1"})),
+        ("lte", serde_json::json!({"lte": "1"})),
+        ("gt", serde_json::json!({"gt": "1"})),
+        ("gte", serde_json::json!({"gte": "1"})),
+        (
+            "selector",
+            serde_json::json!({"selector": {"abi": "transfer(address to)"}}),
+        ),
+        ("each", serde_json::json!({"each": "any_value"})),
+        ("tuple", serde_json::json!({"tuple": [null]})),
+        ("any", serde_json::json!({"any": ["any_value"]})),
+        ("all", serde_json::json!({"all": []})),
+        ("not", serde_json::json!({"not": "any_value"})),
+        ("length", serde_json::json!({"length": {"eq": "1"}})),
+    ];
+
+    // What the published schema offers, read back out of the schema itself so
+    // the two cannot drift: a form is offered when the schema names its key.
+    let generator = &mut schemars::SchemaGenerator::default();
+    let string_schema =
+        serde_json::to_string(&StringPredicate::json_schema(generator)).expect("it serializes");
+    let number_schema =
+        serde_json::to_string(&NumberPredicate::json_schema(generator)).expect("it serializes");
+
+    for (key, document) in forms {
+        let quoted = format!("\"{key}\"");
+        let offered_to_string = string_schema.contains(&quoted);
+        let parses_as_string = serde_json::from_value::<StringPredicate>(document.clone()).is_ok();
+        assert_eq!(
+            offered_to_string, parses_as_string,
+            "StringPredicate disagrees about {key}: schema offers it {offered_to_string}, parser \
+             accepts it {parses_as_string}"
+        );
+
+        let offered_to_number = number_schema.contains(&quoted);
+        let parses_as_number = serde_json::from_value::<NumberPredicate>(document).is_ok();
+        assert_eq!(
+            offered_to_number, parses_as_number,
+            "NumberPredicate disagrees about {key}: schema offers it {offered_to_number}, parser \
+             accepts it {parses_as_number}"
+        );
+    }
+}
+
+/// The wrapper is transparent, so a typed predicate is the same document a
+/// plain one is, and means the same thing. A rule that round-trips through
+/// storage comes back spelling its source matcher the way it was written.
+#[test]
+fn a_typed_predicate_is_the_same_document_as_an_untyped_one() {
+    for document in [
+        serde_json::json!("any_value"),
+        serde_json::json!({"eq": "codex"}),
+        serde_json::json!({"in": ["app.ekubo.org", "ekubo.org"]}),
+        serde_json::json!({"not": {"eq": "codex"}}),
+    ] {
+        let typed: StringPredicate =
+            serde_json::from_value(document.clone()).expect("a string form parses");
+        assert_eq!(
+            serde_json::to_value(&typed).expect("it serializes"),
+            document
+        );
+        let untyped: Predicate =
+            serde_json::from_value(document.clone()).expect("the same form parses untyped");
+        assert_eq!(typed.predicate(), &untyped, "{document}");
+    }
+}

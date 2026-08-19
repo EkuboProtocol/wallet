@@ -100,8 +100,16 @@ exact cancellation. The MCP server never receives a directly callable
 `KeyStore`, arbitrary signature operation, owner authorization, raw key export,
 native-review decisions, unrestricted storage, or owner-only mutation
 capabilities; the core authority privately owns the key-store dependency behind
-its two guarded methods. Harness kind is informational activity attribution
-only. The local stack has no HTTP or OAuth surface.
+its two guarded methods.
+
+Harness kind is the `--client` argument the bridge passed. It drives activity
+attribution and, since the plan source matcher, a policy rule may also name it
+through `source.agent.client`. It remains untrusted: a same-user process is in
+scope and can pass any harness name, so such a rule separates one honest
+harness from another rather than excluding a hostile one. Because naming a
+source only ever shrinks what a rule matches, a harness claim can restrict a
+permission and can never create one. The local stack has no HTTP or OAuth
+surface.
 Managed configurations contain only the installed helper command with a fixed
 `--client` argument and, where that file format supports remote MCP, the
 independent hosted companion URL. Claude Desktop keeps the remote companion in
@@ -116,11 +124,20 @@ then re-reads account, network, and review state. Sessions have a fixed
 seven-day deadline; incoming extension requests cannot move it.
 
 WalletConnect transaction requests enter the same account policy engine as
-local MCP requests and scheduled automations. Policy rules match calls and the
-prepared transaction envelope, not the request source, harness, dapp identity,
-or WalletConnect session. A matching `allow` rule can therefore sign and submit
-the same transaction automatically when any connected dapp requests it;
-`plan_source` is display and audit context only. A dapp cannot force an
+local MCP requests and scheduled automations. Policy rules match calls, the
+prepared transaction envelope, and the channel that delivered the plan. A rule
+with no `source` matcher signs and submits the same transaction automatically
+whichever connected dapp requests it.
+
+A rule may name `walletconnect` and constrain the dapp's claimed domain, but
+that domain is the URL the dapp typed about itself in its session proposal and
+is attested by nothing; a dapp serving from anywhere may name any domain, so a
+domain-gated rule is only as strong as the owner's care at the pairing screen.
+Adding a source matcher can only shrink what a rule matches, so a claim never
+widens authority. `plan_source` remains display and audit context only and is
+never matched: it is a line assembled for a person and half-authored by the
+requester, kept deliberately apart from the closed `request_source` structure
+core builds and rules read. A dapp cannot force an
 otherwise allowed transaction into review or override a deny. Personal-message
 and typed-data requests always require native review. The WalletConnect adapter
 receives only `DappApi`, not `OwnerApi` or a `KeyStore`; that capability can

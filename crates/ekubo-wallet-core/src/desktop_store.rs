@@ -50,8 +50,18 @@ pub struct GuidedSetupState {
 
 /// Untrusted harness attribution supplied by the stdio bridge.
 ///
-/// This value is never consulted for authorization. It exists only so the
-/// owner-facing activity list can say, for example, "via Claude Desktop."
+/// It exists so the owner-facing activity list can say, for example, "via
+/// Claude Desktop", and — since the plan source matcher — so a rule may say
+/// "only from Codex" through
+/// [`RequestSource::Agent`](crate::core::source::RequestSource::Agent).
+///
+/// That second use does not make it trusted, and the matcher is careful to
+/// say so. This is the `--client` argument whatever launched the bridge
+/// passed; the threat model puts a same-user process in scope and grants it
+/// the local MCP IPC by design, so any local process can pass any of these.
+/// A rule reading it separates one honest harness from another. It is not a
+/// barrier against a hostile one, and the policy engine never treats it as
+/// evidence — it can only ever narrow what a rule already permitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
@@ -78,6 +88,14 @@ impl AgentKind {
             Self::GrokBuild => "Grok Build",
             Self::Other => "an unrecognized harness",
         }
+    }
+
+    /// The wire spelling a policy rule compares against, which is the same
+    /// spelling the bridge passed and the database stores. One string for all
+    /// three, so a rule cannot be written against a name no other layer uses.
+    #[must_use]
+    pub const fn as_policy_claim(self) -> &'static str {
+        self.as_str()
     }
 
     pub(crate) const fn as_str(self) -> &'static str {

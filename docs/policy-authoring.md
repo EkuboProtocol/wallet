@@ -9,11 +9,48 @@ OS owner authentication; a transition that core proves only tightens authority
 can be installed from the owner UI without an additional OS challenge.
 
 The installed policy belongs to the wallet account, not to the agent that
-proposed it. Rules match calls and prepared-envelope fields; there is no matcher
-for MCP client, harness, automation, dapp, WalletConnect session, or recorded
-plan source. A rule that allows a transaction from an agent also allows the
-same matching transaction from an installed automation or connected dapp. If
-request origin matters, keep the action on native review or constrain the exact
+proposed it. A rule with no `source` matcher matches whoever asks: allowing a
+transaction from an agent also allows the same matching transaction from an
+installed automation or a connected dapp.
+
+The `source` matcher narrows that. It is tagged by channel, so the channel and
+the fields that only exist within it stay together:
+
+```json
+{ "source": { "walletconnect": { "domain": { "in": ["app.ekubo.org"] } } } }
+{ "source": { "agent": { "client": { "eq": "codex" } } } }
+{ "source": { "agent": { "plan_host": { "eq": "mcp.ekubo.org" } } } }
+{ "source": { "automation": { "id": { "eq": "…" } } } }
+```
+
+Naming a field at all requires the request to carry it, so a matcher never
+matches a request whose source the wallet does not know, and adding one to a
+rule can only shrink what that rule matches. That is why constraining an
+existing `allow` by source installs as a proved tightening.
+
+**Know what each field is worth.** The channel is proved — core is the thing
+being called. An automation id is proved, and so is `plan_host`, which is the
+TLS-vetted host that served the plan's bytes; a plan handed over inline has no
+host, so constraining `plan_host` is also how a rule refuses an inline plan.
+
+A dapp's `domain` and an agent's `client` are **claims**, and rules written on
+them are worth exactly what the claim is worth:
+
+- `client` is the `--client` argument whatever launched the MCP bridge passed.
+  The threat model puts a same-user process in scope and grants it the local
+  MCP IPC by design, so any local process can pass any harness name. A deny on
+  "not Codex" is escaped by claiming Codex, and an allow for Codex is available
+  to anything that says so. Use it to keep one agent's rules off another
+  agent's requests — a real and useful thing — not as a barrier against a
+  hostile one.
+- `domain` is the URL the dapp typed about itself when it proposed the session.
+  A dapp serving from anywhere may name any domain. One careless approval at
+  the pairing screen and a domain-gated `allow` signs for that dapp from then
+  on.
+
+Neither can widen authority, which is the reason both are allowed under any
+effect. If request origin has to be a *security* boundary rather than a
+workflow one, keep the action on native review, or constrain the exact
 transaction fields narrowly enough that every source is safe to use it.
 
 Policy version 1 is intentionally small. It contains one ordered `rules` list.
@@ -22,7 +59,9 @@ flat fields on the rule: `chain_id`, `to`, `native_value`, and `calldata`
 describe one planned call, while `transaction_type`, `nonce`, `gas_limit`,
 `max_fee_per_gas`, `max_priority_fee_per_gas`, `delegation`, `envelope_to`, and
 `envelope_native_value` describe the prepared transaction envelope outside
-that call. Present matchers are ANDed;
+that call. `source` describes neither: it names the channel that delivered the
+plan, and is the one matcher with its own shape rather than a predicate.
+Present matchers are ANDed;
 an omitted matcher means any value. Rules are evaluated from top to bottom and
 the first matching rule decides each call. A call reaching the end needs owner
 review, as does a matching `review` rule. A matching deny rejects without queuing

@@ -26,6 +26,7 @@ use crate::{
             SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
+        source::RequestSource,
     },
     fork::{ForkContext, ForkParent, ForkPreface, validate_replay},
     policy_store::StoredPolicy,
@@ -307,6 +308,7 @@ pub async fn simulate_execution(
     network: &NetworkConfig,
     plan: &ExecutionPlan,
     stored_policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     fork: Option<&ForkPreface>,
 ) -> Result<SimulationResult> {
@@ -358,6 +360,7 @@ pub async fn simulate_execution(
             network,
             plan,
             stored_policy,
+            source,
             context,
             fork,
         )
@@ -368,8 +371,17 @@ pub async fn simulate_execution(
             .as_ref()
             .is_some_and(|failure| failure.category == SimulationFailureCategory::RpcError);
         if !retryable || remaining == 0 {
-            return finalize_policy(wallet, network, plan, stored_policy, context, fork, result)
-                .await;
+            return finalize_policy(
+                wallet,
+                network,
+                plan,
+                stored_policy,
+                source,
+                context,
+                fork,
+                result,
+            )
+            .await;
         }
         last = Some(result);
     }
@@ -379,11 +391,13 @@ pub async fn simulate_execution(
     last.context("network has no RPC endpoints to simulate against")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_policy(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
     stored_policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     fork: Option<&ForkPreface>,
     mut result: SimulationResult,
@@ -402,6 +416,7 @@ async fn finalize_policy(
             .as_ref()
             .map(crate::execution::PreparedExecution::policy_facts)
             .as_ref(),
+        source,
         &stored_policy.policy,
         context,
     );
@@ -432,6 +447,7 @@ pub async fn simulate_external_execution(
     network: &NetworkConfig,
     plan: &ExecutionPlan,
     stored_policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     fork: Option<&ForkPreface>,
 ) -> Result<SimulationResult> {
@@ -439,7 +455,7 @@ pub async fn simulate_external_execution(
         .acquire_owned()
         .await
         .context("external simulation limiter was closed")?;
-    simulate_execution(wallet, network, plan, stored_policy, context, fork).await
+    simulate_execution(wallet, network, plan, stored_policy, source, context, fork).await
 }
 
 async fn simulate_execution_through(
@@ -448,6 +464,7 @@ async fn simulate_execution_through(
     network: &NetworkConfig,
     plan: &ExecutionPlan,
     stored_policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     fork: Option<&ForkPreface>,
 ) -> Result<SimulationResult> {
@@ -485,6 +502,7 @@ async fn simulate_execution_through(
                     return Ok(setup_failure_result(
                         plan,
                         stored_policy,
+                        source,
                         context,
                         planned.mode,
                         "RPC returned no latest block",
@@ -497,6 +515,7 @@ async fn simulate_execution_through(
             return Ok(rpc_failure_result(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 &error,
@@ -507,6 +526,7 @@ async fn simulate_execution_through(
         return Ok(setup_failure_result(
             plan,
             stored_policy,
+            source,
             context,
             planned.mode,
             &format!("RPC reports chain {chain_id}, not {}", network.chain_id),
@@ -519,6 +539,7 @@ async fn simulate_execution_through(
             return Ok(setup_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 &error.to_string(),
@@ -542,6 +563,7 @@ async fn simulate_execution_through(
             return Ok(rpc_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 &error,
@@ -571,6 +593,7 @@ async fn simulate_execution_through(
                 return Ok(rpc_failure_result_at_block(
                     plan,
                     stored_policy,
+                    source,
                     context,
                     planned.mode,
                     &error,
@@ -582,6 +605,7 @@ async fn simulate_execution_through(
             return Ok(setup_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 "Calibur implementation is not deployed on this chain",
@@ -593,6 +617,7 @@ async fn simulate_execution_through(
             return Ok(setup_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 &format!(
@@ -612,6 +637,7 @@ async fn simulate_execution_through(
                 return Ok(setup_failure_result_at_block(
                     plan,
                     stored_policy,
+                    source,
                     context,
                     planned.mode,
                     "wallet has code that is not an EIP-7702 delegation designator",
@@ -631,6 +657,7 @@ async fn simulate_execution_through(
         return Ok(setup_failure_result_at_block(
             plan,
             stored_policy,
+            source,
             context,
             planned.mode,
             &format!(
@@ -673,6 +700,7 @@ async fn simulate_execution_through(
             return Ok(rpc_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 &error,
@@ -693,6 +721,7 @@ async fn simulate_execution_through(
             return Ok(setup_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 &error.to_string(),
@@ -716,6 +745,7 @@ async fn simulate_execution_through(
             return Ok(setup_failure_result_at_block(
                 plan,
                 stored_policy,
+                source,
                 context,
                 planned.mode,
                 "fork replay native transfer logs do not reconcile with the pinned balance",
@@ -731,6 +761,7 @@ async fn simulate_execution_through(
         return Ok(setup_failure_result_at_block(
             plan,
             stored_policy,
+            source,
             context,
             planned.mode,
             &format!(
@@ -752,6 +783,7 @@ async fn simulate_execution_through(
                 return Ok(setup_failure_result_at_block(
                     plan,
                     stored_policy,
+                    source,
                     context,
                     planned.mode,
                     "pre-balance eth_simulateV1 response did not match the pinned request",
@@ -763,6 +795,7 @@ async fn simulate_execution_through(
                 return Ok(setup_failure_result_at_block(
                     plan,
                     stored_policy,
+                    source,
                     context,
                     planned.mode,
                     "pre-balance eth_simulateV1 response did not match the pinned request",
@@ -788,6 +821,7 @@ async fn simulate_execution_through(
         return Ok(setup_failure_result_at_block(
             plan,
             stored_policy,
+            source,
             context,
             planned.mode,
             "eth_simulateV1 native transfer logs do not reconcile with the pinned balance",
@@ -811,7 +845,7 @@ async fn simulate_execution_through(
         tokens: token_balance_changes(&all_tokens, &balances_before, &balances_after, &activity),
     };
 
-    let mut findings = evaluate_policy(plan, None, &stored_policy.policy, context);
+    let mut findings = evaluate_policy(plan, None, source, &stored_policy.policy, context);
     let simulation = execution_output(plan, main, simulated_header.gas_limit());
     // A plan that does not execute is never allowed, whatever the policy says
     // about its calls: there is no policy setting that turns a revert into an
@@ -1482,12 +1516,13 @@ fn default_directive(category: SimulationFailureCategory) -> SimulationFailureDi
 fn base_failure_result(
     plan: &ExecutionPlan,
     stored_policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     mode: ExecutionMode,
     failure: SimulationFailure,
     block_number: u64,
 ) -> SimulationResult {
-    let mut findings = evaluate_policy(plan, None, &stored_policy.policy, context);
+    let mut findings = evaluate_policy(plan, None, source, &stored_policy.policy, context);
     findings.push(PolicyFinding {
         severity: FindingSeverity::Error,
         code: SIMULATION_FAILED_CODE.into(),
@@ -1526,16 +1561,18 @@ fn base_failure_result(
 fn rpc_failure_result(
     plan: &ExecutionPlan,
     policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     mode: ExecutionMode,
     error: &anyhow::Error,
 ) -> SimulationResult {
-    rpc_failure_result_at_block(plan, policy, context, mode, error, 0)
+    rpc_failure_result_at_block(plan, policy, source, context, mode, error, 0)
 }
 
 fn rpc_failure_result_at_block(
     plan: &ExecutionPlan,
     policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     mode: ExecutionMode,
     error: &anyhow::Error,
@@ -1544,6 +1581,7 @@ fn rpc_failure_result_at_block(
     base_failure_result(
         plan,
         policy,
+        source,
         context,
         mode,
         failure(
@@ -1559,16 +1597,18 @@ fn rpc_failure_result_at_block(
 fn setup_failure_result(
     plan: &ExecutionPlan,
     policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     mode: ExecutionMode,
     message: &str,
 ) -> SimulationResult {
-    setup_failure_result_at_block(plan, policy, context, mode, message, 0)
+    setup_failure_result_at_block(plan, policy, source, context, mode, message, 0)
 }
 
 fn setup_failure_result_at_block(
     plan: &ExecutionPlan,
     policy: &StoredPolicy,
+    source: &RequestSource,
     context: &PolicyContext,
     mode: ExecutionMode,
     message: &str,
@@ -1577,6 +1617,7 @@ fn setup_failure_result_at_block(
     base_failure_result(
         plan,
         policy,
+        source,
         context,
         mode,
         failure(

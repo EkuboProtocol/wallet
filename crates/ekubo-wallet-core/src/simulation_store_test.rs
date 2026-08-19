@@ -67,7 +67,15 @@ fn result(plan: &ExecutionPlan) -> SimulationResult {
 fn record(store: &mut SimulationStore, value: &str, now: DateTime<Utc>) -> RecordedSimulation {
     let plan = plan(value);
     let result = result(&plan);
-    store.record("primary", "1", plan, None, result, now)
+    store.record(
+        "primary",
+        "1",
+        plan,
+        None,
+        RequestSource::Unknown,
+        result,
+        now,
+    )
 }
 
 #[test]
@@ -98,7 +106,15 @@ fn the_cache_is_bounded_by_bytes_and_not_only_by_count() {
     for index in 1..=MAX_RECORDED_PER_WALLET {
         let plan = plan(&index.to_string());
         let result = result(&plan);
-        store.record("primary", "1", plan, None, result, now);
+        store.record(
+            "primary",
+            "1",
+            plan,
+            None,
+            RequestSource::Unknown,
+            result,
+            now,
+        );
     }
     assert!(store.len() <= MAX_RECORDED_PER_WALLET);
     assert!(
@@ -117,13 +133,21 @@ fn one_wallet_cannot_evict_another_wallets_simulations() {
     let mut store = SimulationStore::new();
     let quiet_plan = plan("1");
     let quiet_result = result(&quiet_plan);
-    let quiet = store.record("quiet", "1", quiet_plan, None, quiet_result, now);
+    let quiet = store.record(
+        "quiet",
+        "1",
+        quiet_plan,
+        None,
+        RequestSource::Unknown,
+        quiet_result,
+        now,
+    );
 
     // A busy wallet fills its own per-wallet allowance several times over.
     for index in 2..MAX_RECORDED_PER_WALLET * 2 {
         let plan = plan(&index.to_string());
         let result = result(&plan);
-        store.record("busy", "1", plan, None, result, now);
+        store.record("busy", "1", plan, None, RequestSource::Unknown, result, now);
     }
 
     assert!(
@@ -196,7 +220,15 @@ fn a_recorded_result_names_the_policy_revision_it_was_evaluated_under() {
     result.policy_revision = stored.revision;
     let mut store = SimulationStore::new();
     let now = Utc::now();
-    let recorded = store.record("primary", "1", plan, None, result, now);
+    let recorded = store.record(
+        "primary",
+        "1",
+        plan,
+        None,
+        RequestSource::Unknown,
+        result,
+        now,
+    );
     assert_eq!(recorded.result.policy_revision, 7);
     assert_eq!(
         recorded.chain_id,
@@ -218,7 +250,15 @@ fn a_clock_that_moved_backwards_does_not_refresh_a_simulation() {
 
     // Inside the window and moving forward: usable, as before.
     let mut store = SimulationStore::default();
-    let recorded = store.record("primary", "1", built.clone(), None, outcome.clone(), at);
+    let recorded = store.record(
+        "primary",
+        "1",
+        built.clone(),
+        None,
+        RequestSource::Unknown,
+        outcome.clone(),
+        at,
+    );
     assert!(
         store
             .take(recorded.simulation_id, at + TimeDelta::seconds(60))
@@ -228,7 +268,15 @@ fn a_clock_that_moved_backwards_does_not_refresh_a_simulation() {
     // The clock moved behind the moment it was recorded. Elapsed time is no
     // longer knowable, and the safe reading of that is "too long", not "fresh".
     let mut store = SimulationStore::default();
-    let recorded = store.record("primary", "1", built, None, outcome, at);
+    let recorded = store.record(
+        "primary",
+        "1",
+        built,
+        None,
+        RequestSource::Unknown,
+        outcome,
+        at,
+    );
     let error = format!(
         "{:#}",
         store
@@ -244,7 +292,15 @@ fn a_partial_clock_rollback_cannot_extend_the_monotonic_lifetime() {
     let built = plan("1");
     let outcome = result(&built);
     let mut store = SimulationStore::default();
-    let recorded = store.record("primary", "1", built, None, outcome, at);
+    let recorded = store.record(
+        "primary",
+        "1",
+        built,
+        None,
+        RequestSource::Unknown,
+        outcome,
+        at,
+    );
 
     // Wall time claims only 110 seconds elapsed, but the process-local clock
     // has observed 180. A partial rollback must not buy another ten seconds of
@@ -270,7 +326,15 @@ fn the_ordinary_expiry_boundary_is_unchanged() {
     let outcome = result(&built);
 
     let mut store = SimulationStore::default();
-    let recorded = store.record("primary", "1", built.clone(), None, outcome.clone(), at);
+    let recorded = store.record(
+        "primary",
+        "1",
+        built.clone(),
+        None,
+        RequestSource::Unknown,
+        outcome.clone(),
+        at,
+    );
     assert!(
         store
             .take(
@@ -281,7 +345,15 @@ fn the_ordinary_expiry_boundary_is_unchanged() {
     );
 
     let mut store = SimulationStore::default();
-    let recorded = store.record("primary", "1", built, None, outcome, at);
+    let recorded = store.record(
+        "primary",
+        "1",
+        built,
+        None,
+        RequestSource::Unknown,
+        outcome,
+        at,
+    );
     assert!(
         store
             .take(

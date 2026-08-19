@@ -18,7 +18,10 @@
 //! should be reading the chain as it is at that moment, not as it was when the
 //! agent queued the request.
 
-use crate::{core::execution_plan::ExecutionPlan, simulation::SimulationResult};
+use crate::{
+    core::{execution_plan::ExecutionPlan, source::RequestSource},
+    simulation::SimulationResult,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use std::{
@@ -58,6 +61,11 @@ pub struct RecordedSimulation {
     /// "inline data URI" — carried through to approval-time display. None only
     /// for wallet-native recovery operations such as cancellation.
     pub plan_source: Option<String>,
+    /// The same provenance as a policy rule may match on it. Kept beside the
+    /// display line rather than derived from it, because a send from this
+    /// handle re-simulates and re-evaluates: without it, a plan fetched from
+    /// a host would come back as one that never was.
+    pub request_source: RequestSource,
     pub result: SimulationResult,
     pub recorded_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -99,6 +107,7 @@ impl SimulationStore {
         chain_id: &str,
         plan: ExecutionPlan,
         plan_source: Option<String>,
+        request_source: RequestSource,
         result: SimulationResult,
         now: DateTime<Utc>,
     ) -> RecordedSimulation {
@@ -111,6 +120,7 @@ impl SimulationStore {
             chain_id: chain_id.to_owned(),
             plan,
             plan_source,
+            request_source,
             result,
             recorded_at: now,
             expires_at: now + TimeDelta::seconds(SIMULATION_TTL_SECONDS),
@@ -163,6 +173,7 @@ impl SimulationStore {
         chain_id: &str,
         plan: ExecutionPlan,
         plan_source: Option<String>,
+        request_source: RequestSource,
         result: SimulationResult,
         now: DateTime<Utc>,
     ) -> RecordedSimulation {
@@ -172,6 +183,7 @@ impl SimulationStore {
             chain_id,
             plan,
             plan_source,
+            request_source,
             result,
             now,
         )

@@ -368,7 +368,8 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE tokens DROP COLUMN approximate_usd_price;
+                "ALTER TABLE pending_transactions DROP COLUMN request_source;
+                 ALTER TABLE tokens DROP COLUMN approximate_usd_price;
                  ALTER TABLE pending_transactions DROP COLUMN requested_review;
                  DROP INDEX automation_runs_by_automation;
                  DROP TABLE automation_runs;
@@ -491,9 +492,14 @@ fn seeding_approximate_values_never_overwrites_one_the_owner_recorded() {
             .unwrap();
         // Wind back to the schema before the seeding step so opening the
         // database runs it again over a row that now has an owner's value.
+        // Every step from there re-runs, so the column a later one adds has to
+        // go with the version: a database at 7 did not have it.
         store
             .connection
-            .execute_batch("UPDATE schema_metadata SET version = 7 WHERE singleton = 1")
+            .execute_batch(
+                "ALTER TABLE pending_transactions DROP COLUMN request_source;
+                 UPDATE schema_metadata SET version = 7 WHERE singleton = 1",
+            )
             .unwrap();
     }
 

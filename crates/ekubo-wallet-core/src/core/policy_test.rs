@@ -43,7 +43,7 @@ fn policy(value: serde_json::Value) -> WalletPolicy {
 }
 
 fn findings(subject: &WalletPolicy, plan: &ExecutionPlan) -> Vec<PolicyFinding> {
-    evaluate_policy(plan, None, subject, &context())
+    evaluate_policy(plan, None, &RequestSource::Unknown, subject, &context())
 }
 
 fn prepared(delegation: Option<Address>) -> PreparedTransactionFacts {
@@ -68,7 +68,13 @@ fn prepared_findings(
     plan: &ExecutionPlan,
     prepared: &PreparedTransactionFacts,
 ) -> Vec<PolicyFinding> {
-    evaluate_policy(plan, Some(prepared), subject, &context())
+    evaluate_policy(
+        plan,
+        Some(prepared),
+        &RequestSource::Unknown,
+        subject,
+        &context(),
+    )
 }
 
 fn outcome(subject: &WalletPolicy, plan: &ExecutionPlan) -> PolicyOutcome {
@@ -520,6 +526,18 @@ fn schema_describes_the_ordered_v1_surface() {
     assert!(schema.contains("tuple"));
     assert!(!schema.contains("max_calls_per_batch"));
     assert!(!schema.contains("ChainPolicy"));
+    assert!(schema.contains("source"));
+    assert!(schema.contains("walletconnect"));
+    // The typed predicates publish `$ref`s to themselves by name. A name
+    // schemars never registered is a dangling reference: the document still
+    // serializes, and every editor completing a source field silently gets
+    // nothing. So the definitions have to be here, not just the references.
+    for definition in ["\"StringPredicate\":", "\"NumberPredicate\":"] {
+        assert!(
+            schema.contains(definition),
+            "generated schema has no {definition} definition to resolve its refs against"
+        );
+    }
 }
 
 #[test]
@@ -542,6 +560,7 @@ fn published_policy_schema_carries_every_enforced_rule_field() {
         "delegation",
         "envelope_to",
         "envelope_native_value",
+        "source",
     ] {
         assert!(
             properties.contains_key(field),
@@ -552,4 +571,143 @@ fn published_policy_schema_carries_every_enforced_rule_field() {
     for effect in ["allow", "review", "deny"] {
         assert!(effects.contains(effect), "static schema omits {effect}");
     }
+    let source = schema["$defs"]["SourceMatcher"].to_string();
+    for channel in ["walletconnect", "agent", "automation"] {
+        assert!(source.contains(channel), "static schema omits {channel}");
+    }
+    // The forms a string cannot answer must not be offered for a slot that
+    // only ever holds one, or the schema promises authority the parser
+    // refuses.
+    let string_predicate = schema["$defs"]["StringPredicate"].to_string();
+    for absent in ["\"gt\"", "\"selector\"", "\"each\"", "\"tuple\""] {
+        assert!(
+            !string_predicate.contains(absent),
+            "static schema offers {absent} on a string"
+        );
+    }
+}
+
+/// One agent's rules must not decide another agent's request, and the same
+/// transaction from a dapp is a different question again. This is the issue's
+/// whole ask, at the layer that answers it.
+#[test]
+fn a_rule_may_name_the_channel_that_asked() {
+    let subject = policy(json!({"version": 1, "rules": [
+        {
+            "effect": "allow",
+            "label": "Approvals from the Ekubo app only",
+            "source": {"walletconnect": {"domain": {"eq": "app.ekubo.org"}}},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        },
+        {
+            "effect": "allow",
+            "label": "Approvals from a Codex loop",
+            "source": {"agent": {"client": {"eq": "codex"}}},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        }
+    ]}));
+    let plan = plan(1, &[(TOKEN, &approve(ROUTER, 100), "0")]);
+
+    for (source, allowed) in [
+        (
+            RequestSource::walletconnect(Some("https://app.ekubo.org/")),
+            true,
+        ),
+        (
+            RequestSource::walletconnect(Some("https://claim-rewards.xyz/")),
+            false,
+        ),
+        (RequestSource::agent(Some("codex"), None), true),
+        (RequestSource::agent(Some("claude_code"), None), false),
+        (RequestSource::automation("7"), false),
+        (RequestSource::Unknown, false),
+    ] {
+        let findings = evaluate_policy(&plan, None, &source, &subject, &context());
+        assert_eq!(
+            policy_allows(&findings),
+            allowed,
+            "{source:?} was decided wrong"
+        );
+    }
+}
+
+/// Adding a source matcher can only ever shrink what a rule matches, which is
+/// the property the whole design rests on: it makes a claim-gated `allow` a
+/// tightening rather than a grant, so no unauthenticated claim can widen
+/// authority.
+#[test]
+fn constraining_the_source_only_ever_narrows_a_rule() {
+    let broad = policy(json!({"version": 1, "rules": [
+        {"effect": "allow", "to": {"eq": format!("{TOKEN:#x}")}}
+    ]}));
+    let narrowed = policy(json!({"version": 1, "rules": [
+        {
+            "effect": "allow",
+            "source": {"agent": {"client": {"eq": "codex"}}},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        }
+    ]}));
+    assert!(is_tightening(&broad, &narrowed));
+    assert!(!is_tightening(&narrowed, &broad));
+
+    // And narrowing further within the channel is a tightening again, while
+    // relaxing the same field is not.
+    let one_host = policy(json!({"version": 1, "rules": [
+        {
+            "effect": "allow",
+            "source": {"agent": {
+                "client": {"eq": "codex"},
+                "plan_host": {"eq": "mcp.ekubo.org"}
+            }},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        }
+    ]}));
+    assert!(is_tightening(&narrowed, &one_host));
+    assert!(!is_tightening(&one_host, &narrowed));
+}
+
+/// A rule an earlier rule already covers is refused at install. Source
+/// matchers have to take part in that proof, or a source-narrowed fallback
+/// would be admitted under a broad permission that already swallowed it.
+#[test]
+fn a_source_narrowed_rule_under_a_broader_one_is_unreachable() {
+    let refused = WalletPolicy::parse(json!({"version": 1, "rules": [
+        {"effect": "allow", "to": {"eq": format!("{TOKEN:#x}")}},
+        {
+            "effect": "deny",
+            "source": {"agent": {"client": {"eq": "codex"}}},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        }
+    ]}));
+    assert!(refused.is_err(), "an unreachable deny was admitted");
+
+    // The other order is fine: the narrow rule decides first and the broad
+    // one still has everything else to answer for.
+    WalletPolicy::parse(json!({"version": 1, "rules": [
+        {
+            "effect": "deny",
+            "source": {"agent": {"client": {"eq": "codex"}}},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        },
+        {"effect": "allow", "to": {"eq": format!("{TOKEN:#x}")}}
+    ]}))
+    .expect("a narrow rule ahead of a broad one is reachable");
+}
+
+/// The owner reads the diff, so the diff has to say whose word each rule
+/// takes. A claim that reads like a fact is the one failure this line cannot
+/// have.
+#[test]
+fn the_permission_diff_names_the_channel_and_flags_the_claim() {
+    let subject = policy(json!({"version": 1, "rules": [
+        {
+            "effect": "allow",
+            "source": {"walletconnect": {"domain": {"eq": "app.ekubo.org"}}},
+            "to": {"eq": format!("{TOKEN:#x}")}
+        }
+    ]}));
+    let described = subject.rules[0].describe();
+    assert!(described.contains("WalletConnect"), "{described}");
+    assert!(described.contains("claiming"), "{described}");
+    assert!(described.contains("app.ekubo.org"), "{described}");
 }

@@ -22,6 +22,7 @@ fn record(status: PendingStatus, updated_at: DateTime<Utc>) -> PendingTransactio
         chain_id: "1".into(),
         execution_plan: plan(),
         plan_source: Some("automation:test".into()),
+        request_source: RequestSource::automation("test"),
         digest: "0x00".into(),
         review_digest: None,
         policy_revision: 1,

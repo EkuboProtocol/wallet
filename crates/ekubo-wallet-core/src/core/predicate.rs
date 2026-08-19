@@ -1059,6 +1059,189 @@ fn parse_literal(literal: &str, ty: &DynSolType) -> Result<String> {
     }
 }
 
+/// A [`Predicate`] on a slot whose value type the schema already fixes.
+///
+/// One predicate language, two doors into it, and the difference is only when
+/// the type shows up. `Predicate` is the door for a slot whose type is not
+/// knowable from the document alone: `calldata` holds `bytes` whose decoded
+/// arguments have whatever types the named ABI gives them, so
+/// [`Rule::validate`](crate::core::policy::WalletPolicy) checks applicability
+/// after the whole document has parsed.
+///
+/// A slot the schema pins to one type needs no such deferral. Deserializing
+/// through this wrapper runs [`Predicate::check_applicable`] against that type
+/// immediately, and — the reason it exists — the published JSON Schema names
+/// only the forms that type can answer. An editor completing a `WalletConnect`
+/// domain offers `eq`, `in`, and `not`, and never offers `gt`, `selector`,
+/// `each`, or `tuple`, none of which a string could ever satisfy.
+///
+/// Transparent on the wire: the same predicate document, held to a narrower
+/// alphabet.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct StringPredicate(Predicate);
+
+/// The same wrapper for a slot holding a `uint256`. Reachable in a policy
+/// document today only as the inner predicate of a [`StringPredicate`]
+/// `length`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct NumberPredicate(Predicate);
+
+macro_rules! typed_predicate {
+    ($name:ident, $ty:expr, $schema:literal) => {
+        impl $name {
+            /// The one ABI type a value in this slot ever has.
+            #[must_use]
+            pub fn value_type() -> DynSolType {
+                $ty
+            }
+
+            /// The predicate underneath.
+            #[must_use]
+            pub const fn predicate(&self) -> &Predicate {
+                &self.0
+            }
+
+            /// How `value` answers this predicate.
+            #[must_use]
+            pub fn evaluate(&self, value: &DynSolValue, context: &PolicyContext) -> Match {
+                self.0.evaluate(value, context)
+            }
+
+            /// One clause of plain English for the permission diff.
+            #[must_use]
+            pub fn describe(&self) -> String {
+                self.0.describe()
+            }
+
+            /// Whether every value this admits is admitted by `other`.
+            /// Normalizes both against the slot's type first, exactly as the
+            /// untyped slots do, so two spellings of one literal are not two
+            /// authorities.
+            #[must_use]
+            pub fn is_narrower_than(&self, other: &Self) -> bool {
+                let ty = Self::value_type();
+                self.0
+                    .normalized_for(&ty)
+                    .is_narrower_than(&other.0.normalized_for(&ty))
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let predicate = Predicate::deserialize(deserializer)?;
+                predicate
+                    .check_applicable(&$ty)
+                    .map_err(|error| serde::de::Error::custom(format!("{error:#}")))?;
+                Ok(Self(predicate))
+            }
+        }
+
+        impl JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                $schema.into()
+            }
+
+            fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                Self::schema(generator)
+            }
+        }
+    };
+}
+
+typed_predicate!(StringPredicate, DynSolType::String, "StringPredicate");
+typed_predicate!(NumberPredicate, DynSolType::Uint(256), "NumberPredicate");
+
+/// `{"<key>": <value schema>}`, and nothing else in the object.
+fn predicate_form(key: &str, value: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { key: value },
+        "required": [key],
+        "additionalProperties": false,
+    })
+}
+
+/// A reference to a typed predicate's own definition, for the recursive forms.
+///
+/// Written out rather than asked of the generator, because asking for a
+/// definition while building it is how a generator loops. The name is the
+/// `schema_name` above, which is where schemars puts it.
+fn predicate_reference(name: &str) -> serde_json::Value {
+    serde_json::json!({ "$ref": format!("#/$defs/{name}") })
+}
+
+fn one_of(branches: &[serde_json::Value]) -> schemars::Schema {
+    schemars::Schema::try_from(serde_json::json!({ "oneOf": branches }))
+        .expect("a hand-built predicate schema is valid JSON Schema")
+}
+
+/// The forms a `string` value can answer.
+///
+/// Hand-shaped, because the derived schema is the whole [`Predicate`] alphabet
+/// and publishing less than that is the entire point. What is listed has to
+/// stay exactly what [`Predicate::check_applicable`] accepts for a string: a
+/// schema *stricter* than the parser would mark a document invalid that the
+/// wallet installs happily, which is worse than publishing no schema at all.
+/// `predicate_test.rs` checks the two agree, form by form.
+impl StringPredicate {
+    fn schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let me = predicate_reference("StringPredicate");
+        // Asked of the generator rather than written out, because this is the
+        // one reference that is not to a definition already being built: the
+        // call is what puts `NumberPredicate` in `$defs` at all.
+        let number = serde_json::to_value(generator.subschema_for::<NumberPredicate>())
+            .expect("a schema serializes to JSON");
+        one_of(&[
+            serde_json::json!({ "type": "string", "const": "any_value" }),
+            predicate_form("eq", &serde_json::json!({ "type": "string" })),
+            predicate_form(
+                "in",
+                &serde_json::json!({
+                    "type": "array", "items": { "type": "string" }, "minItems": 1
+                }),
+            ),
+            predicate_form(
+                "any",
+                &serde_json::json!({ "type": "array", "items": me, "minItems": 1 }),
+            ),
+            predicate_form("all", &serde_json::json!({ "type": "array", "items": me })),
+            predicate_form("not", &me),
+            predicate_form("length", &number),
+        ])
+    }
+}
+
+/// The forms a `uint256` value can answer. `length` is absent: its subject is
+/// an array, `bytes`, or a `string`, never a number.
+impl NumberPredicate {
+    fn schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let me = predicate_reference("NumberPredicate");
+        let literal = serde_json::json!({ "type": "string" });
+        one_of(&[
+            serde_json::json!({ "type": "string", "const": "any_value" }),
+            predicate_form("eq", &literal),
+            predicate_form(
+                "in",
+                &serde_json::json!({
+                    "type": "array", "items": literal, "minItems": 1
+                }),
+            ),
+            predicate_form("lt", &literal),
+            predicate_form("lte", &literal),
+            predicate_form("gt", &literal),
+            predicate_form("gte", &literal),
+            predicate_form(
+                "any",
+                &serde_json::json!({ "type": "array", "items": me, "minItems": 1 }),
+            ),
+            predicate_form("all", &serde_json::json!({ "type": "array", "items": me })),
+            predicate_form("not", &me),
+        ])
+    }
+}
+
 #[cfg(test)]
 #[path = "predicate_test.rs"]
 mod tests;

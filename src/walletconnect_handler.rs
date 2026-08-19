@@ -15,8 +15,11 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use ekubo_wallet_core::{
     approval::{ApprovalKind, ApprovalRequest, ReviewDocument},
-    core::execution_plan::{
-        DecimalU256, ExecutionPlan, ExecutionStep, ExecutionStepKind, PlannedTransaction,
+    core::{
+        execution_plan::{
+            DecimalU256, ExecutionPlan, ExecutionStep, ExecutionStepKind, PlannedTransaction,
+        },
+        source::RequestSource,
     },
     message::{MessageEncoding, MessageStatus, parse_siwe},
     pending::{PendingStatus, PendingTransaction},
@@ -473,7 +476,7 @@ impl DesktopSession {
             }],
         )?;
         match self
-            .execute_plan(request.chain_id, &plan, &describe_plan_source(request.dapp))
+            .execute_plan(request.chain_id, &plan, request.dapp)
             .await?
         {
             Ok(record) => Ok(RequestOutcome::Result(json!(
@@ -524,7 +527,7 @@ impl DesktopSession {
         }
         let plan = self.build_plan(batch.chain_id, &batch.calls)?;
         match self
-            .execute_plan(batch.chain_id, &plan, &describe_plan_source(request.dapp))
+            .execute_plan(batch.chain_id, &plan, request.dapp)
             .await?
         {
             Ok(record) => {
@@ -648,12 +651,17 @@ impl DesktopSession {
         &self,
         chain_id: u64,
         plan: &ExecutionPlan,
-        plan_source: &str,
+        dapp: &AppMetadata,
     ) -> Result<std::result::Result<PendingTransaction, RequestOutcome>> {
         let network = self.dapp.network_by_chain_id(chain_id)?;
+        let plan_source = describe_plan_source(dapp);
+        // The dapp's own URL, reduced to a host. Claimed, and the matcher it
+        // feeds says so; the line above is the same claim written for a
+        // person to read.
+        let source = RequestSource::walletconnect(Some(dapp.url.as_str()));
         let simulation = self
             .dapp
-            .simulate_transaction(self.wallet(), &network, plan)
+            .simulate_transaction(self.wallet(), &network, plan, &source)
             .await?;
         if self.shutdown.is_cancelled() {
             return Ok(Err(RequestOutcome::rejected(
@@ -662,7 +670,14 @@ impl DesktopSession {
         }
         let disposition = self
             .dapp
-            .execute_transaction(self.wallet(), &network, plan, plan_source, &simulation)
+            .execute_transaction(
+                self.wallet(),
+                &network,
+                plan,
+                &plan_source,
+                &source,
+                &simulation,
+            )
             .await?;
         let signed = match disposition {
             ekubo_wallet_core::orchestrator::SendDisposition::Signed(record) => {

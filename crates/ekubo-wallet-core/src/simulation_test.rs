@@ -288,6 +288,7 @@ async fn live_direct_simulation_uses_eth_simulate_v1() {
         &default_networks()[0],
         &plan(1),
         &policy,
+        &RequestSource::Unknown,
         &context(&wallet),
         None,
     )
@@ -321,6 +322,7 @@ async fn live_batch_simulation_executes_canonical_calibur() {
         &default_networks()[0],
         &plan(2),
         &policy,
+        &RequestSource::Unknown,
         &context(&wallet),
         None,
     )
@@ -363,6 +365,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
             native_value: None,
             calldata: None,
             transaction_type: None,
+            source: None,
             nonce: None,
             gas_limit: None,
             max_fee_per_gas: None,
@@ -385,6 +388,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
         &default_networks()[0],
         &execution_plan,
         &policy,
+        &RequestSource::Unknown,
         &context(&wallet),
         None,
     )
@@ -421,6 +425,7 @@ fn a_failed_batch_does_not_invent_prepared_delegation_facts() {
     let result = setup_failure_result_at_block(
         &plan(2),
         &policy,
+        &RequestSource::Unknown,
         &context(&wallet),
         ExecutionMode::CaliburBatch,
         "the endpoint refused eth_simulateV1",
@@ -436,6 +441,7 @@ fn a_failed_batch_does_not_invent_prepared_delegation_facts() {
     let direct = setup_failure_result_at_block(
         &plan(1),
         &policy,
+        &RequestSource::Unknown,
         &context(&wallet),
         ExecutionMode::Direct,
         "the endpoint refused eth_simulateV1",

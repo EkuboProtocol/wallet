@@ -19,11 +19,20 @@
 //! be proven to cover all of its matches, so ineffective fallback rules cannot
 //! hide behind a broad permission.
 //!
-//! Every predicate is decided from the execution plan's own bytes plus the
-//! signing wallet address in [`PolicyContext`]. Nothing the RPC
-//! reports — observed balances, transfer logs, gas, or whether the simulation
-//! succeeded — reaches a policy decision, so a dishonest endpoint cannot relax
-//! a rule by misreporting what a transaction did.
+//! Every predicate is decided from the execution plan's own bytes, the exact
+//! envelope prepared to carry them, what core knows about the channel that
+//! delivered them ([`SourceMatcher`]), and the signing wallet address in
+//! [`PolicyContext`]. Nothing the RPC reports — observed balances, transfer
+//! logs, gas, or whether the simulation succeeded — reaches a policy decision,
+//! so a dishonest endpoint cannot relax a rule by misreporting what a
+//! transaction did.
+//!
+//! The `source` slot is the one matcher whose subject is not the transaction,
+//! and parts of it are the requester's own account of itself rather than
+//! anything the wallet proved. It can only ever narrow — a rule naming it
+//! matches a subset of what the same rule matches without it — so a claim can
+//! restrict a permission and can never create one. [`crate::core::source`]
+//! carries the full argument and the two hazards it leaves standing.
 //!
 //! There are no cumulative spending budgets here. A rule may constrain the
 //! native value or an integer ABI argument of one call, but the same agent may
@@ -33,6 +42,7 @@
 use crate::core::{
     execution_plan::ExecutionPlan,
     predicate::{Match, PolicyContext, Predicate},
+    source::{RequestSource, SourceMatcher},
 };
 use alloy::{
     dyn_abi::{DynSolType, DynSolValue},
@@ -134,6 +144,14 @@ pub struct Rule {
     /// Native value on the outer signed transaction envelope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_native_value: Option<Predicate>,
+    /// Who asked for this plan, by channel. Unlike every other slot this
+    /// reads neither the plan's bytes nor the envelope, so it has its own
+    /// type rather than a [`Predicate`]: see [`SourceMatcher`]. A rule naming
+    /// it cannot match a request whose source the wallet does not know, and
+    /// the domain and client fields within it are the requester's own account
+    /// of itself rather than anything the wallet proved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceMatcher>,
 }
 
 impl Rule {
@@ -146,8 +164,13 @@ impl Rule {
         &self,
         call: &Call,
         prepared: Option<&PreparedTransactionFacts>,
+        source: &RequestSource,
         context: &PolicyContext,
     ) -> Match {
+        let source_match = self
+            .source
+            .as_ref()
+            .map_or(Match::Yes, |matcher| matcher.evaluate(source, context));
         let call_match = [
             (self.chain_id.as_ref(), &call.chain_id),
             (self.to.as_ref(), &call.to),
@@ -160,6 +183,7 @@ impl Rule {
                 answer.and(predicate.evaluate(value, context))
             })
         });
+        let call_match = call_match.and(source_match);
         let Some(prepared) = prepared else {
             return if self.has_prepared_matcher() {
                 Match::No
@@ -217,6 +241,10 @@ impl Rule {
 
     fn validate(&self) -> Result<()> {
         validate_label(self.label.as_deref())?;
+        // The `source` slot needs no check here: its fields are
+        // `StringPredicate`, which refuses an inapplicable predicate as it
+        // deserializes, where the document being read is still the error's
+        // subject.
         for (slot, predicate, ty) in self.slots() {
             predicate
                 .check_applicable(&ty)
@@ -338,6 +366,11 @@ impl Rule {
                 other.envelope_native_value.as_ref(),
                 &DynSolType::Uint(256),
             )
+            && match (self.source.as_ref(), other.source.as_ref()) {
+                (_, None) => true,
+                (None, Some(_)) => false,
+                (Some(mine), Some(theirs)) => mine.is_narrower_than(theirs),
+            }
     }
 
     /// One reviewable line describing the authority this rule grants or takes
@@ -364,6 +397,12 @@ impl Rule {
     /// about the verb in front.
     fn described_constraints(&self) -> String {
         let mut parts = Vec::new();
+        // Who asked leads, because it is the clause a reviewer most needs to
+        // weigh: the rest of the line describes a transaction, and this says
+        // whose word the rule is taking for it.
+        if let Some(matcher) = &self.source {
+            parts.push(matcher.describe());
+        }
         if let Some(predicate) = &self.chain_id {
             parts.push(format!("chain ID {}", predicate.describe()));
         }
@@ -533,6 +572,7 @@ impl WalletPolicy {
                 delegation: None,
                 envelope_to: None,
                 envelope_native_value: None,
+                source: None,
             }],
         }
     }
@@ -570,6 +610,7 @@ impl WalletPolicy {
                 delegation: None,
                 envelope_to: None,
                 envelope_native_value: None,
+                source: None,
             }],
         }
     }
@@ -671,14 +712,20 @@ mod admission {
 
 /// Grade every call in `plan` against `policy`.
 ///
-/// The signature is the whole interface: a plan, a policy, and the resolved
-/// local metadata the policy may consult. Nothing else is in scope, and
-/// `tests/boundary.rs` pins this so a future parameter has to be argued for
-/// rather than added.
+/// The signature is the whole interface: a plan, the exact envelope prepared
+/// for it, what core knows about who asked, a policy, and the resolved local
+/// metadata the policy may consult. Nothing else is in scope, and a future
+/// parameter has to be argued for rather than added.
+///
+/// `source` is a matched subject in the same sense `prepared` is: core
+/// constructs it from what the receiving adapter knows and hands it to a pure
+/// evaluation. It is not part of [`PolicyContext`], which resolves literals
+/// and holds one address.
 #[must_use]
 pub fn evaluate_policy(
     plan: &ExecutionPlan,
     prepared: Option<&PreparedTransactionFacts>,
+    source: &RequestSource,
     policy: &WalletPolicy,
     context: &PolicyContext,
 ) -> Vec<PolicyFinding> {
@@ -687,7 +734,7 @@ pub fn evaluate_policy(
         let call = Call::of(plan, step);
         let mut decision = None;
         for (index, rule) in policy.rules.iter().enumerate() {
-            let answer = rule.evaluate(&call, prepared, context);
+            let answer = rule.evaluate(&call, prepared, source, context);
             if answer.is_match() {
                 decision = Some((index, rule));
                 break;
@@ -877,7 +924,9 @@ pub fn json_schema() -> Value {
                  is evaluated before the transaction takes the least-permissive result \
                  (deny < review < allow). Omitted matchers mean anything and present matchers are \
                  ANDed. Per-call native value and outer envelope native value are distinct; \
-                 neither is a cumulative spending budget."
+                 neither is a cumulative spending budget. The `source` matcher constrains which \
+                 channel delivered the plan; within it, a dapp's domain and an agent's client are \
+                 self-asserted by the requester and prove nothing about who is on the other end."
                     .into(),
             ),
         );

@@ -26,7 +26,8 @@
         "max_priority_fee_per_gas": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
         "delegation": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
         "envelope_to": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
-        "envelope_native_value": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] }
+        "envelope_native_value": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "source": { "anyOf": [{ "$ref": "#/$defs/SourceMatcher" }, { "type": "null" }] }
       },
       "additionalProperties": false,
       "required": ["effect"]
@@ -77,7 +78,94 @@
     "Any": { "type": "object", "properties": { "any": { "type": "array", "items": { "$ref": "#/$defs/Predicate" } } }, "required": ["any"], "additionalProperties": false },
     "All": { "type": "object", "properties": { "all": { "type": "array", "items": { "$ref": "#/$defs/Predicate" } } }, "required": ["all"], "additionalProperties": false },
     "Not": { "type": "object", "properties": { "not": { "$ref": "#/$defs/Predicate" } }, "required": ["not"], "additionalProperties": false },
-    "Length": { "type": "object", "properties": { "length": { "$ref": "#/$defs/Predicate" } }, "required": ["length"], "additionalProperties": false }
+    "Length": { "type": "object", "properties": { "length": { "$ref": "#/$defs/Predicate" } }, "required": ["length"], "additionalProperties": false },
+    "SourceMatcher": {
+      "description": "Which channel delivered the plan, and what that channel is required to have known about who asked. Tagged by channel so the channel and its own fields cannot come apart. A rule naming this cannot match a request whose source the wallet does not know.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "walletconnect": {
+              "type": "object",
+              "properties": {
+                "domain": {
+                  "description": "Host of the URL the dapp gives for itself, lowercased, without scheme or port. SELF-ASSERTED by the dapp in its session proposal and attested by nothing: a dapp serving from anywhere may name any domain, so this separates connected dapps from one another rather than proving which site is on the other end.",
+                  "anyOf": [{ "$ref": "#/$defs/StringPredicate" }, { "type": "null" }]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["walletconnect"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "type": "object",
+              "properties": {
+                "client": {
+                  "description": "The harness kind: codex, claude_code, claude_desktop, gemini_cli, cursor, opencode, grok_build. SELF-IDENTIFIED by whatever launched the MCP bridge and attested by nothing; any local process may pass any of them. Useful for keeping one agent's rules off another agent's requests, not as a barrier against a hostile one.",
+                  "anyOf": [{ "$ref": "#/$defs/StringPredicate" }, { "type": "null" }]
+                },
+                "plan_host": {
+                  "description": "Host that served the execution plan, proved by TLS. A plan given inline has no host, so constraining this at all also means \"not an inline plan\".",
+                  "anyOf": [{ "$ref": "#/$defs/StringPredicate" }, { "type": "null" }]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["agent"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "automation": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The installed automation's id. Proved: nothing outside the wallet chooses it.",
+                  "anyOf": [{ "$ref": "#/$defs/StringPredicate" }, { "type": "null" }]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["automation"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "StringPredicate": {
+      "description": "A predicate on a slot the schema pins to a string. The same predicate language as Predicate, restricted to the forms a string can answer; the wallet refuses the others where they are written.",
+      "oneOf": [
+        { "type": "string", "const": "any_value" },
+        { "$ref": "#/$defs/Eq" },
+        { "$ref": "#/$defs/In" },
+        { "type": "object", "properties": { "any": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/StringPredicate" } } }, "required": ["any"], "additionalProperties": false },
+        { "type": "object", "properties": { "all": { "type": "array", "items": { "$ref": "#/$defs/StringPredicate" } } }, "required": ["all"], "additionalProperties": false },
+        { "type": "object", "properties": { "not": { "$ref": "#/$defs/StringPredicate" } }, "required": ["not"], "additionalProperties": false },
+        { "type": "object", "properties": { "length": { "$ref": "#/$defs/NumberPredicate" } }, "required": ["length"], "additionalProperties": false }
+      ]
+    },
+    "NumberPredicate": {
+      "description": "A predicate on a slot the schema pins to an unsigned integer. `length` is absent: its subject is an array, bytes, or a string, never a number.",
+      "oneOf": [
+        { "type": "string", "const": "any_value" },
+        { "$ref": "#/$defs/Eq" },
+        { "$ref": "#/$defs/In" },
+        { "$ref": "#/$defs/Lt" },
+        { "$ref": "#/$defs/Lte" },
+        { "$ref": "#/$defs/Gt" },
+        { "$ref": "#/$defs/Gte" },
+        { "type": "object", "properties": { "any": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/NumberPredicate" } } }, "required": ["any"], "additionalProperties": false },
+        { "type": "object", "properties": { "all": { "type": "array", "items": { "$ref": "#/$defs/NumberPredicate" } } }, "required": ["all"], "additionalProperties": false },
+        { "type": "object", "properties": { "not": { "$ref": "#/$defs/NumberPredicate" } }, "required": ["not"], "additionalProperties": false }
+      ]
+    }
   },
-  "description": "Ordered stateless signing policy over each call and the exact prepared transaction envelope. The first matching rule decides each call: allow signs automatically, review requires explicit owner approval, deny rejects without queuing, and reaching the end also requires review. Every call is evaluated before the transaction takes the least-permissive result (deny < review < allow). Omitted matchers mean anything and present matchers are ANDed. Per-call native value and outer envelope native value are distinct; neither is a cumulative spending budget."
+  "description": "Ordered stateless signing policy over each call, the exact prepared transaction envelope, and the channel that delivered the plan. The first matching rule decides each call: allow signs automatically, review requires explicit owner approval, deny rejects without queuing, and reaching the end also requires review. Every call is evaluated before the transaction takes the least-permissive result (deny < review < allow). Omitted matchers mean anything and present matchers are ANDed. Per-call native value and outer envelope native value are distinct; neither is a cumulative spending budget. The `source` matcher constrains which channel delivered the plan; within it, a dapp's domain and an agent's client are self-asserted by the requester and prove nothing about who is on the other end."
 }

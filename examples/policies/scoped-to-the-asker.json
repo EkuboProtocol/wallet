@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
+  "version": 1,
+  "rules": [
+    {
+      "effect": "deny",
+      "label": "No connected dapp reaches this contract at all",
+      "source": { "walletconnect": {} },
+      "to": { "in": ["0x2222222222222222222222222222222222222222"] }
+    },
+    {
+      "effect": "allow",
+      "label": "This automation's own claims, and nothing else's",
+      "source": { "automation": { "id": { "eq": "claim-rewards" } } },
+      "chain_id": { "eq": "1" },
+      "to": { "in": ["0x2222222222222222222222222222222222222222"] },
+      "calldata": { "selector": { "abi": "claim(address recipient)", "args": { "recipient": { "eq": "$self" } } } }
+    },
+    {
+      "effect": "allow",
+      "label": "Plain sends to one address, from a Codex loop only",
+      "source": { "agent": { "client": { "eq": "codex" } } },
+      "chain_id": { "eq": "1" },
+      "to": { "in": ["0x4444444444444444444444444444444444444444"] },
+      "calldata": { "eq": "0x" },
+      "native_value": { "lte": "1000000000000000000" }
+    }
+  ]
+}

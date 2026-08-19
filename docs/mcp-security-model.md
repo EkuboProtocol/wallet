@@ -78,10 +78,19 @@ There is no local EVM or `eth_getProof` reconstruction; no simulated state is st
 In particular, a simulation fork cannot create a pending request.
 
 Signing policy is scoped to the wallet account, not the requesting MCP session.
-The policy schema has no caller, harness, automation, dapp, WalletConnect
-session, or plan-source matcher; recorded source text is informational activity
-context. An allow rule proposed for an agent therefore also permits an
-equivalent transaction requested by an installed automation or connected dapp.
+A rule with no `source` matcher matches whoever asks, so an allow rule proposed
+for an agent also permits an equivalent transaction requested by an installed
+automation or a connected dapp.
+
+A rule may carry a `source` matcher naming the channel — `agent`,
+`walletconnect`, or `automation` — and, within `agent`, the harness kind and
+the TLS-vetted host that served the plan. The harness kind is the `--client`
+argument the bridge passed and stays untrusted: a same-user process is in scope
+and can pass any of them, so such a rule separates one honest harness from
+another rather than excluding a hostile one. There is still no matcher for the
+MCP session, and none for the recorded `plan_source` text, which remains
+informational activity context. Naming a source only ever shrinks what a rule
+matches, so a harness claim can restrict a permission and can never create one.
 MCP can ask for one otherwise allowed submission to receive native review, but
 that request can only add review and cannot override a deny or approve anything.
 Token symbols and decimals are owner-confirmed display metadata and are never read from the contract.

@@ -8,6 +8,7 @@ use crate::{
     core::{
         execution_plan::{DecimalU256, ExecutionPlan},
         policy::ReviewRequest,
+        source::RequestSource,
     },
     policy_store::PolicyStore,
     rpc::MinedFee,
@@ -215,6 +216,23 @@ pub struct PendingTransaction {
     /// as replacing one of this wallet's pending transactions with a cancel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_source: Option<String>,
+    /// The same question `plan_source` answers for a reader, answered for the
+    /// policy engine instead: which channel delivered this plan, and what
+    /// that channel knew about who asked.
+    ///
+    /// Two fields rather than one, on purpose. `plan_source` is a line of
+    /// text assembled for a person and half-authored by the requester;
+    /// this is a closed structure core built, and it is the only one a rule
+    /// may match on. Collapsing them would put dapp-authored text on the
+    /// authorization path, which is the mistake this codebase keeps
+    /// deliberately un-made.
+    ///
+    /// Stored so the review a human opens is evaluated against the source the
+    /// request actually arrived with. A row written before this column
+    /// existed reads back as [`RequestSource::Unknown`], which no source
+    /// matcher covers.
+    #[serde(default)]
+    pub request_source: RequestSource,
     pub digest: String,
     /// Digest of exact nonce, gas, fee, call, and delegation fields reviewed
     /// for an exceptional approval. Automatic transactions do not have one.
@@ -309,6 +327,7 @@ impl PendingStore {
         network_name: &str,
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
+        request_source: &RequestSource,
         policy_revision: u64,
         review_request: ReviewRequest,
     ) -> Result<PendingTransaction> {
@@ -388,8 +407,9 @@ impl PendingStore {
         transaction.execute(
             "INSERT INTO pending_transactions(
                 request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
-                plan_digest, plan_source, policy_revision, status, created_at, updated_at, requested_review
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11, ?12)",
+                plan_digest, plan_source, policy_revision, status, created_at, updated_at, requested_review,
+                request_source
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11, ?12, ?13)",
             params![
                 request_id,
                 wallet_instance_id.to_string(),
@@ -403,6 +423,7 @@ impl PendingStore {
                 policy_revision,
                 Millis(created_at),
                 i64::from(review_request.is_required()),
+                serde_json::to_string(request_source)?,
             ],
         )?;
         transaction.commit()?;
@@ -429,6 +450,7 @@ impl PendingStore {
             network_name,
             plan,
             plan_source,
+            &RequestSource::Unknown,
             policy_revision,
             ReviewRequest::PolicyDecides,
         )
@@ -445,6 +467,7 @@ impl PendingStore {
         network_name: &str,
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
+        request_source: &RequestSource,
         policy_revision: u64,
         serialized_transaction: &str,
         transaction_hash: &str,
@@ -486,8 +509,8 @@ impl PendingStore {
                 "INSERT INTO pending_transactions(
                 request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                 plan_digest, plan_source, policy_revision, status, created_at, updated_at,
-                serialized_transaction, signed_transaction_hash, approval_required
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'signed', ?11, ?11, ?12, ?13, 0)",
+                serialized_transaction, signed_transaction_hash, approval_required, request_source
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'signed', ?11, ?11, ?12, ?13, 0, ?14)",
                 params![
                     request_id,
                     wallet_instance_id.to_string(),
@@ -502,6 +525,7 @@ impl PendingStore {
                     Millis(created_at),
                     Blob(envelope.bytes),
                     Blob(envelope.hash),
+                    serde_json::to_string(request_source)?,
                 ],
             )
             .with_context(|| in_flight_conflict(&transaction, plan.sender, chain_id))?;
@@ -532,6 +556,7 @@ impl PendingStore {
             network_name,
             plan,
             plan_source,
+            &RequestSource::Unknown,
             policy_revision,
             serialized_transaction,
             transaction_hash,
@@ -1284,7 +1309,7 @@ impl PendingStore {
                         approval_required, review_digest, cancel_serialized_transaction,
                         cancel_transaction_hashes, gas_used, effective_gas_price, plan_source,
                         generation, block_hash, settlement_transaction_hash, finalized_at,
-                        requested_review
+                        requested_review, request_source
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -1317,6 +1342,7 @@ impl PendingStore {
                         settlement_transaction_hash: row.blob_opt(25)?,
                         finalized_at: row.time_opt(26)?,
                         requested_review: row.get(27)?,
+                        request_source: row.get(28)?,
                     })
                 },
             )
@@ -1357,6 +1383,9 @@ struct PendingRow {
     settlement_transaction_hash: Option<B256>,
     finalized_at: Option<DateTime<Utc>>,
     requested_review: i64,
+    /// The canonical JSON of a [`RequestSource`]. Null on every row written
+    /// before the column existed.
+    request_source: Option<String>,
 }
 
 impl PendingRow {
@@ -1381,6 +1410,17 @@ impl PendingRow {
             "stored pending chain ID mismatch"
         );
         validate_plan_source(self.plan_source.as_deref())?;
+        // A null column is a row from before it existed and reads as
+        // `Unknown`. Anything else has to be a `RequestSource` this build
+        // understands: the value decides what the policy matched, so a
+        // stored blob that does not parse is refused rather than quietly
+        // downgraded to `Unknown`, which is a different and more permissive
+        // answer.
+        let request_source = match self.request_source.as_deref() {
+            None => RequestSource::Unknown,
+            Some(stored) => serde_json::from_str(stored)
+                .context("stored request source is not a recognized plan source")?,
+        };
         ensure!(
             self.serialized_transaction.is_some() == self.signed_transaction_hash.is_some(),
             "stored signed transaction is incomplete"
@@ -1556,6 +1596,7 @@ impl PendingRow {
             chain_id: self.chain_id.to_string(),
             execution_plan,
             plan_source: self.plan_source,
+            request_source,
             digest: format!("{:#x}", self.digest),
             review_digest: self.review_digest.map(|digest| format!("{digest:#x}")),
             policy_revision,

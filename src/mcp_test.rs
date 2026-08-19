@@ -1343,6 +1343,7 @@ async fn a_recorded_simulation_is_only_a_one_use_handle_for_a_fresh_simulation()
         "1",
         plan.clone(),
         Some("mcp.ekubo.org".into()),
+        ekubo_wallet_core::core::source::RequestSource::agent(None, Some("mcp.ekubo.org")),
         recorded_failure(&plan, 1),
         Utc::now(),
     );
@@ -1387,6 +1388,7 @@ async fn a_preview_policy_revision_never_substitutes_for_fresh_policy_evaluation
         "1",
         plan.clone(),
         Some("mcp.ekubo.org".into()),
+        ekubo_wallet_core::core::source::RequestSource::agent(None, Some("mcp.ekubo.org")),
         recorded_failure(&plan, 1),
         Utc::now(),
     );
@@ -1442,6 +1444,7 @@ async fn a_fork_result_can_never_be_sent_even_if_one_reaches_the_registry() {
         "1",
         plan,
         None,
+        ekubo_wallet_core::core::source::RequestSource::Unknown,
         hypothetical,
         Utc::now(),
     );

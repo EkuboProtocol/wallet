@@ -30,6 +30,13 @@ only emit calls; every call is evaluated against the installed policy at send
 time, and a batch that does not resolve to all-allow never reaches the signer.
 An automation an agent installs and leaves running is bounded by the policy the
 owner installed, the same way that live agent is.
+
+Being a distinguishable plan source is now something a rule can say. A tick
+carries `{"automation": {"id": …}}`, which the scheduler proves by naming the
+row it is ticking, so a policy can grant an automation exactly the calls it
+needs without granting the same calls to every agent and dapp. Naming a source
+only ever shrinks what a rule matches, so this narrows an automation's reach
+rather than widening it.
 [security-boundary.md](security-boundary.md) describes the shared execution
 capability.
 

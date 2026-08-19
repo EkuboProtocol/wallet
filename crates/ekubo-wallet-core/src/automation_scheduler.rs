@@ -28,7 +28,7 @@ use crate::{
     automation::{self, Automation, PollFailure},
     automation_store::{AutomationStore, RunOutcome},
     config::{ConfigStore, NetworkConfig, WalletMetadata},
-    core::{policy::ReviewRequest, predicate::PolicyContext},
+    core::{policy::ReviewRequest, predicate::PolicyContext, source::RequestSource},
     orchestrator::SendDisposition,
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
@@ -217,8 +217,19 @@ impl AutomationScheduler {
         let context = PolicyContext {
             wallet: wallet.address,
         };
-        let simulation =
-            simulate_execution(wallet, network, &plan, &stored_policy, &context, None).await?;
+        // Proved, not claimed: the id names the row this scheduler is
+        // currently ticking, and nothing outside the wallet chose it.
+        let source = RequestSource::automation(&automation.id.to_string());
+        let simulation = simulate_execution(
+            wallet,
+            network,
+            &plan,
+            &stored_policy,
+            &source,
+            &context,
+            None,
+        )
+        .await?;
         let plan_source = format!("automation:{}", automation.id);
         let disposition = self
             .execution
@@ -229,6 +240,7 @@ impl AutomationScheduler {
                 network,
                 &plan,
                 Some(plan_source.as_str()),
+                &source,
                 &simulation,
                 // An automation runs unattended by definition: there is nobody
                 // to ask for a second look, and a tick that queued one would

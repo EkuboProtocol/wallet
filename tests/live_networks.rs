@@ -122,6 +122,12 @@ fn policy_context() -> ekubo_wallet::core::predicate::PolicyContext {
     ekubo_wallet::core::predicate::PolicyContext { wallet: sender() }
 }
 
+/// These tests exercise the chain, not the policy: the rules they run under
+/// name no source, so an unknown one is the honest input.
+fn source() -> ekubo_wallet::core::source::RequestSource {
+    ekubo_wallet::core::source::RequestSource::Unknown
+}
+
 fn policy() -> StoredPolicy {
     StoredPolicy {
         wallet_instance_id: wallet_instance_id(),
@@ -249,10 +255,17 @@ async fn simulate_retrying(
 ) -> SimulationResult {
     let mut delay = Duration::from_secs(2);
     for _ in 0..4 {
-        let result =
-            simulate_execution(&wallet(), network, plan, &policy(), &policy_context(), fork)
-                .await
-                .expect("simulation returns a result");
+        let result = simulate_execution(
+            &wallet(),
+            network,
+            plan,
+            &policy(),
+            &source(),
+            &policy_context(),
+            fork,
+        )
+        .await
+        .expect("simulation returns a result");
         let throttled = result
             .simulation
             .failure
@@ -265,9 +278,17 @@ async fn simulate_retrying(
         tokio::time::sleep(delay).await;
         delay *= 2;
     }
-    simulate_execution(&wallet(), network, plan, &policy(), &policy_context(), fork)
-        .await
-        .expect("simulation returns a result")
+    simulate_execution(
+        &wallet(),
+        network,
+        plan,
+        &policy(),
+        &source(),
+        &policy_context(),
+        fork,
+    )
+    .await
+    .expect("simulation returns a result")
 }
 
 /// Read one Permit2 allowance, optionally through a fork.
@@ -522,6 +543,7 @@ async fn simulation_failure_is_reported_and_blocks_signing(network: &NetworkConf
         network,
         &approve_plan(network.chain_id, spender(), 1_000),
         &policy(),
+        &source(),
         &policy_context(),
         None,
     )

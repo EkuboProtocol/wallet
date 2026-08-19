@@ -749,6 +749,7 @@ impl DappApi {
         network: &NetworkConfig,
         plan: &ExecutionPlan,
         plan_source: &str,
+        source: &ekubo_wallet_core::core::source::RequestSource,
         simulation: &SimulationResult,
     ) -> Result<SendDisposition> {
         let policies = Arc::new(Mutex::new(PolicyStore::production(self.config.data_dir())?));
@@ -761,6 +762,7 @@ impl DappApi {
                 network,
                 plan,
                 Some(plan_source),
+                source,
                 simulation,
                 ekubo_wallet_core::core::policy::ReviewRequest::PolicyDecides,
             )
@@ -772,6 +774,7 @@ impl DappApi {
         wallet: &WalletMetadata,
         network: &NetworkConfig,
         plan: &ExecutionPlan,
+        source: &ekubo_wallet_core::core::source::RequestSource,
     ) -> Result<SimulationResult> {
         let policies = Mutex::new(PolicyStore::production(self.config.data_dir())?);
         let stored_policy = policies
@@ -782,8 +785,16 @@ impl DappApi {
         let policy_context = ekubo_wallet_core::core::predicate::PolicyContext {
             wallet: wallet.address,
         };
-        simulate_external_execution(wallet, network, plan, &stored_policy, &policy_context, None)
-            .await
+        simulate_external_execution(
+            wallet,
+            network,
+            plan,
+            &stored_policy,
+            source,
+            &policy_context,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn reconcile_transaction(
@@ -1259,6 +1270,9 @@ impl OwnerApi {
             &network,
             &plan,
             &policy,
+            // The source a real tick of this automation would carry, so a dry
+            // run's verdict is about the rules that would actually decide it.
+            &ekubo_wallet_core::core::source::RequestSource::automation(&automation.id.to_string()),
             &ekubo_wallet_core::core::predicate::PolicyContext {
                 wallet: wallet.address,
             },

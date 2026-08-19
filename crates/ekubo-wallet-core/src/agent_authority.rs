@@ -56,6 +56,7 @@ impl AgentExecutionAuthority {
         network: &NetworkConfig,
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
+        source: &crate::core::source::RequestSource,
         simulation: &SimulationResult,
         review_request: ReviewRequest,
     ) -> Result<SendDisposition> {
@@ -68,6 +69,7 @@ impl AgentExecutionAuthority {
             network,
             plan,
             plan_source,
+            source,
             simulation,
             review_request,
         )

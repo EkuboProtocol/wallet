@@ -18,6 +18,7 @@ use ekubo_wallet::core::{
     execution_plan::ExecutionPlan,
     policy::{PolicyOutcome, WalletPolicy, evaluate_policy, policy_allows, policy_outcome},
     predicate::PolicyContext,
+    source::RequestSource,
 };
 use serde_json::json;
 use std::{fs, path::PathBuf};
@@ -86,17 +87,29 @@ fn plan(chain_id: &str, to: Address, data: &str, value: &str) -> ExecutionPlan {
 }
 
 fn allows(policy: &WalletPolicy, plan: &ExecutionPlan) -> bool {
-    policy_allows(&evaluate_policy(plan, None, policy, &context()))
+    policy_allows(&evaluate_policy(
+        plan,
+        None,
+        &RequestSource::Unknown,
+        policy,
+        &context(),
+    ))
 }
 
 fn outcome(policy: &WalletPolicy, plan: &ExecutionPlan) -> PolicyOutcome {
-    policy_outcome(&evaluate_policy(plan, None, policy, &context()))
+    policy_outcome(&evaluate_policy(
+        plan,
+        None,
+        &RequestSource::Unknown,
+        policy,
+        &context(),
+    ))
 }
 
 /// Assert a verdict and say which example and which call produced it.
 #[track_caller]
 fn check(name: &str, policy: &WalletPolicy, plan: &ExecutionPlan, expected: bool, case: &str) {
-    let findings = evaluate_policy(plan, None, policy, &context());
+    let findings = evaluate_policy(plan, None, &RequestSource::Unknown, policy, &context());
     let actual = policy_allows(&findings);
     assert_eq!(
         actual,
@@ -527,6 +540,7 @@ fn an_unmatched_call_requires_approval_and_says_why() {
     let findings = evaluate_policy(
         &plan("1", STRANGER, "0xdeadbeef", "0"),
         None,
+        &RequestSource::Unknown,
         &policy,
         &context(),
     );
@@ -572,6 +586,7 @@ fn every_example_with_restricted_rules_withholds_automatic_signing_for_unknown_c
         "bounded-token-approval.template.json",
         "approval-wildcards.template.json",
         "disable-signing.json",
+        "scoped-to-the-asker.json",
     ] {
         let policy = example(name);
         assert!(
@@ -579,4 +594,59 @@ fn every_example_with_restricted_rules_withholds_automatic_signing_for_unknown_c
             "{name} permitted an arbitrary call to an unknown contract"
         );
     }
+}
+
+/// The source-scoped example does what its labels say: the same call is
+/// signed, queued, or refused according to who asked for it, and nothing is
+/// signed for a source the wallet cannot name.
+#[test]
+fn scoped_to_the_asker_decides_the_same_call_by_who_asked() {
+    const PAYEE: Address = address!("4444444444444444444444444444444444444444");
+    let policy = example("scoped-to-the-asker.json");
+    let send = plan("1", PAYEE, "0x", "10000000000000000");
+
+    let verdict = |source: &RequestSource| {
+        policy_outcome(&evaluate_policy(&send, None, source, &policy, &context()))
+    };
+
+    // The rule that names Codex is the only one covering a plain send here.
+    assert_eq!(
+        verdict(&RequestSource::agent(Some("codex"), None)),
+        PolicyOutcome::Allowed
+    );
+    // Another harness gets no rule at all, so a human decides.
+    assert_eq!(
+        verdict(&RequestSource::agent(Some("claude_code"), None)),
+        PolicyOutcome::RequiresApproval
+    );
+    // And a source the wallet cannot name never falls into a rule that names
+    // one — including a row stored before the wallet recorded sources.
+    assert_eq!(
+        verdict(&RequestSource::Unknown),
+        PolicyOutcome::RequiresApproval
+    );
+
+    // The leading deny forecloses one target for every dapp, whatever domain
+    // it claims, and does not touch that target for anyone else.
+    let dapp_call = plan("1", FRIEND, "0x", "0");
+    assert_eq!(
+        policy_outcome(&evaluate_policy(
+            &dapp_call,
+            None,
+            &RequestSource::walletconnect(Some("https://app.ekubo.org/")),
+            &policy,
+            &context()
+        )),
+        PolicyOutcome::Rejected
+    );
+    assert_eq!(
+        policy_outcome(&evaluate_policy(
+            &dapp_call,
+            None,
+            &RequestSource::agent(Some("codex"), None),
+            &policy,
+            &context()
+        )),
+        PolicyOutcome::RequiresApproval
+    );
 }

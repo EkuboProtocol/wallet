@@ -105,6 +105,7 @@ fn a_requested_review_is_recorded_on_the_row_that_will_be_read() {
             "ethereum",
             &plan(),
             None,
+            &RequestSource::Unknown,
             1,
             ReviewRequest::Required,
         )
@@ -130,7 +131,16 @@ fn a_later_request_for_review_upgrades_the_waiting_row_and_nothing_clears_it() {
         .wallet_instance_id;
     let queue = |store: &mut PendingStore, review| {
         store
-            .create_for_instance("primary", instance, "ethereum", &plan(), None, 1, review)
+            .create_for_instance(
+                "primary",
+                instance,
+                "ethereum",
+                &plan(),
+                None,
+                &RequestSource::Unknown,
+                1,
+                review,
+            )
             .unwrap()
     };
 
