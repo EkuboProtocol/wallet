@@ -1792,7 +1792,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  plan_json TEXT NOT NULL,
                  plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
                  plan_source TEXT,
-                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
                  request_source TEXT,
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
                  status TEXT NOT NULL CHECK (status IN (
@@ -1946,7 +1946,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- the deduplication that exists to keep the review short
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
-                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER
@@ -2009,7 +2009,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- the deduplication that exists to keep the review short
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
-                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
                  -- One decision per request; `status` names which one it was.
@@ -2057,7 +2057,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  source_revision INTEGER NOT NULL CHECK (source_revision > 0),
                  policy_json TEXT NOT NULL,
                  rationale TEXT NOT NULL,
-                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+                 requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
                  created_at INTEGER NOT NULL,
                  FOREIGN KEY (wallet_instance_id) REFERENCES wallet_instances(instance_id)
              ) STRICT",
@@ -2195,7 +2195,7 @@ const AUTOMATION_RUNS_INDEX: &str = "CREATE INDEX automation_runs_by_automation
 const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_proposals (
      chain_id INTEGER PRIMARY KEY NOT NULL CHECK (chain_id > 0),
      profile_json TEXT NOT NULL,
-     requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+     requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
      proposed_at INTEGER NOT NULL
  ) STRICT";
 
@@ -2223,7 +2223,7 @@ const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals 
      name TEXT,
      decimals INTEGER NOT NULL CHECK (decimals >= 0 AND decimals <= 255),
      source TEXT NOT NULL,
-     requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')),
+     requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
      proposed_at INTEGER NOT NULL,
      PRIMARY KEY (chain_id, address)
  ) STRICT";

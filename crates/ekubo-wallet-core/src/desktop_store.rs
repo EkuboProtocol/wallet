@@ -76,6 +76,34 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// Every kind, so the schema that stores one and the code that produces
+    /// one cannot drift apart unnoticed. A variant added without a thought
+    /// for the columns it has to fit in fails `desktop_store_test` rather
+    /// than failing an owner's send.
+    ///
+    /// They drifted once. `GrokBuild` was accepted by the bridge handshake
+    /// while every `requesting_harness_kind` column still listed the six
+    /// kinds that predated it, so attribution from a Grok Build session
+    /// failed its own constraint — after the request was stored, and for an
+    /// automatic send after the key had signed. A database created from this
+    /// build lists all of these. One created before it cannot be widened in
+    /// place, because every mechanism `SQLite` offers for changing a `CHECK`
+    /// rewrites the table, and this crate's migrations are additive by rule.
+    /// Those databases keep the narrow column and simply leave such a request
+    /// unlabelled, which they can now afford to do because
+    /// `WalletMcpServer::with_attribution` no longer lets a caption failure
+    /// reach the work it was captioning.
+    pub const ALL: [Self; 8] = [
+        Self::Codex,
+        Self::ClaudeCode,
+        Self::ClaudeDesktop,
+        Self::GeminiCli,
+        Self::Cursor,
+        Self::Opencode,
+        Self::GrokBuild,
+        Self::Other,
+    ];
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {

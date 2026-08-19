@@ -262,17 +262,35 @@ impl WalletMcpServer {
         })
     }
 
-    fn with_attribution(
-        &self,
-        apply: impl FnOnce(&mut DesktopStore, AgentKind) -> Result<()>,
-    ) -> Result<()> {
+    /// Label a stored request with the harness that asked for it.
+    ///
+    /// Infallible on purpose. This runs *after* the request is durably
+    /// stored, and for an automatic send after the key has already signed, so
+    /// a failure here is a failure to write a caption on work that is already
+    /// done. Propagating it reported a completed — even broadcast —
+    /// transaction to the agent as an error, which is the one answer that is
+    /// certainly wrong.
+    ///
+    /// That was not hypothetical: the harness-kind columns were created with
+    /// a vocabulary that omitted `grok_build`, so every attributed operation
+    /// from a Grok Build session failed its own constraint on a database
+    /// created before that was fixed. The vocabulary is right now, and this
+    /// makes the whole class of failure cosmetic rather than fatal.
+    fn with_attribution(&self, apply: impl FnOnce(&mut DesktopStore, AgentKind) -> Result<()>) {
         let Some((harness, desktop)) = &self.requesting_client else {
-            return Ok(());
+            return;
         };
-        let mut desktop = desktop
-            .lock()
-            .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))?;
-        apply(&mut desktop, *harness)
+        let Ok(mut desktop) = desktop.lock() else {
+            tracing::warn!("desktop database lock was poisoned; request left unattributed");
+            return;
+        };
+        if let Err(error) = apply(&mut desktop, *harness) {
+            tracing::warn!(
+                %error,
+                harness = harness.as_policy_claim(),
+                "could not record which harness asked; the request itself is unaffected"
+            );
+        }
     }
 
     fn ensure_global_fork_capacity(&self) -> std::result::Result<(), ErrorData> {
@@ -1943,8 +1961,7 @@ impl WalletMcpServer {
             .collect::<Vec<_>>();
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_token_proposals(&attributed, client_id)
-        })
-        .map_err(|error| tool_error(&error))?;
+        });
         let store = self
             .tokens
             .lock()
@@ -2384,8 +2401,7 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_network_proposal(candidate.chain_id, client_id)
-        })
-        .map_err(|error| tool_error(&error))?;
+        });
         Ok(Json(ProposedNetworkOutput {
             chain_id: candidate.chain_id.to_string(),
             replaces,
@@ -2999,8 +3015,7 @@ impl WalletMcpServer {
         drop(policies);
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_policy_proposal(&wallet.id, client_id)
-        })
-        .map_err(|error| tool_error(&error))?;
+        });
         self.events.publish(DomainEventKind::PolicyProposalChanged {
             wallet_id: wallet.id.clone(),
         });
@@ -3062,8 +3077,7 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_typed_data(record.request_id, client_id)
-        })
-        .map_err(|error| tool_error(&error))?;
+        });
         self.publish_queued_signature(record.request_id, SignatureKind::TypedData);
         let mut output = typed_data_output(record);
         output.permit_approvals = permit_approvals;
@@ -3157,8 +3171,7 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_message(record.request_id, client_id)
-        })
-        .map_err(|error| tool_error(&error))?;
+        });
         // After attribution, so the row the owner is sent to already names the
         // agent that asked rather than filling that in a moment later.
         self.publish_queued_signature(record.request_id, SignatureKind::Message);
@@ -3519,7 +3532,7 @@ impl WalletMcpServer {
         if let crate::orchestrator::SendDisposition::Queued(request) = disposition {
             self.with_attribution(|desktop, client_id| {
                 desktop.attribute_transaction(request.request_id, client_id)
-            })?;
+            });
             let mut output = execution_status_output(request);
             output.instruction = Some(if simulation.simulation.success {
                 format!(
@@ -3550,7 +3563,7 @@ impl WalletMcpServer {
         };
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_transaction(record.request_id, client_id)
-        })?;
+        });
         self.submit_signed_record(&wallet, &network, record, Some(simulation))
             .await
     }
