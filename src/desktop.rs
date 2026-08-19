@@ -4364,7 +4364,7 @@ struct GuidedSetup {
     /// Nothing draws until the read lands. A checklist that appears before
     /// its own history does is a checklist claiming somebody has done none of
     /// this, in front of somebody who may have done all of it — and since a
-    /// dismissal now lasts only until the next launch, it would make that
+    /// dismissal now lasts until the next launch at most, it would make that
     /// claim at every launch rather than once.
     state: Option<GuidedSetupState>,
     /// Set when the owner sends the card away. Deliberately not stored: it
