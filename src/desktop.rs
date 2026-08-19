@@ -1550,9 +1550,13 @@ fn render_portfolio_balance_row(
                                 )))
                                 .overflow_x_scroll()
                                 .text_right()
+                                // Monospace digits at this size are dense
+                                // enough already: bolding them thickened every
+                                // stroke and closed up the counters, which is
+                                // the opposite of what a column of numbers
+                                // being compared needs.
                                 .font_family(MONO_FONT_FAMILY)
                                 .text_lg()
-                                .font_semibold()
                                 .child(
                                     selectable_text(
                                         SharedString::from(format!(
