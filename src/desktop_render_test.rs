@@ -1429,6 +1429,208 @@ fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppCont
     release(cx, &view);
 }
 
+/// A virtualized list that draws no rows is indistinguishable, from the
+/// outside, from a list whose frame is the right size — which is exactly what
+/// the first version of this shipped: three empty boxes where the holdings,
+/// the waiting queue, and the history had been. Every one of these lists is
+/// asserted by a row inside it, never by the frame around it.
+#[gpui::test]
+fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let account = WalletMetadata {
+        instance_id: uuid::Uuid::nil(),
+        id: "primary".into(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    };
+    let network = ekubo_wallet_core::config::default_networks()
+        .first()
+        .expect("a shipped network")
+        .clone();
+
+    // The history: one finished record.
+    cx.update_entity(&view, |wallet, cx| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account.clone()]);
+        snapshot.activity = Ok(Arc::from(vec![OwnerActivityRecord::Transaction(Box::new(
+            cleared_transaction_fixture(uuid::Uuid::new_v4()),
+        ))]));
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Activity);
+        wallet.set_inbox_tab(InboxTab::Decided, cx);
+    });
+    assert!(
+        measure(cx, window, &view, &["activity-row"])[0].is_some(),
+        "the history list must draw the record it holds"
+    );
+
+    // The waiting queue: one request needing a decision.
+    cx.update_entity(&view, |wallet, cx| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account.clone()]);
+        let mut queues = crate::authority::OwnerReviewQueues {
+            transactions: Vec::new(),
+            typed_data: Vec::new(),
+            messages: Vec::new(),
+            policy_proposals: Vec::new(),
+            network_proposals: Vec::new(),
+            token_proposals: Vec::new(),
+        };
+        queues
+            .transactions
+            .push(cleared_transaction_fixture(uuid::Uuid::new_v4()));
+        snapshot.reviews = Ok(queues);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_inbox_tab(InboxTab::Waiting, cx);
+    });
+    assert!(
+        measure(cx, window, &view, &["inbox-waiting-card"])[0].is_some(),
+        "the waiting list must draw the request it holds"
+    );
+
+    // The portfolio: one balance.
+    cx.update_entity(&view, |wallet, _| {
+        wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
+            accounts: vec![OwnerPortfolioAccount {
+                wallet: account.clone(),
+                networks: vec![crate::authority::OwnerPortfolioNetwork {
+                    network: network.clone(),
+                    result: Ok(ekubo_wallet_core::token_store::Portfolio {
+                        address: "0x0000000000000000000000000000000000000000".to_owned(),
+                        chain_id: network.chain_id.to_string(),
+                        network: network.name.clone(),
+                        native_balance: "1000000000000000000".to_owned(),
+                        block_number: "1".to_owned(),
+                        tokens: Vec::new(),
+                        tokens_checked: 0,
+                        tokens_skipped: None,
+                        fork: None,
+                    }),
+                }],
+            }],
+        });
+        wallet.set_route(Route::Overview);
+    });
+    assert!(
+        measure(cx, window, &view, &["portfolio-balance-row"])[0].is_some(),
+        "the portfolio must draw the balance it holds"
+    );
+
+    // The permission diff.
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_route(Route::Policies);
+        let policy = WalletPolicy::require_approval_for_everything();
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            current_policy: Some(policy.clone()),
+            history: Vec::new(),
+            history_selection: None,
+            proposal: None,
+            validation: Some(Ok(PolicyDraftReview {
+                wallet_id: "primary".into(),
+                source_revision: Some(2),
+                document: String::new(),
+                policy,
+                diff: vec!["+ rule 1: starts allowing: to any address".to_owned()],
+            })),
+        });
+        wallet.open_policy_review(cx);
+    });
+    assert!(
+        measure(cx, window, &view, &["policy-diff-row"])[0].is_some(),
+        "the review must draw the changed rule it holds"
+    );
+
+    release(cx, &view);
+}
+
+/// A placeholder earns its place by being replaced without anything moving.
+/// This one was a different shape from the rows it stood in for, so the tab
+/// rearranged itself the moment the balances landed.
+#[gpui::test]
+fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let account = WalletMetadata {
+        instance_id: uuid::Uuid::nil(),
+        id: "primary".into(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    };
+    let network = ekubo_wallet_core::config::default_networks()
+        .first()
+        .expect("a shipped network")
+        .clone();
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account.clone()]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.portfolio = PortfolioState::Loading;
+        wallet.set_route(Route::Overview);
+    });
+    let loading = measure(cx, window, &view, &["portfolio-loading-placeholder"])[0]
+        .expect("the placeholder must draw while the balances are being read");
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
+            accounts: vec![OwnerPortfolioAccount {
+                wallet: account.clone(),
+                networks: vec![crate::authority::OwnerPortfolioNetwork {
+                    network: network.clone(),
+                    result: Ok(ekubo_wallet_core::token_store::Portfolio {
+                        address: "0x0000000000000000000000000000000000000000".to_owned(),
+                        chain_id: network.chain_id.to_string(),
+                        network: network.name.clone(),
+                        native_balance: "1000000000000000000".to_owned(),
+                        block_number: "1".to_owned(),
+                        tokens: Vec::new(),
+                        tokens_checked: 0,
+                        tokens_skipped: None,
+                        fork: None,
+                    }),
+                }],
+            }],
+        });
+    });
+    let ready = measure(
+        cx,
+        window,
+        &view,
+        &["portfolio-balances-card", "portfolio-balance-row"],
+    );
+    let balances = ready[0].expect("the balances must draw once they land");
+    let row = ready[1].expect("the balance row must draw");
+
+    assert_eq!(
+        loading.origin, balances.origin,
+        "the balances must land where the placeholder stood"
+    );
+    assert_eq!(
+        loading.size.width, balances.size.width,
+        "and be the same width as it"
+    );
+    // Each placeholder row is the real row's frame, so one of them is the
+    // height of one balance rather than of some other card's line.
+    let placeholder_row = loading.size.height / 4.0;
+    assert!(
+        (placeholder_row - row.size.height).abs() < px(12.0),
+        "a placeholder row must be about the height of the row it stands in \
+         for: {placeholder_row:?} against {:?}",
+        row.size.height
+    );
+
+    release(cx, &view);
+}
+
 /// A tab that quietly dropped holdings could be made to lie by one wrong
 /// price, so whenever the dust filter hides anything it says how much, in both
 /// states of its own switch.

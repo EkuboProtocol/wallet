@@ -654,15 +654,23 @@ fn policy_proposal_for_account<'a>(
 /// Balance rows that have not arrived yet, drawn in the card and at the row
 /// pitch the real ones use. A spinner says only that the app is busy; these
 /// say a list of tokens is what is coming, and where it will be.
+/// Where the balances are about to appear, shaped like the balances.
+///
+/// A placeholder earns its place by being replaced without anything moving, so
+/// this is the real row's own geometry — the same padding, the same divider,
+/// the identity over its metadata on the left and the amount on the right,
+/// each bar the height of the text it stands in for. Widths vary because
+/// equal-length bars read as a rendered table rather than as a placeholder for
+/// one.
 fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
-    // Uneven widths, because equal-length bars read as a rendered table rather
-    // than as a placeholder for one.
-    const ROWS: [(gpui::Pixels, gpui::Pixels, gpui::Pixels); 3] = [
-        (px(184.0), px(96.0), px(248.0)),
-        (px(136.0), px(72.0), px(212.0)),
-        (px(208.0), px(112.0), px(264.0)),
+    const ROWS: [(gpui::Pixels, gpui::Pixels, gpui::Pixels); 4] = [
+        (px(184.0), px(248.0), px(132.0)),
+        (px(136.0), px(212.0), px(96.0)),
+        (px(208.0), px(264.0), px(148.0)),
+        (px(160.0), px(232.0), px(112.0)),
     ];
     let mut card = div()
+        .debug_selector(|| "portfolio-loading-placeholder".to_owned())
         .w_full()
         .min_w_0()
         .p_4()
@@ -672,8 +680,10 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
         .bg(cx.theme().secondary)
         .flex()
         .flex_col();
-    for (index, (identity, balance, metadata)) in ROWS.into_iter().enumerate() {
+    for (index, (identity, metadata, balance)) in ROWS.into_iter().enumerate() {
         card = card.child(
+            // The balance row's own frame: `py_2`, and a divider under every
+            // row but the last.
             div()
                 .w_full()
                 .min_w_0()
@@ -682,20 +692,24 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
                     row.border_b_1().border_color(cx.theme().border)
                 })
                 .flex()
-                .flex_col()
-                .gap_1p5()
+                .items_center()
+                .justify_between()
+                .gap_3()
                 .child(
                     div()
-                        .w_full()
-                        .min_w_0()
+                        .min_w(px(180.0))
+                        .flex_1()
+                        .flex_basis(px(260.0))
                         .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
+                        .flex_col()
+                        .gap_0p5()
+                        // The identity line is `font_medium` at the base size;
+                        // the metadata under it is `text_xs`.
                         .child(Skeleton::new().h_5().w(identity).max_w_full())
-                        .child(Skeleton::new().h_5().w(balance).flex_none()),
+                        .child(Skeleton::new().secondary().h_3().w(metadata).max_w_full()),
                 )
-                .child(Skeleton::new().secondary().h_3().w(metadata).max_w_full()),
+                // The amount is `text_lg` and sits hard right.
+                .child(Skeleton::new().h_6().w(balance).flex_none()),
         );
     }
     card
@@ -1424,6 +1438,7 @@ fn render_portfolio_balance_row(
             });
     }
     div()
+        .debug_selector(|| "portfolio-balance-row".to_owned())
         .w_full()
         .min_w_0()
         .py_2()
@@ -3682,6 +3697,7 @@ fn render_inbox_waiting_card(
     // The gap the queue used to get from its column lives on the row now:
     // a virtualized list stacks its items with no spacing of its own.
     div()
+        .debug_selector(|| "inbox-waiting-card".to_owned())
         .pb_3()
         .child(WalletWindow::render_review_card(
             &card.id,
@@ -3721,6 +3737,7 @@ fn render_policy_diff_row(index: usize, row: &PolicyDiffRow, cx: &App) -> AnyEle
             )
     };
     div()
+        .debug_selector(|| "policy-diff-row".to_owned())
         .w_full()
         .min_w_0()
         .pb_2()
@@ -4023,7 +4040,12 @@ fn render_activity_row(
                 )),
         );
     }
-    div().w_full().min_w_0().pb_2().child(card)
+    div()
+        .debug_selector(|| "activity-row".to_owned())
+        .w_full()
+        .min_w_0()
+        .pb_2()
+        .child(card)
 }
 
 #[derive(Clone)]
@@ -10804,15 +10826,15 @@ impl WalletWindow {
                 .debug_selector(|| "inbox-waiting-list".to_owned())
                 .flex_1()
                 .min_h_0()
-                .child(variable_list(
-                    self.inbox_waiting_list.clone(),
-                    move |index, _, cx| {
+                .child(
+                    variable_list(self.inbox_waiting_list.clone(), move |index, _, cx| {
                         let Some(card) = cards.get(index) else {
                             return div().into_any_element();
                         };
                         render_inbox_waiting_card(card, blocked, &view, cx)
-                    },
-                )),
+                    })
+                    .size_full(),
+                ),
         )
     }
 
@@ -11774,7 +11796,8 @@ impl WalletWindow {
                 cx,
             )
             .into_any_element()
-        });
+        })
+        .size_full();
         panel
             .child(
                 div()
@@ -12676,15 +12699,21 @@ impl WalletWindow {
         };
         let account_unavailable = account_error.is_some();
         let connecting = self.walletconnect_connecting;
+        // The same frame the account form and the inbox use: roomier than the
+        // cards below it, and filled with the page background rather than
+        // `secondary`. This is the one card on the page that is a form, and
+        // leaving `secondary` to mean "an item in a list" is what keeps the
+        // session cards under it reading as items rather than as more frame.
         let mut panel = div()
-            .p_4()
+            .p_5()
+            .pb_6()
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+            .bg(cx.theme().background)
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .child(
                 div()
                     .text_lg()
@@ -14619,6 +14648,7 @@ impl WalletWindow {
                 })
         }));
         let card = div()
+            .debug_selector(|| "portfolio-balances-card".to_owned())
             .w_full()
             .min_w_0()
             .flex_1()
@@ -14653,15 +14683,15 @@ impl WalletWindow {
                 .debug_selector(|| "portfolio-balances".to_owned())
                 .flex_1()
                 .min_h_0()
-                .child(variable_list(
-                    self.portfolio_list.clone(),
-                    move |index, _, cx| {
+                .child(
+                    variable_list(self.portfolio_list.clone(), move |index, _, cx| {
                         let Some(row) = rows.get(index) else {
                             return div().into_any_element();
                         };
                         render_portfolio_list_row(row, &wallet_id, index + 1 < row_count, cx)
-                    },
-                )),
+                    })
+                    .size_full(),
+                ),
         )
     }
 
@@ -14702,11 +14732,7 @@ impl WalletWindow {
             )
             .child(
                 Switch::new("portfolio-show-low-value")
-                    .label(if self.show_low_value_balances {
-                        "Showing them"
-                    } else {
-                        "Show them"
-                    })
+                    .label("Show all")
                     .checked(self.show_low_value_balances)
                     .on_click(cx.listener(|view, checked: &bool, _, cx| {
                         view.show_low_value_balances = *checked;
@@ -16438,7 +16464,8 @@ impl WalletWindow {
                                     };
                                     render_policy_diff_row(index, row, cx)
                                 },
-                            )),
+                            )
+                            .size_full()),
                     ),
             )
             .when(allow_anything_draft, |review| {
