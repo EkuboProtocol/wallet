@@ -407,10 +407,14 @@ impl Rule {
             parts.push(format!("chain ID {}", predicate.describe()));
         }
         parts.push(match &self.to {
+            Some(predicate) if predicate.is_universally_true() => "to any address".to_owned(),
             Some(predicate) => format!("to {}", predicate.describe()),
             None => "to any address".to_string(),
         });
         parts.push(match &self.calldata {
+            Some(predicate) if predicate.is_universally_true() => {
+                "any calldata, including batched calls to other contracts".to_owned()
+            }
             Some(predicate) => predicate.describe(),
             None => "any calldata, including batched calls to other contracts".to_string(),
         });
@@ -575,6 +579,38 @@ impl WalletPolicy {
                 source: None,
             }],
         }
+    }
+
+    /// Whether this document contains an `allow` rule that places no effective
+    /// constraint on any transaction field or requester.
+    ///
+    /// This is deliberately conservative for owner-facing danger treatment: an
+    /// earlier deny may make the policy narrower in practice, but the broad
+    /// allow still deserves the unrestricted warning. Testing semantic breadth
+    /// rather than equality with [`Self::allow_anything`] prevents redundant
+    /// predicate spellings from disguising the same authority.
+    #[must_use]
+    pub fn contains_unrestricted_allow(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.effect == Effect::Allow
+                && rule.source.is_none()
+                && [
+                    rule.chain_id.as_ref(),
+                    rule.to.as_ref(),
+                    rule.native_value.as_ref(),
+                    rule.calldata.as_ref(),
+                    rule.transaction_type.as_ref(),
+                    rule.nonce.as_ref(),
+                    rule.gas_limit.as_ref(),
+                    rule.max_fee_per_gas.as_ref(),
+                    rule.max_priority_fee_per_gas.as_ref(),
+                    rule.delegation.as_ref(),
+                    rule.envelope_to.as_ref(),
+                    rule.envelope_native_value.as_ref(),
+                ]
+                .into_iter()
+                .all(|predicate| predicate.is_none_or(Predicate::is_universally_true))
+        })
     }
 
     /// Nothing signs automatically: no rules at all, so every call reaches the

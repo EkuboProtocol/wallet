@@ -59,11 +59,13 @@ allows its exact call and prepared-envelope fields. Every send, including one
 using a prior simulation ID, freshly simulates, prepares, and evaluates the
 current policy; preview identifiers are not durable authorization.
 
-Transaction policy is account-scoped rather than requester-scoped. Its schema
-has no harness, automation, dapp, WalletConnect-session, or plan-source matcher;
-the recorded source is display and audit context only. The same matching allow
-rule therefore applies to equivalent transactions submitted through local MCP,
-an installed automation, or a connected WalletConnect dapp.
+Transaction policy is account-scoped and may also constrain the closed
+`request_source` structure core constructs for a local agent, an installed
+automation, or a WalletConnect dapp. Harness names and dapp domains inside that
+structure are requester claims, not identities: they can narrow a rule but
+cannot establish who is calling. The separate `plan_source` string remains
+display and audit context only and is never matched. A rule with no source
+matcher applies to equivalent transactions from every channel.
 
 Exact calldata, message bytes, complete typed data, digest, warnings, Unicode
 controls, bidi controls, and confusable characters remain available in the

@@ -317,10 +317,11 @@ pub enum Predicate {
     /// Applies only to tuple values and composes with `each` for arrays of
     /// tuples and with another `tuple` for nested tuples.
     Tuple(Vec<Option<Predicate>>),
-    /// At least one of these predicates matches. An empty list never matches.
-    Any(Vec<Predicate>),
-    /// All of these predicates match. An empty list matches vacuously.
-    All(Vec<Predicate>),
+    /// At least one of these predicates matches. The list must not be empty.
+    Any(#[schemars(length(min = 1))] Vec<Predicate>),
+    /// All of these predicates match. The list must not be empty; use
+    /// `any_value` when the intent is to constrain nothing.
+    All(#[schemars(length(min = 1))] Vec<Predicate>),
     /// The inner predicate does not match. A value the inner predicate cannot
     /// decode stays undecided rather than inverting into a match.
     Not(Box<Predicate>),
@@ -449,7 +450,13 @@ impl Predicate {
                 ensure!(!inner.is_empty(), "an `any` predicate needs a branch");
                 inner.iter().try_for_each(|item| item.check_applicable(ty))
             }
-            Self::All(inner) => inner.iter().try_for_each(|item| item.check_applicable(ty)),
+            Self::All(inner) => {
+                ensure!(
+                    !inner.is_empty(),
+                    "an `all` predicate needs a branch; use `any_value` to match every value"
+                );
+                inner.iter().try_for_each(|item| item.check_applicable(ty))
+            }
             Self::Not(inner) => inner.check_applicable(ty),
             Self::Length(inner) => {
                 ensure!(
@@ -543,7 +550,7 @@ impl Predicate {
     /// nothing asserts nothing, so it is the widest predicate there is, and an
     /// `any` containing a universally true branch is too.
     #[must_use]
-    fn is_universally_true(&self) -> bool {
+    pub(crate) fn is_universally_true(&self) -> bool {
         match self {
             Self::AnyValue => true,
             Self::All(items) => items.iter().all(Self::is_universally_true),
@@ -733,11 +740,13 @@ impl Predicate {
                     format!("a tuple where {}", constrained.join(" and "))
                 }
             }
+            Self::Any(inner) if inner.is_empty() => "no value".to_owned(),
             Self::Any(inner) => inner
                 .iter()
                 .map(Self::describe)
                 .collect::<Vec<_>>()
                 .join(" or "),
+            Self::All(inner) if inner.is_empty() => "any value".to_owned(),
             Self::All(inner) => inner
                 .iter()
                 .map(Self::describe)

@@ -206,10 +206,44 @@ fn matcherless_deny_disables_transaction_signing() {
 #[test]
 fn matcherless_allow_permits_every_transaction_call() {
     let subject = WalletPolicy::allow_anything();
+    assert!(subject.contains_unrestricted_allow());
     assert_eq!(
         outcome(&subject, &one_call(ROUTER, "0xdeadbeef", "1000")),
         PolicyOutcome::Allowed
     );
+}
+
+#[test]
+fn unrestricted_authority_is_detected_by_semantics_and_described_explicitly() {
+    let redundant = policy(json!({"version": 1, "rules": [{
+        "effect": "allow",
+        "to": {"all": ["any_value"]},
+        "calldata": {"any": ["any_value", {"eq": "0x"}]}
+    }]}));
+    assert!(redundant.contains_unrestricted_allow());
+    let described = redundant.rules[0].describe();
+    assert!(described.contains("to any address"), "{described}");
+    assert!(
+        described.contains("any calldata, including batched calls to other contracts"),
+        "{described}"
+    );
+
+    let constrained = policy(json!({"version": 1, "rules": [{
+        "effect": "allow",
+        "to": {"eq": format!("{TOKEN:#x}")}
+    }]}));
+    assert!(!constrained.contains_unrestricted_allow());
+}
+
+#[test]
+fn empty_all_cannot_hide_match_all_authority_in_a_policy() {
+    let error = WalletPolicy::parse(json!({"version": 1, "rules": [{
+        "effect": "allow",
+        "to": {"all": []},
+        "calldata": {"all": []}
+    }]}))
+    .expect_err("empty `all` must be rejected");
+    assert!(format!("{error:#}").contains("needs a branch"), "{error:#}");
 }
 
 #[test]

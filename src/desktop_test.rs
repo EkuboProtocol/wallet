@@ -2163,6 +2163,9 @@ fn connection_document(account: Option<&str>, warnings: &[&str]) -> ReviewDocume
     for warning in warnings {
         request = request.warning((*warning).to_owned());
     }
+    // One proposal produces every account document under one immutable review
+    // id. Keep the helper faithful to that production invariant.
+    request.id = uuid::Uuid::nil();
     ReviewDocument::from_request(request, Vec::new())
 }
 
@@ -2288,6 +2291,27 @@ fn a_document_that_is_not_the_same_document_is_read_again_from_the_top() {
     assert!(!review.scroll_layout_ready);
     assert!(!Arc::ptr_eq(&scroll_state, &review.end_rendered));
     assert!(!review.end_rendered.load(Ordering::Acquire));
+}
+
+#[test]
+fn changed_content_with_the_same_row_shape_rearms_the_scroll_gate() {
+    let (mut review, _receiver) = connection_review(&["primary"], &["First warning."]);
+    let generation = review.state.generation();
+    review.state.mark_viewed_to_end(generation);
+    review.end_rendered.store(true, Ordering::Release);
+    review.scroll_layout_ready = true;
+    let scroll_state = Arc::clone(&review.end_rendered);
+
+    // One warning becomes another, so the virtual row enum sequence is exactly
+    // the same. Content comparison, not row shape, must catch the change.
+    review.adopt_answered_document(connection_document(
+        Some("primary"),
+        &["A different warning."],
+    ));
+
+    assert!(!review.state.approve_enabled());
+    assert!(!review.scroll_layout_ready);
+    assert!(!Arc::ptr_eq(&scroll_state, &review.end_rendered));
 }
 
 fn setup_account(id: &str) -> WalletMetadata {

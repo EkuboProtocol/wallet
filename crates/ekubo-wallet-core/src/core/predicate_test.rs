@@ -189,11 +189,26 @@ fn the_metadata_predicates_are_gone_from_the_language() {
 }
 
 #[test]
-fn an_empty_any_never_matches_and_an_empty_all_always_does() {
+fn empty_boolean_combinators_are_described_but_refused_by_admission() {
     let ctx = context();
     let value = DynSolValue::Address(WALLET);
-    assert!(!Predicate::Any(Vec::new()).matches(&value, &ctx));
-    assert!(Predicate::All(Vec::new()).matches(&value, &ctx));
+    let empty_any = Predicate::Any(Vec::new());
+    let empty_all = Predicate::All(Vec::new());
+
+    // The evaluator remains mathematically total even for values constructed
+    // inside this crate, and the renderer must never turn either into a blank
+    // authorization line.
+    assert!(!empty_any.matches(&value, &ctx));
+    assert!(empty_all.matches(&value, &ctx));
+    assert_eq!(empty_any.describe(), "no value");
+    assert_eq!(empty_all.describe(), "any value");
+
+    for subject in [empty_any, empty_all] {
+        assert!(
+            subject.check_applicable(&DynSolType::Address).is_err(),
+            "a redundant empty combinator must not enter a policy"
+        );
+    }
 }
 
 #[test]
@@ -752,7 +767,7 @@ fn address_predicate() -> impl Strategy<Value = Predicate> {
     leaf.prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
             prop::collection::vec(inner.clone(), 1..3).prop_map(Predicate::Any),
-            prop::collection::vec(inner.clone(), 0..3).prop_map(Predicate::All),
+            prop::collection::vec(inner.clone(), 1..3).prop_map(Predicate::All),
             inner.prop_map(|item| Predicate::Not(Box::new(item))),
         ]
     })
@@ -1232,7 +1247,7 @@ fn a_typed_predicate_publishes_exactly_the_forms_it_parses() {
         ("each", serde_json::json!({"each": "any_value"})),
         ("tuple", serde_json::json!({"tuple": [null]})),
         ("any", serde_json::json!({"any": ["any_value"]})),
-        ("all", serde_json::json!({"all": []})),
+        ("all", serde_json::json!({"all": ["any_value"]})),
         ("not", serde_json::json!({"not": "any_value"})),
         ("length", serde_json::json!({"length": {"eq": "1"}})),
     ];
@@ -1244,6 +1259,10 @@ fn a_typed_predicate_publishes_exactly_the_forms_it_parses() {
         serde_json::to_string(&StringPredicate::json_schema(generator)).expect("it serializes");
     let number_schema =
         serde_json::to_string(&NumberPredicate::json_schema(generator)).expect("it serializes");
+    assert!(
+        string_schema.contains("\"minItems\":1") && number_schema.contains("\"minItems\":1"),
+        "boolean-combinator schemas must reject empty branch lists"
+    );
 
     for (key, document) in forms {
         let quoted = format!("\"{key}\"");

@@ -2983,14 +2983,14 @@ impl ActiveReview {
     /// replaces the document. Rebuilding from nothing threw the reader back to
     /// the top and re-armed the scroll gate, which made answering the review's
     /// own question cost a second full read — and a third, for anyone who
-    /// changed their mind. Every choice's document is the same document with a
-    /// different account named in it, so when the rows come out identical the
-    /// scroll position and the end-reached bit both carry over. When they do
-    /// not, the reader gets the new document from the top with approval
-    /// re-armed, exactly as any other changed document is presented. The
-    /// generation still advances either way, so a click rendered from the old
-    /// document is as stale as it ever was.
+    /// changed their mind. Carry-over is sound only when the documents differ
+    /// in the two facts the owner just answered: account and address. Row shape
+    /// alone is not evidence of that; changed warning or section text can have
+    /// the same rows. The generation still advances either way, so a click
+    /// rendered from the old document is as stale as it ever was.
     fn adopt_answered_document(&mut self, document: ReviewDocument) {
+        let same_connection_except_account =
+            walletconnect_documents_differ_only_by_account(self.state.document(), &document);
         let previous_rows = Arc::clone(&self.detail_rows);
         let scroll_handle = self.scroll_handle.clone();
         let end_rendered = Arc::clone(&self.end_rendered);
@@ -3002,7 +3002,7 @@ impl ActiveReview {
         self.state = ReviewState::new(document);
         self.rebuild_detail_list();
 
-        if *self.detail_rows != *previous_rows {
+        if !same_connection_except_account || *self.detail_rows != *previous_rows {
             return;
         }
         self.scroll_handle = scroll_handle;
@@ -3015,6 +3015,35 @@ impl ActiveReview {
             self.state.mark_viewed_to_end(generation);
         }
     }
+}
+
+/// The exact content invariant that permits a `WalletConnect` account answer to
+/// retain the review's scroll gate. Everything except the values of the
+/// core-authored `Account` and `Address` header facts must compare byte-for-byte.
+fn walletconnect_documents_differ_only_by_account(
+    before: &ReviewDocument,
+    after: &ReviewDocument,
+) -> bool {
+    let before_request = &before.request;
+    let after_request = &after.request;
+    before_request.id == after_request.id
+        && before_request.kind == after_request.kind
+        && before_request.title == after_request.title
+        && before_request.summary == after_request.summary
+        && before_request.sections == after_request.sections
+        && before_request.warnings == after_request.warnings
+        && before_request.digest == after_request.digest
+        && before.exact_payloads == after.exact_payloads
+        && before_request.facts.len() == after_request.facts.len()
+        && before_request
+            .facts
+            .iter()
+            .zip(&after_request.facts)
+            .all(|(left, right)| {
+                left.label == right.label
+                    && (matches!(left.label.as_str(), "Account" | "Address")
+                        || left.value == right.value)
+            })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17098,7 +17127,7 @@ impl WalletWindow {
             .and_then(|value| WalletPolicy::parse(value).ok());
         let allow_anything_draft = draft_policy
             .as_ref()
-            .is_some_and(|policy| *policy == WalletPolicy::allow_anything());
+            .is_some_and(WalletPolicy::contains_unrestricted_allow);
         // A draft that says exactly what the installed policy says is not a
         // draft to come back from, and one that does not parse always is.
         let can_restore_current = editor
