@@ -1352,6 +1352,103 @@ fn token_inventory_fills_the_remaining_page_height(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+fn an_agents_case_is_read_at_the_height_of_the_frame(cx: &mut gpui::TestAppContext) {
+    // The case used to be a 180-pixel box on the diff screen that could not
+    // scroll, so a long rationale was simply cut off with no way to reach the
+    // rest. On its own screen it takes the height the frame has left.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, cx| {
+        let account = WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        };
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Policies);
+        let document = wallet
+            .policy_json_input
+            .as_ref()
+            .expect("policy input is initialized")
+            .read(cx)
+            .value()
+            .to_string();
+        assert!(document.is_empty());
+
+        let current = WalletPolicy::require_approval_for_everything();
+        let proposed = WalletPolicy::allow_anything();
+        let review = PolicyDraftReview {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            document: String::new(),
+            policy: proposed.clone(),
+            diff: vec!["+ rule 1 grants every call".to_owned()],
+        };
+        wallet.policy_editor = Some(PolicyEditor {
+            wallet_id: "primary".into(),
+            source_revision: Some(2),
+            current_policy: Some(current),
+            history: Vec::new(),
+            history_selection: None,
+            proposal: Some(PolicyProposal {
+                wallet_instance_id: uuid::Uuid::nil(),
+                wallet_id: "primary".into(),
+                wallet_address: alloy::primitives::Address::ZERO,
+                source_revision: 2,
+                policy: proposed,
+                // Longer than any fixed box would show.
+                rationale: "This proposal widens signing authority. ".repeat(60),
+                created_at: chrono::Utc::now(),
+            }),
+            validation: Some(Ok(review)),
+        });
+        wallet.policy_proposal_open = true;
+        wallet.policy_review_open = false;
+    });
+
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "policy-proposal-case",
+            "policy-proposal-rationale",
+            "policy-review-changes",
+            "policy-editor-layout",
+        ],
+    );
+    let case = bounds[0].expect("the agent's case must draw");
+    let rationale = bounds[1].expect("the rationale must draw");
+    assert!(
+        bounds[2].is_none(),
+        "the case screen stands in place of the diff, not above it"
+    );
+    let frame = bounds[3].expect("the editor frame must draw");
+
+    // Taller than the box it replaces, by a lot: it takes what the screen has
+    // rather than a number chosen in advance.
+    assert!(
+        rationale.size.height > px(180.0),
+        "the rationale must not be bounded like the old box: {:?}",
+        rationale.size.height
+    );
+    // And it stays inside the frame, so the actions under it are reachable
+    // without the page growing past its own bottom edge.
+    assert!(
+        rationale.bottom() <= case.bottom() + px(1.0) && case.bottom() <= frame.bottom() + px(1.0),
+        "the case must fit its frame: rationale {rationale:?}, case {case:?}, frame {frame:?}"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn reviewing_a_policy_does_not_shrink_the_json_editor(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);

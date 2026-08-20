@@ -2885,7 +2885,7 @@ fn a_draft_that_matches_the_installed_policy_cannot_be_installed() {
 }
 
 #[test]
-fn the_agent_rationale_is_read_on_the_review_screen_and_not_in_the_rail() {
+fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff() {
     let source = include_str!("desktop.rs");
     let editor = source
         .split_once("fn render_policy_editor")
@@ -2897,8 +2897,8 @@ fn the_agent_rationale_is_read_on_the_review_screen_and_not_in_the_rail() {
 
     // The rail says a proposal is waiting and offers the two answers to it.
     // It does not argue the case: an excerpt at 264 pixels is a paragraph of
-    // two-word lines that says less than the review screen does and still
-    // costs the height of one.
+    // two-word lines that says less than the case screen does and still costs
+    // the height of one.
     assert!(!editor.contains("policy_rationale_excerpt("));
     assert!(!editor.contains("rationale_excerpt"));
     assert!(!editor.contains("Review changes has the rest of the agent's"));
@@ -2906,6 +2906,11 @@ fn the_agent_rationale_is_read_on_the_review_screen_and_not_in_the_rail() {
     assert!(editor.contains(r#".title("Agent proposal")"#));
     assert!(editor.contains(r#"app_button("review-policy-proposal-full-screen")"#));
     assert!(editor.contains(r#"app_button("reject-policy-proposal-full-screen")"#));
+
+    // Opening a proposal replaces the draft, so the rail cannot call it
+    // "Review changes" -- that is the press on the case screen that shows the
+    // diff and changes nothing.
+    assert!(editor.contains(r#".label("Open proposal")"#));
 
     // Rejecting a proposal destroys nothing that was ever in force, so it is
     // not dressed as the dangerous half of the pair. The half that changes
@@ -2931,6 +2936,33 @@ fn the_agent_rationale_is_read_on_the_review_screen_and_not_in_the_rail() {
     // changes themselves.
     assert!(editor.contains(r#""policy-change-summary""#));
 
+    // A draft that arrived from an agent says so, because it looks exactly
+    // like one the owner typed and the difference decides how it is read.
+    assert!(editor.contains(r#""policy-draft-origin""#));
+    assert!(editor.contains("This draft is an agent's proposal, loaded for you"));
+
+    let case = source
+        .split_once("fn render_policy_proposal")
+        .expect("the agent's case renders")
+        .1
+        .split_once("fn render_policy_review")
+        .expect("the case has an end marker")
+        .0;
+    // The whole case, unbounded, as the only thing on the screen that
+    // scrolls. A `max_h` here could not scroll at all: `overflow_y_scrollbar`
+    // copies `max_size` onto the wrapper without taking it off the content,
+    // so the content is capped at its own viewport height.
+    assert!(case.contains("terminal_safe_multiline(&proposal.rationale)"));
+    assert!(case.contains(r#""policy-proposal-rationale""#));
+    assert!(case.contains("overflow_y_scrollbar()"));
+    assert!(!case.contains("max_h("));
+    // It reaches the diff, the draft, and the way out.
+    assert!(case.contains(r#"app_button("review-policy-proposal-changes")"#));
+    assert!(case.contains(r#"app_button("edit-policy-proposal-draft")"#));
+    assert!(case.contains(r#"app_button("reject-policy-proposal-case")"#));
+    // And says what taking it up already did.
+    assert!(case.contains("loaded in your editor as a draft"));
+
     let review = source
         .split_once("fn render_policy_review")
         .expect("the policy review renders")
@@ -2938,15 +2970,14 @@ fn the_agent_rationale_is_read_on_the_review_screen_and_not_in_the_rail() {
         .split_once("fn render_policy_editor")
         .expect("the policy review has an end marker")
         .0;
-    // The whole rationale, at the width of the frame, on the screen where
-    // installing happens.
-    assert!(review.contains("terminal_safe_multiline(&proposal.rationale)"));
-    assert!(review.contains(r#""policy-review-rationale""#));
-    // Unheaded. The box holds the only prose on a screen of diff rows, and
-    // the screen already names the account the agent proposed against.
-    assert!(!review.contains("Why the agent proposed this"));
-    // Bounded, so a long one scrolls in place instead of pushing the diff
-    // off the screen.
-    assert!(review.contains("max_h(px(180.0))"));
-    assert!(review.contains("overflow_y_scrollbar()"));
+    // The diff screen carries no prose of its own: two unbounded things on one
+    // screen is what forced a bad bound on one of them.
+    assert!(!review.contains("terminal_safe_multiline"));
+    assert!(!review.contains(r#""policy-review-rationale""#));
+    assert!(!review.contains("max_h(px(180.0))"));
+    // But the argument is one press away, and the way back is named for where
+    // it goes rather than for what the reader was doing.
+    assert!(review.contains(r#"app_button("open-policy-proposal-case")"#));
+    assert!(review.contains(r#".label("Edit this draft")"#));
+    assert!(!review.contains(r#".label("Back to editing")"#));
 }

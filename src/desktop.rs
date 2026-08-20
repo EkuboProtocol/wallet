@@ -2388,6 +2388,15 @@ pub struct WalletWindow {
     /// the install action under it. They are the same screen in two states
     /// rather than two columns fighting over one window.
     policy_review_open: bool,
+    /// Whether the editor is showing an agent's case for its proposal rather
+    /// than the draft or the diff.
+    ///
+    /// A proposal asks three things of a reader -- why, what it changes, and
+    /// whether to install -- and the first two are prose and a list, each of
+    /// unbounded length. Read on one screen they need a scrolling region
+    /// each, nested inside a frame whose bottom edge is fixed; so the case
+    /// gets a screen of its own, where it is the only thing that scrolls.
+    policy_proposal_open: bool,
     policy_diff_list: VariableListState,
     policy_diff_drawn_for: Cell<usize>,
     token_proposal_busy: bool,
@@ -6122,6 +6131,7 @@ impl WalletWindow {
             policy_account_id: None,
             policy_installing: false,
             policy_review_open: false,
+            policy_proposal_open: false,
             policy_diff_list: virtual_inbox_list(0),
             policy_diff_drawn_for: Cell::new(0),
             policy_action_error: None,
@@ -8132,10 +8142,14 @@ impl WalletWindow {
                             proposal: Some(proposal),
                             validation: Some(Ok(review)),
                         });
-                        // A proposal arrives already checked, and the question
-                        // it raises is what it changes — so opening one lands
-                        // on the diff rather than on somebody else's JSON.
-                        self.policy_review_open = true;
+                        // A proposal arrives already checked, so what is
+                        // left is the reading: the agent's case first, then
+                        // the diff, then installing. Landing on the case also
+                        // makes the loading visible -- the draft in the editor
+                        // is now this document, and the screen that says so is
+                        // the screen that says where it came from.
+                        self.policy_proposal_open = true;
+                        self.policy_review_open = false;
                         self.policy_diff_drawn_for.set(0);
                         self.policy_action_error = None;
                         // A receipt for the last proposal must not be left
@@ -8293,6 +8307,7 @@ impl WalletWindow {
                 editor.validation = None;
                 editor.history_selection = latest_policy_revision(editor.history.len());
                 self.policy_review_open = false;
+                self.policy_proposal_open = false;
                 self.policy_action_error = None;
             }
             Err(error) => {
@@ -8336,6 +8351,7 @@ impl WalletWindow {
             return;
         }
         self.policy_review_open = true;
+        self.policy_proposal_open = false;
         self.policy_diff_list
             .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
         cx.notify();
@@ -8345,6 +8361,33 @@ impl WalletWindow {
         if !self.policy_review_open {
             return;
         }
+        self.policy_review_open = false;
+        cx.notify();
+    }
+
+    /// Go back to the agent's case for the draft on screen.
+    ///
+    /// Reachable from the diff, so the argument for a change is never more
+    /// than one press from the change itself.
+    fn open_policy_proposal_case(&mut self, cx: &mut Context<Self>) {
+        let has_case = self
+            .policy_editor
+            .as_ref()
+            .is_some_and(|editor| editor.proposal.is_some());
+        if !has_case || self.policy_installing {
+            return;
+        }
+        self.policy_proposal_open = true;
+        self.policy_review_open = false;
+        cx.notify();
+    }
+
+    /// Leave the case and the diff for the draft they describe.
+    fn edit_policy_draft(&mut self, cx: &mut Context<Self>) {
+        if self.policy_installing {
+            return;
+        }
+        self.policy_proposal_open = false;
         self.policy_review_open = false;
         cx.notify();
     }
@@ -8471,6 +8514,7 @@ impl WalletWindow {
                         // there is nothing left to review: the editor comes
                         // back holding what was just installed.
                         view.policy_review_open = false;
+                        view.policy_proposal_open = false;
                         view.policy_action_error = proposal_cleanup.err().map(|error| {
                             format!(
                                 "Installed policy revision {} for {}, but could not clear the superseded proposal: {error:#}",
@@ -8633,6 +8677,12 @@ impl WalletWindow {
         // is still sitting in the editor behind it.
         if self.policy_review_open && !self.policy_installing {
             self.close_policy_review(cx);
+        }
+        // And from the agent's case to the same draft. Reading why a change
+        // was proposed decides nothing either.
+        if self.policy_proposal_open && !self.policy_installing {
+            self.policy_proposal_open = false;
+            cx.notify();
         }
         // Escape also closes the export panel. Leaving it open was the one
         // modal in the app that trapped focus with no keyboard way out, and
@@ -10542,6 +10592,7 @@ impl WalletWindow {
                 self.policy_editor = None;
                 self.policy_action_error = None;
                 self.policy_review_open = false;
+                self.policy_proposal_open = false;
             }
         }
         reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
@@ -16851,6 +16902,210 @@ impl WalletWindow {
     /// of this screen now: the rows get the frame's width, a rewritten rule is
     /// stacked as before-and-after rather than run together on one line, and
     /// the action that installs it sits under the thing it installs.
+    /// The agent's case for a proposal, as the screen it needs to be read on.
+    ///
+    /// This was a 180-pixel box on the diff screen, which could not be
+    /// scrolled -- `overflow_y_scrollbar` copies the element's `max_size` onto
+    /// the wrapper it creates without taking it off the content, so the
+    /// content was capped at exactly the height of its own viewport and had
+    /// nothing to scroll. Bounding prose that way was the wrong idea before it
+    /// was a broken one: a rationale is as long as the change is complicated,
+    /// and it was competing for height with a diff that is also as long as the
+    /// change is complicated. Here it is the only thing on the screen that
+    /// scrolls, so it needs no bound at all.
+    fn render_policy_proposal(
+        &self,
+        editor: &PolicyEditor,
+        proposal: &PolicyProposal,
+        review: &PolicyDraftReview,
+        allow_anything_draft: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let rows = policy_diff_rows(&review.diff);
+        let revision = review.source_revision.map_or_else(
+            || "no installed policy".to_owned(),
+            |r| format!("revision {r}"),
+        );
+        let rationale = ekubo_wallet_core::sanitize::terminal_safe_multiline(&proposal.rationale);
+        let reject_proposal = proposal.clone();
+        let case = div()
+            .debug_selector(|| "policy-proposal-case".to_owned())
+            .w_full()
+            .min_w_0()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .flex_wrap()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex_basis(px(320.0))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_lg().font_semibold().child("Agent proposal"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(format!(
+                                        "{} · against {revision} · nothing is installed until you authenticate",
+                                        editor.wallet_id
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        app_button("reject-policy-proposal-case")
+                            .debug_selector(|| "reject-policy-proposal-case".to_owned())
+                            .label("Reject proposal")
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.reject_policy_proposal(&reject_proposal, cx);
+                            })),
+                    ),
+            )
+            // Ahead of the argument rather than after it: what an unrestricted
+            // allow grants is the fact a case for one has to answer to.
+            .when(allow_anything_draft, |case| {
+                case.child(
+                    div()
+                        .id("policy-proposal-unrestricted-warning")
+                        .role(Role::Alert)
+                        .flex_none()
+                        .p_2()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(cx.theme().danger)
+                        .text_sm()
+                        .whitespace_normal()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(
+                            "Danger: this policy automatically signs every call on every chain.",
+                        )),
+                )
+            })
+            // The whole case, at the width of the frame, taking the height
+            // left over and scrolling in it.
+            .child(
+                div()
+                    .id("policy-proposal-rationale")
+                    .debug_selector(|| "policy-proposal-rationale".to_owned())
+                    .w_full()
+                    .min_w_0()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p_3()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .text_sm()
+                    .whitespace_normal()
+                    .child(selectable_text("policy-proposal-rationale-text", &rationale)),
+            )
+            // What it changes, as a count. The changes themselves are the
+            // next screen, which is the whole of what that screen is for.
+            .child(
+                h_flex()
+                    .debug_selector(|| "policy-proposal-summary".to_owned())
+                    .flex_none()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .text_sm()
+                    .children(policy_change_summary(&rows).into_iter().map(
+                        |(direction, line)| {
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .px_2()
+                                .py_1()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(direction.color(cx).opacity(0.5))
+                                .text_color(direction.color(cx))
+                                .child(line)
+                        },
+                    )),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    // Said once, plainly, on the screen where the proposal is
+                    // taken up: this document is the draft now, and the draft
+                    // is what installs. Everything after this point is the
+                    // ordinary editor flow.
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex_basis(px(280.0))
+                            .text_sm()
+                            .whitespace_normal()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(
+                                "This proposal is loaded in your editor as a draft. You can edit \
+                                 it before installing; what installs is what is in the editor.",
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                app_button("edit-policy-proposal-draft")
+                                    .debug_selector(|| "edit-policy-proposal-draft".to_owned())
+                                    .label("Edit the draft")
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.edit_policy_draft(cx);
+                                    })),
+                            )
+                            .child(
+                                app_button("review-policy-proposal-changes")
+                                    .debug_selector(|| {
+                                        "review-policy-proposal-changes".to_owned()
+                                    })
+                                    .label("Review the changes")
+                                    .primary()
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.open_policy_review(cx);
+                                    })),
+                            ),
+                    ),
+            );
+        self.policy_editor_frame(cx).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .p_4()
+                .flex()
+                .flex_col()
+                .child(case),
+        )
+    }
+
     fn render_policy_review(
         &self,
         editor: &PolicyEditor,
@@ -16917,47 +17172,45 @@ impl WalletWindow {
                             ),
                     )
                     .child(
-                        app_button("close-policy-review")
-                            .debug_selector(|| "close-policy-review".to_owned())
-                            .label("Back to editing")
-                            .disabled(self.policy_installing)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.close_policy_review(cx);
-                            })),
+                        h_flex()
+                            .flex_none()
+                            .flex_wrap()
+                            .gap_2()
+                            // One press back to the argument, when there is
+                            // one. The diff says what changes and never says
+                            // why anyone wanted it to.
+                            .when(editor.proposal.is_some(), |actions| {
+                                actions.child(
+                                    app_button("open-policy-proposal-case")
+                                        .debug_selector(|| {
+                                            "open-policy-proposal-case".to_owned()
+                                        })
+                                        .label("Why the agent proposed this")
+                                        .disabled(self.policy_installing)
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.open_policy_proposal_case(cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                // Named for where it goes. "Back to editing"
+                                // read as returning to whatever the reader was
+                                // doing, which for a proposal is exactly wrong:
+                                // the editor holds the agent's document now.
+                                app_button("close-policy-review")
+                                    .debug_selector(|| "close-policy-review".to_owned())
+                                    .label("Edit this draft")
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.close_policy_review(cx);
+                                    })),
+                            ),
                     ),
             )
-            // Where the agent's case for the change is actually read.
-            //
-            // The rail showed all of it at 264 pixels and this screen showed
-            // none of it, which put the argument on the page where nothing is
-            // decided and kept it off the page where installing happens. Here
-            // it has the width of the frame, and a ceiling, so a long one
-            // scrolls in place instead of pushing the diff off the screen.
-            .when_some(
-                editor.proposal.as_ref().map(|proposal| {
-                    ekubo_wallet_core::sanitize::terminal_safe_multiline(&proposal.rationale)
-                }),
-                |review, rationale| {
-                    review.child(
-                        div()
-                            .id("policy-review-rationale")
-                            .debug_selector(|| "policy-review-rationale".to_owned())
-                            .flex_none()
-                            .w_full()
-                            .min_w_0()
-                            .max_h(px(180.0))
-                            .overflow_y_scrollbar()
-                            .p_3()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .text_sm()
-                            .whitespace_normal()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_text("policy-review-rationale-text", &rationale)),
-                    )
-                },
-            )
+            // The agent's case is not here: it is prose of no fixed length,
+            // and so is the diff, and a screen cannot give two of those a
+            // scrolling region each without bounding one of them badly. It has
+            // its own screen, one press away.
             .child(
                 h_flex()
                     .debug_selector(|| "policy-change-summary".to_owned())
@@ -17139,6 +17392,13 @@ impl WalletWindow {
         // two states of this screen rather than two columns of it: the diff
         // takes the whole frame, at prose width, with the install action under
         // it.
+        if self.policy_proposal_open
+            && let Some(proposal) = editor.proposal.as_ref()
+            && let Some(review) = validated
+            && reviewed_exact_document
+        {
+            return self.render_policy_proposal(editor, proposal, review, allow_anything_draft, cx);
+        }
         if self.policy_review_open
             && let Some(review) = validated
             && reviewed_exact_document
@@ -17248,17 +17508,17 @@ impl WalletWindow {
                                         .flex_wrap()
                                         .gap_2()
                                         .child(
-                                            // Named for what it opens. This
-                                            // said "Review in editor", which
-                                            // promised somebody else's JSON —
-                                            // the one thing opening a proposal
-                                            // deliberately does not do, since
-                                            // it lands on the permission diff.
-                                            // The draft is still reachable
-                                            // from inside, so nothing is lost
-                                            // by not advertising it here.
+                                            // Named for what it opens, and
+                                            // for what that costs. Pressing it
+                                            // takes the proposal up as the
+                                            // draft, replacing whatever is in
+                                            // the editor — so it cannot be
+                                            // called "Review changes", which
+                                            // is the press on the proposal
+                                            // screen that shows the diff and
+                                            // changes nothing.
                                             app_button("review-policy-proposal-full-screen")
-                                                .label("Review changes")
+                                                .label("Open proposal")
                                                 .primary()
                                                 .disabled(!applicable)
                                                 .on_click(cx.listener(
@@ -17475,6 +17735,25 @@ impl WalletWindow {
                                             .child("JSON syntax and policy structure are checked when you preview"),
                                     ),
                             )
+                            // A draft that arrived from an agent looks
+                            // exactly like one the owner typed, and the
+                            // difference decides how carefully it is read.
+                            .when(editor.proposal.is_some(), |panel| {
+                                panel.child(
+                                    div()
+                                        .debug_selector(|| "policy-draft-origin".to_owned())
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex_none()
+                                        .whitespace_normal()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(selectable_label(
+                                            "This draft is an agent's proposal, loaded for you \
+                                             to edit.",
+                                        )),
+                                )
+                            })
                             .when(allow_anything_draft, |editor| {
                                 editor.child(
                                     div()
