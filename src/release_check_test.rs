@@ -9,14 +9,80 @@ const REPOSITORY: &str = "EkuboProtocol/wallet";
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_relaunch_forces_a_new_instance() {
+fn macos_relaunch_waits_for_this_process_before_opening_the_bundle() {
     let application = Path::new("/Applications/Ekubo Wallet.app");
     let command = macos_relaunch_command(application);
 
-    assert_eq!(command.get_program(), "/usr/bin/open");
-    assert_eq!(
-        command.get_args().collect::<Vec<_>>(),
-        vec![std::ffi::OsStr::new("-n"), application.as_os_str()]
+    assert_eq!(command.get_program(), "/bin/sh");
+    let arguments = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 5);
+    assert_eq!(arguments[0], "-c");
+    // The departing process and the bundle are arguments, never interpolated
+    // into the script: the shipped bundle path has a space in it.
+    assert_eq!(arguments[3], std::process::id().to_string());
+    assert_eq!(arguments[4], application.to_string_lossy());
+    assert!(!arguments[1].contains("Ekubo"));
+
+    // `open -n` asks for a separate instance, which macOS gives its own Dock
+    // tile. It survives only as the timeout fallback, never as the ordinary
+    // path.
+    let script = &arguments[1];
+    let (before_fallback, after_fallback) = script
+        .split_once("-ge 100")
+        .expect("the wait is bounded so a wallet that hangs on exit still relaunches");
+    assert!(!before_fallback.contains("open"));
+    assert_eq!(after_fallback.matches("open -n").count(), 1);
+    assert!(script.trim_end().ends_with(r#"exec /usr/bin/open "$2""#));
+}
+
+/// The behaviour, not the argv, and against the shipped script rather than a
+/// retyped copy of it: only the two `open` calls are swapped for something a
+/// test can observe, so the waiting itself is the shipped waiting.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_macos_relaunch_helper_opens_nothing_until_the_wallet_is_gone() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let marker = directory.path().join("opened");
+    let script = MACOS_RELAUNCH_SCRIPT
+        .replace(r#"exec /usr/bin/open -n "$2""#, "exit 9")
+        .replace(r#"exec /usr/bin/open "$2""#, r#"printf done > "$2""#);
+    assert!(!script.contains("/usr/bin/open"), "{script}");
+
+    let mut wallet = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .spawn()
+        .expect("a wallet process to wait for");
+    let mut helper = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .arg("ekubo-wallet-relaunch")
+        .arg(wallet.id().to_string())
+        .arg(&marker)
+        .spawn()
+        .expect("the helper starts");
+
+    // While the old wallet is alive the helper must not have opened anything:
+    // opening here is what costs the Dock tile.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(
+        !marker.exists(),
+        "the helper opened the bundle while the old wallet was still running"
+    );
+
+    wallet.kill().expect("the wallet exits");
+    wallet.wait().expect("the wallet is reaped");
+    let status = helper.wait().expect("the helper finishes");
+    assert!(
+        status.success(),
+        "the helper gave up on the clean handoff instead of opening: {status}"
+    );
+    assert!(
+        marker.exists(),
+        "the helper did not open the bundle after the old wallet exited"
     );
 }
 

@@ -19004,7 +19004,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         Ok(true) => {
                             let _ = crate::release_check::record_update_diagnostic(
                                 &update_data_dir,
-                                "updated wallet relaunch command completed",
+                                "updated wallet relaunch handoff started",
                             );
                         }
                         Ok(false) => {}

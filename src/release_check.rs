@@ -137,22 +137,63 @@ fn relaunch_current_application() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Waits for the wallet that spawned it to exit, then asks `LaunchServices` to
+/// open the bundle.
+///
+/// `$1` is the departing process, `$2` the application bundle. Both arrive as
+/// arguments rather than interpolated text, so a bundle path containing spaces
+/// -- which the shipped one does -- needs no quoting and can carry no shell
+/// syntax.
+///
+/// The wait is what keeps the relaunched wallet in the Dock tile the old one
+/// was using. Opening while the old process is still alive requires `open -n`,
+/// because `LaunchServices` would otherwise match the running instance by bundle
+/// identifier and just reactivate a wallet that is in the middle of quitting;
+/// and `-n` deliberately asks for a *separate* instance, which macOS gives a
+/// Dock tile of its own instead of the pinned one. Waiting removes the need for
+/// `-n`: by the time this opens the bundle there is no instance left to
+/// collide with, so the new wallet lands in the tile that is already there.
+///
+/// Bounded, because a wallet that hangs on the way out must not cost the owner
+/// their wallet entirely. After roughly ten seconds this gives up on the clean
+/// handoff and starts the new version anyway, which is the old behaviour and
+/// the old cosmetic fault.
+#[cfg(target_os = "macos")]
+const MACOS_RELAUNCH_SCRIPT: &str = r#"waited=0
+while kill -0 "$1" 2>/dev/null; do
+  if [ "$waited" -ge 100 ]; then exec /usr/bin/open -n "$2"; fi
+  waited=$((waited + 1))
+  sleep 0.1
+done
+exec /usr/bin/open "$2"
+"#;
+
 #[cfg(target_os = "macos")]
 fn macos_relaunch_command(application: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new("/usr/bin/open");
-    command.arg("-n").arg(application);
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(MACOS_RELAUNCH_SCRIPT)
+        // `sh -c` assigns the argument after the script to `$0`, so the process
+        // id is `$1` and the bundle is `$2`, in that order below.
+        .arg("ekubo-wallet-relaunch")
+        .arg(std::process::id().to_string())
+        .arg(application);
     command
 }
 
 #[cfg(target_os = "macos")]
 fn relaunch_macos_application(application: &Path) -> anyhow::Result<()> {
-    let status = macos_relaunch_command(application)
-        .status()
-        .context("could not run macOS LaunchServices")?;
-    anyhow::ensure!(
-        status.success(),
-        "macOS LaunchServices rejected the relaunch with {status}"
-    );
+    // Spawned and never awaited. The helper's whole job is to wait for this
+    // process to exit, so waiting on it here would hang both of them until the
+    // helper's own timeout fired. It is reparented to launchd when this
+    // process goes, which is exactly the moment it is waiting for.
+    macos_relaunch_command(application)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("could not start the macOS relaunch helper")?;
     Ok(())
 }
 
