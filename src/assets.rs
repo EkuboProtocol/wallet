@@ -3,6 +3,7 @@ use std::borrow::Cow;
 
 pub const PENCIL_ICON: &str = "icons/wallet-pencil.svg";
 pub const TRASH_ICON: &str = "icons/wallet-trash.svg";
+pub const REFRESH_ICON: &str = "icons/wallet-refresh.svg";
 
 /// Application assets layered over gpui-component's bundled icon set.
 pub struct WalletAssets(gpui_component_assets::Assets);
@@ -22,6 +23,9 @@ impl AssetSource for WalletAssets {
             TRASH_ICON => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/wallet-trash.svg"
             )))),
+            REFRESH_ICON => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/wallet-refresh.svg"
+            )))),
             _ => self.0.load(path),
         }
     }
@@ -29,7 +33,7 @@ impl AssetSource for WalletAssets {
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
         let mut assets = self.0.list(path)?;
         assets.extend(
-            [PENCIL_ICON, TRASH_ICON]
+            [PENCIL_ICON, TRASH_ICON, REFRESH_ICON]
                 .into_iter()
                 .filter(|asset| asset.starts_with(path))
                 .map(SharedString::from),

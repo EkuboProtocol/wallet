@@ -893,14 +893,18 @@ impl PolicyStore {
             "policy document exceeds {MAX_POLICY_BYTES} bytes"
         );
         let updated_at = crate::sql::now();
-        let current_revision: Option<i64> = transaction
+        // The standing document comes back with its revision because both
+        // questions are about the same row: what the caller must have read,
+        // and whether what they wrote back differs from it.
+        let current: Option<(i64, String)> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies
+                "SELECT revision, policy_json FROM wallet_policies
                  WHERE wallet_instance_id = ?1 ORDER BY revision DESC LIMIT 1",
                 [wallet_instance_id.to_string()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        let current_revision = current.as_ref().map(|(revision, _)| *revision);
         let expected_revision = expected_revision
             .map(i64::try_from)
             .transpose()
@@ -909,6 +913,29 @@ impl PolicyStore {
             current_revision == expected_revision,
             "policy revision conflict: expected {expected_revision:?}, found {current_revision:?}"
         );
+        // A revision that says exactly what the revision before it says is not
+        // a change, and installing one is not a harmless no-op: the write
+        // cancels every transaction awaiting approval under the old revision.
+        // So an install that changes nothing still takes back everything the
+        // owner had queued, which is the opposite of what pressing install on
+        // an unedited draft looks like it does. Refused after the revision
+        // check, so a stale writer is told it is stale rather than told its
+        // policy is identical to one it never read.
+        //
+        // Compared as parsed documents rather than as stored text: an older
+        // build may have written the same policy with its fields in another
+        // order, and that is not a change either. A stored document that no
+        // longer parses is not comparable, and replacing it is a real change.
+        if let Some(installed) = current
+            .as_ref()
+            .and_then(|(_, json)| serde_json::from_str(json).ok())
+            .and_then(|value| WalletPolicy::parse(value).ok())
+        {
+            ensure!(
+                policy != installed,
+                "this policy is identical to the installed one, so there is nothing to install"
+            );
+        }
         let revision = current_revision.map_or(1, |value| value + 1);
         transaction.execute(
             "INSERT INTO wallet_policies(
@@ -973,9 +1000,9 @@ impl PolicyStore {
         );
         let source = i64::try_from(source_revision).context("source revision is too large")?;
         let transaction = self.connection.transaction()?;
-        let current: Option<i64> = transaction
+        let active: Option<(i64, String)> = transaction
             .query_row(
-                "SELECT policies.revision FROM wallet_policies AS policies
+                "SELECT policies.revision, policies.policy_json FROM wallet_policies AS policies
                  INNER JOIN wallet_instances AS instances
                     ON instances.instance_id = policies.wallet_instance_id
                  WHERE policies.wallet_instance_id = ?1
@@ -988,14 +1015,32 @@ impl PolicyStore {
                     wallet_id,
                     format!("{wallet_address:#x}")
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        let current = active.as_ref().map(|(revision, _)| *revision);
         ensure!(
             current == Some(source),
             "the proposal references policy revision {source_revision}, but the active revision \
              is {current:?}; read the current policy with wallet_get_policy and propose again"
         );
+        // Installing an identical policy is refused, so recording a proposal
+        // for one would put a request in front of the owner that cannot be
+        // granted: they would read it, authenticate, and only then be told
+        // there was never a change in it. Refused here, where the proposer is
+        // still holding it and can be told why.
+        if let Some(installed) = active
+            .as_ref()
+            .and_then(|(_, json)| serde_json::from_str(json).ok())
+            .and_then(|value| WalletPolicy::parse(value).ok())
+        {
+            ensure!(
+                policy != installed,
+                "the proposed policy is identical to the active policy at revision \
+                 {source_revision}, so there is nothing for the user to review; propose a policy \
+                 that differs from the current one, or propose nothing"
+            );
+        }
         let created_at = crate::sql::now();
         transaction.execute(
             "INSERT INTO policy_proposals(

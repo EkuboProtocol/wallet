@@ -686,10 +686,21 @@ fn stores_only_current_policy_with_optimistic_revision() {
         .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     assert_eq!(first.revision, 1);
-    assert!(store.put("primary", &first.policy, None).is_err());
-    let second = store
+    let next = WalletPolicy::require_approval_for_everything();
+    // A write that did not read the revision it is replacing is refused.
+    assert!(store.put("primary", &next, None).is_err());
+    // So is one that replaces a revision with itself: a policy identical to
+    // the installed one is not a change, and storing it as one would cancel
+    // every transaction awaiting approval under the revision it repeats.
+    let identical = store
         .put("primary", &first.policy, Some(first.revision))
-        .unwrap();
+        .unwrap_err()
+        .to_string();
+    assert!(
+        identical.contains("identical to the installed one"),
+        "{identical}"
+    );
+    let second = store.put("primary", &next, Some(first.revision)).unwrap();
     assert_eq!(second.revision, 2);
     assert_eq!(store.get("primary").unwrap().unwrap(), second);
     assert_eq!(
@@ -749,7 +760,7 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
         .put_proposal(
             "primary",
             active.revision,
-            &WalletPolicy::require_approval_for_everything(),
+            &WalletPolicy::deny_all(),
             "narrower follow-up proposal",
         )
         .unwrap();
@@ -801,7 +812,7 @@ fn a_proposal_replaced_during_review_is_refused_not_discarded() {
         .put_proposal(
             "primary",
             active.revision,
-            &WalletPolicy::require_approval_for_everything(),
+            &WalletPolicy::deny_all(),
             "arrived while the screen was up",
         )
         .unwrap();
@@ -820,6 +831,144 @@ fn a_proposal_replaced_during_review_is_refused_not_discarded() {
     let applied = store.consume_proposal(&pending).unwrap();
     assert_eq!(applied.revision, active.revision + 1);
     assert!(store.proposal("primary").unwrap().is_none());
+}
+
+#[test]
+fn a_policy_that_changes_nothing_is_not_installed() {
+    // Installing is not free of consequence, so "no change" is not "no harm":
+    // the write cancels every transaction awaiting approval under the old
+    // revision. An install that changes nothing would take back everything the
+    // owner had queued and leave the permissions exactly as they were.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let mut store = PolicyStore::open(&path, &key(43)).unwrap();
+    let address = Address::repeat_byte(0x33);
+    let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
+        id: "primary".into(),
+        address,
+        created_at: Utc::now(),
+        source: crate::config::WalletSource::Imported,
+        exported_at: None,
+    };
+    // The first policy a wallet gets has nothing to be identical to, so the
+    // fail-closed baseline still installs on an empty history.
+    let installed = store
+        .initialize_policy(&wallet, &WalletPolicy::require_approval_for_everything())
+        .unwrap();
+    assert_eq!(installed.revision, 1);
+
+    let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::PolicySettings);
+    let error = store
+        .install_policy(
+            "primary",
+            address,
+            &WalletPolicy::require_approval_for_everything(),
+            Some(1),
+            Some(&authorization),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("identical to the installed one"), "{error}");
+    // Refused before it was written, not after: the revision did not move.
+    assert_eq!(store.get("primary").unwrap().unwrap().revision, 1);
+
+    // Stored text is not what is compared. A build that wrote this policy with
+    // its fields in another order wrote the same policy, and replacing it with
+    // itself is still nothing to install -- so the stored row is respelled
+    // here, and the answer must not move.
+    let canonical = serde_json::to_value(WalletPolicy::require_approval_for_everything()).unwrap();
+    let rules = serde_json::to_string(&canonical["rules"]).unwrap();
+    let respelled = format!("{{\"rules\":{rules},\"version\":1}}");
+    assert_ne!(respelled, serde_json::to_string(&canonical).unwrap());
+    store
+        .connection
+        .execute(
+            "UPDATE wallet_policies SET policy_json = ?1
+             WHERE wallet_instance_id = ?2 AND revision = 1",
+            params![respelled, wallet.instance_id.to_string()],
+        )
+        .unwrap();
+    let error = store
+        .install_policy(
+            "primary",
+            address,
+            &WalletPolicy::require_approval_for_everything(),
+            Some(1),
+            Some(&authorization),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("identical to the installed one"), "{error}");
+
+    // A policy that does differ installs, and then its predecessor is the one
+    // that can no longer be re-installed as itself.
+    let widened = store
+        .install_policy(
+            "primary",
+            address,
+            &WalletPolicy::allow_anything(),
+            Some(1),
+            Some(&authorization),
+        )
+        .unwrap();
+    assert_eq!(widened.revision, 2);
+    assert!(
+        store
+            .install_policy(
+                "primary",
+                address,
+                &WalletPolicy::allow_anything(),
+                Some(2),
+                Some(&authorization),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn a_proposal_that_changes_nothing_is_refused_where_the_agent_can_still_read_why() {
+    // Installing an identical policy is refused, so recording a proposal for
+    // one would put a request in front of the owner that cannot be granted:
+    // they would read it, authenticate, and only then be told there was never
+    // a change in it. The proposer hears about it instead, while it is still
+    // theirs to fix.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let mut store = PolicyStore::open(&path, &key(44)).unwrap();
+    let active = store
+        .put(
+            "primary",
+            &WalletPolicy::require_approval_for_everything(),
+            None,
+        )
+        .unwrap();
+
+    let error = store
+        .put_proposal(
+            "primary",
+            active.revision,
+            &WalletPolicy::require_approval_for_everything(),
+            "no change at all",
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("identical to the active policy"), "{error}");
+    // Phrased for the agent that has to do something about it.
+    assert!(error.contains("propose a policy"), "{error}");
+    // Nothing was stored, so nothing is waiting for the owner to review.
+    assert!(store.proposal("primary").unwrap().is_none());
+
+    // A proposal that does change something is recorded as before.
+    store
+        .put_proposal(
+            "primary",
+            active.revision,
+            &WalletPolicy::allow_anything(),
+            "widen for the rebalance",
+        )
+        .unwrap();
+    assert!(store.proposal("primary").unwrap().is_some());
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::{
     BUILD_VERSION,
     agent_config::AgentAdapter,
-    assets::{PENCIL_ICON, WalletAssets},
+    assets::{PENCIL_ICON, REFRESH_ICON, WalletAssets},
     authority::{
         ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerApi,
         OwnerPortfolioAccount, OwnerPortfolioSnapshot, OwnerReviewQueues,
@@ -649,33 +649,6 @@ fn policy_proposal_for_account<'a>(
     proposals
         .iter()
         .find(|proposal| proposal.wallet_id == editor_wallet_id)
-}
-
-/// How much of an agent's rationale the policy rail shows.
-const POLICY_RATIONALE_EXCERPT_CHARS: usize = 160;
-
-/// The rail's one-paragraph opening of `rationale`, and whether it was cut.
-///
-/// The rail is 264 pixels wide and agents argue for their policy changes at
-/// length. Printed whole it became a column of two-word lines that pushed
-/// Review changes and Reject proposal below the fold, so the buttons for a
-/// proposal were reachable only by scrolling past the case for it — the same
-/// reason the change summary next to it is a count and not the changes. The
-/// rail gets enough to tell one proposal from another; the review screen,
-/// which is where the decision is actually made, prints all of it at a width
-/// meant for reading. Line breaks collapse because a rationale written as ten
-/// short lines is as tall as a long one here.
-fn policy_rationale_excerpt(rationale: &str) -> (String, bool) {
-    let collapsed = rationale.split_whitespace().collect::<Vec<_>>().join(" ");
-    let Some((cut, _)) = collapsed.char_indices().nth(POLICY_RATIONALE_EXCERPT_CHARS) else {
-        return (collapsed, false);
-    };
-    let head = collapsed[..cut].trim_end();
-    // Cutting mid-word reads as a rendering fault rather than as an excerpt.
-    // A first word longer than the whole budget has no space to fall back to,
-    // so it is cut where it is.
-    let head = head.rfind(' ').map_or(head, |space| &head[..space]);
-    (format!("{head}…"), true)
 }
 
 /// Balance rows that have not arrived yet, drawn in the card and at the row
@@ -8427,6 +8400,17 @@ impl WalletWindow {
             cx.notify();
             return;
         }
+        // The review screen takes this press away for an unchanged draft, so
+        // reaching here means the draft or the installed policy moved under
+        // it. Said here as well because the store's refusal arrives only after
+        // the owner has authenticated for a change that was never in the
+        // draft.
+        if editor.current_policy.as_ref() == Some(&review.policy) {
+            self.policy_action_error =
+                Some("This draft is the installed policy. There is nothing to install.".into());
+            cx.notify();
+            return;
+        }
         let review = review.clone();
         let proposal = editor.proposal.clone();
         let owner = self.owner.clone();
@@ -8777,7 +8761,7 @@ impl WalletWindow {
     ///
     /// This is the tab-open path, which is a navigation rather than a request
     /// for fresh data — so it defers to [`PORTFOLIO_REFRESH_INTERVAL`] where
-    /// the header's Refresh button, being an explicit ask, does not.
+    /// the footer's refresh control, being an explicit ask, does not.
     fn refresh_portfolio_if_stale(&mut self, cx: &mut Context<Self>) {
         // A reading from the future means the clock moved under us, which says
         // nothing about the balances. Comparing the signed difference keeps
@@ -13151,29 +13135,39 @@ impl WalletWindow {
             // pressed and at no other time: the wallet never polls it, and it
             // never announces itself to a page.
             .child(
-                app_button("paste-walletconnect-uri")
-                    .debug_selector(|| "paste-walletconnect-uri".to_owned())
-                    .self_start()
-                    .label("Paste link & connect")
-                    .primary()
-                    .disabled(account_unavailable || connecting.is_some())
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.connect_walletconnect_from_clipboard(cx);
-                    })),
-            )
-            // A pairing that is not drawn in the list below has no Disconnect
-            // button of its own, and a dapp that never proposes would
-            // otherwise leave the wallet waiting with no way out but quitting.
-            .when_some(connecting, |panel, session_id| {
-                panel.child(
-                    app_button("cancel-walletconnect")
-                        .self_start()
-                        .label("Cancel")
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.disconnect_walletconnect(session_id, cx);
-                        })),
-                )
-            });
+                // Cancel stands beside the press it undoes rather than under
+                // it. Stacked, it read as the next step in the connect flow;
+                // in the row it reads as the other answer to the pairing this
+                // button just opened.
+                h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        app_button("paste-walletconnect-uri")
+                            .debug_selector(|| "paste-walletconnect-uri".to_owned())
+                            .label("Paste link & connect")
+                            .primary()
+                            .disabled(account_unavailable || connecting.is_some())
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.connect_walletconnect_from_clipboard(cx);
+                            })),
+                    )
+                    // A pairing that is not drawn in the list below has no
+                    // Disconnect button of its own, and a dapp that never
+                    // proposes would otherwise leave the wallet waiting with
+                    // no way out but quitting.
+                    .when_some(connecting, |row, session_id| {
+                        row.child(
+                            app_button("cancel-walletconnect")
+                                .debug_selector(|| "cancel-walletconnect".to_owned())
+                                .label("Cancel")
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.disconnect_walletconnect(session_id, cx);
+                                })),
+                        )
+                    }),
+            );
         if connecting.is_some() {
             panel = panel.child(
                 div()
@@ -15033,7 +15027,8 @@ impl WalletWindow {
     }
 
     /// The two facts that belong under the list, on one line: why a token you
-    /// hold might not be in it, and how old the numbers in it are.
+    /// hold might not be in it, and how old the numbers in it are — with the
+    /// way to ask for newer ones next to the age it would replace.
     ///
     /// One line rather than two stacked ones, because they are read together
     /// and each is short — and because the tab's bottom edge is fixed now, so
@@ -15225,31 +15220,63 @@ impl WalletWindow {
             )
     }
 
-    /// How old the balances on screen are, as the last line of the tab.
+    /// How old the balances on screen are, and the way to ask for newer ones,
+    /// as the last line of the tab.
     ///
     /// Rendered in every state that has a reading behind it, not only the
     /// one showing balances: while a refresh is in flight the age of what is
     /// still on screen is the more useful fact, and after a failure it is the
-    /// only one. `None` until this account has been read once, when there is
-    /// no age to report.
-    fn portfolio_refreshed_note(&self, cx: &App) -> Option<gpui::Div> {
-        let refreshed_at = self.focused_portfolio_refreshed_at()?;
+    /// only one. The age is dropped until this account has been read once,
+    /// when there is none to report; the control stays, because a first read
+    /// that failed is exactly when asking again is worth doing. `None` only
+    /// where there is no account, and so no balances to refresh.
+    fn portfolio_refreshed_note(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        // No account is no balances to refresh, and the page below is asking
+        // for one instead of showing them.
+        self.selected_portfolio_account()?;
+        let refreshed_at = self.focused_portfolio_refreshed_at();
+        let loading = matches!(self.portfolio, PortfolioState::Loading);
+        let no_networks = self
+            .cached_networks()
+            .unwrap_or_default()
+            .iter()
+            .all(|network| network.disabled || (network.testnet && !self.testnet_mode));
         Some(
-            div()
+            h_flex()
                 .debug_selector(|| "portfolio-refreshed-at".to_owned())
                 // Right of the footer line, opposite the note about which
                 // balances are listed: two short facts about the same list,
                 // read together on one line instead of stacked under it.
                 .flex_none()
-                .text_right()
+                .items_center()
+                .gap_1()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(selectable_text(
-                    "portfolio-refreshed-at-text",
-                    &format!(
-                        "Refreshed {}",
-                        relative_time_label(refreshed_at, chrono::Utc::now())
-                    ),
+                // Absent until the first read lands. The control beside it is
+                // not, because a first read that failed is exactly when
+                // asking again is worth doing.
+                .children(refreshed_at.map(|refreshed_at| {
+                    selectable_text(
+                        "portfolio-refreshed-at-text",
+                        &format!(
+                            "Refreshed {}",
+                            relative_time_label(refreshed_at, chrono::Utc::now())
+                        ),
+                    )
+                }))
+                .child(accessible_button(
+                    app_button("refresh-portfolio")
+                        .debug_selector(|| "refresh-portfolio".to_owned())
+                        .icon(Icon::default().path(REFRESH_ICON))
+                        .ghost()
+                        .h(px(22.0))
+                        .px_1()
+                        .tooltip("Refresh balances")
+                        .disabled(loading || no_networks)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.refresh_portfolio(cx);
+                        })),
+                    "Refresh balances",
                 )),
         )
     }
@@ -16666,40 +16693,13 @@ impl WalletWindow {
             .into_any_element()
     }
 
-    /// Page-level actions belong in the fixed header, not in the scrolling
-    /// body: a refresh control that scrolls away is a control you cannot find
-    /// while looking at what you wanted to refresh.
+    /// Page-level actions belong somewhere fixed rather than in the scrolling
+    /// body: a control that scrolls away is a control you cannot find while
+    /// looking at what you wanted it for. The header is where that is true of
+    /// the page as a whole; a control that belongs to one line of the page
+    /// goes on that line instead, so long as the line itself does not scroll.
     fn route_header_actions(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
         match self.route {
-            Route::Overview => {
-                // With no account there is nothing to refresh, and the page
-                // below is asking for one instead of showing balances. This
-                // reads the same fact `render_portfolio` does, so the header
-                // and the empty panel cannot disagree.
-                if self
-                    .cached_accounts()
-                    .is_ok_and(<[WalletMetadata]>::is_empty)
-                {
-                    return None;
-                }
-                let loading = matches!(self.portfolio, PortfolioState::Loading);
-                let no_networks = self
-                    .cached_networks()
-                    .unwrap_or_default()
-                    .iter()
-                    .all(|network| network.disabled || (network.testnet && !self.testnet_mode));
-                Some(
-                    div().flex_none().child(
-                        app_button("refresh-portfolio")
-                            .debug_selector(|| "refresh-portfolio".to_owned())
-                            .label(if loading { "Refreshing…" } else { "Refresh" })
-                            .disabled(loading || no_networks)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.refresh_portfolio(cx);
-                            })),
-                    ),
-                )
-            }
             Route::Networks => Some(
                 div()
                     .debug_selector(|| "network-header-action".to_owned())
@@ -16859,6 +16859,11 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let rows = policy_diff_rows(&review.diff);
+        // A draft equal to the installed policy is not a change to install.
+        // The store refuses it, and it refuses it after the authentication
+        // prompt, so the press has to be gone before it is made rather than
+        // answered with an error afterwards.
+        let unchanged = editor.current_policy.as_ref() == Some(&review.policy);
         let revision = review.source_revision.map_or_else(
             || "no installed policy".to_owned(),
             |r| format!("revision {r}"),
@@ -16946,25 +16951,10 @@ impl WalletWindow {
                             .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().border)
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_semibold()
-                                    .child("Why the agent proposed this"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .whitespace_normal()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_text(
-                                        "policy-review-rationale-text",
-                                        &rationale,
-                                    )),
-                            ),
+                            .text_sm()
+                            .whitespace_normal()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_text("policy-review-rationale-text", &rationale)),
                     )
                 },
             )
@@ -17077,9 +17067,11 @@ impl WalletWindow {
                             .text_sm()
                             .whitespace_normal()
                             .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label(
-                                "Installing asks for your authentication first.",
-                            )),
+                            .child(selectable_label(if unchanged {
+                                "This draft is the installed policy. There is nothing to install."
+                            } else {
+                                "Installing asks for your authentication first."
+                            })),
                     )
                     .child(
                         app_button("install-policy-draft-full-screen")
@@ -17091,7 +17083,7 @@ impl WalletWindow {
                             })
                             .primary()
                             .loading(self.policy_installing)
-                            .disabled(self.policy_installing)
+                            .disabled(self.policy_installing || unchanged)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.install_policy_editor(cx);
                             })),
@@ -17226,9 +17218,6 @@ impl WalletWindow {
                     .is_some_and(|policy| policy.revision == proposal.source_revision);
                 let review_proposal = proposal.clone();
                 let reject_proposal = proposal.clone();
-                let (rationale_excerpt, rationale_shortened) = policy_rationale_excerpt(
-                    &ekubo_wallet_core::sanitize::terminal_safe_multiline(&proposal.rationale),
-                );
                 Some(
                     GroupBox::new()
                         .id("policy-full-screen-proposal")
@@ -17238,25 +17227,6 @@ impl WalletWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(div().text_sm().whitespace_normal().child(selectable_text(
-                                    format!(
-                                        "policy-full-screen-proposal-rationale-{}",
-                                        proposal.wallet_id
-                                    ),
-                                    &rationale_excerpt,
-                                )))
-                                .when(rationale_shortened, |card| {
-                                    card.child(
-                                        div()
-                                            .text_sm()
-                                            .whitespace_normal()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(selectable_label(
-                                                "Review changes has the rest of the agent's \
-                                                 reasoning.",
-                                            )),
-                                    )
-                                })
                                 .when(!applicable && current_error.is_none(), |card| {
                                     card.child(
                                         div().text_sm().text_color(cx.theme().danger).child(
@@ -17304,7 +17274,6 @@ impl WalletWindow {
                                         .child(
                                             app_button("reject-policy-proposal-full-screen")
                                                 .label("Reject proposal")
-                                                .danger()
                                                 .on_click(cx.listener(move |view, _, _, cx| {
                                                     view.reject_policy_proposal(
                                                         &reject_proposal,

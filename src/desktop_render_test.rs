@@ -980,7 +980,9 @@ fn add_network_is_part_of_the_fixed_header(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn portfolio_refresh_uses_the_button_label_without_a_second_spinner(cx: &mut gpui::TestAppContext) {
+fn portfolio_refresh_sits_with_the_refreshed_line_and_not_in_the_header(
+    cx: &mut gpui::TestAppContext,
+) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
     cx.update_entity(&view, |wallet, _| {
@@ -1003,15 +1005,33 @@ fn portfolio_refresh_uses_the_button_label_without_a_second_spinner(cx: &mut gpu
         cx,
         window,
         &view,
-        &["refresh-portfolio", "route-header-loading"],
+        &[
+            "refresh-portfolio",
+            "route-header-loading",
+            "portfolio-footer",
+            "portfolio-refreshed-at",
+        ],
     );
-    assert!(
-        overview[0].is_some(),
-        "the disabled Refreshing… button must remain in the portfolio header"
-    );
+    // No balances have been read yet, so there is no age to print -- and this
+    // is exactly when asking again is worth doing, so the control is here
+    // whether or not the line beside it has anything to say.
+    let refresh = overview[0].expect("the refresh control must draw");
     assert!(
         overview[1].is_none(),
         "the portfolio header must not add a redundant loading spinner"
+    );
+    let footer = overview[2].expect("the footer must draw");
+    let refreshed = overview[3].expect("the refreshed line must draw");
+    assert!(
+        refresh.origin.y >= footer.origin.y - px(1.0)
+            && refresh.bottom() <= footer.bottom() + px(1.0),
+        "refresh belongs on the footer line, next to the age it would replace: it drew at \
+         {refresh:?} against a footer of {footer:?}"
+    );
+    assert!(
+        refresh.origin.x >= refreshed.origin.x - px(1.0)
+            && refresh.right() <= refreshed.right() + px(1.0),
+        "refresh belongs inside the refreshed line rather than beside it"
     );
 
     release(cx, &view);

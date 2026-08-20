@@ -5,7 +5,14 @@ fn wallet_assets_include_editing_icons_and_component_icons() {
     let assets = WalletAssets::default();
     assert!(assets.load(PENCIL_ICON).unwrap().is_some());
     assert!(assets.load(TRASH_ICON).unwrap().is_some());
+    assert!(assets.load(REFRESH_ICON).unwrap().is_some());
     assert!(assets.load("icons/inbox.svg").unwrap().is_some());
+    // Listing is what the icon set is discovered through, so an icon that
+    // loads but is not listed is only half added.
+    let listed = assets.list("icons/").unwrap();
+    for icon in [PENCIL_ICON, TRASH_ICON, REFRESH_ICON] {
+        assert!(listed.iter().any(|asset| asset.as_ref() == icon), "{icon}");
+    }
 }
 
 #[test]

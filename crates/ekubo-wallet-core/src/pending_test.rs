@@ -49,6 +49,24 @@ fn store() -> (tempfile::TempDir, PendingStore) {
     (directory, PendingStore::new(database))
 }
 
+/// The standing policy under a different label: the same permissions, so what
+/// the wallet will sign does not move, but a different document, so installing
+/// it does move the revision.
+///
+/// These tests are about what a revision move does to transactions already in
+/// flight, and the store refuses to install a policy identical to the one it
+/// already holds — a write that changes nothing cannot be the way to bump a
+/// revision, because that write cancels everything awaiting approval.
+fn relabelled(policy: &WalletPolicy) -> WalletPolicy {
+    let mut policy = policy.clone();
+    policy
+        .rules
+        .first_mut()
+        .expect("the fixture policy has a rule")
+        .label = Some("Every transaction call, restated".into());
+    policy
+}
+
 #[test]
 fn persists_exact_plan_and_lifecycle_without_spend_state() {
     let (_directory, mut store) = store();
@@ -429,7 +447,7 @@ fn ambiguous_broadcast_can_only_reclaim_the_same_signed_bytes() {
         .put_for_wallet(
             "primary",
             plan().sender,
-            &current.policy,
+            &relabelled(&current.policy),
             Some(current.revision),
         )
         .unwrap();
@@ -860,7 +878,7 @@ fn policy_change_cancels_signed_transaction_before_submission() {
         .put_for_wallet(
             "primary",
             plan().sender,
-            &current.policy,
+            &relabelled(&current.policy),
             Some(current.revision),
         )
         .unwrap();
@@ -908,7 +926,7 @@ fn policy_change_preserves_a_claimed_submission_for_hash_reconciliation() {
         .put_for_wallet(
             "primary",
             plan().sender,
-            &current.policy,
+            &relabelled(&current.policy),
             Some(current.revision),
         )
         .unwrap();
@@ -994,7 +1012,7 @@ fn policy_change_replaces_stale_duplicate_approval_request() {
         .put_for_wallet(
             "primary",
             plan().sender,
-            &current.policy,
+            &relabelled(&current.policy),
             Some(current.revision),
         )
         .unwrap();

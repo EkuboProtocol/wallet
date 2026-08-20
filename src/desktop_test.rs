@@ -2814,50 +2814,78 @@ fn the_clipboard_is_read_on_a_press_and_never_on_a_keystroke() {
     assert!(source.contains(r#"app_button("paste-walletconnect-uri")"#));
     assert!(!source.contains("walletconnect_uri_input"));
     assert!(!source.contains(r#"app_button("connect-walletconnect")"#));
+
+    // Cancel is the other answer to the pairing this button opened, so it
+    // stands beside it. Under it, the two read as consecutive steps.
+    let row_source = source
+        .split_once("// Cancel stands beside the press it undoes")
+        .expect("the connect panel explains its row")
+        .1
+        .split_once("h_flex()")
+        .expect("the row opens with a flex row")
+        .1;
+    let row_source = format!("h_flex(){row_source}");
+    let row_source = row_source
+        .split_once("\n            );")
+        .expect("the row ends with the panel's child")
+        .0
+        .to_owned();
+    let row_source = row_source.as_str();
+    assert!(row_source.contains(r#"app_button("cancel-walletconnect")"#));
+    // One row holding both, paste first: `h_flex` opens it, and the cancel
+    // button is inside it rather than in a child of the column below.
+    let paste_at = row_source
+        .find(r#"app_button("paste-walletconnect-uri")"#)
+        .expect("the row pastes a link");
+    let cancel_at = row_source
+        .find(r#"app_button("cancel-walletconnect")"#)
+        .expect("the row can cancel");
+    assert!(row_source.starts_with("h_flex()"), "{row_source}");
+    assert!(
+        paste_at < cancel_at,
+        "cancel comes after the press it undoes"
+    );
+
+    // Neither button pins itself to the start of a column any more: they are
+    // laid out by the row.
+    assert!(!row_source[..cancel_at].contains(".self_start()"));
 }
 
 #[test]
-fn the_policy_rail_shows_an_opening_of_a_rationale_and_not_all_of_it() {
-    // Short enough to read in the rail: printed as authored.
-    let short = "Allows the daily rebalance to swap USDC for WETH under 1 ETH.";
-    assert_eq!(
-        policy_rationale_excerpt(short),
-        (short.to_owned(), false),
-        "a rationale that already fits is not cut"
+fn a_draft_that_matches_the_installed_policy_cannot_be_installed() {
+    let source = include_str!("desktop.rs");
+
+    // The store refuses an identical policy, and it refuses it after the
+    // owner has authenticated. So the press is gone before it is made: the
+    // review screen disables install and says why in the line beside it.
+    let review = source
+        .split_once("fn render_policy_review")
+        .expect("the policy review renders")
+        .1
+        .split_once("fn render_policy_editor")
+        .expect("the policy review has an end marker")
+        .0;
+    assert!(
+        review.contains("let unchanged = editor.current_policy.as_ref() == Some(&review.policy);")
     );
+    assert!(review.contains(".disabled(self.policy_installing || unchanged)"));
+    assert!(review.contains("There is nothing to install."));
 
-    // A rationale written as many short lines is as tall as a long one in a
-    // 264-pixel column, so the excerpt is one paragraph either way.
-    assert_eq!(
-        policy_rationale_excerpt("first\nsecond\n\n  third  "),
-        ("first second third".to_owned(), false)
-    );
-
-    let long = "word ".repeat(200);
-    let (excerpt, shortened) = policy_rationale_excerpt(&long);
-    assert!(shortened);
-    assert!(excerpt.chars().count() <= POLICY_RATIONALE_EXCERPT_CHARS + 1);
-    assert!(excerpt.ends_with('…'));
-    // Cut at a word, not through one.
-    assert!(excerpt.trim_end_matches('…').ends_with("word"));
-    assert!(long.starts_with(excerpt.trim_end_matches('…')));
-
-    // A single word longer than the whole budget has no space to fall back
-    // to. It is cut where it is rather than swallowing the excerpt.
-    let unbroken = "x".repeat(400);
-    let (excerpt, shortened) = policy_rationale_excerpt(&unbroken);
-    assert!(shortened);
-    assert_eq!(excerpt.chars().count(), POLICY_RATIONALE_EXCERPT_CHARS + 1);
-
-    // Multi-byte text is cut on a character boundary, not a byte one.
-    let emoji = "🦀 ".repeat(200);
-    let (excerpt, shortened) = policy_rationale_excerpt(&emoji);
-    assert!(shortened);
-    assert!(emoji.starts_with(excerpt.trim_end_matches('…')));
+    // And the installer says it too, for the case where the draft or the
+    // installed policy moved under an open review screen.
+    let install = source
+        .split_once("fn install_policy_editor")
+        .expect("the editor installs")
+        .1
+        .split_once("\n    fn ")
+        .expect("the installer has an end marker")
+        .0;
+    assert!(install.contains("editor.current_policy.as_ref() == Some(&review.policy)"));
+    assert!(install.contains("There is nothing to install."));
 }
 
 #[test]
-fn the_agent_rationale_is_read_on_the_review_screen_and_excerpted_in_the_rail() {
+fn the_agent_rationale_is_read_on_the_review_screen_and_not_in_the_rail() {
     let source = include_str!("desktop.rs");
     let editor = source
         .split_once("fn render_policy_editor")
@@ -2867,12 +2895,29 @@ fn the_agent_rationale_is_read_on_the_review_screen_and_excerpted_in_the_rail() 
         .expect("the policy editor has an end marker")
         .0;
 
-    // The rail draws the excerpt. Drawing the whole sanitized rationale into
-    // a 264-pixel column is what pushed the buttons for a proposal below the
-    // case for it.
-    assert!(editor.contains("policy_rationale_excerpt("));
-    assert!(editor.contains("&rationale_excerpt,"));
-    assert!(!editor.contains("terminal_safe_multiline(\n                            &proposal"));
+    // The rail says a proposal is waiting and offers the two answers to it.
+    // It does not argue the case: an excerpt at 264 pixels is a paragraph of
+    // two-word lines that says less than the review screen does and still
+    // costs the height of one.
+    assert!(!editor.contains("policy_rationale_excerpt("));
+    assert!(!editor.contains("rationale_excerpt"));
+    assert!(!editor.contains("Review changes has the rest of the agent's"));
+    assert!(!editor.contains("terminal_safe_multiline"));
+    assert!(editor.contains(r#".title("Agent proposal")"#));
+    assert!(editor.contains(r#"app_button("review-policy-proposal-full-screen")"#));
+    assert!(editor.contains(r#"app_button("reject-policy-proposal-full-screen")"#));
+
+    // Rejecting a proposal destroys nothing that was ever in force, so it is
+    // not dressed as the dangerous half of the pair. The half that changes
+    // what the wallet will sign is the other one.
+    let reject = editor
+        .split_once(r#"app_button("reject-policy-proposal-full-screen")"#)
+        .expect("the rail can reject a proposal")
+        .1
+        .split_once("on_click")
+        .expect("the reject button handles a press")
+        .0;
+    assert!(!reject.contains(".danger()"));
 
     // One button, no box around it, and no paragraph explaining a button
     // whose label already says what it does.
@@ -2897,6 +2942,9 @@ fn the_agent_rationale_is_read_on_the_review_screen_and_excerpted_in_the_rail() 
     // installing happens.
     assert!(review.contains("terminal_safe_multiline(&proposal.rationale)"));
     assert!(review.contains(r#""policy-review-rationale""#));
+    // Unheaded. The box holds the only prose on a screen of diff rows, and
+    // the screen already names the account the agent proposed against.
+    assert!(!review.contains("Why the agent proposed this"));
     // Bounded, so a long one scrolls in place instead of pushing the diff
     // off the screen.
     assert!(review.contains("max_h(px(180.0))"));
