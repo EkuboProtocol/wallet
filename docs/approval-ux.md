@@ -10,6 +10,16 @@ Closing a review records no decision. Refreshing always selects Reject again; a
 changed document identity also returns scroll to the beginning and clears the
 viewed-to-end bit. Generation numbers make events from a replaced view stale.
 
+A dapp connection is the one review that asks the owner a question inside the
+document — which account to expose — and it answers with a different document
+per account. Answering it keeps the scroll position and the viewed-to-end bit,
+provided the rows come out identical to the ones already on screen; the
+documents differ only in the account they name, so nothing carried over was
+read against text that changed. Rows that differ fall back to the general rule
+above. The generation still advances on every answer, so clicks rendered from
+the previous document remain stale. The choice starts unmade and the account
+chooser is the first thing under the summary, because it gates approval.
+
 Selecting Approve invokes platform owner authentication. After authentication,
 the authority reloads the request and policy, verifies the review identity and
 digest, and only then signs. Cancelling authentication leaves the request

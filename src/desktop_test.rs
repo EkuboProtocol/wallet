@@ -2149,6 +2149,147 @@ fn a_dapp_connection_cannot_be_approved_before_an_account_is_chosen() {
     assert!(review_selection_is_complete(None));
 }
 
+/// A connection document naming `account`, or naming nobody yet.
+fn connection_document(account: Option<&str>, warnings: &[&str]) -> ReviewDocument {
+    let mut request = ekubo_wallet_core::approval::ApprovalRequest::new(
+        ekubo_wallet_core::approval::ApprovalKind::PolicyException,
+        "Approve a dapp connection",
+        "Expose one of your accounts to the dapp.",
+    )
+    .fact("Site", "dapp.example")
+    .fact("Account", account.unwrap_or("not chosen yet"))
+    .section("Granted chains and methods")
+    .fact("Chain", "eip155:1");
+    for warning in warnings {
+        request = request.warning((*warning).to_owned());
+    }
+    ReviewDocument::from_request(request, Vec::new())
+}
+
+fn connection_review(
+    accounts: &[&str],
+    warnings: &[&str],
+) -> (
+    ActiveReview,
+    oneshot::Receiver<crate::walletconnect::ProposalCommand>,
+) {
+    let (response, receiver) = oneshot::channel();
+    let choices = accounts
+        .iter()
+        .map(|id| crate::walletconnect::ProposalChoice {
+            account: setup_account(id),
+            scope: walletconnect_session::ApprovedScope {
+                address: alloy::primitives::Address::ZERO.to_checksum(None),
+                chains: vec!["eip155:1".to_owned()],
+                methods: vec!["eth_sendTransaction".to_owned()],
+                grants: Vec::new(),
+                events: Vec::new(),
+            },
+            document: connection_document(Some(id), warnings),
+        })
+        .collect();
+    let review = ActiveReview::new(
+        connection_document(None, warnings),
+        None,
+        Some(ActiveReviewCompletion::WalletConnect {
+            choices,
+            selected_account: None,
+            response,
+        }),
+    );
+    (review, receiver)
+}
+
+#[test]
+fn the_account_choice_is_the_first_thing_under_the_connection_summary() {
+    // A reader who has to scroll past the warnings to discover the question
+    // finds the approve button still grey once they get to the bottom, with
+    // no idea that the answer is somewhere above them.
+    let document = connection_document(None, &["Dapp identity metadata is self-asserted."]);
+    let rows = security_review_detail_rows(&document, true);
+    assert_eq!(rows.first(), Some(&SecurityReviewDetailRow::Prelude));
+    assert_eq!(
+        rows.get(1),
+        Some(&SecurityReviewDetailRow::WalletConnectAccounts)
+    );
+    assert!(
+        rows.iter()
+            .position(|row| *row == SecurityReviewDetailRow::WalletConnectAccounts)
+            < rows
+                .iter()
+                .position(|row| *row == SecurityReviewDetailRow::WarningsHeading)
+    );
+
+    // Every other review is unchanged: no chooser, warnings straight after
+    // the effects.
+    let rows = security_review_detail_rows(&document, false);
+    assert!(!rows.contains(&SecurityReviewDetailRow::WalletConnectAccounts));
+    assert_eq!(rows.first(), Some(&SecurityReviewDetailRow::Prelude));
+}
+
+#[test]
+fn choosing_an_account_keeps_the_reading_already_done() {
+    let (mut review, _receiver) =
+        connection_review(&["primary", "spare"], &["Self-asserted metadata."]);
+    let generation = review.state.generation();
+    // The owner scrolled the whole document before noticing the question.
+    review.state.mark_viewed_to_end(generation);
+    review.end_rendered.store(true, Ordering::Release);
+    review.scroll_layout_ready = true;
+    review.scroll_stable_samples = 2;
+    let scroll_state = Arc::clone(&review.end_rendered);
+    assert!(review.state.approve_enabled());
+
+    let ActiveReviewCompletion::WalletConnect { choices, .. } =
+        review.completion.as_ref().expect("a connection completion")
+    else {
+        panic!("a connection review carries connection choices");
+    };
+    let chosen = choices[1].document.clone();
+    review.adopt_answered_document(chosen);
+
+    // Answering the review's own question does not cost a second full read.
+    assert!(review.state.approve_enabled());
+    assert!(review.scroll_layout_ready);
+    assert_eq!(review.scroll_stable_samples, 2);
+    assert!(Arc::ptr_eq(&scroll_state, &review.end_rendered));
+    // A click rendered from the previous document is still stale.
+    assert_ne!(review.state.generation(), generation);
+    assert_eq!(
+        review
+            .state
+            .document()
+            .request
+            .facts
+            .iter()
+            .find_map(|fact| { (fact.label == "Account").then(|| fact.value.clone()) }),
+        Some("spare".to_owned())
+    );
+}
+
+#[test]
+fn a_document_that_is_not_the_same_document_is_read_again_from_the_top() {
+    // The carry-over is only sound because every choice's document is the
+    // same document with a different account named in it. Anything that
+    // changes the rows falls back to the general rule.
+    let (mut review, _receiver) = connection_review(&["primary"], &["Self-asserted metadata."]);
+    let generation = review.state.generation();
+    review.state.mark_viewed_to_end(generation);
+    review.end_rendered.store(true, Ordering::Release);
+    review.scroll_layout_ready = true;
+    let scroll_state = Arc::clone(&review.end_rendered);
+
+    review.adopt_answered_document(connection_document(
+        Some("primary"),
+        &["Self-asserted metadata.", "This dapp asked for more."],
+    ));
+
+    assert!(!review.state.approve_enabled());
+    assert!(!review.scroll_layout_ready);
+    assert!(!Arc::ptr_eq(&scroll_state, &review.end_rendered));
+    assert!(!review.end_rendered.load(Ordering::Acquire));
+}
+
 fn setup_account(id: &str) -> WalletMetadata {
     WalletMetadata {
         instance_id: uuid::Uuid::new_v4(),

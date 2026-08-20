@@ -2949,6 +2949,46 @@ impl ActiveReview {
         self.scroll_last_max = None;
         self.scroll_stable_samples = 0;
     }
+
+    /// Swap in the document for an answer the owner just gave inside this
+    /// review, keeping the reading they have already done.
+    ///
+    /// A dapp connection has one document per account, so choosing an account
+    /// replaces the document. Rebuilding from nothing threw the reader back to
+    /// the top and re-armed the scroll gate, which made answering the review's
+    /// own question cost a second full read — and a third, for anyone who
+    /// changed their mind. Every choice's document is the same document with a
+    /// different account named in it, so when the rows come out identical the
+    /// scroll position and the end-reached bit both carry over. When they do
+    /// not, the reader gets the new document from the top with approval
+    /// re-armed, exactly as any other changed document is presented. The
+    /// generation still advances either way, so a click rendered from the old
+    /// document is as stale as it ever was.
+    fn adopt_answered_document(&mut self, document: ReviewDocument) {
+        let previous_rows = Arc::clone(&self.detail_rows);
+        let scroll_handle = self.scroll_handle.clone();
+        let end_rendered = Arc::clone(&self.end_rendered);
+        let scroll_layout_ready = self.scroll_layout_ready;
+        let scroll_last_max = self.scroll_last_max;
+        let scroll_stable_samples = self.scroll_stable_samples;
+        let viewed_to_end = self.state.approve_enabled();
+
+        self.state = ReviewState::new(document);
+        self.rebuild_detail_list();
+
+        if *self.detail_rows != *previous_rows {
+            return;
+        }
+        self.scroll_handle = scroll_handle;
+        self.end_rendered = end_rendered;
+        self.scroll_layout_ready = scroll_layout_ready;
+        self.scroll_last_max = scroll_last_max;
+        self.scroll_stable_samples = scroll_stable_samples;
+        if viewed_to_end {
+            let generation = self.state.generation();
+            self.state.mark_viewed_to_end(generation);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3030,13 +3070,23 @@ fn security_review_detail_rows(
             + usize::from(!document.exact_payloads.is_empty()),
     );
     rows.push(SecurityReviewDetailRow::Prelude);
+    // The account choice comes first, directly under the summary that asks
+    // for it.
+    //
+    // It used to sit below the warnings, off the first screen. A reader who
+    // scrolled the whole document to arm approval found the button still
+    // grey, with a line of small text naming a control they had passed
+    // without recognising it as something to answer. Putting the question on
+    // the screen the review opens on costs the warnings nothing: choosing an
+    // account exposes nothing on its own, and approval still waits for the
+    // reader to reach the end of everything below.
+    if wallet_connect_accounts {
+        rows.push(SecurityReviewDetailRow::WalletConnectAccounts);
+    }
     rows.extend(effects.into_iter().map(SecurityReviewDetailRow::Section));
     if !document.request.warnings.is_empty() {
         rows.push(SecurityReviewDetailRow::WarningsHeading);
         rows.extend((0..document.request.warnings.len()).map(SecurityReviewDetailRow::Warning));
-    }
-    if wallet_connect_accounts {
-        rows.push(SecurityReviewDetailRow::WalletConnectAccounts);
     }
     rows.extend(remaining.into_iter().map(SecurityReviewDetailRow::Section));
     if !document.request.facts.is_empty() {
@@ -7636,9 +7686,9 @@ impl WalletWindow {
         let Some(choice) = choices.get(index) else {
             return;
         };
+        let document = choice.document.clone();
         *selected_account = Some(index);
-        active.state = ReviewState::new(choice.document.clone());
-        active.rebuild_detail_list();
+        active.adopt_answered_document(document);
         cx.notify();
     }
 
@@ -15979,6 +16029,18 @@ impl WalletWindow {
                     let account_editor = editor.clone();
                     div()
                         .w_full()
+                        // A row of toggle buttons under a heading looked like
+                        // a filter, which is exactly how readers treated it.
+                        // Framed like the warning cards it sits beside, it
+                        // reads as the unanswered question it is.
+                        .p_4()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(if selected_account.is_none() {
+                            cx.theme().warning
+                        } else {
+                            cx.theme().border
+                        })
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -16204,7 +16266,18 @@ impl WalletWindow {
                                 buttons.child(
                                     div()
                                         .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
+                                        // Scrolling further is something the
+                                        // reader is already doing; choosing an
+                                        // account is a thing they have not
+                                        // started. Muted grey read as a note
+                                        // about the button rather than as the
+                                        // one instruction standing between
+                                        // them and it.
+                                        .text_color(if selection_is_complete {
+                                            cx.theme().muted_foreground
+                                        } else {
+                                            cx.theme().warning
+                                        })
                                         .child(approve_blocked_reason),
                                 )
                             })
