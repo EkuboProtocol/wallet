@@ -651,6 +651,33 @@ fn policy_proposal_for_account<'a>(
         .find(|proposal| proposal.wallet_id == editor_wallet_id)
 }
 
+/// How much of an agent's rationale the policy rail shows.
+const POLICY_RATIONALE_EXCERPT_CHARS: usize = 160;
+
+/// The rail's one-paragraph opening of `rationale`, and whether it was cut.
+///
+/// The rail is 264 pixels wide and agents argue for their policy changes at
+/// length. Printed whole it became a column of two-word lines that pushed
+/// Review changes and Reject proposal below the fold, so the buttons for a
+/// proposal were reachable only by scrolling past the case for it — the same
+/// reason the change summary next to it is a count and not the changes. The
+/// rail gets enough to tell one proposal from another; the review screen,
+/// which is where the decision is actually made, prints all of it at a width
+/// meant for reading. Line breaks collapse because a rationale written as ten
+/// short lines is as tall as a long one here.
+fn policy_rationale_excerpt(rationale: &str) -> (String, bool) {
+    let collapsed = rationale.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some((cut, _)) = collapsed.char_indices().nth(POLICY_RATIONALE_EXCERPT_CHARS) else {
+        return (collapsed, false);
+    };
+    let head = collapsed[..cut].trim_end();
+    // Cutting mid-word reads as a rendering fault rather than as an excerpt.
+    // A first word longer than the whole budget has no space to fall back to,
+    // so it is cut where it is.
+    let head = head.rfind(' ').map_or(head, |space| &head[..space]);
+    (format!("{head}…"), true)
+}
+
 /// Balance rows that have not arrived yet, drawn in the card and at the row
 /// pitch the real ones use. A spinner says only that the app is busy; these
 /// say a list of tokens is what is coming, and where it will be.
@@ -16870,6 +16897,53 @@ impl WalletWindow {
                             })),
                     ),
             )
+            // Where the agent's case for the change is actually read.
+            //
+            // The rail showed all of it at 264 pixels and this screen showed
+            // none of it, which put the argument on the page where nothing is
+            // decided and kept it off the page where installing happens. Here
+            // it has the width of the frame, and a ceiling, so a long one
+            // scrolls in place instead of pushing the diff off the screen.
+            .when_some(
+                editor.proposal.as_ref().map(|proposal| {
+                    ekubo_wallet_core::sanitize::terminal_safe_multiline(&proposal.rationale)
+                }),
+                |review, rationale| {
+                    review.child(
+                        div()
+                            .id("policy-review-rationale")
+                            .debug_selector(|| "policy-review-rationale".to_owned())
+                            .flex_none()
+                            .w_full()
+                            .min_w_0()
+                            .max_h(px(180.0))
+                            .overflow_y_scrollbar()
+                            .p_3()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .child("Why the agent proposed this"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_text(
+                                        "policy-review-rationale-text",
+                                        &rationale,
+                                    )),
+                            ),
+                    )
+                },
+            )
             .child(
                 h_flex()
                     .debug_selector(|| "policy-change-summary".to_owned())
@@ -17056,31 +17130,25 @@ impl WalletWindow {
             return self.render_policy_review(editor, review, allow_anything_draft, cx);
         }
 
-        let mut preview = GroupBox::new()
+        // The rail's own action, unframed.
+        //
+        // It used to be a titled box headed "Review changes" over a paragraph
+        // explaining, in four variations, that a draft should be checked and
+        // read before it is installed — above a button that says it does both.
+        // The border drew a section around one button, the title repeated the
+        // button, and the paragraph repeated the title. What a validation
+        // error actually is has its own alert further up the rail, so nothing
+        // here was the only place anything was said.
+        let mut preview = div()
             .id("policy-full-screen-preview")
-            .title("Review changes")
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(match editor.validation.as_ref() {
-                        Some(Ok(_)) if reviewed_exact_document => {
-                            "This draft has been checked. Read what it changes before installing it."
-                        }
-                        Some(Ok(_)) => {
-                            "This draft changed after its last preview. Check it again."
-                        }
-                        Some(Err(_)) => {
-                            "Fix the policy validation error, then read what the draft changes."
-                        }
-                        None => {
-                            "Validate the JSON and read its permission changes before installation."
-                        }
-                    })),
-            )
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_2()
             .child(
                 app_button("validate-policy-draft-full-screen")
-                    .self_start()
+                    .w_full()
                     .label(if reviewed_exact_document {
                         "Review changes"
                     } else {
@@ -17134,6 +17202,9 @@ impl WalletWindow {
                     .is_some_and(|policy| policy.revision == proposal.source_revision);
                 let review_proposal = proposal.clone();
                 let reject_proposal = proposal.clone();
+                let (rationale_excerpt, rationale_shortened) = policy_rationale_excerpt(
+                    &ekubo_wallet_core::sanitize::terminal_safe_multiline(&proposal.rationale),
+                );
                 Some(
                     GroupBox::new()
                         .id("policy-full-screen-proposal")
@@ -17143,15 +17214,25 @@ impl WalletWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(div().text_sm().child(selectable_text(
+                                .child(div().text_sm().whitespace_normal().child(selectable_text(
                                     format!(
                                         "policy-full-screen-proposal-rationale-{}",
                                         proposal.wallet_id
                                     ),
-                                    &ekubo_wallet_core::sanitize::terminal_safe_multiline(
-                                        &proposal.rationale,
-                                    ),
+                                    &rationale_excerpt,
                                 )))
+                                .when(rationale_shortened, |card| {
+                                    card.child(
+                                        div()
+                                            .text_sm()
+                                            .whitespace_normal()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(selectable_label(
+                                                "Review changes has the rest of the agent's \
+                                                 reasoning.",
+                                            )),
+                                    )
+                                })
                                 .when(!applicable && current_error.is_none(), |card| {
                                     card.child(
                                         div().text_sm().text_color(cx.theme().danger).child(

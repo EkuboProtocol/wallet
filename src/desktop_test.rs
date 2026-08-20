@@ -2731,3 +2731,90 @@ fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
         assert!(Route::ALL.contains(&task.route()));
     }
 }
+
+#[test]
+fn the_policy_rail_shows_an_opening_of_a_rationale_and_not_all_of_it() {
+    // Short enough to read in the rail: printed as authored.
+    let short = "Allows the daily rebalance to swap USDC for WETH under 1 ETH.";
+    assert_eq!(
+        policy_rationale_excerpt(short),
+        (short.to_owned(), false),
+        "a rationale that already fits is not cut"
+    );
+
+    // A rationale written as many short lines is as tall as a long one in a
+    // 264-pixel column, so the excerpt is one paragraph either way.
+    assert_eq!(
+        policy_rationale_excerpt("first\nsecond\n\n  third  "),
+        ("first second third".to_owned(), false)
+    );
+
+    let long = "word ".repeat(200);
+    let (excerpt, shortened) = policy_rationale_excerpt(&long);
+    assert!(shortened);
+    assert!(excerpt.chars().count() <= POLICY_RATIONALE_EXCERPT_CHARS + 1);
+    assert!(excerpt.ends_with('…'));
+    // Cut at a word, not through one.
+    assert!(excerpt.trim_end_matches('…').ends_with("word"));
+    assert!(long.starts_with(excerpt.trim_end_matches('…')));
+
+    // A single word longer than the whole budget has no space to fall back
+    // to. It is cut where it is rather than swallowing the excerpt.
+    let unbroken = "x".repeat(400);
+    let (excerpt, shortened) = policy_rationale_excerpt(&unbroken);
+    assert!(shortened);
+    assert_eq!(excerpt.chars().count(), POLICY_RATIONALE_EXCERPT_CHARS + 1);
+
+    // Multi-byte text is cut on a character boundary, not a byte one.
+    let emoji = "🦀 ".repeat(200);
+    let (excerpt, shortened) = policy_rationale_excerpt(&emoji);
+    assert!(shortened);
+    assert!(emoji.starts_with(excerpt.trim_end_matches('…')));
+}
+
+#[test]
+fn the_agent_rationale_is_read_on_the_review_screen_and_excerpted_in_the_rail() {
+    let source = include_str!("desktop.rs");
+    let editor = source
+        .split_once("fn render_policy_editor")
+        .expect("the policy editor renders")
+        .1
+        .split_once("fn render_content")
+        .expect("the policy editor has an end marker")
+        .0;
+
+    // The rail draws the excerpt. Drawing the whole sanitized rationale into
+    // a 264-pixel column is what pushed the buttons for a proposal below the
+    // case for it.
+    assert!(editor.contains("policy_rationale_excerpt("));
+    assert!(editor.contains("&rationale_excerpt,"));
+    assert!(!editor.contains("terminal_safe_multiline(\n                            &proposal"));
+
+    // One button, no box around it, and no paragraph explaining a button
+    // whose label already says what it does.
+    assert!(editor.contains(r#".id("policy-full-screen-preview")"#));
+    assert!(!editor.contains(r#".title("Review changes")"#));
+    assert!(!editor.contains("Read what it changes before installing it."));
+    assert!(!editor.contains("Validate the JSON and read its permission changes"));
+    assert!(editor.contains("Validate & review changes"));
+
+    // The count of what changes stays: it is short, and it is not the
+    // changes themselves.
+    assert!(editor.contains(r#""policy-change-summary""#));
+
+    let review = source
+        .split_once("fn render_policy_review")
+        .expect("the policy review renders")
+        .1
+        .split_once("fn render_policy_editor")
+        .expect("the policy review has an end marker")
+        .0;
+    // The whole rationale, at the width of the frame, on the screen where
+    // installing happens.
+    assert!(review.contains("terminal_safe_multiline(&proposal.rationale)"));
+    assert!(review.contains(r#""policy-review-rationale""#));
+    // Bounded, so a long one scrolls in place instead of pushing the diff
+    // off the screen.
+    assert!(review.contains("max_h(px(180.0))"));
+    assert!(review.contains("overflow_y_scrollbar()"));
+}
