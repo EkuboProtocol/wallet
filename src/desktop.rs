@@ -8208,6 +8208,8 @@ impl WalletWindow {
                     == Some(proposal)
                 {
                     self.policy_editor = None;
+                    self.policy_proposal_open = false;
+                    self.policy_review_open = false;
                 }
                 // The card is gone by the time this is read, so the note has
                 // to carry the whole outcome: which way it was decided, and
@@ -17016,6 +17018,18 @@ impl WalletWindow {
                     .whitespace_normal()
                     .child(selectable_text("policy-proposal-rationale-text", &rationale)),
             )
+            .when_some(self.policy_action_error.clone(), |case, error| {
+                case.child(
+                    div()
+                        .id("policy-proposal-action-error")
+                        .role(Role::Alert)
+                        .flex_none()
+                        .text_sm()
+                        .whitespace_normal()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
+                )
+            })
             // What it changes, as a count. The changes themselves are the
             // next screen, which is the whole of what that screen is for.
             .child(

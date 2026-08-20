@@ -2962,6 +2962,10 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
     assert!(case.contains(r#"app_button("reject-policy-proposal-case")"#));
     // And says what taking it up already did.
     assert!(case.contains("loaded in your editor as a draft"));
+    // Rejecting can fail -- the proposal may have been replaced while it was
+    // open -- and a failure leaves the reader here, so here has to say so.
+    assert!(case.contains("self.policy_action_error"));
+    assert!(case.contains(r#""policy-proposal-action-error""#));
 
     let review = source
         .split_once("fn render_policy_review")
