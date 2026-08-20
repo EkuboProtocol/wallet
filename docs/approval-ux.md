@@ -56,16 +56,3 @@ review asks an endpoint again but does not create an independent trust anchor.
 Private-key export uses the same owner-authentication boundary. The revealed
 value is held for 30 seconds, copying requires a separate click, and clipboard
 cleanup occurs only when the clipboard still contains that exact value.
-
-A pairing link pasted anywhere in the window, or the WalletConnect page's
-one-press handoff, starts a pairing from the clipboard. The clipboard is read
-on that keystroke or that click and at no other time: the wallet never polls
-it, and never advertises itself to a page. Text without the `wc:` scheme is
-left alone and stays an ordinary paste; the keystroke is window-scoped, so a
-focused text field keeps its own paste. The read is refused outright while the
-legal gate is up, while a private-key export is open — that panel puts a key on
-the clipboard on purpose — and while an unsaved network form would block the
-move. Pairing is not connecting: the dapp still has to propose a session, and
-that proposal still opens the review above, where the owner chooses an account
-and authenticates. A pending security review is not dismissed by a paste; the
-pairing starts behind it and its proposal queues.
