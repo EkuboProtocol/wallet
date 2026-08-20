@@ -2360,7 +2360,6 @@ pub struct WalletWindow {
     /// While this is set the button is busy and the press is refused.
     walletconnect_connecting: Option<uuid::Uuid>,
     walletconnect_presenter: ProposalPresenter,
-    walletconnect_uri_input: Option<Entity<InputState>>,
     network_editor_open: bool,
     network_editor_scroll_handle: ScrollHandle,
     network_editor_overflow_indicator: ScrollOverflowIndicator,
@@ -3177,6 +3176,24 @@ struct ReviewDecisionLabels {
 /// Gone from the manager means it ended — by failing before it settled, or by
 /// being cancelled. Settled means it became a connection. Either way the
 /// button has its answer and stops spinning.
+/// The scheme a pairing link announces itself with.
+const PAIRING_URI_SCHEME: &str = "wc:";
+
+/// The pairing link in pasted text, if the paste was meant for this wallet.
+///
+/// Detection and validation are deliberately two different questions. The
+/// scheme answers "was this paste aimed at the wallet at all", and only that:
+/// text that is not a pairing link stays an ordinary paste, and the handler
+/// keeps its hands off it. Whether the link still works is `PairingUri`'s
+/// answer, and it has a written sentence for every way one can fail —
+/// truncated, v1, expired. Testing validity here instead would swallow a
+/// paste that was obviously a pairing attempt and say nothing about why it
+/// did not take.
+fn clipboard_pairing_uri(text: &str) -> Option<&str> {
+    let text = text.trim();
+    text.starts_with(PAIRING_URI_SCHEME).then_some(text)
+}
+
 fn walletconnect_pairing_is_in_flight(sessions: &[SessionSummary], connecting: uuid::Uuid) -> bool {
     sessions
         .iter()
@@ -6069,7 +6086,6 @@ impl WalletWindow {
             walletconnect_sessions: Vec::new(),
             walletconnect_connecting: None,
             walletconnect_presenter,
-            walletconnect_uri_input: None,
             network_editor_open: false,
             network_editor_scroll_handle,
             network_editor_overflow_indicator,
@@ -6383,19 +6399,6 @@ impl WalletWindow {
             ));
             self.private_key_input = Some(input);
         }
-        if self.walletconnect_uri_input.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("wc: pairing URI"));
-            self.form_input_subscriptions.push(cx.subscribe_in(
-                &input,
-                window,
-                |view, _, event: &InputEvent, window, cx| {
-                    if primary_enter(event) {
-                        view.connect_walletconnect(window, cx);
-                    }
-                },
-            ));
-            self.walletconnect_uri_input = Some(input);
-        }
         if self.network_name_input.is_none() {
             self.network_name_input =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("my-rollup")));
@@ -6514,7 +6517,6 @@ impl WalletWindow {
         self.token_list_generation = self.token_list_generation.wrapping_add(1);
         self.account_id_input = None;
         self.private_key_input = None;
-        self.walletconnect_uri_input = None;
         self.network_name_input = None;
         self.network_display_name_input = None;
         self.network_aliases_input = None;
@@ -7450,45 +7452,52 @@ impl WalletWindow {
         .detach();
     }
 
-    fn connect_walletconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.walletconnect_uri_input.clone() else {
-            return;
-        };
+    /// Start a pairing from a link the owner copied out of a dapp.
+    ///
+    /// This is the handoff a browser cannot make for itself, and it is one
+    /// press: copy the link out of the dapp's connect dialog, press the
+    /// button. The wallet does not go looking for the link and never
+    /// advertises itself to a page.
+    ///
+    /// The clipboard is read on this press and at no other time, which is why
+    /// the read needs no exceptions carved around it. It is not something the
+    /// wallet decided to do while the owner was doing something else — it is
+    /// the literal content of the request, made from a button that only exists
+    /// on this page, behind whatever overlay is in front when one is.
+    ///
+    /// Nothing about the approval boundary moves: pairing is not connecting.
+    /// The dapp still has to propose a session, and that proposal still opens
+    /// the review where the owner picks an account and authenticates.
+    fn connect_walletconnect_from_clipboard(&mut self, cx: &mut Context<Self>) {
         // The button renders disabled while a pairing is in flight, but a
         // render-time property is not what decides this: refuse the press
         // here, where the second click of a double click arrives.
         if self.walletconnect_connecting.is_some() {
             return;
         }
-        match self.cached_accounts() {
-            Ok([]) => {
-                self.set_route_error(
-                    Route::WalletConnect,
-                    "Create an account before starting a WalletConnect pairing.",
-                );
-                cx.notify();
-                return;
-            }
-            Err(error) => {
-                self.set_route_error(
-                    Route::WalletConnect,
-                    format!("Could not verify a signing account: {error:#}"),
-                );
-                cx.notify();
-                return;
-            }
-            Ok(_) => {}
-        }
-        let uri = Zeroizing::new(input.read(cx).value().trim().to_owned());
-        if let Err(error) = self.begin_walletconnect_uri(&uri, cx) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            // A pairing link carries the symmetric key for the session, so it
+            // is a secret for as long as the pairing lasts.
+            .map(Zeroizing::new)
+            .unwrap_or_default();
+        let Some(uri) = clipboard_pairing_uri(&text) else {
+            self.set_route_error(
+                Route::WalletConnect,
+                "The clipboard has no WalletConnect link in it. Copy one from the dapp's \
+                 connect dialog, then press this again.",
+            );
+            cx.notify();
+            return;
+        };
+        if let Err(error) = self.begin_walletconnect_uri(uri, cx) {
             self.set_route_error(
                 Route::WalletConnect,
                 format!("Could not connect: {error:#}"),
             );
-            cx.notify();
-            return;
         }
-        input.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
     }
 
     fn begin_walletconnect_uri(&mut self, uri: &str, cx: &mut Context<Self>) -> Result<()> {
@@ -13100,74 +13109,60 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("Paste a WalletConnect v2 URI copied from the dapp. Pairings stay in memory and disconnect when you explicitly Quit.")),
-            );
-        if let Some(input) = self.walletconnect_uri_input.as_ref() {
-            panel = panel
-                .child(
-                    div()
-                        .text_sm()
-                        .font_medium()
-                        .child(selectable_label("Pairing URI")),
+                    .child(selectable_label("Copy the link from the dapp's connect dialog, then press the button. Connecting still asks you to pick an account and authenticate. Pairings stay in memory and disconnect when you explicitly Quit.")),
+            )
+            // The whole handoff in one press.
+            //
+            // A field beside a Connect button made this four acts for one
+            // intention -- find the field, click it, paste, press Connect --
+            // and it is already the step a first-time owner has no way to
+            // guess at from the dapp's side of the browser. The link is on the
+            // clipboard by the time anyone reaches this page, because copying
+            // it is how it leaves the dapp. The clipboard is read when this is
+            // pressed and at no other time: the wallet never polls it, and it
+            // never announces itself to a page.
+            .child(
+                app_button("paste-walletconnect-uri")
+                    .debug_selector(|| "paste-walletconnect-uri".to_owned())
+                    .self_start()
+                    .label("Paste link & connect")
+                    .primary()
+                    .disabled(account_unavailable || connecting.is_some())
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.connect_walletconnect_from_clipboard(cx);
+                    })),
+            )
+            // A pairing that is not drawn in the list below has no Disconnect
+            // button of its own, and a dapp that never proposes would
+            // otherwise leave the wallet waiting with no way out but quitting.
+            .when_some(connecting, |panel, session_id| {
+                panel.child(
+                    app_button("cancel-walletconnect")
+                        .self_start()
+                        .label("Cancel")
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.disconnect_walletconnect(session_id, cx);
+                        })),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_end()
-                        .gap_2()
-                        .child(
-                            div().min_w(px(220.0)).flex_1().child(
-                                app_input(input, cx)
-                                    .aria_label("WalletConnect pairing URI")
-                                    .w_full(),
-                            ),
-                        )
-                        .child(
-                            app_button("connect-walletconnect")
-                                .label(if connecting.is_some() {
-                                    "Connecting"
-                                } else {
-                                    "Connect"
-                                })
-                                .primary()
-                                .loading(connecting.is_some())
-                                .disabled(account_unavailable || connecting.is_some())
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.connect_walletconnect(window, cx);
-                                })),
-                        )
-                        // A pairing that is not drawn in the list below has no
-                        // Disconnect button of its own, and a dapp that never
-                        // proposes would otherwise leave the wallet waiting
-                        // with no way out but quitting.
-                        .when_some(connecting, |row, session_id| {
-                            row.child(app_button("cancel-walletconnect").label("Cancel").on_click(
-                                cx.listener(move |view, _, _, cx| {
-                                    view.disconnect_walletconnect(session_id, cx);
-                                }),
-                            ))
-                        }),
-                );
-            if connecting.is_some() {
-                panel = panel.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(selectable_label(
-                            "Paired. The review window opens when the dapp proposes a \
-                             connection; Cancel drops the pairing.",
-                        )),
-                );
-            }
-            if let Some(error) = account_error {
-                panel = panel.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label(error)),
-                );
-            }
+            });
+        if connecting.is_some() {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(
+                        "Paired. The review window opens when the dapp proposes a \
+                         connection; Cancel drops the pairing.",
+                    )),
+            );
+        }
+        if let Some(error) = account_error {
+            panel = panel.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(selectable_label(error)),
+            );
         }
         let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
         // Only dapps the owner approved. A pairing that has not been through

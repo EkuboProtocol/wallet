@@ -56,3 +56,14 @@ review asks an endpoint again but does not create an independent trust anchor.
 Private-key export uses the same owner-authentication boundary. The revealed
 value is held for 30 seconds, copying requires a separate click, and clipboard
 cleanup occurs only when the clipboard still contains that exact value.
+
+The WalletConnect page starts a pairing from the clipboard in one press. The
+clipboard is read on that press and at no other time: the wallet never polls
+it, never binds a global paste keystroke, and never advertises itself to a
+page. That is what keeps the read free of exceptions — it is the content of an
+explicit request, made from a button that exists on one page and is covered by
+any overlay in front of it, rather than something the wallet does while the
+owner is doing something else. A press with no `wc:` link on the clipboard
+reports that and does nothing. Pairing is not connecting: the dapp still has to
+propose a session, and that proposal still opens the review above, where the
+owner chooses an account and authenticates.

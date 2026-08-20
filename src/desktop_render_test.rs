@@ -3400,6 +3400,73 @@ fn deciding_a_policy_proposal_says_what_was_decided(cx: &mut gpui::TestAppContex
     release(cx, &view);
 }
 
+#[gpui::test]
+fn the_handoff_button_reports_what_the_clipboard_actually_held(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::WalletConnect));
+
+    // Pressed with something else on the clipboard, the button says so rather
+    // than looking inert.
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            "ekubo.org is where the pool is".to_owned(),
+        ));
+    });
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.connect_walletconnect_from_clipboard(cx);
+    });
+    let reported = cx.read_entity(&view, |wallet, _| {
+        wallet.route_errors.get(&Route::WalletConnect).cloned()
+    });
+    assert!(
+        reported.is_some_and(|error| error.contains("clipboard")),
+        "a press with no link on the clipboard must say that is what happened"
+    );
+    assert!(
+        cx.read_entity(&view, |wallet, _| wallet.walletconnect_connecting.is_none()),
+        "text that is not a pairing link started a pairing"
+    );
+
+    // With a link on it, the press gets as far as the pairing. This wallet has
+    // no account to expose, so it stops there and says why instead of failing
+    // quietly.
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+            "wc:{}@2?symKey={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        )));
+    });
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.connect_walletconnect_from_clipboard(cx);
+    });
+    let reported = cx.read_entity(&view, |wallet, _| {
+        wallet.route_errors.get(&Route::WalletConnect).cloned()
+    });
+    assert!(
+        reported.is_some_and(|error| error.contains("account")),
+        "a pairing that cannot start must say why"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn the_walletconnect_page_offers_the_handoff_as_one_press(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::WalletConnect));
+
+    let bounds = measure(cx, window, &view, &["paste-walletconnect-uri"]);
+    assert!(
+        bounds[0].is_some(),
+        "the one-press handoff must be on the page a dapp connection starts from"
+    );
+
+    release(cx, &view);
+}
+
 fn run_fixture(
     automation_id: uuid::Uuid,
     outcome: RunOutcome,

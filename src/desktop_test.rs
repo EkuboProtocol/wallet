@@ -2733,6 +2733,66 @@ fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
 }
 
 #[test]
+fn a_pairing_link_is_recognised_by_its_scheme_and_nothing_else_is_touched() {
+    let link = "wc:c9e6d3f0@2?symKey=abc";
+    assert_eq!(clipboard_pairing_uri(link), Some(link));
+    // A link copied out of a browser arrives with whatever whitespace the
+    // page had around it.
+    assert_eq!(clipboard_pairing_uri(&format!("  {link}\n")), Some(link));
+
+    // Everything else stays an ordinary paste. The handler must not act on a
+    // password, an address, or a line of JSON the owner meant for a field.
+    assert_eq!(clipboard_pairing_uri(""), None);
+    assert_eq!(clipboard_pairing_uri("   "), None);
+    assert_eq!(clipboard_pairing_uri("https://ekubo.org"), None);
+    assert_eq!(clipboard_pairing_uri("0xabc"), None);
+    assert_eq!(clipboard_pairing_uri("{\"policy\": []}"), None);
+    // Not the scheme, just a word that starts the same way.
+    assert_eq!(clipboard_pairing_uri("wconnect later"), None);
+
+    // Detection is not validation: a truncated link is still recognised, so
+    // the parser gets to say what is wrong with it instead of the paste being
+    // silently swallowed.
+    assert_eq!(clipboard_pairing_uri("wc:"), Some("wc:"));
+}
+
+#[test]
+fn the_clipboard_is_read_on_a_press_and_never_on_a_keystroke() {
+    let source = include_str!("desktop.rs");
+    let handler = source
+        .split_once("fn connect_walletconnect_from_clipboard")
+        .expect("the clipboard handoff exists")
+        .1
+        .split_once("fn begin_walletconnect_uri")
+        .expect("the clipboard handoff has an end marker")
+        .0;
+
+    // A pairing link carries the session key, so it is not left lying in a
+    // String.
+    assert!(handler.contains("Zeroizing"));
+    // Pairing is not connecting: nothing here approves a session.
+    assert!(!handler.contains("authorize_dapp_connection"));
+    // The press happens on the WalletConnect page, so the handoff has no
+    // business closing overlays or moving the owner between pages.
+    assert!(!handler.contains("close_overlay"));
+    assert!(!handler.contains("set_route(Route::"));
+
+    // No global paste. A keystroke bound at the window would read the
+    // clipboard on every press, including while the export panel has a
+    // private key on it -- which is what made the earlier version need
+    // exceptions carved around the read. A button needs none, because
+    // pressing it is the request to read.
+    assert!(!source.contains("PasteWalletConnectUri"));
+    assert!(!source.contains(r#"KeyBinding::new("cmd-v""#));
+    assert!(!source.contains(r#"KeyBinding::new("ctrl-v""#));
+
+    // One affordance on the page, not a field beside a button.
+    assert!(source.contains(r#"app_button("paste-walletconnect-uri")"#));
+    assert!(!source.contains("walletconnect_uri_input"));
+    assert!(!source.contains(r#"app_button("connect-walletconnect")"#));
+}
+
+#[test]
 fn the_policy_rail_shows_an_opening_of_a_rationale_and_not_all_of_it() {
     // Short enough to read in the rail: printed as authored.
     let short = "Allows the daily rebalance to swap USDC for WETH under 1 ETH.";
