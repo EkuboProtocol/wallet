@@ -88,6 +88,7 @@ actions!(
     [
         OpenCommandPalette,
         CloseOverlay,
+        PasteWalletConnectUri,
         CloseWindow,
         HideApplication,
         Quit
@@ -3177,6 +3178,24 @@ struct ReviewDecisionLabels {
 /// Gone from the manager means it ended — by failing before it settled, or by
 /// being cancelled. Settled means it became a connection. Either way the
 /// button has its answer and stops spinning.
+/// The scheme a pairing link announces itself with.
+const PAIRING_URI_SCHEME: &str = "wc:";
+
+/// The pairing link in pasted text, if the paste was meant for this wallet.
+///
+/// Detection and validation are deliberately two different questions. The
+/// scheme answers "was this paste aimed at the wallet at all", and only that:
+/// text that is not a pairing link stays an ordinary paste, and the handler
+/// keeps its hands off it. Whether the link still works is `PairingUri`'s
+/// answer, and it has a written sentence for every way one can fail —
+/// truncated, v1, expired. Testing validity here instead would swallow a
+/// paste that was obviously a pairing attempt and say nothing about why it
+/// did not take.
+fn clipboard_pairing_uri(text: &str) -> Option<&str> {
+    let text = text.trim();
+    text.starts_with(PAIRING_URI_SCHEME).then_some(text)
+}
+
 fn walletconnect_pairing_is_in_flight(sessions: &[SessionSummary], connecting: uuid::Uuid) -> bool {
     sessions
         .iter()
@@ -7489,6 +7508,91 @@ impl WalletWindow {
             return;
         }
         input.update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// Start a pairing from a link the owner copied out of a dapp.
+    ///
+    /// This is the handoff a browser cannot make for itself. The owner copies
+    /// the link from the dapp's connect dialog and pastes it at the wallet;
+    /// the wallet does not go looking, does not advertise itself, and reads
+    /// the clipboard only on a keystroke or a click. Nothing about the
+    /// approval boundary moves: pairing is not connecting. The dapp still has
+    /// to propose a session, and that proposal still opens the review where
+    /// the owner picks an account and authenticates.
+    ///
+    /// Returns whether the paste was a pairing link at all, so a deliberate
+    /// press of the button can say that it was not while a stray Cmd+V stays
+    /// quiet.
+    fn connect_walletconnect_from_clipboard(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // Nothing reaches around the legal gate.
+        if self.legal_gate {
+            return false;
+        }
+        // The export panel puts a private key on the clipboard on purpose and
+        // scrubs it again when the lease ends. A handler that reads the
+        // clipboard on every Cmd+V must not be the thing that reads it then,
+        // so this does not look while an export is open.
+        if self.account_export.is_some() {
+            return false;
+        }
+        // `set_route` refuses to leave a half-written network form, so acting
+        // here would start a pairing on a screen the owner cannot see.
+        if self.network_editor_open {
+            return false;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return false;
+        };
+        // A pairing link carries the symmetric key for the session, so it is a
+        // secret for as long as the pairing lasts.
+        let text = Zeroizing::new(text);
+        let Some(uri) = clipboard_pairing_uri(&text) else {
+            return false;
+        };
+
+        // Whatever was in front is not what the owner just asked for. A
+        // security review is the exception `close_overlay` already makes:
+        // somebody is waiting on that decision, and a paste is not an answer
+        // to it. The pairing starts behind it and its proposal queues, exactly
+        // as a proposal arriving from an already-paired dapp would.
+        self.command_palette = false;
+        self.close_overlay(cx);
+        self.set_route(Route::WalletConnect);
+
+        if self.walletconnect_connecting.is_some() {
+            self.set_route_error(
+                Route::WalletConnect,
+                "A pairing is already in flight. Cancel it before starting another.",
+            );
+            cx.notify();
+            return true;
+        }
+        if let Err(error) = self.begin_walletconnect_uri(uri, cx) {
+            self.set_route_error(
+                Route::WalletConnect,
+                format!("Could not connect: {error:#}"),
+            );
+        } else if let Some(input) = self.walletconnect_uri_input.clone() {
+            // The field is the fallback for this same act. Leaving a stale URI
+            // in it beside a pairing that is already running reads as though
+            // the pairing came from the field.
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        cx.notify();
+        true
+    }
+
+    fn paste_walletconnect_uri(
+        &mut self,
+        _: &PasteWalletConnectUri,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.connect_walletconnect_from_clipboard(window, cx);
     }
 
     fn begin_walletconnect_uri(&mut self, uri: &str, cx: &mut Context<Self>) -> Result<()> {
@@ -13100,15 +13204,53 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("Paste a WalletConnect v2 URI copied from the dapp. Pairings stay in memory and disconnect when you explicitly Quit.")),
+                    .child(selectable_label("Copy the link from the dapp's connect dialog, then paste it here. Pairings stay in memory and disconnect when you explicitly Quit.")),
+            )
+            // The whole handoff in one press.
+            //
+            // Finding the field, clicking it, pasting, and pressing Connect is
+            // four acts for one intention, and it is the step a first-time
+            // owner has no way to guess at from the dapp's side of the
+            // browser. The clipboard is read when this is pressed and at no
+            // other time: the wallet never polls it, and it never announces
+            // itself to a page.
+            .child(
+                app_button("paste-walletconnect-uri")
+                    .debug_selector(|| "paste-walletconnect-uri".to_owned())
+                    .self_start()
+                    .label("Paste link & connect")
+                    .primary()
+                    .disabled(account_unavailable || connecting.is_some())
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        if !view.connect_walletconnect_from_clipboard(window, cx) {
+                            view.set_route_error(
+                                Route::WalletConnect,
+                                "The clipboard has no WalletConnect link in it. Copy one from \
+                                 the dapp's connect dialog, then press this again.",
+                            );
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(
+                        "Pasting a pairing link anywhere in the wallet does the same thing. \
+                         Connecting still asks you to pick an account and authenticate.",
+                    )),
             );
         if let Some(input) = self.walletconnect_uri_input.as_ref() {
             panel = panel
+                // Kept as the way through when the clipboard has moved on
+                // since the link was copied, or when the link arrived as text
+                // rather than on the clipboard at all.
                 .child(
                     div()
                         .text_sm()
                         .font_medium()
-                        .child(selectable_label("Pairing URI")),
+                        .child(selectable_label("Or enter a pairing link")),
                 )
                 .child(
                     div()
@@ -18032,6 +18174,7 @@ impl Render for WalletWindow {
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::paste_walletconnect_uri))
             .on_action(cx.listener(|view, _: &CloseOverlay, _, cx| {
                 view.close_overlay(cx);
             }))
@@ -18639,6 +18782,14 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 KeyBinding::new("ctrl-k", OpenCommandPalette, None),
                 close_window_key_binding(),
                 KeyBinding::new("escape", CloseOverlay, Some("Wallet")),
+                // Paste a pairing link anywhere in the app. Scoped to the
+                // window rather than the application because gpui-component
+                // binds the same keystroke inside its text inputs, and GPUI
+                // resolves from the focused node outward: typing a URI into
+                // the policy JSON editor still pastes text there, and this
+                // fires only when no field has the keystroke.
+                KeyBinding::new("cmd-v", PasteWalletConnectUri, Some("Wallet")),
+                KeyBinding::new("ctrl-v", PasteWalletConnectUri, Some("Wallet")),
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-h", HideApplication, None),
                 #[cfg(target_os = "macos")]

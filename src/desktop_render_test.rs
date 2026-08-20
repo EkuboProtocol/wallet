@@ -3400,6 +3400,106 @@ fn deciding_a_policy_proposal_says_what_was_decided(cx: &mut gpui::TestAppContex
     release(cx, &view);
 }
 
+/// Draw, then hand the window to the clipboard handoff the way the keystroke
+/// and the button both do.
+fn paste_pairing_link(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+) -> bool {
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    let drawn = view.clone();
+    visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
+        gpui::AnyView::from(drawn).into_any_element()
+    });
+    let acted = visual.update(|window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet.connect_walletconnect_from_clipboard(window, cx)
+        })
+    });
+    visual.run_until_parked();
+    acted
+}
+
+#[gpui::test]
+fn a_pasted_pairing_link_is_the_handoff_and_other_text_is_left_alone(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Settings));
+
+    // Anything that is not a pairing link is somebody else's paste. The
+    // wallet does not move, and does not report anything either.
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            "ekubo.org is where the pool is".to_owned(),
+        ));
+    });
+    assert!(!paste_pairing_link(cx, window, &view));
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.route),
+        Route::Settings,
+        "an ordinary paste moved the wallet off the page the owner was on"
+    );
+
+    // A pairing link is the handoff: whatever page was open, the owner ends
+    // up where the connection happens.
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+            "wc:{}@2?symKey={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        )));
+    });
+    assert!(paste_pairing_link(cx, window, &view));
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.route),
+        Route::WalletConnect,
+        "a pasted pairing link did not land on the WalletConnect page"
+    );
+    // This wallet has no account to expose, so the pairing stops here and
+    // says so rather than failing quietly on a page with nothing on it.
+    let reported = cx.read_entity(&view, |wallet, _| {
+        wallet.route_errors.get(&Route::WalletConnect).cloned()
+    });
+    assert!(
+        reported.is_some_and(|error| error.contains("account")),
+        "a pairing that cannot start must say why"
+    );
+
+    // The export panel deliberately puts a private key on the clipboard. A
+    // handler that reads the clipboard on every Cmd+V must not be reading it
+    // then, so it does not look at all.
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.legal_gate = true;
+    });
+    assert!(!paste_pairing_link(cx, window, &view));
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.route),
+        Route::Settings,
+        "the legal gate was reached around by a paste"
+    );
+
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn the_walletconnect_page_offers_the_handoff_as_one_press(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| wallet.set_route(Route::WalletConnect));
+
+    let bounds = measure(cx, window, &view, &["paste-walletconnect-uri"]);
+    assert!(
+        bounds[0].is_some(),
+        "the one-press handoff must be on the page a dapp connection starts from"
+    );
+
+    release(cx, &view);
+}
+
 fn run_fixture(
     automation_id: uuid::Uuid,
     outcome: RunOutcome,
