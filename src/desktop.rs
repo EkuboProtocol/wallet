@@ -5592,13 +5592,17 @@ impl ListDelegate for TokenListDelegate {
         let price_token = token.clone();
         let price_wallet = self.wallet.clone();
         let value_action = app_button(("set-token-value", index.row))
-            // The token's own row is where the recorded price belongs and the
-            // only place it is shown: it is a field of this token, not a fact
-            // about a balance somewhere else.
-            .label(token.approximate_usd_price.map_or_else(
-                || "Set value".to_owned(),
-                |price| format!("Value {}", format_usd(price)),
-            ))
+            // A button label names what pressing it does. This one used to
+            // read "Value $1.00", which names a fact -- and a fact belongs in
+            // the row's own metadata, where it lines up with the decimals and
+            // the source and can be compared down the column. The price moved
+            // there; the control says what it opens, in the words the network
+            // rows already use for the same dialog.
+            .label(if token.approximate_usd_price.is_some() {
+                "Change value…"
+            } else {
+                "Set value…"
+            })
             .on_click(move |_, window, cx| {
                 let target = PriceEditorTarget::Token(Box::new(price_token.clone()));
                 let _ = price_wallet.update(cx, |view, cx| {
@@ -5731,12 +5735,28 @@ impl ListDelegate for TokenListDelegate {
                                                 .child(selectable_text(
                                                     ("token-decimals-source", index.row),
                                                     &format!(
-                                                        "{} decimals · {}",
+                                                        "{} decimals · {}{}",
                                                         token.decimals.map_or_else(
                                                             || "unknown".to_owned(),
                                                             |value| value.to_string()
                                                         ),
-                                                        token.source
+                                                        token.source,
+                                                        // The recorded price,
+                                                        // last on the row's
+                                                        // own line of facts.
+                                                        // Absent, rather than
+                                                        // written as nothing,
+                                                        // when nobody has
+                                                        // recorded one: the
+                                                        // control beside it
+                                                        // already says so.
+                                                        token.approximate_usd_price.map_or_else(
+                                                            String::new,
+                                                            |price| format!(
+                                                                " · {}",
+                                                                format_usd(price)
+                                                            )
+                                                        ),
                                                     ),
                                                 )),
                                         ),
@@ -13237,9 +13257,17 @@ impl WalletWindow {
             );
         if connecting.is_some() {
             panel = panel.child(
-                div()
+                // With the spinner, because this is a wait on a relay and a
+                // dapp, and the only thing on screen saying so was a sentence
+                // that reads the same whether the pairing is seconds old or
+                // stalled. Waiting is a state the interface has to show, not
+                // one the reader should have to infer from a disabled button.
+                h_flex()
+                    .gap_2()
+                    .items_center()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new().small())
                     .child(selectable_label(
                         "Paired. The review window opens when the dapp proposes a \
                          connection; Cancel drops the pairing.",
@@ -13247,12 +13275,10 @@ impl WalletWindow {
             );
         }
         if let Some(error) = account_error {
-            panel = panel.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(selectable_label(error)),
-            );
+            // The same alert every other route uses to say a thing could not
+            // be read. As a line of red text it was the one failure in the
+            // wallet that looked like a caption.
+            panel = panel.child(selectable_error_alert("walletconnect-account-error", error));
         }
         let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
         // Only dapps the owner approved. A pairing that has not been through
@@ -15677,24 +15703,35 @@ impl WalletWindow {
             // box and left the list showing the last query's results.
             let clear_list = list.clone();
             token_search = token_search.suffix(
-                Button::new("clear-token-search")
-                    .icon(Icon::new(IconName::CircleX).with_size(px(24.0)))
-                    .ghost()
-                    .h(px(36.0))
-                    .w(px(36.0))
-                    .p_0()
-                    .tab_stop(false)
-                    .text_color(cx.theme().muted_foreground)
-                    .on_click(move |_, window, cx| {
-                        clear_input.update(cx, |input, cx| input.set_value("", window, cx));
-                        clear_list.update(cx, |list, cx| {
-                            let delegate = list.delegate_mut();
-                            delegate.query = String::new();
-                            delegate.apply_filters();
-                            scroll_token_list_to_top(list);
-                            cx.notify();
-                        });
-                    }),
+                // An icon with no word on it needs a name for the tooltip and
+                // a name for anything reading the interface aloud; this had
+                // neither, and a bare ✗ beside a full search box is a guess.
+                accessible_button(
+                    Button::new("clear-token-search")
+                        .icon(Icon::new(IconName::CircleX).with_size(px(24.0)))
+                        .ghost()
+                        .h(px(36.0))
+                        .w(px(36.0))
+                        .p_0()
+                        // Not in the tab order on purpose: Tab leaves the
+                        // search box for the list. Clearing from the keyboard
+                        // is select-all and delete, in the field that already
+                        // has focus.
+                        .tab_stop(false)
+                        .tooltip("Clear search")
+                        .text_color(cx.theme().muted_foreground)
+                        .on_click(move |_, window, cx| {
+                            clear_input.update(cx, |input, cx| input.set_value("", window, cx));
+                            clear_list.update(cx, |list, cx| {
+                                let delegate = list.delegate_mut();
+                                delegate.query = String::new();
+                                delegate.apply_filters();
+                                scroll_token_list_to_top(list);
+                                cx.notify();
+                            });
+                        }),
+                    "Clear search",
+                ),
             );
         }
 
@@ -17249,9 +17286,12 @@ impl WalletWindow {
                                 // read as returning to whatever the reader was
                                 // doing, which for a proposal is exactly wrong:
                                 // the editor holds the agent's document now.
+                                // The same words the proposal card uses for
+                                // the same destination. Two labels for one
+                                // command read as two commands.
                                 app_button("close-policy-review")
                                     .debug_selector(|| "close-policy-review".to_owned())
-                                    .label("Edit this draft")
+                                    .label("Edit the draft")
                                     .disabled(self.policy_installing)
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.close_policy_review(cx);
