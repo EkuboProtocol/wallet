@@ -4127,10 +4127,16 @@ fn render_activity_row(
                         app_button(SharedString::from(format!(
                             "cancel-transaction-{request_id}"
                         )))
+                        // Named for its object, because bare "Cancel" is the
+                        // word this interface uses everywhere else for
+                        // leaving a form without committing. Here it commits:
+                        // it broadcasts a replacement at the same nonce, it
+                        // costs gas, and it can lose the race. The ellipsis is
+                        // the confirmation that says so.
                         .label(if status == PendingStatus::Cancelling {
-                            "Try cancelling again"
+                            "Try cancelling again…"
                         } else {
-                            "Cancel"
+                            "Cancel transaction…"
                         })
                         .danger()
                         .disabled(busy)
@@ -12294,7 +12300,7 @@ impl WalletWindow {
                 .child(
                     app_button("clear-activity-history")
                         .danger()
-                        .label("Clear history")
+                        .label("Clear history…")
                         .disabled(self.history_clearing)
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.confirm_activity_history_clear(window, cx);
@@ -12943,7 +12949,7 @@ impl WalletWindow {
                                         app_button(SharedString::from(format!(
                                             "export-account-{export_id}"
                                         )))
-                                        .label("Export key")
+                                        .label("Export key…")
                                         .on_click(
                                             cx.listener(move |view, _, _, cx| {
                                                 view.begin_account_export(export_id.clone(), cx);
@@ -12954,7 +12960,7 @@ impl WalletWindow {
                                         app_button(SharedString::from(format!(
                                             "remove-account-{removal_id}"
                                         )))
-                                        .label("Remove")
+                                        .label("Remove…")
                                         .danger()
                                         .on_click(
                                             cx.listener(move |view, _, _, cx| {
@@ -13081,7 +13087,7 @@ impl WalletWindow {
                     "Terms of Service",
                     Some(legal_acceptance_detail(&status.terms_of_service, cx)),
                     app_button("review-terms")
-                        .label("View")
+                        .label("View…")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::TermsOfService, cx);
                         })),
@@ -13092,7 +13098,7 @@ impl WalletWindow {
                     "Privacy Policy",
                     Some(legal_acceptance_detail(&status.privacy_policy, cx)),
                     app_button("review-privacy")
-                        .label("View")
+                        .label("View…")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
                         })),
@@ -13119,7 +13125,7 @@ impl WalletWindow {
                         cx.theme().muted_foreground,
                     )),
                     app_button("review-license")
-                        .label("View")
+                        .label("View…")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ApplicationLicense, cx);
                         })),
@@ -13130,7 +13136,7 @@ impl WalletWindow {
                     "Third-Party Licenses",
                     None,
                     app_button("review-licenses")
-                        .label("View")
+                        .label("View…")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
                         })),
@@ -14129,7 +14135,7 @@ impl WalletWindow {
                 actions.child(
                     app_button(SharedString::from(format!("delete-automation-{id}")))
                         .debug_selector(|| "delete-automation".to_owned())
-                        .label("Delete")
+                        .label("Delete…")
                         .ghost()
                         .disabled(busy)
                         .on_click(cx.listener(move |view, _, window, cx| {
@@ -14860,7 +14866,7 @@ impl WalletWindow {
                                                 "edit-network-{name}"
                                             )))
                                             .icon(Icon::default().path(PENCIL_ICON))
-                                            .label("Edit")
+                                            .label("Edit…")
                                             .tooltip("Edit network")
                                             .disabled(busy)
                                             .on_click(cx.listener(
@@ -15400,8 +15406,7 @@ impl WalletWindow {
                 .child(
                     app_button("open-token-editor")
                         .debug_selector(|| "add-token-button".to_owned())
-                        .label("Add token")
-                        .primary()
+                        .label("Add token…")
                         .disabled(self.token_editor_open)
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.open_new_token_editor(window, cx);
@@ -15787,7 +15792,7 @@ impl WalletWindow {
                     panel.child(
                         app_button("install-signed-update")
                             .self_start()
-                            .label(format!("Install {}", update.version()))
+                            .label(format!("Install {}…", update.version()))
                             .primary()
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.confirm_update_installation(window, cx);
@@ -16778,8 +16783,7 @@ impl WalletWindow {
                     .flex_none()
                     .child(
                         app_button("open-custom-network-editor")
-                            .label("Add custom network")
-                            .primary()
+                            .label("Add custom network…")
                             .icon(IconName::Plus)
                             .disabled(self.network_editor_open)
                             .on_click(cx.listener(|view, _, window, cx| {

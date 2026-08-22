@@ -1298,7 +1298,7 @@ fn an_action_button_is_the_width_of_its_label(cx: &mut gpui::TestAppContext) {
     settle(cx, &view);
 
     // A flex column stretches its children, so this button was as wide as the
-    // page — a primary bar with "Add token" floating in the middle of it.
+    // page — a bar with "Add token…" floating in the middle of it.
     cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Tokens));
     let measured = measure(cx, window, &view, &["add-token-button"]);
     let button = measured[0].expect("the add-token button must have been laid out");
