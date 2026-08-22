@@ -1464,6 +1464,10 @@ fn render_portfolio_balance_row(
                     .child("·"),
             )
             .child(match row.explorer_url.clone() {
+                // The one link styling left in the interface, and the only
+                // thing it is for: a target outside the application. Every
+                // other quiet command is a ghost Button, because the
+                // underline and the pointing hand are a promise to leave.
                 Some(explorer_url) => app_button(SharedString::from(format!(
                     "portfolio-token-explorer-{wallet_id}-{}-{address}",
                     row.chain_id
@@ -14939,14 +14943,20 @@ impl WalletWindow {
                                             let name = name.clone();
                                             move || format!("set-native-value-{name}")
                                         })
+                                        // A ghost Button, not a link: this
+                                        // opens the price dialog, and link
+                                        // styling on an in-app command hides
+                                        // the affordance and hands assistive
+                                        // technology the wrong role. The
+                                        // ellipsis is the dialog.
                                         .label(if recorded.is_some() {
-                                            "Change value"
+                                            "Change value…"
                                         } else {
-                                            "Set value"
+                                            "Set value…"
                                         })
-                                        .link()
+                                        .ghost()
                                         .h(px(22.0))
-                                        .px_0()
+                                        .px_1()
                                         .text_sm()
                                         .font_normal()
                                         .on_click(cx.listener(move |view, _, window, cx| {
@@ -15109,11 +15119,20 @@ impl WalletWindow {
                     .when(holdings, |hint| {
                         hint.child(selectable_label("Only non-zero balances are shown."))
                             .child(
+                                // A ghost Button rather than the link it used
+                                // to be. This switches tab, and in-app
+                                // navigation dressed as a link claims to leave
+                                // for a browser, takes the pointing-hand
+                                // cursor that says so, and reports the wrong
+                                // role to assistive technology. Named for
+                                // where it goes, the way the empty states'
+                                // "Go to Accounts" is: it does not add a
+                                // token, it opens the tab that can.
                                 app_button("portfolio-manage-tokens")
-                                    .label("Add a token")
-                                    .link()
+                                    .label("Go to Tokens")
+                                    .ghost()
                                     .h(px(22.0))
-                                    .px_0()
+                                    .px_1()
                                     .text_sm()
                                     .font_normal()
                                     .on_click(cx.listener(|view, _, _, cx| {
@@ -18204,10 +18223,13 @@ impl WalletWindow {
                         .justify_end()
                         .pt_1()
                         .child(accessible_button(
+                            // Quiet, but a Button: dismissing a panel is an
+                            // application command, and link styling would
+                            // promise a resource somewhere else.
                             app_button("guided-setup-dismiss")
                                 .debug_selector(|| "guided-setup-dismiss".to_owned())
-                                .link()
-                                .px_0()
+                                .ghost()
+                                .px_1()
                                 .h(px(20.0))
                                 .text_xs()
                                 .font_normal()
