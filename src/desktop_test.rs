@@ -2980,8 +2980,12 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
     assert!(!review.contains(r#""policy-review-rationale""#));
     assert!(!review.contains("max_h(px(180.0))"));
     // But the argument is one press away, and the way back is named for where
-    // it goes rather than for what the reader was doing.
+    // it goes rather than for what the reader was doing -- in the same words
+    // the proposal card uses for the same destination, so one command does not
+    // read as two.
     assert!(review.contains(r#"app_button("open-policy-proposal-case")"#));
-    assert!(review.contains(r#".label("Edit this draft")"#));
+    assert!(review.contains(r#".label("Edit the draft")"#));
+    assert!(case.contains(r#".label("Edit the draft")"#));
     assert!(!review.contains(r#".label("Back to editing")"#));
+    assert!(!review.contains(r#".label("Edit this draft")"#));
 }
