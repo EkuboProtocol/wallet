@@ -15455,12 +15455,15 @@ impl WalletWindow {
                 )
                 .when_some(self.token_list_url_input.as_ref(), |row, _| {
                     row.child(
+                        // A disclosure, so one label and a chevron that turns
+                        // over. It used to swap the words as well, which read
+                        // as two different commands sharing a position -- and
+                        // it carried an ellipsis, which now says "this opens a
+                        // dialog" everywhere else in the wallet. It opens the
+                        // section directly below it.
                         app_button("toggle-owner-token-list-import")
-                            .label(if self.token_list_import_open {
-                                "Close token-list import"
-                            } else {
-                                "Import a published token list…"
-                            })
+                            .label("Import a published token list")
+                            .toggled(self.token_list_import_open)
                             .icon(if self.token_list_import_open {
                                 IconName::ChevronUp
                             } else {
