@@ -12457,8 +12457,12 @@ impl WalletWindow {
                                         .child(
                                             app_button(action_selector.clone())
                                                 .debug_selector(move || action_selector.clone())
+                                                // Both plain Buttons. One
+                                                // primary per detected agent
+                                                // put three of them down the
+                                                // same list, none of which is
+                                                // the page's default commit.
                                                 .label(if installed { "Remove" } else { "Install" })
-                                                .when(!installed, ButtonVariants::primary)
                                                 .disabled(
                                                     self.legal_gate
                                                         || self.agent_reinstall
@@ -14105,8 +14109,13 @@ impl WalletWindow {
                         // "Start", not "Run again": this does not run a tick,
                         // it puts the automation back on its schedule under
                         // the policy that is active now.
+                        //
+                        // An ordinary Button. Primary marks the one default
+                        // commitment in a decision area, and a list of five
+                        // stopped automations is not five decision areas: it
+                        // is five rows, each shouting the same emphasis until
+                        // none of it means anything.
                         .label("Start")
-                        .primary()
                         .loading(busy)
                         .disabled(busy)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -14118,8 +14127,14 @@ impl WalletWindow {
                 actions.child(
                     app_button(SharedString::from(format!("stop-automation-{id}")))
                         .debug_selector(|| "stop-automation".to_owned())
+                        // Not danger. Stopping is the reversible half of this
+                        // pair -- Start puts the automation back on its
+                        // schedule, and nothing is lost in between. Painting
+                        // it red while Delete, the irreversible one, sat
+                        // beside it as a ghost inverted the hierarchy the
+                        // colour exists to carry. The destructive commitment
+                        // lives on the confirmation Delete opens.
                         .label("Stop")
-                        .danger()
                         .loading(busy)
                         .disabled(busy)
                         .on_click(cx.listener(move |view, _, _, cx| {
