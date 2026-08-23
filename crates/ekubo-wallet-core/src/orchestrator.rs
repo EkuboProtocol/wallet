@@ -24,7 +24,8 @@ use crate::{
         ReviewPresenter,
     },
     approval_summary::{
-        TokenMetadataMap, interpret_steps, plan_token_targets, render_balance_changes, token_label,
+        OwnAccounts, TokenMetadataMap, address_label, interpret_steps, plan_token_targets,
+        render_balance_changes, token_label,
     },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     core::{
@@ -415,6 +416,12 @@ pub async fn approve_transaction(
     let overrides = SigningOverrides::reviewed();
     let review = TransactionReview {
         wallet: &wallet,
+        own_accounts: config
+            .load()?
+            .wallets
+            .into_iter()
+            .map(|account| (account.address, account.id))
+            .collect(),
         network: &network,
         request: &request,
         stored_policy: &stored_policy,
@@ -549,6 +556,11 @@ pub async fn approve_transaction(
 /// is being approved. Only the chain's answer to it can differ.
 struct TransactionReview<'a> {
     wallet: &'a WalletMetadata,
+    /// Every account this wallet holds, so a counterparty that is one of them
+    /// can be named as one. Read from configuration once, before review: the
+    /// question "is this address also mine" is about the wallet's own records
+    /// and must not be answerable by anything that reaches it from a plan.
+    own_accounts: OwnAccounts,
     network: &'a NetworkConfig,
     request: &'a PendingTransaction,
     stored_policy: &'a StoredPolicy,
@@ -630,6 +642,7 @@ impl TransactionReview<'_> {
             &prepared,
             self.network,
             &token_metadata,
+            &self.own_accounts,
         )
         .await?;
         let mut latest = self
@@ -737,6 +750,7 @@ async fn transaction_approval_request(
     prepared: &PreparedExecution,
     network: &NetworkConfig,
     token_metadata: &TokenMetadataMap,
+    own_accounts: &OwnAccounts,
 ) -> Result<ApprovalRequest> {
     let total_native = pending
         .execution_plan
@@ -776,7 +790,10 @@ async fn transaction_approval_request(
                     .as_deref()
                     .unwrap_or("constructed locally by this wallet"),
             )
-            .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
+            .fact(
+                "Sender",
+                address_label(pending.execution_plan.sender, own_accounts),
+            )
             .fact(
                 "Total native value",
                 native_value(&total_native.to_string(), network),
@@ -785,7 +802,7 @@ async fn transaction_approval_request(
             .digest(prepared.review_digest());
     request.id = pending.request_id;
 
-    let interpretations = interpret_steps(steps, token_metadata).await;
+    let interpretations = interpret_steps(steps, token_metadata, own_accounts).await;
     request = request.section_kind(
         ApprovalSectionKind::Effects,
         "Expected wallet changes (simulation, excluding live gas)",
@@ -809,7 +826,7 @@ async fn transaction_approval_request(
     for (step, interpretation) in steps.iter().zip(&interpretations) {
         let calldata = step.transaction.data.as_ref();
         let target = token_metadata.get(&step.transaction.to).map_or_else(
-            || format!("{:#x}", step.transaction.to),
+            || address_label(step.transaction.to, own_accounts),
             |metadata| token_label(step.transaction.to, metadata),
         );
         request = request

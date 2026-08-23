@@ -12,7 +12,10 @@ use ekubo_wallet_core::{
     approval::{
         ApprovalKind, ApprovalRequest, ApprovalSectionKind, ReviewDocument, ReviewPresenter,
     },
-    approval_summary::{TokenMetadataMap, format_fixed_point, interpret_steps, plan_token_targets},
+    approval_summary::{
+        OwnAccounts, TokenMetadataMap, address_label, format_fixed_point, interpret_steps,
+        plan_token_targets,
+    },
     automation::{Automation, AutomationState, PollFailure, PolledCall},
     automation_store::{AutomationRun, AutomationStore},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
@@ -256,6 +259,7 @@ fn receipt_presentation(
     wallet: Address,
     receipt: &ReceiptDetails,
     metadata: &TokenMetadataMap,
+    own: &OwnAccounts,
 ) -> ReceiptPresentation {
     let transfer = keccak256("Transfer(address,address,uint256)");
     let approval = keccak256("Approval(address,address,uint256)");
@@ -285,8 +289,10 @@ fn receipt_presentation(
                 events.push((
                     "Token transfer".to_owned(),
                     format!(
-                        "{} from {from:#x} to {to:#x}",
-                        token_amount(amount, log.address, metadata)
+                        "{} from {} to {}",
+                        token_amount(amount, log.address, metadata),
+                        address_label(from, own),
+                        address_label(to, own)
                     ),
                 ));
             }
@@ -299,8 +305,10 @@ fn receipt_presentation(
                 events.push((
                     "NFT transfer".to_owned(),
                     format!(
-                        "{} token #{token_id} from {from:#x} to {to:#x}",
-                        trusted_token_label(log.address, metadata)
+                        "{} token #{token_id} from {} to {}",
+                        trusted_token_label(log.address, metadata),
+                        address_label(from, own),
+                        address_label(to, own)
                     ),
                 ));
             }
@@ -312,7 +320,8 @@ fn receipt_presentation(
                 events.push((
                     "Token approval".to_owned(),
                     format!(
-                        "Allowed {spender:#x} to spend {}",
+                        "Allowed {} to spend {}",
+                        address_label(spender, own),
                         token_amount(U256::from_be_slice(&log.data), log.address, metadata)
                     ),
                 ));
@@ -326,8 +335,9 @@ fn receipt_presentation(
                 events.push((
                     "Collection approval".to_owned(),
                     format!(
-                        "{} operator access for {operator:#x} on {}",
+                        "{} operator access for {} on {}",
                         if enabled { "Enabled" } else { "Removed" },
+                        address_label(operator, own),
                         trusted_token_label(log.address, metadata)
                     ),
                 ));
@@ -342,8 +352,10 @@ fn receipt_presentation(
                 events.push((
                     "Multi-token transfer".to_owned(),
                     format!(
-                        "{amount} of token #{token_id} on {} from {from:#x} to {to:#x}",
-                        trusted_token_label(log.address, metadata)
+                        "{amount} of token #{token_id} on {} from {} to {}",
+                        trusted_token_label(log.address, metadata),
+                        address_label(from, own),
+                        address_label(to, own)
                     ),
                 ));
             }
@@ -376,6 +388,7 @@ async fn transaction_inspection_document(
     wallet: Address,
     network: &NetworkConfig,
     metadata: &TokenMetadataMap,
+    own: &OwnAccounts,
     transaction_hash: Option<&str>,
     receipt: Option<&ReceiptDetails>,
     receipt_error: Option<&str>,
@@ -402,7 +415,7 @@ async fn transaction_inspection_document(
         .fact("Account", &pending.wallet_id)
         .fact("Network", network.display_label())
         .fact("Chain ID", &pending.chain_id)
-        .fact("Sender", format!("{wallet:#x}"))
+        .fact("Sender", address_label(wallet, own))
         .fact(
             "Plan source",
             pending
@@ -429,7 +442,7 @@ async fn transaction_inspection_document(
         );
     }
     if let Some(receipt) = receipt {
-        let presentation = receipt_presentation(wallet, receipt, metadata);
+        let presentation = receipt_presentation(wallet, receipt, metadata, own);
         if receipt.succeeded {
             if presentation.effects.is_empty() {
                 request = request.fact(
@@ -500,7 +513,8 @@ async fn transaction_inspection_document(
         request = request.fact("Receipt", "Not available");
     }
 
-    let interpretations = interpret_steps(&pending.execution_plan.ordered_steps, metadata).await;
+    let interpretations =
+        interpret_steps(&pending.execution_plan.ordered_steps, metadata, own).await;
     for (step, interpretation) in pending
         .execution_plan
         .ordered_steps
@@ -515,7 +529,7 @@ async fn transaction_inspection_document(
                     "Unrecognized contract call — verify the target and exact calldata.".to_owned()
                 }),
             )
-            .fact("Target", format!("{:#x}", step.transaction.to))
+            .fact("Target", address_label(step.transaction.to, own))
             .fact(
                 "Native value",
                 native_amount(
@@ -1740,11 +1754,19 @@ impl OwnerApi {
         }
         let metadata = TokenStore::production(self.config.data_dir())?
             .display_metadata(chain_id, &token_targets.into_iter().collect::<Vec<_>>())?;
+        let own_accounts = self
+            .config
+            .load()?
+            .wallets
+            .into_iter()
+            .map(|account| (account.address, account.id))
+            .collect::<OwnAccounts>();
         let document = transaction_inspection_document(
             &pending,
             wallet.address,
             &network,
             &metadata,
+            &own_accounts,
             receipt_hash
                 .as_deref()
                 .or_else(|| candidates.first().map(String::as_str)),

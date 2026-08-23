@@ -32,6 +32,21 @@ fn approve_calldata(spender: Address, amount: U256) -> Vec<u8> {
     data
 }
 
+/// Read one step with no accounts of the owner's.
+///
+/// These tests are about what the calldata says, not about whose addresses
+/// appear in it; the two that are about that pass their own account list.
+async fn interpret_one(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInterpretation {
+    interpret_step(step, metadata, &OwnAccounts::new()).await
+}
+
+fn transfer_calldata(to: Address, amount: U256) -> Vec<u8> {
+    let mut data = TRANSFER_SELECTOR.to_vec();
+    data.extend_from_slice(&to.into_word().0);
+    data.extend_from_slice(&amount.to_be_bytes::<32>());
+    data
+}
+
 fn set_approval_for_all_calldata(operator: Address, approved: bool) -> Vec<u8> {
     let mut data = SET_APPROVAL_FOR_ALL_SELECTOR.to_vec();
     data.extend_from_slice(&operator.into_word().0);
@@ -50,7 +65,7 @@ async fn a_descriptor_does_not_silence_the_operator_grant_warning() {
         .parse()
         .unwrap();
     let operator = Address::repeat_byte(0x33);
-    let granted = interpret_step(
+    let granted = interpret_one(
         &step(1, positions, set_approval_for_all_calldata(operator, true)),
         &TokenMetadataMap::new(),
     )
@@ -71,7 +86,7 @@ async fn a_descriptor_does_not_silence_the_operator_grant_warning() {
 
     // A revocation reads through the same descriptor and must stay quiet:
     // a warning on every operator call would say nothing about this one.
-    let revoked = interpret_step(
+    let revoked = interpret_one(
         &step(1, positions, set_approval_for_all_calldata(operator, false)),
         &TokenMetadataMap::new(),
     )
@@ -89,7 +104,7 @@ async fn a_descriptor_does_not_silence_the_unlimited_allowance_warning() {
     let steth: Address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
         .parse()
         .unwrap();
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(
             1,
             steth,
@@ -214,7 +229,7 @@ fn rejects_address_words_with_dirty_high_bytes() {
 async fn renders_recognized_token_amounts_without_redundant_base_units() {
     let token = Address::repeat_byte(0x33);
     let spender = Address::repeat_byte(0x44);
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(
             1,
             token,
@@ -232,7 +247,7 @@ async fn renders_recognized_token_amounts_without_redundant_base_units() {
 #[tokio::test]
 async fn falls_back_to_base_units_without_metadata() {
     let token = Address::repeat_byte(0x33);
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(
             1,
             token,
@@ -248,7 +263,7 @@ async fn falls_back_to_base_units_without_metadata() {
 #[tokio::test]
 async fn warns_about_effectively_unlimited_allowances() {
     let token = Address::repeat_byte(0x33);
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(
             1,
             token,
@@ -294,7 +309,7 @@ async fn warns_about_blanket_operator_approval() {
     let mut calldata = SET_APPROVAL_FOR_ALL_SELECTOR.to_vec();
     calldata.extend_from_slice(&operator.into_word().0);
     calldata.extend_from_slice(&U256::from(1_u8).to_be_bytes::<32>());
-    let interpretation = interpret_step(&step(2, token, calldata), &TokenMetadataMap::new()).await;
+    let interpretation = interpret_one(&step(2, token, calldata), &TokenMetadataMap::new()).await;
     assert_eq!(interpretation.warnings.len(), 1);
     assert!(interpretation.warnings[0].contains("blanket operator control"));
 }
@@ -302,7 +317,7 @@ async fn warns_about_blanket_operator_approval() {
 #[tokio::test]
 async fn zero_approval_reads_as_a_revocation() {
     let token = Address::repeat_byte(0x33);
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(
             1,
             token,
@@ -317,7 +332,7 @@ async fn zero_approval_reads_as_a_revocation() {
 
 #[tokio::test]
 async fn unknown_calldata_has_no_interpretation() {
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(1, Address::repeat_byte(0x33), vec![0xde, 0xad, 0xbe, 0xef]),
         &TokenMetadataMap::new(),
     )
@@ -334,7 +349,7 @@ async fn summarizes_nested_multicall_selectors() {
     ]);
     let mut calldata = MULTICALL_SELECTOR.to_vec();
     calldata.extend_from_slice(&inner.abi_encode_params());
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(1, Address::repeat_byte(0x33), calldata),
         &TokenMetadataMap::new(),
     )
@@ -356,7 +371,7 @@ async fn a_multicall_description_says_how_many_calls_it_did_not_show() {
     let inner = DynSolValue::Array(nested);
     let mut calldata = MULTICALL_SELECTOR.to_vec();
     calldata.extend_from_slice(&inner.abi_encode_params());
-    let interpretation = interpret_step(
+    let interpretation = interpret_one(
         &step(1, Address::repeat_byte(0x33), calldata),
         &TokenMetadataMap::new(),
     )
@@ -383,7 +398,7 @@ async fn a_multicall_warns_that_its_contents_are_unreviewed() {
     let mut calldata = MULTICALL_SELECTOR.to_vec();
     calldata.extend_from_slice(&inner.abi_encode_params());
     let token = Address::repeat_byte(0x33);
-    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    let interpretation = interpret_one(&step(1, token, calldata), &TokenMetadataMap::new()).await;
     assert!(
         interpretation
             .warnings
@@ -402,7 +417,7 @@ async fn an_empty_multicall_still_warns_that_it_is_unreviewed() {
     let mut calldata = MULTICALL_SELECTOR.to_vec();
     calldata.extend_from_slice(&inner.abi_encode_params());
     let token = Address::repeat_byte(0x33);
-    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    let interpretation = interpret_one(&step(1, token, calldata), &TokenMetadataMap::new()).await;
     assert!(
         interpretation
             .warnings
@@ -430,7 +445,7 @@ async fn a_multicall_warns_exactly_once_however_many_calls_it_bundles() {
     let mut calldata = MULTICALL_SELECTOR.to_vec();
     calldata.extend_from_slice(&inner.abi_encode_params());
     let token = Address::repeat_byte(0x33);
-    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    let interpretation = interpret_one(&step(1, token, calldata), &TokenMetadataMap::new()).await;
     assert_eq!(
         interpretation.warnings.len(),
         1,
@@ -485,7 +500,8 @@ async fn clear_signed_steps_take_precedence_over_standard_decoding() {
     let (chain_id, target, calldata) = crate::clear_signing::stake_fixture();
     let mut staked = step(1, target, calldata);
     staked.transaction.chain_id = DecimalU256::new(chain_id.to_string()).unwrap();
-    let interpretations = interpret_steps(&[staked], &TokenMetadataMap::new()).await;
+    let interpretations =
+        interpret_steps(&[staked], &TokenMetadataMap::new(), &OwnAccounts::new()).await;
     let interpretation = &interpretations[0];
     let description = interpretation.description.as_deref().unwrap();
     assert!(description.contains("Ekubo"), "{description}");
@@ -497,9 +513,80 @@ async fn clear_signed_steps_take_precedence_over_standard_decoding() {
     // the unrecognized-selector path rather than borrowing the reading.
     let (_, target, calldata) = crate::clear_signing::stake_fixture();
     let elsewhere = step(1, target, calldata);
-    let fallback = interpret_steps(&[elsewhere], &TokenMetadataMap::new()).await;
+    let fallback =
+        interpret_steps(&[elsewhere], &TokenMetadataMap::new(), &OwnAccounts::new()).await;
     assert_eq!(fallback[0].description, None);
     assert!(fallback[0].details.is_empty());
+}
+
+/// The one question an address cannot answer on its own is whether the other
+/// end is also the owner's. Sending to a stranger and moving funds between two
+/// accounts this wallet holds are the same forty characters on screen.
+#[tokio::test]
+async fn a_transfer_to_another_of_the_owners_accounts_says_so() {
+    let token = Address::repeat_byte(0x11);
+    let mine = Address::repeat_byte(0x22);
+    let stranger = Address::repeat_byte(0x33);
+    let mut own = OwnAccounts::new();
+    own.insert(mine, "savings".to_owned());
+
+    let to_mine = step(1, token, transfer_calldata(mine, U256::from(5_u8)));
+    let described = interpret_steps(&[to_mine], &TokenMetadataMap::new(), &own).await[0]
+        .description
+        .clone()
+        .expect("a standard transfer is described");
+    assert!(
+        described.contains(&format!("{mine:#x}")),
+        "the exact address is never replaced by a name: {described}"
+    );
+    assert!(
+        described.contains("your account savings"),
+        "an account the owner holds must be named as one: {described}"
+    );
+
+    let to_stranger = step(1, token, transfer_calldata(stranger, U256::from(5_u8)));
+    let described = interpret_steps(&[to_stranger], &TokenMetadataMap::new(), &own).await[0]
+        .description
+        .clone()
+        .expect("a standard transfer is described");
+    assert!(described.contains(&format!("{stranger:#x}")), "{described}");
+    assert!(
+        !described.contains("your account"),
+        "an address the wallet does not hold must never be dressed as one: {described}"
+    );
+}
+
+/// The label renders as `0xaddress (your account NAME)`, so a name shaped like
+/// an address is the thing that could point a reviewer somewhere the plan does
+/// not go. Account names are owner-authored, which makes them trusted enough
+/// to show and not trusted enough to show unfiltered.
+#[test]
+fn an_account_name_can_never_be_read_as_a_second_address() {
+    let mine = Address::repeat_byte(0x22);
+    for forged in [
+        "0x3333333333333333333333333333333333333333",
+        "savings (0x3333333333333333333333333333333333333333)",
+        "0X3333",
+    ] {
+        let mut own = OwnAccounts::new();
+        own.insert(mine, forged.to_owned());
+        let rendered = address_label(mine, &own);
+        assert!(
+            !rendered.to_ascii_lowercase().contains("0x3333"),
+            "{forged} survived into {rendered}"
+        );
+    }
+
+    let mut own = OwnAccounts::new();
+    own.insert(mine, "savings".to_owned());
+    assert_eq!(
+        address_label(mine, &own),
+        format!("{mine:#x} (your account savings)")
+    );
+    assert_eq!(
+        address_label(mine, &OwnAccounts::new()),
+        format!("{mine:#x}")
+    );
 }
 
 #[test]

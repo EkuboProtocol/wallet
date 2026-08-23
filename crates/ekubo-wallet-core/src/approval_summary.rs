@@ -127,15 +127,24 @@ pub async fn plan_token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     targets.into_iter().collect()
 }
 
+/// The accounts this wallet holds, by address.
+///
+/// A reviewer can read an address. What they cannot read off one is whether
+/// the other end of a transfer is also theirs -- moving funds between two
+/// accounts this wallet holds and sending them to a stranger are the same
+/// forty characters, and only one of them is a loss.
+pub type OwnAccounts = BTreeMap<Address, String>;
+
 /// Interpret every step of an execution plan without contacting the network.
 #[must_use]
 pub async fn interpret_steps(
     steps: &[ExecutionStep],
     metadata: &TokenMetadataMap,
+    own: &OwnAccounts,
 ) -> Vec<StepInterpretation> {
     let mut interpretations = Vec::with_capacity(steps.len());
     for step in steps {
-        interpretations.push(interpret_step(step, metadata).await);
+        interpretations.push(interpret_step(step, metadata, own).await);
     }
     interpretations
 }
@@ -149,7 +158,11 @@ fn step_value(step: &ExecutionStep) -> alloy::primitives::U256 {
         .unwrap_or_default()
 }
 
-async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInterpretation {
+async fn interpret_step(
+    step: &ExecutionStep,
+    metadata: &TokenMetadataMap,
+    own: &OwnAccounts,
+) -> StepInterpretation {
     // A vendored ERC-7730 descriptor is the most specific reading available:
     // it matches on exact chain, address, and selector, and was reviewed when
     // the snapshot was committed. Standard token decoding remains the
@@ -189,35 +202,42 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
         Some(StandardCall::Approve { spender, amount }) => {
             if amount == U256::ZERO {
                 Some(format!(
-                    "revoke {} allowance for spender {spender:#x}",
-                    token_label(token, &display)
+                    "revoke {} allowance for spender {}",
+                    token_label(token, &display),
+                    address_label(spender, own)
                 ))
             } else {
                 Some(format!(
-                    "approve spender {spender:#x} for {}",
+                    "approve spender {} for {}",
+                    address_label(spender, own),
                     format_token_amount(amount, token, &display)
                 ))
             }
         }
         Some(StandardCall::Transfer { to, amount }) => Some(format!(
-            "transfer {} to {to:#x}",
-            format_token_amount(amount, token, &display)
+            "transfer {} to {}",
+            format_token_amount(amount, token, &display),
+            address_label(to, own)
         )),
         Some(StandardCall::TransferFrom { from, to, amount }) => Some(format!(
-            "transferFrom {from:#x} to {to:#x} for {}",
+            "transferFrom {} to {} for {}",
+            address_label(from, own),
+            address_label(to, own),
             format_token_amount(amount, token, &display)
         )),
         Some(StandardCall::SetApprovalForAll {
             operator,
             approved: true,
         }) => Some(format!(
-            "setApprovalForAll: grant operator {operator:#x} control of all {token:#x} tokens"
+            "setApprovalForAll: grant operator {} control of all {token:#x} tokens",
+            address_label(operator, own)
         )),
         Some(StandardCall::SetApprovalForAll {
             operator,
             approved: false,
         }) => Some(format!(
-            "setApprovalForAll: revoke operator {operator:#x} for {token:#x}"
+            "setApprovalForAll: revoke operator {} for {token:#x}",
+            address_label(operator, own)
         )),
         Some(StandardCall::Multicall { calls }) => {
             let shown = calls.len().min(MAX_DISPLAYED_NESTED_CALLS);
@@ -496,6 +516,34 @@ pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
             || format!("{token:#x} (unlisted token)"),
             |symbol| format!("{symbol} ({token:#x})"),
         )
+}
+
+/// An address as a reviewer should read it: the exact address always, and the
+/// owner's own name for it when the address is one of their accounts.
+///
+/// The address is never replaced or abbreviated -- it is the thing being
+/// authorized, and a name is only ever added beside it. The name comes from
+/// the wallet's own account list and from nothing else: an agent cannot create
+/// an account, so it has no way to introduce a label here.
+#[must_use]
+pub fn address_label(address: Address, own: &OwnAccounts) -> String {
+    own.get(&address)
+        .map(String::as_str)
+        .and_then(display_account_name)
+        .map_or_else(
+            || format!("{address:#x}"),
+            |name| format!("{address:#x} (your account {name})"),
+        )
+}
+
+/// An account name is owner-authored rather than agent-supplied, which makes
+/// it trusted enough to show and not trusted enough to show unfiltered: an
+/// owner can type anything into it, including something shaped like the
+/// address suffix this label already carries. It is held to what
+/// [`display_symbol`] holds a token symbol to, for the same reason -- nothing
+/// that survives can be mistaken for a second address.
+pub(crate) fn display_account_name(id: &str) -> Option<String> {
+    display_symbol(id)
 }
 
 /// A stored symbol is still text the wallet did not author: it reaches the

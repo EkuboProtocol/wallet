@@ -53,7 +53,7 @@ fn receipt_presentation_aggregates_wallet_transfers_with_trusted_metadata() {
         },
     )]);
 
-    let presentation = receipt_presentation(wallet, &receipt, &metadata);
+    let presentation = receipt_presentation(wallet, &receipt, &metadata, &OwnAccounts::new());
 
     assert_eq!(presentation.decoded, 1);
     assert_eq!(presentation.effects.len(), 1);
@@ -62,6 +62,20 @@ fn receipt_presentation_aggregates_wallet_transfers_with_trusted_metadata() {
     assert_eq!(presentation.events.len(), 1);
     assert!(presentation.events[0].1.contains("1.25 USDC"));
     assert!(presentation.events[0].1.contains(&format!("{sender:#x}")));
+
+    // The same receipt, read by an owner who holds both ends of it. The
+    // addresses are unchanged -- they are what happened -- and the two that
+    // are theirs now say so, which is the whole difference between a transfer
+    // out and a transfer between their own accounts.
+    let own = OwnAccounts::from([
+        (wallet, "spending".to_owned()),
+        (sender, "savings".to_owned()),
+    ]);
+    let presentation = receipt_presentation(wallet, &receipt, &metadata, &own);
+    let event = &presentation.events[0].1;
+    assert!(event.contains(&format!("{sender:#x}")), "{event}");
+    assert!(event.contains("your account savings"), "{event}");
+    assert!(event.contains("your account spending"), "{event}");
 }
 
 #[test]
