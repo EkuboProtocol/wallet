@@ -539,11 +539,31 @@ pub fn address_label(address: Address, own: &OwnAccounts) -> String {
 /// An account name is owner-authored rather than agent-supplied, which makes
 /// it trusted enough to show and not trusted enough to show unfiltered: an
 /// owner can type anything into it, including something shaped like the
-/// address suffix this label already carries. It is held to what
-/// [`display_symbol`] holds a token symbol to, for the same reason -- nothing
-/// that survives can be mistaken for a second address.
+/// address this label already carries. It starts from what [`display_symbol`]
+/// holds a token symbol to, for the same reason -- nothing that survives can
+/// be mistaken for a second address.
+///
+/// It does not stop there. A token symbol is a handful of characters and a
+/// refusal of `0x` covers it; an account name has room for a whole address,
+/// and `Ox3333…` is letters to a parser and an address to a reader. So a
+/// letter `O` standing in for the zero is refused as well -- but only in front
+/// of a run of hex, because otherwise an account called `box` would lose its
+/// name for no reason.
 pub(crate) fn display_account_name(id: &str) -> Option<String> {
-    display_symbol(id)
+    let cleaned = display_symbol(id)?;
+    let lowered = cleaned.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    // Every surviving character is ASCII, so a byte index is a char boundary.
+    let forged = (0..bytes.len().saturating_sub(1)).any(|index| {
+        bytes[index] == b'o'
+            && bytes[index + 1] == b'x'
+            && lowered[index + 2..]
+                .chars()
+                .take_while(char::is_ascii_hexdigit)
+                .count()
+                >= 4
+    });
+    if forged { None } else { Some(cleaned) }
 }
 
 /// A stored symbol is still text the wallet did not author: it reaches the

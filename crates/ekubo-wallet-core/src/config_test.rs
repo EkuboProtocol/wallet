@@ -7,6 +7,50 @@
 
 use super::*;
 
+/// A configuration that names its currency is believed; one that does not
+/// falls back to what this build ships for that chain; a chain this build does
+/// not carry keeps saying nothing, because raw units are honest and a guessed
+/// denomination on an approval screen is not.
+#[test]
+fn a_network_without_a_currency_takes_the_one_this_build_ships_for_its_chain() {
+    let mut ethereum = crate::networks::known_network(1)
+        .expect("the registry ships Ethereum")
+        .config
+        .clone();
+    let shipped = ethereum
+        .native_currency
+        .clone()
+        .expect("Ethereum ships a native currency");
+    assert_eq!(shipped.symbol, "ETH");
+
+    // Configured wins, even when it disagrees with the registry.
+    ethereum.native_currency = Some(NativeCurrency {
+        name: "Renamed".to_owned(),
+        symbol: "RENAMED".to_owned(),
+        decimals: 8,
+    });
+    let resolved = ethereum
+        .resolved_native_currency()
+        .expect("a configured currency is used as given");
+    assert_eq!(resolved.symbol, "RENAMED");
+    assert_eq!(resolved.decimals, 8);
+
+    // Absent falls back by chain id.
+    ethereum.native_currency = None;
+    let resolved = ethereum
+        .resolved_native_currency()
+        .expect("a known chain resolves from the registry");
+    assert_eq!(resolved.symbol, shipped.symbol);
+    assert_eq!(resolved.decimals, shipped.decimals);
+
+    // A chain the registry does not carry resolves to nothing rather than to
+    // a plausible default.
+    let unknown = u64::MAX;
+    assert!(crate::networks::known_network(unknown).is_none());
+    ethereum.chain_id = unknown;
+    assert!(ethereum.resolved_native_currency().is_none());
+}
+
 #[test]
 fn plaintext_configuration_is_never_an_input() {
     let directory = tempfile::tempdir().unwrap();

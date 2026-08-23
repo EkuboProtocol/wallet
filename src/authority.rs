@@ -229,7 +229,11 @@ fn signed_token_amount(
 }
 
 fn native_amount(value: U256, network: &NetworkConfig) -> String {
-    let Some(currency) = network.native_currency.as_ref() else {
+    // Resolved, not the stored field: the network fee and the value of a call
+    // are exactly the numbers an owner reads to decide, and a configuration
+    // that predates the field would have shown them in wei on a chain whose
+    // currency this build has always known.
+    let Some(currency) = network.resolved_native_currency() else {
         return format!("{value} wei");
     };
     format!(

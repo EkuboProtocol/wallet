@@ -1459,17 +1459,16 @@ struct PortfolioRowCache {
 struct PortfolioRowKey {
     /// Which balance read the holdings came from.
     portfolio: u64,
-    /// Which background snapshot priced them.
+    /// Which background snapshot priced them. The revision the snapshot was
+    /// published under, not the generation of the read that fetched it: a
+    /// reload bumps its generation when it starts and publishes when it
+    /// finishes, so keying on the generation would let a frame drawn in
+    /// between cache rows read from the outgoing snapshot under the incoming
+    /// snapshot's name -- and go on serving them after it landed.
     snapshot: u64,
     account: usize,
     show_low_value: bool,
 }
-
-/// How many times the rows have been derived, for the test that holds this to
-/// once per reading rather than once per frame.
-#[cfg(test)]
-pub(crate) static PORTFOLIO_ROWS_DERIVED: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
 
 /// One row of the portfolio list: an asset the account holds, or a network
 /// whose balances could not be read at all.
@@ -2306,6 +2305,9 @@ pub struct WalletWindow {
     owner: OwnerApi,
     desktop_snapshot: Option<Arc<DesktopSnapshot>>,
     desktop_snapshot_generation: u64,
+    /// How many snapshots have actually been published, as opposed to
+    /// requested. What is derived from a snapshot is keyed on this.
+    desktop_snapshot_revision: u64,
     desktop_snapshot_loading: bool,
     desktop_snapshot_dirty: bool,
     desktop_snapshot_error: Option<SharedString>,
@@ -2439,6 +2441,15 @@ pub struct WalletWindow {
     show_low_value_balances: bool,
     portfolio_list: VariableListState,
     portfolio_rows: Cell<usize>,
+    /// How many times this window has derived the Portfolio's rows, for the
+    /// test that holds it to once per reading rather than once per frame.
+    ///
+    /// Per window rather than one static: the render tests share a process,
+    /// several of them draw this tab, and libtest runs them on its own thread
+    /// pool -- so a global counter is read across a race and the exact counts
+    /// this pins would fail whenever a sibling test drew at the wrong moment.
+    #[cfg(test)]
+    portfolio_rows_derived: Cell<usize>,
     /// The rows the Portfolio list is drawing, kept across the frames that
     /// redraw it without changing them.
     portfolio_row_cache: RefCell<Option<PortfolioRowCache>>,
@@ -6196,6 +6207,7 @@ impl WalletWindow {
             owner,
             desktop_snapshot: None,
             desktop_snapshot_generation: 0,
+            desktop_snapshot_revision: 0,
             desktop_snapshot_loading: false,
             desktop_snapshot_dirty: false,
             desktop_snapshot_error: None,
@@ -6285,6 +6297,8 @@ impl WalletWindow {
             show_low_value_balances: false,
             portfolio_list: virtual_inbox_list(0),
             portfolio_rows: Cell::new(0),
+            #[cfg(test)]
+            portfolio_rows_derived: Cell::new(0),
             portfolio_row_cache: RefCell::new(None),
             modal_focus: cx.focus_handle(),
             walletconnect,
@@ -6828,6 +6842,8 @@ impl WalletWindow {
                             }
                         }
                         view.desktop_snapshot = Some(Arc::new(snapshot));
+                        view.desktop_snapshot_revision =
+                            view.desktop_snapshot_revision.wrapping_add(1);
                         view.desktop_snapshot_error = None;
                     }
                     Err(error) => {
@@ -9039,10 +9055,16 @@ impl WalletWindow {
     /// here: an index captured in a menu item would be a stale answer the
     /// moment an account is added or removed.
     ///
-    /// Selecting before navigating matters. Arriving on the page asks for a
-    /// refresh, and a refresh already in flight declines to start another --
-    /// so navigating first would read the account being left behind and leave
-    /// the one that was asked for waiting on the next trigger.
+    /// Selecting before navigating saves a read rather than deciding the
+    /// outcome. Arriving on the page asks for a refresh, and a refresh already
+    /// in flight declines to start another -- but selecting invalidates the
+    /// portfolio before it asks, which clears that state, so the requested
+    /// account is read in either order. Doing it first only means the account
+    /// being left behind is never fetched on the way past.
+    ///
+    /// An id with no account is left alone: the Accounts page it came from is
+    /// drawn from the same list, so this is a row that has just been removed,
+    /// and following it would land on the Portfolio of whoever is first.
     fn show_account_portfolio(&mut self, wallet_id: &str, cx: &mut Context<Self>) {
         let Some(index) = self
             .portfolio_accounts()
@@ -9057,9 +9079,13 @@ impl WalletWindow {
 
     /// Open the policy editor on a named account.
     ///
-    /// The route changes first: leaving Policies is what discards a temporary
-    /// view of a historical revision, and doing that after building the editor
-    /// would throw away the one just built.
+    /// The route changes first because that is the order the screen changes
+    /// in, not because the reverse would break: the transition that discards a
+    /// temporary view of a historical revision is the one that *leaves*
+    /// Policies, and this always arrives from Accounts. Unlike the Portfolio
+    /// above, an id with no policy is not filtered out here -- the editor
+    /// reports what it could not read, which is the more useful answer for a
+    /// page whose whole subject is what this wallet will sign.
     fn show_account_policy(
         &mut self,
         wallet_id: &str,
@@ -15447,7 +15473,7 @@ impl WalletWindow {
     ) -> (Arc<[PortfolioListRow]>, usize) {
         let key = PortfolioRowKey {
             portfolio: self.portfolio_generation,
-            snapshot: self.desktop_snapshot_generation,
+            snapshot: self.desktop_snapshot_revision,
             account: self.portfolio_account_index,
             show_low_value: self.show_low_value_balances,
         };
@@ -15457,7 +15483,8 @@ impl WalletWindow {
             return (Arc::clone(&cached.rows), cached.hidden);
         }
         #[cfg(test)]
-        PORTFOLIO_ROWS_DERIVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.portfolio_rows_derived
+            .set(self.portfolio_rows_derived.get() + 1);
         let held = portfolio_balance_rows(
             account,
             self.snapshot().map_or(&EMPTY_NATIVE_PRICES, |snapshot| {

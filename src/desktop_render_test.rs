@@ -1856,8 +1856,6 @@ fn the_policy_editor_can_be_put_back_to_the_installed_policy(cx: &mut gpui::Test
 /// reading and handed back for every frame in between.
 #[gpui::test]
 fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAppContext) {
-    use std::sync::atomic::Ordering::Relaxed;
-
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
@@ -1900,11 +1898,11 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         wallet.set_route(Route::Overview);
     });
 
-    PORTFOLIO_ROWS_DERIVED.store(0, Relaxed);
+    cx.update_entity(&view, |wallet, _| wallet.portfolio_rows_derived.set(0));
     let drawn = measure(cx, window, &view, &["portfolio-balances"]);
     drawn[0].expect("the balances list must draw");
     assert_eq!(
-        PORTFOLIO_ROWS_DERIVED.load(Relaxed),
+        cx.read_entity(&view, |wallet, _| wallet.portfolio_rows_derived.get()),
         1,
         "the first frame has to derive the rows"
     );
@@ -1914,20 +1912,48 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         draw(cx, window, &view);
     }
     assert_eq!(
-        PORTFOLIO_ROWS_DERIVED.load(Relaxed),
+        cx.read_entity(&view, |wallet, _| wallet.portfolio_rows_derived.get()),
         1,
         "a frame that only redraws the list must reuse the rows it already has"
     );
 
-    // The dust filter is one of the four things they are derived from, so it
-    // has to reach through.
+    // A reload that has only been *asked for* changes nothing about what is
+    // on screen: the snapshot behind these rows is still the one they were
+    // derived from. Keying on the request rather than on what it published
+    // would re-derive here -- against the outgoing snapshot -- and then cache
+    // that answer under the incoming snapshot's name.
+    cx.update_entity(&view, |wallet, _| {
+        wallet.desktop_snapshot_generation = wallet.desktop_snapshot_generation.wrapping_add(1);
+        wallet.desktop_snapshot_loading = true;
+    });
+    draw(cx, window, &view);
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.portfolio_rows_derived.get()),
+        1,
+        "a reload in flight has published nothing, so the rows are unchanged"
+    );
+
+    // Publishing one is the thing that changes them.
+    cx.update_entity(&view, |wallet, _| {
+        wallet.desktop_snapshot_loading = false;
+        wallet.desktop_snapshot_revision = wallet.desktop_snapshot_revision.wrapping_add(1);
+    });
+    draw(cx, window, &view);
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| wallet.portfolio_rows_derived.get()),
+        2,
+        "a landed snapshot must derive the rows again"
+    );
+
+    // The dust filter is one of the things they are derived from, so it has
+    // to reach through too.
     cx.update_entity(&view, |wallet, _| {
         wallet.show_low_value_balances = !wallet.show_low_value_balances;
     });
     draw(cx, window, &view);
     assert_eq!(
-        PORTFOLIO_ROWS_DERIVED.load(Relaxed),
-        2,
+        cx.read_entity(&view, |wallet, _| wallet.portfolio_rows_derived.get()),
+        3,
         "changing what the list holds back must derive the rows again"
     );
 

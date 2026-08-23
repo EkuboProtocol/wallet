@@ -567,13 +567,28 @@ fn an_account_name_can_never_be_read_as_a_second_address() {
         "0x3333333333333333333333333333333333333333",
         "savings (0x3333333333333333333333333333333333333333)",
         "0X3333",
+        // Letters to a parser, an address to whoever is reading the screen.
+        "Ox3333333333333333333333333333333333333333",
+        "oXdeadbeef",
     ] {
         let mut own = OwnAccounts::new();
         own.insert(mine, forged.to_owned());
-        let rendered = address_label(mine, &own);
-        assert!(
-            !rendered.to_ascii_lowercase().contains("0x3333"),
-            "{forged} survived into {rendered}"
+        assert_eq!(
+            address_label(mine, &own),
+            format!("{mine:#x}"),
+            "{forged} must leave the address standing alone"
+        );
+    }
+
+    // The hex run is what makes it a forgery. An ordinary name that happens to
+    // contain those two letters keeps its label.
+    for ordinary in ["box", "oxide", "Oxen"] {
+        let mut own = OwnAccounts::new();
+        own.insert(mine, ordinary.to_owned());
+        assert_eq!(
+            address_label(mine, &own),
+            format!("{mine:#x} (your account {ordinary})"),
+            "{ordinary} is not an address"
         );
     }
 
