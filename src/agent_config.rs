@@ -485,18 +485,16 @@ impl AgentAdapter {
     /// Whether this agent's configuration already names this wallet.
     ///
     /// The question is about the two managed entries, not about the file they
-    /// sit in. Comparing the whole file byte for byte answered a different
-    /// question — one the harness gets a vote in. Claude Code rewrites
-    /// `~/.claude.json` on every launch and writes it without the trailing
-    /// newline this wallet's serializer appends, so a configuration this
-    /// wallet had just written correctly read as absent from that launch
-    /// onward, while Codex — whose TOML round-trips byte for byte — kept
-    /// reporting the truth. The entries are what the harness executes, so
-    /// they are what the answer is about.
+    /// sit in: the entries are what a harness executes, and the bytes around
+    /// them belong to the harness, which rewrites them on its own schedule.
+    /// `a_harness_that_rewrote_its_own_config_still_reads_as_installed` holds
+    /// the case that taught us the difference.
     ///
     /// A file that does not parse is an error rather than a `false`: the
     /// owner can act on "your configuration is malformed" and cannot act on
-    /// an agent that silently claims to be uninstalled.
+    /// an agent that silently claims to be uninstalled. A file with nothing
+    /// in it is not malformed — it is a harness that has never been
+    /// configured.
     pub fn installed(&self) -> Result<bool> {
         let contents = match fs::read_to_string(&self.config_path) {
             Ok(contents) => contents,

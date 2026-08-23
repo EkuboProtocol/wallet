@@ -244,7 +244,10 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
         config_path: config.clone(),
     };
 
-    // Nothing there at all, and a file holding no entries of ours.
+    // Nothing there at all, a file with nothing in it, and a file holding no
+    // entries of ours. None of the three is an error to report.
+    assert!(!adapter.installed().unwrap());
+    fs::write(&config, "  \n\t\n").unwrap();
     assert!(!adapter.installed().unwrap());
     fs::write(&config, r#"{"numStartups":507}"#).unwrap();
     assert!(!adapter.installed().unwrap());

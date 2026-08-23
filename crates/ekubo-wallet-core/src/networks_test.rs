@@ -34,6 +34,14 @@ fn every_default_network_ships_a_native_currency() {
             "{} ships a nameless native currency",
             profile.config.name
         );
+        // Zero decimals would render every balance and every fee as whole
+        // coins. All 52 ship 18 today, so this locks in what is true rather
+        // than what is hoped for.
+        assert!(
+            currency.decimals > 0,
+            "{} ships a native currency with no decimal places",
+            profile.config.name
+        );
     }
 }
 

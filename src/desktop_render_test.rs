@@ -1960,6 +1960,78 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
     release(cx, &view);
 }
 
+/// The account row's menu hands over an identity, not a position. A row
+/// removed between the menu being drawn and an item being pressed would
+/// otherwise open somebody else's Portfolio -- and the two pages these open
+/// are per-account, so landing on the wrong one is the whole failure.
+#[gpui::test]
+fn an_accounts_menu_opens_the_page_for_that_account(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let accounts = ["primary", "savings", "cold"]
+        .iter()
+        .map(|id| WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: (*id).into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        })
+        .collect::<Vec<_>>();
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(accounts.clone());
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Accounts);
+    });
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.show_account_portfolio("cold", cx);
+    });
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| (
+            wallet.route,
+            wallet.portfolio_account_index
+        )),
+        (Route::Overview, 2),
+        "the Portfolio must open on the account the row named"
+    );
+
+    // An id the list no longer holds leaves the page where it is rather than
+    // opening whoever happens to be first.
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_route(Route::Accounts);
+        wallet.show_account_portfolio("removed", cx);
+    });
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| (
+            wallet.route,
+            wallet.portfolio_account_index
+        )),
+        (Route::Accounts, 2),
+        "an account that is gone must not navigate or move the selection"
+    );
+
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet.show_account_policy("savings", window, cx);
+        });
+    })
+    .expect("the wallet window is open");
+    assert_eq!(
+        cx.read_entity(&view, |wallet, _| (
+            wallet.route,
+            wallet.policy_account_id.clone()
+        )),
+        (Route::Policies, Some("savings".to_owned())),
+        "the policy editor must open on the account the row named"
+    );
+
+    release(cx, &view);
+}
+
 /// A placeholder earns its place by being replaced without anything moving.
 /// This one was a different shape from the rows it stood in for, so the tab
 /// rearranged itself the moment the balances landed.

@@ -732,6 +732,90 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
 }
 
+/// The facts are what a reviewer reads first, and the sender is the one on
+/// every transaction. It is always an account this wallet holds, so it is
+/// always nameable -- and the name has to survive the whole authoring path,
+/// not just the formatter that produces it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_document_a_reviewer_reads_names_the_account_it_sends_from() {
+    let (address, chain) = start_stub().await;
+    let _ = &chain;
+    let (directory, server, wallet) =
+        pipeline_server(address, &WalletPolicy::require_approval_for_everything());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+            must_review: false,
+        }))
+        .await
+        .expect("an uncovered call queues")
+        .0;
+    let record = server
+        .pending
+        .lock()
+        .unwrap()
+        .get(output.request_id)
+        .unwrap();
+    let read_policy = || -> anyhow::Result<crate::policy_store::StoredPolicy> {
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .get("primary")?
+            .context("policy exists")
+    };
+    let presenter = CaptureThenApprove::default();
+    crate::orchestrator::approve_transaction(
+        &server.config,
+        PendingStore::new(test_store(directory.path())),
+        TokenStore::new(test_store(directory.path())),
+        &legal_store(directory.path()),
+        &read_policy,
+        record,
+        &presenter,
+        &TestHumanPresence { allow: true },
+        server.execution_authority.key_store_for_test(),
+    )
+    .await
+    .unwrap();
+
+    let document = presenter
+        .documents
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("the presenter was shown a document");
+    let sender = document
+        .request
+        .facts
+        .iter()
+        .chain(
+            document
+                .request
+                .sections
+                .iter()
+                .flat_map(|section| &section.facts),
+        )
+        .find(|fact| fact.label == "Sender")
+        .expect("every transaction document names its sender");
+    let exact = format!("{:#x}", wallet.address);
+    assert!(
+        sender.value.contains(&exact),
+        "the exact sending address must be on the document: {sender:?}"
+    );
+    assert!(
+        sender.value.contains("your account primary"),
+        "and be named as the owner's own: {sender:?}"
+    );
+}
+
 /// Queue a plan the policy will not sign automatically, then approve it the
 /// way the review window does, and return the signed row.
 async fn queue_and_approve(

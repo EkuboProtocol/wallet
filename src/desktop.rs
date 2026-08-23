@@ -1466,6 +1466,11 @@ struct PortfolioRowKey {
     /// between cache rows read from the outgoing snapshot under the incoming
     /// snapshot's name -- and go on serving them after it landed.
     snapshot: u64,
+    /// Which account's holdings they are. Redundant while a `Ready` snapshot
+    /// holds exactly the account its own read was for -- the portfolio
+    /// generation already moves when the selection does -- and kept anyway,
+    /// because that is an invariant two functions away and this is a cache
+    /// whose staleness nobody would see.
     account: usize,
     show_low_value: bool,
 }
@@ -15213,7 +15218,7 @@ impl WalletWindow {
                         // belongs to. Like a token's, it decides only where
                         // the balance sorts on the Portfolio tab and whether
                         // that tab holds it back as dust.
-                        .when_some(network.native_currency.as_ref(), |card, currency| {
+                        .when_some(network.resolved_native_currency(), |card, currency| {
                             let chain_id = network.chain_id;
                             let symbol = currency.symbol.clone();
                             let recorded = self
