@@ -393,8 +393,7 @@ fn substantiation(change: &crate::simulation::TokenBalanceChange) -> u8 {
 
 fn native_currency(network: &NetworkConfig) -> NativeCurrency {
     network
-        .native_currency
-        .clone()
+        .resolved_native_currency()
         .unwrap_or_else(|| NativeCurrency {
             name: "Native currency".into(),
             symbol: "native units".into(),

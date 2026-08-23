@@ -214,6 +214,29 @@ impl NetworkConfig {
     pub fn display_label(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
     }
+
+    /// What this network's balances and values are denominated in.
+    ///
+    /// The stored field is optional — a row may predate it, or have been
+    /// written by hand — and a network without one showed balances in wei and
+    /// approvals in "native units", on Ethereum, to an owner who had chosen
+    /// nothing unusual. The compiled-in registry already knows what every
+    /// chain this build ships calls its currency, so a configuration that does
+    /// not say falls back to that, by chain id.
+    ///
+    /// Only the registry answers. Nothing an agent or a peer can reach
+    /// contributes to it, because these decimals are what an approval screen
+    /// formats an amount with, and a wrong answer there is an owner reading a
+    /// number that is not the one being signed. A chain the registry does not
+    /// carry still has no currency, and the raw units it falls back to are
+    /// honest about that.
+    #[must_use]
+    pub fn resolved_native_currency(&self) -> Option<NativeCurrency> {
+        self.native_currency.clone().or_else(|| {
+            crate::networks::known_network(self.chain_id)
+                .and_then(|profile| profile.config.native_currency.clone())
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

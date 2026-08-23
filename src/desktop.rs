@@ -1386,7 +1386,11 @@ fn portfolio_balance_rows(
             .unwrap_or(&item.network.name)
             .to_owned();
         if portfolio.native_balance != "0" {
-            let native = item.network.native_currency.as_ref();
+            // A row that does not name its currency still gets the one
+            // this build ships for its chain, rather than a balance in
+            // wei under the heading "native units".
+            let native = item.network.resolved_native_currency();
+            let native = native.as_ref();
             rows.push(PortfolioBalanceRow {
                 chain_id: item.network.chain_id,
                 network_name: network_name.clone(),

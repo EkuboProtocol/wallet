@@ -77,7 +77,8 @@ fn native_value(wei: &str, network: &NetworkConfig) -> String {
     if BigUint::from_str(wei).is_err() {
         return format!("value {wei}");
     }
-    match network.native_currency.as_ref() {
+    let currency = network.resolved_native_currency();
+    match currency.as_ref() {
         Some(currency) if wei != "0" => format!(
             "{} {} ({wei} wei)",
             crate::approval_summary::format_fixed_point(wei, currency.decimals),

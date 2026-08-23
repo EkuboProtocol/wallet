@@ -16,6 +16,27 @@ fn registry_is_well_formed() {
     );
 }
 
+/// A configured network that does not name its currency falls back to what
+/// this build ships for its chain id, so a default network missing one would
+/// put an owner in front of balances in wei and approvals in "native units"
+/// on a chain they never chose anything unusual about. The fallback is only
+/// as good as the registry behind it.
+#[test]
+fn every_default_network_ships_a_native_currency() {
+    for profile in known_networks().iter().filter(|profile| profile.is_default) {
+        let currency = profile
+            .config
+            .native_currency
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} ships no native currency", profile.config.name));
+        assert!(
+            !currency.name.trim().is_empty() && !currency.symbol.trim().is_empty(),
+            "{} ships a nameless native currency",
+            profile.config.name
+        );
+    }
+}
+
 #[test]
 fn registry_identifiers_are_unique_across_every_chain() {
     let mut chain_ids = BTreeSet::new();
