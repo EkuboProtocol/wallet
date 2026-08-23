@@ -1375,6 +1375,48 @@ fn token_inventory_fills_the_remaining_page_height(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+fn an_account_row_keeps_copy_visible_and_the_rest_in_a_menu(cx: &mut gpui::TestAppContext) {
+    // Three buttons in every row, one of them a destructive red at rest, gave
+    // the list no focal point and put Remove one slip away from the address
+    // somebody was only reading. Copy is the frequent one, so it stays; the
+    // two rare ones moved behind a trigger that is still visible, so nothing
+    // depends on hover and the keyboard path belongs to the menu component.
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![WalletMetadata {
+            instance_id: uuid::Uuid::nil(),
+            id: "primary".into(),
+            address: alloy::primitives::Address::ZERO,
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        }]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Accounts);
+    });
+
+    let measured = measure(cx, window, &view, &["account-menu"]);
+    let trigger = measured[0].expect("the account row's menu trigger must be laid out");
+    assert!(
+        trigger.size.width > px(0.0) && trigger.size.height > px(0.0),
+        "the trigger must be a real target, not a zero-sized element: {:?}",
+        trigger.size
+    );
+
+    // The commands themselves are Actions, so the row no longer owns them and
+    // the source is the only place that can say the buttons are gone.
+    let source = include_str!("desktop.rs");
+    assert!(!source.contains(r#""export-account-{export_id}""#));
+    assert!(!source.contains(r#""remove-account-{removal_id}""#));
+    assert!(source.contains("ExportAccountKey"));
+    assert!(source.contains("RemoveAccount"));
+    release(cx, &view);
+}
+
+#[gpui::test]
 fn an_agents_case_is_read_at_the_height_of_the_frame(cx: &mut gpui::TestAppContext) {
     // The case used to be a 180-pixel box on the diff screen that could not
     // scroll, so a long rationale was simply cut off with no way to reach the
@@ -2877,6 +2919,19 @@ fn screenshots() {
                             );
                             snapshot.automation_runs = BTreeMap::from([(running.id, runs)]);
                             snapshot.automations = Ok(vec![running, stopped]);
+                        }
+                        // An Accounts tab with no account is a picture of the
+                        // form above the list, and the list is where the row
+                        // geometry and the row's own menu live.
+                        if route == Route::Accounts {
+                            snapshot.accounts = Ok(vec![WalletMetadata {
+                                instance_id: uuid::Uuid::nil(),
+                                id: "primary".into(),
+                                address: alloy::primitives::Address::ZERO,
+                                created_at: chrono::Utc::now(),
+                                source: ekubo_wallet_core::config::WalletSource::Created,
+                                exported_at: None,
+                            }]);
                         }
                         if route == Route::Policies {
                             snapshot.accounts = Ok(vec![WalletMetadata {

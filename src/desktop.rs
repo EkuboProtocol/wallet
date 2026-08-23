@@ -60,6 +60,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
+    menu::DropdownMenu as _,
     scroll::{ScrollableElement as _, ScrollbarHandle},
     skeleton::Skeleton,
     spinner::Spinner,
@@ -508,6 +509,29 @@ impl InteractiveElement for AccessibleButton {
 }
 
 impl StatefulInteractiveElement for AccessibleButton {}
+
+// Both delegate to the button underneath, and both exist for one reason: a
+// dropdown trigger has to satisfy `Styled + Selectable`, and an icon-only
+// trigger is exactly the control that needs a screen-reader name. Without
+// these the two requirements were mutually exclusive.
+impl Styled for AccessibleButton {
+    fn style(&mut self) -> &mut gpui::StyleRefinement {
+        self.0.style()
+    }
+}
+
+impl Selectable for AccessibleButton {
+    fn selected(mut self, selected: bool) -> Self {
+        self.0 = self.0.selected(selected);
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.0.is_selected()
+    }
+}
+
+impl gpui_component::menu::DropdownMenu for AccessibleButton {}
 
 impl RenderOnce for AccessibleButton {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
@@ -993,6 +1017,25 @@ fn load_application_fonts(cx: &mut App) -> Result<()> {
 #[action(namespace = ekubo_wallet, no_json)]
 struct NavigateRoute {
     route: Route,
+}
+
+/// The two commands an account row keeps behind its menu.
+///
+/// Menu items in this component library dispatch Actions rather than closures,
+/// which is the better contract anyway: the account's identity travels with
+/// the command, one handler on the window performs it, and the same command
+/// could be bound to a key or reached from a menu bar without the row having
+/// to hand out a callback.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ekubo_wallet, no_json)]
+struct ExportAccountKey {
+    wallet_id: String,
+}
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ekubo_wallet, no_json)]
+struct RemoveAccount {
+    wallet_id: String,
 }
 
 struct DesktopRuntime {
@@ -5849,12 +5892,21 @@ impl ListDelegate for TokenListDelegate {
             .items_center()
             .justify_center()
             .text_color(cx.theme().muted_foreground)
+            // "No tokens match these filters" is only true when something was
+            // filtering. On a wallet that has never been given a token it
+            // named a cause that did not exist and left the reader looking for
+            // a filter to clear; the two states are different and say so.
             .child(selectable_text(
                 "token-list-empty-message",
-                &self
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "No tokens match these filters.".into()),
+                &self.error.clone().unwrap_or_else(|| {
+                    if self.query.is_empty() && self.all_tokens.is_empty() {
+                        "No tokens yet. Add one above, or import a published list.".into()
+                    } else if self.query.is_empty() {
+                        "No tokens on the networks you are showing.".into()
+                    } else {
+                        "No tokens match this search.".into()
+                    }
+                }),
             ))
     }
 }
@@ -13032,27 +13084,52 @@ impl WalletWindow {
                                         )
                                         .large(),
                                     )
+                                    // Copying the address is the thing anybody
+                                    // does here, so it stays visible. The
+                                    // other two are rare and one of them is
+                                    // irreversible, and as three equal buttons
+                                    // in every row they made a wall with no
+                                    // focal point — a red Remove sitting at
+                                    // rest beside the address of an account
+                                    // somebody is only looking up.
+                                    //
+                                    // Behind a menu they keep their keyboard
+                                    // path, their dismissal, and their focus
+                                    // restoration, all of which the component
+                                    // owns and a strip of buttons would have
+                                    // had to rebuild. The trigger is visible,
+                                    // so nothing is hidden behind hover.
                                     .child(
-                                        app_button(SharedString::from(format!(
-                                            "export-account-{export_id}"
-                                        )))
-                                        .label("Export key…")
-                                        .on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.begin_account_export(export_id.clone(), cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        app_button(SharedString::from(format!(
-                                            "remove-account-{removal_id}"
-                                        )))
-                                        .label("Remove…")
-                                        .danger()
-                                        .on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.begin_account_removal(removal_id.clone(), cx);
-                                            }),
+                                        accessible_button(
+                                            app_button(SharedString::from(format!(
+                                                "account-menu-{}",
+                                                item.id
+                                            )))
+                                            .debug_selector(|| "account-menu".to_owned())
+                                            .icon(IconName::Ellipsis)
+                                            .tooltip("More account actions"),
+                                            "More account actions",
+                                        )
+                                        .dropdown_menu_with_anchor(
+                                            Anchor::TopRight,
+                                            move |menu, _, _| {
+                                                menu.menu(
+                                                    "Export key…",
+                                                    Box::new(ExportAccountKey {
+                                                        wallet_id: export_id.clone(),
+                                                    }),
+                                                )
+                                                // Separated, because it is the
+                                                // one item here that cannot be
+                                                // undone.
+                                                .separator()
+                                                .menu(
+                                                    "Remove…",
+                                                    Box::new(RemoveAccount {
+                                                        wallet_id: removal_id.clone(),
+                                                    }),
+                                                )
+                                            },
                                         ),
                                     ),
                             ),
@@ -18484,6 +18561,15 @@ impl Render for WalletWindow {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(|view, _: &CloseOverlay, _, cx| {
                 view.close_overlay(cx);
+            }))
+            // Dispatched by the account row's menu. The account travels with
+            // the command rather than being captured in a callback, so the
+            // handler is one place and the row is only a trigger.
+            .on_action(cx.listener(|view, action: &ExportAccountKey, _, cx| {
+                view.begin_account_export(action.wallet_id.clone(), cx);
+            }))
+            .on_action(cx.listener(|view, action: &RemoveAccount, _, cx| {
+                view.begin_account_removal(action.wallet_id.clone(), cx);
             }))
             .relative()
             .size_full()
