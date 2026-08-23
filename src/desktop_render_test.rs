@@ -2799,98 +2799,132 @@ fn screenshots() {
         });
     });
 
-    for route in Route::ALL {
-        cx.update(|cx| {
-            view.update(cx, |wallet, _| {
-                // Re-applied each frame: the first render opens the legal gate,
-                // and that overlay covers whichever page is behind it.
-                let mut snapshot = quiet_snapshot();
-                // The Policies page is only meaningfully reviewable with an
-                // account selected and its real editor open. The renderer will
-                // load the default policy for this throwaway account on draw.
-                // An empty tab is a screenshot of a paragraph. The one worth
-                // looking at has something installed, something stopped, and a
-                // dry run open on it.
-                if route == Route::Automations {
-                    let running = automation_fixture(AutomationState::Enabled, None);
-                    let stopped = automation_fixture(
-                        AutomationState::Disabled,
-                        Some("the last three ticks reverted".to_owned()),
-                    );
-                    let runs = vec![
-                        run_fixture(running.id, RunOutcome::Sent, Some(uuid::Uuid::new_v4())),
-                        run_fixture(running.id, RunOutcome::Idle, None),
-                        run_fixture(running.id, RunOutcome::Failed, None),
-                    ];
-                    wallet.automation_dry_runs.insert(
-                        running.id,
-                        AutomationDryRunState::Ready(Box::new(dry_run_fixture())),
-                    );
-                    snapshot.automation_runs = BTreeMap::from([(running.id, runs)]);
-                    snapshot.automations = Ok(vec![running, stopped]);
-                }
-                if route == Route::Policies {
-                    snapshot.accounts = Ok(vec![WalletMetadata {
-                        instance_id: uuid::Uuid::nil(),
-                        id: "primary".into(),
-                        address: alloy::primitives::Address::ZERO,
-                        created_at: chrono::Utc::now(),
-                        source: ekubo_wallet_core::config::WalletSource::Created,
-                        exported_at: None,
-                    }]);
-                    wallet.policy_editor = Some(PolicyEditor {
-                        wallet_id: "primary".into(),
-                        source_revision: Some(1),
-                        current_policy: Some(WalletPolicy::require_approval_for_everything()),
-                        history: Vec::new(),
-                        history_selection: None,
-                        proposal: None,
-                        validation: Some(Ok(PolicyDraftReview {
-                            wallet_id: "primary".into(),
-                            source_revision: Some(1),
-                            document: String::new(),
-                            policy: WalletPolicy::require_approval_for_everything(),
-                            diff: vec![
-                                "+ Require approval for every transaction".into(),
-                                "+ Refuse automatic signing unless a rule permits it".into(),
-                            ],
-                        })),
-                    });
-                    wallet.policy_action_error = None;
-                }
-                wallet.desktop_snapshot = Some(Arc::new(snapshot));
-                wallet.desktop_snapshot_error = None;
-                wallet.legal_gate = false;
-                wallet.legal_review = None;
-                wallet.set_route(route);
-            });
-        });
-        cx.run_until_parked();
-        // `render_to_image` rasterises the last drawn frame, so the window has
-        // to be marked dirty and given a chance to draw or every shot is of
-        // whatever was on screen before.
-        cx.update(|cx| {
-            let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
-        });
-        cx.run_until_parked();
-        if route == Route::Policies {
+    // Both themes, at the default base font and at a larger one. The design
+    // guide asks for exactly this pair of checks and neither can be made from
+    // one shot: a colour that only works because the surface behind it is
+    // white shows up in dark, and a fixed pixel height only betrays itself
+    // when the text inside it grows and the box does not.
+    //
+    // The window here is a bare `WalletWindow`, not the `Root` the application
+    // wraps it in, and `Root` is what copies `theme.font_size` onto the
+    // window's rem. So the rem is set explicitly: without this the loop would
+    // render every variant at 16px and prove nothing.
+    for (mode, mode_name) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
+        for base in [16u16, 20u16] {
+            let rem = px(f32::from(base));
             cx.update(|cx| {
-                view.update(cx, |wallet, _| {
-                    let max = wallet.route_scroll_handle.max_offset();
-                    wallet
-                        .route_scroll_handle
-                        .set_offset(gpui::point(px(0.0), -max.y));
-                });
-                let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
+                Theme::change(mode, None, cx);
+                // `Theme::change` reloads the colours from the mode's config,
+                // so the product's palette goes back on top of it afterwards —
+                // the same order the running application uses.
+                apply_interface_palette(cx);
+                Theme::global_mut(cx).font_size = rem;
+                let _ = cx.update_window(window.into(), |_, window, _| window.set_rem_size(rem));
             });
-            cx.run_until_parked();
+            for route in Route::ALL {
+                cx.update(|cx| {
+                    view.update(cx, |wallet, _| {
+                        // Re-applied each frame: the first render opens the legal gate,
+                        // and that overlay covers whichever page is behind it.
+                        let mut snapshot = quiet_snapshot();
+                        // The Policies page is only meaningfully reviewable with an
+                        // account selected and its real editor open. The renderer will
+                        // load the default policy for this throwaway account on draw.
+                        // An empty tab is a screenshot of a paragraph. The one worth
+                        // looking at has something installed, something stopped, and a
+                        // dry run open on it.
+                        if route == Route::Automations {
+                            let running = automation_fixture(AutomationState::Enabled, None);
+                            let stopped = automation_fixture(
+                                AutomationState::Disabled,
+                                Some("the last three ticks reverted".to_owned()),
+                            );
+                            let runs = vec![
+                                run_fixture(
+                                    running.id,
+                                    RunOutcome::Sent,
+                                    Some(uuid::Uuid::new_v4()),
+                                ),
+                                run_fixture(running.id, RunOutcome::Idle, None),
+                                run_fixture(running.id, RunOutcome::Failed, None),
+                            ];
+                            wallet.automation_dry_runs.insert(
+                                running.id,
+                                AutomationDryRunState::Ready(Box::new(dry_run_fixture())),
+                            );
+                            snapshot.automation_runs = BTreeMap::from([(running.id, runs)]);
+                            snapshot.automations = Ok(vec![running, stopped]);
+                        }
+                        if route == Route::Policies {
+                            snapshot.accounts = Ok(vec![WalletMetadata {
+                                instance_id: uuid::Uuid::nil(),
+                                id: "primary".into(),
+                                address: alloy::primitives::Address::ZERO,
+                                created_at: chrono::Utc::now(),
+                                source: ekubo_wallet_core::config::WalletSource::Created,
+                                exported_at: None,
+                            }]);
+                            wallet.policy_editor = Some(PolicyEditor {
+                                wallet_id: "primary".into(),
+                                source_revision: Some(1),
+                                current_policy: Some(
+                                    WalletPolicy::require_approval_for_everything(),
+                                ),
+                                history: Vec::new(),
+                                history_selection: None,
+                                proposal: None,
+                                validation: Some(Ok(PolicyDraftReview {
+                                    wallet_id: "primary".into(),
+                                    source_revision: Some(1),
+                                    document: String::new(),
+                                    policy: WalletPolicy::require_approval_for_everything(),
+                                    diff: vec![
+                                        "+ Require approval for every transaction".into(),
+                                        "+ Refuse automatic signing unless a rule permits it"
+                                            .into(),
+                                    ],
+                                })),
+                            });
+                            wallet.policy_action_error = None;
+                        }
+                        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+                        wallet.desktop_snapshot_error = None;
+                        wallet.legal_gate = false;
+                        wallet.legal_review = None;
+                        wallet.set_route(route);
+                    });
+                });
+                cx.run_until_parked();
+                // `render_to_image` rasterises the last drawn frame, so the window has
+                // to be marked dirty and given a chance to draw or every shot is of
+                // whatever was on screen before.
+                cx.update(|cx| {
+                    let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
+                });
+                cx.run_until_parked();
+                if route == Route::Policies {
+                    cx.update(|cx| {
+                        view.update(cx, |wallet, _| {
+                            let max = wallet.route_scroll_handle.max_offset();
+                            wallet
+                                .route_scroll_handle
+                                .set_offset(gpui::point(px(0.0), -max.y));
+                        });
+                        let _ = cx.update_window(window.into(), |_, window, _| window.refresh());
+                    });
+                    cx.run_until_parked();
+                }
+                let image = cx
+                    .capture_screenshot(window.into())
+                    .expect("offscreen render");
+                let path = directory.join(format!(
+                    "{}-{mode_name}-{base}.png",
+                    route.label().to_lowercase()
+                ));
+                image.save(&path).expect("write png");
+                println!("wrote {}", path.display());
+            }
         }
-        let image = cx
-            .capture_screenshot(window.into())
-            .expect("offscreen render");
-        let path = directory.join(format!("{}.png", route.label().to_lowercase()));
-        image.save(&path).expect("write png");
-        println!("wrote {}", path.display());
     }
 }
 
