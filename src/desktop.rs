@@ -1436,6 +1436,41 @@ fn portfolio_balance_rows(
     rows
 }
 
+/// The Portfolio's rows, and the reading they were derived from.
+///
+/// Deriving them reads every balance the account holds out of its base units,
+/// formats it, prices it, and sorts the result -- work in proportion to the
+/// holdings. `render` runs once per frame the window draws, and while a list
+/// is being scrolled on a 120 Hz display that is 120 times a second, for an
+/// answer that changed none of those times.
+struct PortfolioRowCache {
+    key: PortfolioRowKey,
+    rows: Arc<[PortfolioListRow]>,
+    /// How many holdings the dust filter is keeping out of `rows`.
+    hidden: usize,
+}
+
+/// Everything the rows are derived from, and nothing a scroll touches.
+///
+/// A balance read and a background snapshot each announce themselves with a
+/// generation they already keep, so neither has to be compared by value: the
+/// rows are stale exactly when one of these four is not what it was.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PortfolioRowKey {
+    /// Which balance read the holdings came from.
+    portfolio: u64,
+    /// Which background snapshot priced them.
+    snapshot: u64,
+    account: usize,
+    show_low_value: bool,
+}
+
+/// How many times the rows have been derived, for the test that holds this to
+/// once per reading rather than once per frame.
+#[cfg(test)]
+pub(crate) static PORTFOLIO_ROWS_DERIVED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// One row of the portfolio list: an asset the account holds, or a network
 /// whose balances could not be read at all.
 ///
@@ -2404,6 +2439,9 @@ pub struct WalletWindow {
     show_low_value_balances: bool,
     portfolio_list: VariableListState,
     portfolio_rows: Cell<usize>,
+    /// The rows the Portfolio list is drawing, kept across the frames that
+    /// redraw it without changing them.
+    portfolio_row_cache: RefCell<Option<PortfolioRowCache>>,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_sessions: Vec<SessionSummary>,
@@ -6247,6 +6285,7 @@ impl WalletWindow {
             show_low_value_balances: false,
             portfolio_list: virtual_inbox_list(0),
             portfolio_rows: Cell::new(0),
+            portfolio_row_cache: RefCell::new(None),
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_sessions: Vec::new(),
@@ -15394,14 +15433,31 @@ impl WalletWindow {
             .children(self.portfolio_refreshed_note(cx))
     }
 
-    /// Every asset the account holds, as one virtualized list inside a frame
-    /// that keeps the window's height.
-    fn render_portfolio_balances(
+    /// The rows the Portfolio list draws, and how many holdings the dust
+    /// filter is keeping out of them.
+    ///
+    /// Derived once per reading rather than once per frame. Scrolling a list
+    /// redraws the window, and the window's render rebuilds whatever it draws
+    /// from -- but a balance parsed out of its base units, formatted, priced
+    /// and sorted is the same balance at the top of the list as at the bottom
+    /// of it, so the scroll gets the answer already computed.
+    fn portfolio_list_rows(
         &self,
         account: &OwnerPortfolioAccount,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let wallet_id = account.wallet.id.clone();
+    ) -> (Arc<[PortfolioListRow]>, usize) {
+        let key = PortfolioRowKey {
+            portfolio: self.portfolio_generation,
+            snapshot: self.desktop_snapshot_generation,
+            account: self.portfolio_account_index,
+            show_low_value: self.show_low_value_balances,
+        };
+        if let Some(cached) = self.portfolio_row_cache.borrow().as_ref()
+            && cached.key == key
+        {
+            return (Arc::clone(&cached.rows), cached.hidden);
+        }
+        #[cfg(test)]
+        PORTFOLIO_ROWS_DERIVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let held = portfolio_balance_rows(
             account,
             self.snapshot().map_or(&EMPTY_NATIVE_PRICES, |snapshot| {
@@ -15444,6 +15500,24 @@ impl WalletWindow {
                     error: error.clone(),
                 })
         }));
+        let rows = Arc::<[PortfolioListRow]>::from(rows);
+        *self.portfolio_row_cache.borrow_mut() = Some(PortfolioRowCache {
+            key,
+            rows: Arc::clone(&rows),
+            hidden,
+        });
+        (rows, hidden)
+    }
+
+    /// Every asset the account holds, as one virtualized list inside a frame
+    /// that keeps the window's height.
+    fn render_portfolio_balances(
+        &self,
+        account: &OwnerPortfolioAccount,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let wallet_id = account.wallet.id.clone();
+        let (rows, hidden) = self.portfolio_list_rows(account);
         let card = portfolio_balances_card(cx).when(hidden > 0, |card| {
             card.child(self.render_portfolio_dust_control(hidden, cx))
         });
@@ -15460,7 +15534,6 @@ impl WalletWindow {
         self.portfolio_overflow_indicator
             .set_scroll_handle(self.portfolio_list.clone());
         let row_count = rows.len();
-        let rows = Arc::<[PortfolioListRow]>::from(rows);
         card.child(
             div()
                 .relative()

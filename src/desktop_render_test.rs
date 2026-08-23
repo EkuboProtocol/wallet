@@ -1848,6 +1848,92 @@ fn the_policy_editor_can_be_put_back_to_the_installed_policy(cx: &mut gpui::Test
     release(cx, &view);
 }
 
+/// Scrolling a list redraws the window, and the window's render rebuilds
+/// whatever it draws from. The Portfolio's rows are read out of base units,
+/// formatted, priced and sorted, in proportion to what the account holds --
+/// and none of that changes because a list moved. On a 120 Hz display a
+/// scroll asks for that answer 120 times a second, so it is derived once per
+/// reading and handed back for every frame in between.
+#[gpui::test]
+fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAppContext) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let account = WalletMetadata {
+        instance_id: uuid::Uuid::nil(),
+        id: "primary".into(),
+        address: alloy::primitives::Address::ZERO,
+        created_at: chrono::Utc::now(),
+        source: ekubo_wallet_core::config::WalletSource::Created,
+        exported_at: None,
+    };
+    let network = ekubo_wallet_core::config::default_networks()
+        .first()
+        .expect("a shipped network")
+        .clone();
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![account.clone()]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
+            accounts: vec![OwnerPortfolioAccount {
+                wallet: account.clone(),
+                networks: vec![crate::authority::OwnerPortfolioNetwork {
+                    network: network.clone(),
+                    result: Ok(ekubo_wallet_core::token_store::Portfolio {
+                        address: "0x0000000000000000000000000000000000000000".to_owned(),
+                        chain_id: network.chain_id.to_string(),
+                        network: network.name.clone(),
+                        native_balance: "1000000000000000000".to_owned(),
+                        block_number: "1".to_owned(),
+                        tokens: Vec::new(),
+                        tokens_checked: 0,
+                        tokens_skipped: None,
+                        fork: None,
+                    }),
+                }],
+            }],
+        });
+        wallet.set_route(Route::Overview);
+    });
+
+    PORTFOLIO_ROWS_DERIVED.store(0, Relaxed);
+    let drawn = measure(cx, window, &view, &["portfolio-balances"]);
+    drawn[0].expect("the balances list must draw");
+    assert_eq!(
+        PORTFOLIO_ROWS_DERIVED.load(Relaxed),
+        1,
+        "the first frame has to derive the rows"
+    );
+
+    // What a scroll asks for: the same rows, again and again.
+    for _ in 0..8 {
+        draw(cx, window, &view);
+    }
+    assert_eq!(
+        PORTFOLIO_ROWS_DERIVED.load(Relaxed),
+        1,
+        "a frame that only redraws the list must reuse the rows it already has"
+    );
+
+    // The dust filter is one of the four things they are derived from, so it
+    // has to reach through.
+    cx.update_entity(&view, |wallet, _| {
+        wallet.show_low_value_balances = !wallet.show_low_value_balances;
+    });
+    draw(cx, window, &view);
+    assert_eq!(
+        PORTFOLIO_ROWS_DERIVED.load(Relaxed),
+        2,
+        "changing what the list holds back must derive the rows again"
+    );
+
+    release(cx, &view);
+}
+
 /// A placeholder earns its place by being replaced without anything moving.
 /// This one was a different shape from the rows it stood in for, so the tab
 /// rearranged itself the moment the balances landed.
