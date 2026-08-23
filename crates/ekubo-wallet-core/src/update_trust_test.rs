@@ -250,8 +250,48 @@ fn failed_macos_swap_leaves_the_installed_application_untouched() {
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"known-working-wallet").unwrap();
 
-    assert!(swap_macos_paths(&app, &directory.path().join("missing.app")).is_err());
+    assert!(
+        swap_macos_paths(
+            &app.join("Contents"),
+            &directory.path().join("missing.app/Contents")
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read(binary).unwrap(), b"known-working-wallet");
+}
+
+/// The Dock pins an application by a bookmark that resolves by file ID before
+/// it falls back to a path, and login items and Finder aliases resolve the
+/// same way. An update that exchanged the bundle directory itself handed every
+/// one of them an ID that the update then deleted -- which is how a pinned
+/// wallet came back beside a second tile for the same application.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_update_leaves_the_bundle_every_bookmark_points_at() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"old\0EKUBO-WALLET-PACKAGE-VERSION:1.0.4\0").unwrap();
+    let pinned = std::fs::metadata(&app).unwrap().ino();
+
+    install_macos_application(&app, &macos_archive("2.0.0"))
+        .expect("core replaces what the bundle holds");
+
+    assert_eq!(
+        std::fs::metadata(&app).unwrap().ino(),
+        pinned,
+        "the bundle a Dock pin resolves to must survive its own update"
+    );
+    let installed = std::fs::read(&binary).expect("the replacement binary exists");
+    assert!(
+        installed
+            .windows(b"EKUBO-WALLET-PACKAGE-VERSION:2.0.0".len())
+            .any(|bytes| bytes == b"EKUBO-WALLET-PACKAGE-VERSION:2.0.0"),
+        "and hold the new version afterwards"
+    );
 }
 
 #[cfg(target_os = "macos")]

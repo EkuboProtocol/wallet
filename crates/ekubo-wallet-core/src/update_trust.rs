@@ -268,9 +268,20 @@ pub fn install_update(
 }
 
 /// Extract the signed bundle beside the installed application, then atomically
-/// exchange their names. `RENAME_SWAP` either leaves both paths untouched or
-/// commits the complete replacement, so an I/O failure cannot consume the
-/// working application while reporting that installation failed.
+/// exchange the two `Contents` directories. `RENAME_SWAP` either leaves both
+/// paths untouched or commits the complete replacement, so an I/O failure
+/// cannot consume the working application while reporting that installation
+/// failed.
+///
+/// `Contents` rather than the bundle around it, because the `.app` directory
+/// is an identity other software holds on to. The Dock pins an application by
+/// a bookmark that resolves by file ID and only falls back to a path when that
+/// ID is gone; login items and Finder aliases resolve the same way. Swapping
+/// the bundle handed all of them the ID of a directory this function then
+/// deleted, so an updated wallet came back beside its own pinned tile instead
+/// of in it. A bundle keeps everything it has under `Contents`, so exchanging
+/// that replaces the application completely and leaves the identity where it
+/// was.
 #[cfg(target_os = "macos")]
 fn install_macos_application(application: &Path, bytes: &[u8]) -> Result<()> {
     use std::path::Component;
@@ -332,11 +343,23 @@ fn install_macos_application(application: &Path, bytes: &[u8]) -> Result<()> {
             .is_dir(),
         "the macOS update archive contains no application bundle"
     );
-    swap_macos_paths(application, &staged_application)
+    let installed_contents = application.join("Contents");
+    let staged_contents = staged_application.join("Contents");
+    for (path, description) in [
+        (&installed_contents, "the installed macOS application"),
+        (&staged_contents, "the macOS update archive"),
+    ] {
+        ensure!(
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir()),
+            "{description} has no Contents directory"
+        );
+    }
+    swap_macos_paths(&installed_contents, &staged_contents)
         .context("could not atomically replace the macOS application")?;
 
-    // The old application now lives under `transaction`; dropping it removes
-    // that backup only after the atomic exchange has succeeded.
+    // The replaced application's contents now live under `transaction`;
+    // dropping it removes that backup only after the atomic exchange has
+    // succeeded.
     drop(transaction);
     Ok(())
 }
