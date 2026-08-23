@@ -1019,13 +1019,30 @@ struct NavigateRoute {
     route: Route,
 }
 
-/// The two commands an account row keeps behind its menu.
+/// The commands an account row keeps behind its menu.
 ///
 /// Menu items in this component library dispatch Actions rather than closures,
 /// which is the better contract anyway: the account's identity travels with
 /// the command, one handler on the window performs it, and the same command
 /// could be bound to a key or reached from a menu bar without the row having
 /// to hand out a callback.
+///
+/// The first two go somewhere rather than doing something. Both pages they
+/// open are already per-account, and reaching either one meant leaving this
+/// page, opening that one, and finding the account again in its selector --
+/// with nothing on the row to say the pages were about the account at all.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ekubo_wallet, no_json)]
+struct ViewAccountPortfolio {
+    wallet_id: String,
+}
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ekubo_wallet, no_json)]
+struct EditAccountPolicy {
+    wallet_id: String,
+}
+
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = ekubo_wallet, no_json)]
 struct ExportAccountKey {
@@ -8972,6 +8989,44 @@ impl WalletWindow {
         self.portfolio = PortfolioState::Idle;
     }
 
+    /// Open the Portfolio on a named account.
+    ///
+    /// The selector on that page is an index into the same list the Accounts
+    /// page draws, so the row hands over an identity and the lookup happens
+    /// here: an index captured in a menu item would be a stale answer the
+    /// moment an account is added or removed.
+    ///
+    /// Selecting before navigating matters. Arriving on the page asks for a
+    /// refresh, and a refresh already in flight declines to start another --
+    /// so navigating first would read the account being left behind and leave
+    /// the one that was asked for waiting on the next trigger.
+    fn show_account_portfolio(&mut self, wallet_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .portfolio_accounts()
+            .iter()
+            .position(|account| account.id == wallet_id)
+        else {
+            return;
+        };
+        self.select_portfolio_account(index, cx);
+        self.navigate_route(Route::Overview, cx);
+    }
+
+    /// Open the policy editor on a named account.
+    ///
+    /// The route changes first: leaving Policies is what discards a temporary
+    /// view of a historical revision, and doing that after building the editor
+    /// would throw away the one just built.
+    fn show_account_policy(
+        &mut self,
+        wallet_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_route(Route::Policies, cx);
+        self.open_policy_editor(wallet_id, window, cx);
+    }
+
     fn select_portfolio_account(&mut self, index: usize, cx: &mut Context<Self>) {
         let index = clamped_portfolio_account_index(self.portfolio_accounts().len(), index);
         if index == self.portfolio_account_index {
@@ -13008,6 +13063,8 @@ impl WalletWindow {
                     )),
             ),
             Ok(items) => accounts.children(items.iter().map(|item| {
+                let portfolio_id = item.id.clone();
+                let policy_id = item.id.clone();
                 let export_id = item.id.clone();
                 let removal_id = item.id.clone();
                 let address = format!("{:#x}", item.address);
@@ -13113,6 +13170,21 @@ impl WalletWindow {
                                             Anchor::TopRight,
                                             move |menu, _, _| {
                                                 menu.menu(
+                                                    "View portfolio",
+                                                    Box::new(ViewAccountPortfolio {
+                                                        wallet_id: portfolio_id.clone(),
+                                                    }),
+                                                )
+                                                .menu(
+                                                    "Edit policy",
+                                                    Box::new(EditAccountPolicy {
+                                                        wallet_id: policy_id.clone(),
+                                                    }),
+                                                )
+                                                // Above the separator: the two
+                                                // that only navigate.
+                                                .separator()
+                                                .menu(
                                                     "Export key…",
                                                     Box::new(ExportAccountKey {
                                                         wallet_id: export_id.clone(),
@@ -18546,6 +18618,12 @@ impl Render for WalletWindow {
             // Dispatched by the account row's menu. The account travels with
             // the command rather than being captured in a callback, so the
             // handler is one place and the row is only a trigger.
+            .on_action(cx.listener(|view, action: &ViewAccountPortfolio, _, cx| {
+                view.show_account_portfolio(&action.wallet_id, cx);
+            }))
+            .on_action(cx.listener(|view, action: &EditAccountPolicy, window, cx| {
+                view.show_account_policy(&action.wallet_id, window, cx);
+            }))
             .on_action(cx.listener(|view, action: &ExportAccountKey, _, cx| {
                 view.begin_account_export(action.wallet_id.clone(), cx);
             }))
