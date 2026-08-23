@@ -220,6 +220,26 @@ fn measure(
     measure_at(cx, window, view, VIEWPORT, selectors)
 }
 
+/// A `rem`-denominated interface constant, in the pixels this window resolves
+/// it to.
+///
+/// The chrome's widths and heights are relative now, and a laid-out bound is
+/// still absolute, so an assertion comparing the two has to convert one of
+/// them. It asks the window rather than assuming 16: these tests open a bare
+/// `WalletWindow` rather than the `Root` the application wraps it in, and
+/// `Root` is what copies `theme.font_size` onto the window's rem — so if
+/// either of those ever changes, this follows instead of quietly passing.
+fn resolved(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    length: gpui::Rems,
+) -> gpui::Pixels {
+    let rem = cx
+        .update_window(window, |_, window, _| window.rem_size())
+        .expect("the window must still be open");
+    length.to_pixels(rem)
+}
+
 fn measure_at(
     cx: &mut gpui::TestAppContext,
     window: gpui::AnyWindowHandle,
@@ -603,13 +623,15 @@ fn the_settings_pane_is_capped_to_a_readable_measure(cx: &mut gpui::TestAppConte
     // which at 14px is about ninety characters a line against a comfortable
     // band nearer sixty-five to seventy-five.
     let prose = measured[1].expect("the settings prose must have been laid out");
+    let prose_measure = resolved(cx, window, PROSE_MEASURE);
+    let page_measure = resolved(cx, window, PAGE_CONTENT_MAX_WIDTH);
     assert!(
-        prose.size.width <= PROSE_MEASURE,
+        prose.size.width <= prose_measure,
         "explanatory text must stay inside a readable measure: it was {:?}",
         prose.size.width
     );
     assert!(
-        pane.size.width <= PAGE_CONTENT_MAX_WIDTH,
+        pane.size.width <= page_measure,
         "the settings pane must stay within its measure, not stretch to the \
          {VIEWPORT:?} window: it was {:?}",
         pane.size.width
@@ -622,6 +644,7 @@ fn every_route_uses_the_same_centered_content_measure(cx: &mut gpui::TestAppCont
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
+    let page_measure = resolved(cx, window, PAGE_CONTENT_MAX_WIDTH);
     for route in Route::ALL {
         cx.update_entity(&view, |wallet, _| wallet.set_route(route));
         let measured = measure(
@@ -633,13 +656,13 @@ fn every_route_uses_the_same_centered_content_measure(cx: &mut gpui::TestAppCont
         let header = measured[0].expect("the fixed route header must be laid out");
         let content = measured[1].expect("the scrolling route content must be laid out");
         assert!(
-            header.size.width <= PAGE_CONTENT_MAX_WIDTH,
+            header.size.width <= page_measure,
             "{} header exceeded the shared measure: {:?}",
             route.label(),
             header.size.width
         );
         assert!(
-            content.size.width <= PAGE_CONTENT_MAX_WIDTH,
+            content.size.width <= page_measure,
             "{} content exceeded the shared measure: {:?}",
             route.label(),
             content.size.width

@@ -564,8 +564,11 @@ fn command_palette_reaches_every_desktop_route() {
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::Activity.label(), "Inbox");
     assert_eq!(Route::Overview.label(), "Portfolio");
-    assert!(NAVIGATION_RAIL_WIDTH >= px(80.0));
-    assert!(NAVIGATION_BUTTON_SIZE >= px(52.0));
+    // In `rem`, so the rail grows with the labels beside it. At the default
+    // 16px base these are the 80 and 52 device pixels they replaced.
+    assert!(NAVIGATION_RAIL_WIDTH.to_pixels(px(16.0)) >= px(80.0));
+    assert!(NAVIGATION_BUTTON_SIZE.to_pixels(px(16.0)) >= px(52.0));
+    assert!(NAVIGATION_BUTTON_SIZE.to_pixels(px(32.0)) >= px(104.0));
     assert_eq!(Route::ALL.last(), Some(&Route::Settings));
 }
 
@@ -930,8 +933,16 @@ fn interaction_palette_uses_the_figma_brand_colors() {
 
 #[test]
 fn shared_controls_use_contextual_desktop_dimensions() {
-    assert_eq!(BUTTON_HEIGHT, px(44.0));
-    assert_eq!(COPY_BUTTON_HEIGHT, px(32.0));
+    // Control heights are relative, so they hold their proportion to the text
+    // inside them: the same 44 and 32 pixels at the default base, and twice
+    // that when somebody doubles it.
+    assert_eq!(BUTTON_HEIGHT.to_pixels(px(16.0)), px(44.0));
+    assert_eq!(COPY_BUTTON_HEIGHT.to_pixels(px(16.0)), px(32.0));
+    assert_eq!(BUTTON_HEIGHT.to_pixels(px(32.0)), px(88.0));
+    assert_eq!(COPY_BUTTON_HEIGHT.to_pixels(px(32.0)), px(64.0));
+    // Radii stay absolute. They are assigned into `Theme::radius`, which is
+    // `Pixels` upstream, and a corner is optical rather than structural: it
+    // should not grow linearly with the type it encloses.
     assert_eq!(CONTROL_RADIUS, px(14.0));
     assert_eq!(SURFACE_RADIUS, px(16.0));
 }

@@ -46,7 +46,8 @@ use gpui::{
     QuitMode, Render, RenderImage, RenderOnce, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
     WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, anchored, canvas,
-    deferred, div, fill, img, list as variable_list, point, prelude::*, px, size, uniform_list,
+    deferred, div, fill, img, list as variable_list, point, prelude::*, px, rems, size,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
@@ -96,10 +97,16 @@ actions!(
 
 const UI_FONT_FAMILY: &str = "Suisse Intl";
 const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
-const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
-const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
-const BUTTON_HEIGHT: gpui::Pixels = px(44.0);
-const PAGE_CONTENT_MAX_WIDTH: gpui::Pixels = px(720.0);
+// Chrome geometry in `rem`, not pixels, so that raising the base font scales
+// the frame with the words inside it. At the default 16px base every one of
+// these resolves to the pixel value it replaced; at a larger base the rail
+// stays as wide as its labels need and a page keeps its measure in characters
+// rather than in device pixels. A fixed pixel height on a control whose text
+// grows is the one zoom failure the design guide names outright.
+const NAVIGATION_RAIL_WIDTH: gpui::Rems = rems(5.0);
+const NAVIGATION_BUTTON_SIZE: gpui::Rems = rems(3.25);
+const BUTTON_HEIGHT: gpui::Rems = rems(2.75);
+const PAGE_CONTENT_MAX_WIDTH: gpui::Rems = rems(45.0);
 const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// How long a balance read stays fresh enough that reopening the Portfolio tab
 /// reuses it instead of reading again.
@@ -123,7 +130,12 @@ const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// that has gone away must not hold the quit open, and a dapp whose goodbye
 /// misses it sees the session lapse on its own deadline instead.
 const DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT: Duration = Duration::from_secs(3);
-const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
+const COPY_BUTTON_HEIGHT: gpui::Rems = rems(2.0);
+// These two stay in pixels because that is what they are assigned to:
+// `Theme::radius` and `Theme::radius_lg` are `Pixels` upstream, and the theme
+// has no window to resolve a `rem` against when the palette is applied. A
+// corner radius is also the one piece of geometry that should not grow
+// linearly with the type — it is optical, not structural.
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
 const POLICY_EDITOR_DESCRIPTION: &str =
@@ -420,7 +432,7 @@ struct GroupBox {
     id: Option<ElementId>,
     title: Option<AnyElement>,
     children: Vec<AnyElement>,
-    gap: gpui::Pixels,
+    gap: gpui::Rems,
 }
 
 impl GroupBox {
@@ -429,7 +441,7 @@ impl GroupBox {
             id: None,
             title: None,
             children: Vec::new(),
-            gap: px(16.0),
+            gap: rems(1.0),
         }
     }
 
@@ -444,7 +456,7 @@ impl GroupBox {
     }
 
     fn compact(mut self) -> Self {
-        self.gap = px(8.0);
+        self.gap = rems(0.5);
         self
     }
 }
@@ -473,7 +485,7 @@ impl RenderOnce for GroupBox {
             .when_some(self.title, |section, title| {
                 section.child(
                     div()
-                        .text_size(px(15.0))
+                        .text_size(rems(0.9375))
                         .font_medium()
                         .text_color(cx.theme().group_box_foreground)
                         .child(title),
@@ -691,11 +703,11 @@ fn portfolio_balances_card(cx: &App) -> gpui::Div {
 /// the height of the text it stands in for. Widths vary because equal-length
 /// bars read as a rendered table rather than as a placeholder for one.
 fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
-    const ROWS: [(gpui::Pixels, gpui::Pixels, gpui::Pixels); 4] = [
-        (px(184.0), px(248.0), px(132.0)),
-        (px(136.0), px(212.0), px(96.0)),
-        (px(208.0), px(264.0), px(148.0)),
-        (px(160.0), px(232.0), px(112.0)),
+    const ROWS: [(gpui::Rems, gpui::Rems, gpui::Rems); 4] = [
+        (rems(11.5), rems(15.5), rems(8.25)),
+        (rems(8.5), rems(13.25), rems(6.0)),
+        (rems(13.0), rems(16.5), rems(9.25)),
+        (rems(10.0), rems(14.5), rems(7.0)),
     ];
     let mut rows = div()
         .debug_selector(|| "portfolio-loading-placeholder".to_owned())
@@ -728,9 +740,9 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
                     .gap_3()
                     .child(
                         div()
-                            .min_w(px(180.0))
+                            .min_w(rems(11.25))
                             .flex_1()
-                            .flex_basis(px(260.0))
+                            .flex_basis(rems(16.25))
                             .flex()
                             .flex_col()
                             .gap_0p5()
@@ -740,13 +752,13 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
                             // whose height comes from the explorer link in it.
                             .child(
                                 div()
-                                    .h(px(24.0))
+                                    .h(rems(1.5))
                                     .flex()
                                     .items_center()
                                     .child(Skeleton::new().h_5().w(identity).max_w_full()),
                             )
                             .child(
-                                div().h(px(22.0)).flex().items_center().child(
+                                div().h(rems(1.375)).flex().items_center().child(
                                     Skeleton::new().secondary().h_3().w(metadata).max_w_full(),
                                 ),
                             ),
@@ -1026,7 +1038,12 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&Leg
 /// pane ran 634px, which at 14px is about ninety characters a line; the
 /// comfortable band is nearer sixty-five to seventy-five. Capping the prose
 /// rather than the pane keeps the rows where the platform puts them.
-const PROSE_MEASURE: gpui::Pixels = px(520.0);
+///
+/// In `rem`, because a measure is a count of characters and not a distance.
+/// Held at 520 device pixels it would have narrowed to about fifty characters
+/// as soon as somebody raised the base font — tightening the very thing the
+/// cap exists to keep comfortable.
+const PROSE_MEASURE: gpui::Rems = rems(32.5);
 
 /// Where the add/edit network dialog sits, and how tall it may grow.
 struct NetworkEditorMetrics {
@@ -1474,7 +1491,7 @@ fn render_portfolio_balance_row(
                 )))
                 .label(address_label)
                 .link()
-                .h(px(22.0))
+                .h(rems(1.375))
                 .max_w_full()
                 .min_w_0()
                 .px_0()
@@ -1520,9 +1537,9 @@ fn render_portfolio_balance_row(
                 .gap_3()
                 .child(
                     div()
-                        .min_w(px(180.0))
+                        .min_w(rems(11.25))
                         .flex_1()
-                        .flex_basis(px(260.0))
+                        .flex_basis(rems(16.25))
                         .flex()
                         .flex_col()
                         .gap_0p5()
@@ -2433,8 +2450,12 @@ const AUTOMATION_RUNS_SHOWN: usize = 20;
 
 /// Runs read as a table only when their columns line up, and a fixed width is
 /// what lines them up when every cell holds a different length of text.
-const RUN_WHEN_COLUMN: gpui::Pixels = px(104.0);
-const RUN_OUTCOME_COLUMN: gpui::Pixels = px(120.0);
+///
+/// Fixed in `rem`: the width has to hold a timestamp and an outcome word, and
+/// what those need is a number of characters. In device pixels the lane would
+/// stay put while the text in it grew and the column would start truncating.
+const RUN_WHEN_COLUMN: gpui::Rems = rems(6.5);
+const RUN_OUTCOME_COLUMN: gpui::Rems = rems(7.5);
 
 /// What the tab is showing for one automation's dry run.
 ///
@@ -3778,7 +3799,13 @@ fn status_pill(label: &'static str, tone: StatusTone, cx: &App) -> gpui::Div {
         .border_1()
         .border_color(color.opacity(0.35))
         .bg(color.opacity(0.12))
-        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(color))
+        .child(
+            div()
+                .w(rems(0.4375))
+                .h(rems(0.4375))
+                .rounded_full()
+                .bg(color),
+        )
         .child(div().text_xs().font_medium().text_color(color).child(label))
 }
 
@@ -4930,7 +4957,12 @@ fn validate_token_text(
 // the navigation rail; longer words (including URLs) are hard-wrapped so no
 // legal text can escape its viewport.
 const LEGAL_WRAP_COLUMNS: usize = 64;
-const LEGAL_ROW_HEIGHT: gpui::Pixels = px(25.0);
+/// In `rem`, because the row holds a line of type: at a larger base font a
+/// 25-pixel row clipped its own text. The wrap column beside it is a character
+/// count and so is already base-independent — but the claim that 64 of them
+/// fit beside the rail is only true near the default base, and a much larger
+/// one will still run a long line past the viewport.
+const LEGAL_ROW_HEIGHT: gpui::Rems = rems(1.5625);
 
 fn push_wrapped_legal_rows(
     rows: &mut Vec<LegalDisplayRow>,
@@ -6954,6 +6986,9 @@ impl WalletWindow {
             let close_view = view.clone();
             let on_close_view = view.clone();
             dialog
+                // Pixels because `Dialog::w` takes them: the component sizes
+                // itself against the window rather than against the rem, and
+                // there is no relative form of this call to reach for.
                 .w(px(640.0))
                 .title("Add token")
                 .overlay_closable(!busy)
@@ -6989,7 +7024,7 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .flex_1()
-                                        .min_w(px(150.0))
+                                        .min_w(rems(9.375))
                                         .child(div().text_sm().child("Chain ID"))
                                         .child(
                                             app_input(&chain_id, cx)
@@ -7018,7 +7053,7 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .flex_1()
-                                        .min_w(px(150.0))
+                                        .min_w(rems(9.375))
                                         .child(div().text_sm().child("Symbol"))
                                         .child(
                                             app_input(&symbol, cx)
@@ -7039,7 +7074,7 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .flex_1()
-                                        .min_w(px(150.0))
+                                        .min_w(rems(9.375))
                                         .child(div().text_sm().child("Decimals"))
                                         .child(
                                             app_input(&decimals, cx)
@@ -7085,7 +7120,7 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .flex_1()
-                                        .min_w(px(150.0))
+                                        .min_w(rems(9.375))
                                         .child(div().text_sm().child("Full name (optional)"))
                                         .child(
                                             app_input(&name, cx)
@@ -7106,7 +7141,7 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .flex_1()
-                                        .min_w(px(150.0))
+                                        .min_w(rems(9.375))
                                         .child(
                                             div().text_sm().child("Approximate USD value (optional)"),
                                         )
@@ -10907,7 +10942,7 @@ impl WalletWindow {
                     .justify_center()
                     .border_b_1()
                     .border_color(cx.theme().sidebar_border)
-                    .child(img(logo).w(px(36.0)).h(px(36.0))),
+                    .child(img(logo).w(rems(2.25)).h(rems(2.25))),
             );
         for route in Route::ALL {
             // The badge is the one thing on this rail that changes on its own,
@@ -10933,7 +10968,7 @@ impl WalletWindow {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
             }))
-            .child(Icon::new(route.icon()).size(px(30.0)));
+            .child(Icon::new(route.icon()).size(rems(1.875)));
             let button = accessible_button(
                 button,
                 match &waiting {
@@ -10947,9 +10982,9 @@ impl WalletWindow {
                 pending_reviews.to_string()
             };
             let badge_width = if pending_reviews > 99 {
-                px(30.0)
+                rems(1.875)
             } else {
-                px(22.0)
+                rems(1.375)
             };
             let show_tooltip = self.sidebar_hovered_route == Some(route);
             let route_bounds = self
@@ -10987,10 +11022,10 @@ impl WalletWindow {
                             div()
                                 .id("inbox-review-badge")
                                 .absolute()
-                                .bottom(px(-3.0))
-                                .right(px(-4.0))
+                                .bottom(rems(-0.1875))
+                                .right(rems(-0.25))
                                 .w(badge_width)
-                                .h(px(22.0))
+                                .h(rems(1.375))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -11968,7 +12003,7 @@ impl WalletWindow {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(920.0))
+                    .max_w(rems(57.5))
                     .h_full()
                     .min_h_0()
                     .p_4()
@@ -12949,7 +12984,7 @@ impl WalletWindow {
                                 div()
                                     .min_w_0()
                                     .flex_1()
-                                    .flex_basis(px(260.0))
+                                    .flex_basis(rems(16.25))
                                     .child(div().font_semibold().truncate().child(selectable_text(
                                         format!("account-name-{}", item.id),
                                         &item.id,
@@ -13622,7 +13657,7 @@ impl WalletWindow {
                         div()
                             .debug_selector(|| "network-rpc-endpoints-input".to_owned())
                             .w_full()
-                            .h(px(144.0))
+                            .h(rems(9.0))
                             .child(
                                 app_input(rpc_urls, cx)
                                     .aria_label("RPC endpoints")
@@ -15034,7 +15069,7 @@ impl WalletWindow {
                                             "Set value…"
                                         })
                                         .ghost()
-                                        .h(px(22.0))
+                                        .h(rems(1.375))
                                         .px_1()
                                         .text_sm()
                                         .font_normal()
@@ -15210,7 +15245,7 @@ impl WalletWindow {
                                 app_button("portfolio-manage-tokens")
                                     .label("Go to Tokens")
                                     .ghost()
-                                    .h(px(22.0))
+                                    .h(rems(1.375))
                                     .px_1()
                                     .text_sm()
                                     .font_normal()
@@ -15348,7 +15383,7 @@ impl WalletWindow {
                 div()
                     .min_w_0()
                     .flex_1()
-                    .flex_basis(px(240.0))
+                    .flex_basis(rems(15.0))
                     .whitespace_normal()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
@@ -15420,7 +15455,7 @@ impl WalletWindow {
                         .debug_selector(|| "refresh-portfolio".to_owned())
                         .icon(Icon::default().path(REFRESH_ICON))
                         .ghost()
-                        .h(px(22.0))
+                        .h(rems(1.375))
                         .px_1()
                         .tooltip("Refresh balances")
                         .disabled(loading || no_networks)
@@ -15534,7 +15569,7 @@ impl WalletWindow {
                             .items_end()
                             .gap_2()
                             .child(
-                                div().flex_1().min_w(px(220.0)).child(
+                                div().flex_1().min_w(rems(13.75)).child(
                                     app_input(input, cx)
                                         .aria_label("Published token-list URL")
                                         .content_type(InputContentType::Url)
@@ -15683,7 +15718,7 @@ impl WalletWindow {
                     )
                     .child(
                         List::new(proposal_list)
-                            .h(px(340.0))
+                            .h(rems(21.25))
                             .w_full()
                             .border_1()
                             .border_color(cx.theme().border)
@@ -15732,7 +15767,7 @@ impl WalletWindow {
             .large()
             .prefix(
                 Icon::new(IconName::Search)
-                    .with_size(px(24.0))
+                    .size(rems(1.5))
                     .text_color(cx.theme().muted_foreground),
             )
             .p_0()
@@ -15750,10 +15785,10 @@ impl WalletWindow {
                 // neither, and a bare ✗ beside a full search box is a guess.
                 accessible_button(
                     Button::new("clear-token-search")
-                        .icon(Icon::new(IconName::CircleX).with_size(px(24.0)))
+                        .icon(Icon::new(IconName::CircleX).size(rems(1.5)))
                         .ghost()
-                        .h(px(36.0))
-                        .w(px(36.0))
+                        .h(rems(2.25))
+                        .w(rems(2.25))
                         .p_0()
                         // Not in the tab order on purpose: Tab leaves the
                         // search box for the list. Clearing from the keyboard
@@ -15791,7 +15826,7 @@ impl WalletWindow {
                 div()
                     .debug_selector(|| "token-inventory-list".to_owned())
                     .flex_1()
-                    .min_h(px(260.0))
+                    .min_h(rems(16.25))
                     .w_full()
                     .flex()
                     .flex_col()
@@ -15853,10 +15888,10 @@ impl WalletWindow {
                 ))),
         );
         panel = match &self.release_state {
-            ReleaseDisplayState::Idle => panel.child(div().h(px(20.0))),
+            ReleaseDisplayState::Idle => panel.child(div().h(rems(1.25))),
             ReleaseDisplayState::Checking => panel.child(
                 h_flex()
-                    .h(px(20.0))
+                    .h(rems(1.25))
                     .debug_selector(|| "release-check-progress".to_owned())
                     .gap_2()
                     .text_sm()
@@ -15972,7 +16007,7 @@ impl WalletWindow {
                     div()
                         .min_w_0()
                         .flex_1()
-                        .flex_basis(px(210.0))
+                        .flex_basis(rems(13.125))
                         .flex()
                         .flex_col()
                         .child(div().font_semibold().child(asset))
@@ -15995,7 +16030,7 @@ impl WalletWindow {
                     selectable_text(SharedString::from(format!("{fact_id}-amount")), &fact.value)
                         .min_w_0()
                         .flex_1()
-                        .flex_basis(px(240.0))
+                        .flex_basis(rems(15.0))
                         .text_lg()
                         .font_semibold()
                         .text_color(amount_color)
@@ -16033,7 +16068,7 @@ impl WalletWindow {
             .child(
                 div()
                     .flex_none()
-                    .w(px(138.0))
+                    .w(rems(8.625))
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(if fact.label.is_empty() {
@@ -16421,7 +16456,7 @@ impl WalletWindow {
                 .w_full()
                 .min_w_0()
                 .pb_4()
-                .child(div().w_full().max_w(px(920.0)).mx_auto().child(content))
+                .child(div().w_full().max_w(rems(57.5)).mx_auto().child(content))
                 .into_any_element()
         })
         .size_full()
@@ -16836,7 +16871,7 @@ impl WalletWindow {
                             .when(visible.is_some(), |buttons| {
                                 buttons.child(
                                     app_button("copy-account-export")
-                                        .w(px(112.0))
+                                        .w(rems(7.0))
                                         .icon(if export.copied {
                                             IconName::Check
                                         } else {
@@ -17070,7 +17105,7 @@ impl WalletWindow {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .flex_basis(px(320.0))
+                            .flex_basis(rems(20.0))
                             .flex()
                             .flex_col()
                             .gap_1()
@@ -17189,7 +17224,7 @@ impl WalletWindow {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .flex_basis(px(280.0))
+                            .flex_basis(rems(17.5))
                             .text_sm()
                             .whitespace_normal()
                             .text_color(cx.theme().muted_foreground)
@@ -17287,7 +17322,7 @@ impl WalletWindow {
                         div()
                             .min_w_0()
                             .flex_1()
-                            .flex_basis(px(320.0))
+                            .flex_basis(rems(20.0))
                             .flex()
                             .flex_col()
                             .gap_1()
@@ -17697,7 +17732,7 @@ impl WalletWindow {
             // better for being wider. Every pixel it gives up is a column of
             // JSON, which is the thing on this page that runs out of room now
             // that long lines no longer wrap.
-            .w(px(264.0))
+            .w(rems(16.5))
             .h_full()
             .min_h_0()
             .flex_none()
@@ -18086,10 +18121,10 @@ impl WalletWindow {
     fn render_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = div()
             .absolute()
-            .top(px(54.0))
-            .left(px(58.0))
-            .w(px(420.0))
-            .max_h(px(460.0))
+            .top(rems(3.375))
+            .left(rems(3.625))
+            .w(rems(26.25))
+            .max_h(rems(28.75))
             .p_3()
             .rounded(cx.theme().radius_lg)
             .shadow_lg()
@@ -18121,7 +18156,7 @@ impl WalletWindow {
             .when_some(self.command_palette_list.as_ref(), |palette, list| {
                 palette.child(
                     List::new(list)
-                        .h(px(390.0))
+                        .h(rems(24.375))
                         .w_full()
                         .border_1()
                         .border_color(cx.theme().border)
@@ -18159,8 +18194,8 @@ impl WalletWindow {
             let done = self.guided_setup.is_complete(task);
             let marker = div()
                 .flex_none()
-                .mt(px(2.0))
-                .size(px(16.0))
+                .mt(rems(0.125))
+                .size(rems(1.0))
                 .rounded(cx.theme().radius)
                 .border_1()
                 .border_color(if done {
@@ -18175,7 +18210,7 @@ impl WalletWindow {
                 .when(done, |marker| {
                     marker.child(
                         Icon::new(IconName::Check)
-                            .with_size(px(11.0))
+                            .size(rems(0.6875))
                             .text_color(cx.theme().primary_foreground),
                     )
                 });
@@ -18237,8 +18272,8 @@ impl WalletWindow {
             .id("guided-setup")
             .debug_selector(|| "guided-setup".to_owned())
             .absolute()
-            .right(px(20.0))
-            .bottom(px(20.0))
+            .right(rems(1.25))
+            .bottom(rems(1.25))
             .w(width)
             .p_3()
             .rounded(cx.theme().radius_lg)
@@ -18328,14 +18363,19 @@ impl WalletWindow {
                             // Quiet, but a Button: dismissing a panel is an
                             // application command, and link styling would
                             // promise a resource somewhere else.
+                            //
+                            // Quiet is not the same as muted. Painted in
+                            // `muted_foreground` it read as the caption at the
+                            // bottom of the card rather than as the way out of
+                            // it — a control at rest still owes an affordance.
+                            // The ghost variant's own foreground carries it.
                             app_button("guided-setup-dismiss")
                                 .debug_selector(|| "guided-setup-dismiss".to_owned())
                                 .ghost()
                                 .px_1()
-                                .h(px(20.0))
+                                .h(rems(1.25))
                                 .text_xs()
                                 .font_normal()
-                                .text_color(cx.theme().muted_foreground)
                                 .label("Dismiss")
                                 .tooltip("Hide this. It comes back when you finish the next step.")
                                 .on_click(cx.listener(|view, _, _, cx| {
