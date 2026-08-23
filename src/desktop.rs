@@ -5610,8 +5610,9 @@ impl ListDelegate for TokenListDelegate {
                 });
             });
         let actions = app_button(("remove-token", index.row))
-            .label(if removing { "Removing…" } else { "Remove" })
+            .label(if removing { "Removing" } else { "Remove" })
             .danger()
+            .loading(removing)
             .disabled(chain_id.zip(address).is_none() || removing)
             .on_click(move |_, _, cx| {
                 let Some((chain_id, address)) = chain_id.zip(address) else {
@@ -6592,7 +6593,7 @@ impl WalletWindow {
         self.detected_agents_generation = self.detected_agents_generation.wrapping_add(1);
         let generation = self.detected_agents_generation;
         // Detection is a few file reads, and it re-runs after every install.
-        // Blanking the list back to "Detecting…" each time made a list that
+        // Blanking the list back to "Detecting" each time made a list that
         // barely changes flash on every visit; the previous answer stays up
         // until the new one replaces it.
         if matches!(self.detected_agents, AgentDetectionState::Failed(_)) {
@@ -7148,7 +7149,7 @@ impl WalletWindow {
                         .child(
                             app_button("confirm-add-token")
                                 .label(if busy {
-                                    "Authenticating…"
+                                    "Authenticating"
                                 } else {
                                     "Authenticate & add"
                                 })
@@ -7329,7 +7330,7 @@ impl WalletWindow {
                         .child(
                             app_button("save-token-price")
                                 .debug_selector(|| "save-token-price".to_owned())
-                                .label(if busy { "Saving…" } else { "Save value" })
+                                .label(if busy { "Saving" } else { "Save value" })
                                 .primary()
                                 .loading(busy)
                                 .disabled(busy)
@@ -11213,7 +11214,7 @@ impl WalletWindow {
                     .gap_2()
                     .text_color(cx.theme().muted_foreground)
                     .child(Spinner::new().small())
-                    .child(selectable_label("Opening the exact transaction review…")),
+                    .child(selectable_label("Opening the exact transaction review")),
             );
         }
         let cards = match self.inbox_waiting_cards() {
@@ -11613,7 +11614,7 @@ impl WalletWindow {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(Spinner::new())
                                 .child(selectable_label(
-                                    "Reading what this transaction did and checking the network for its receipt…",
+                                    "Reading what this transaction did and checking the network for its receipt",
                                 )),
                         );
                     }
@@ -12402,7 +12403,7 @@ impl WalletWindow {
                     h_flex()
                         .gap_2()
                         .child(Spinner::new())
-                        .child(selectable_label("Detecting…")),
+                        .child(selectable_label("Detecting")),
                 );
             }
             AgentDetectionState::Failed(error) => {
@@ -12837,8 +12838,8 @@ impl WalletWindow {
                             "import-account"
                         })
                         .label(match self.account_operation {
-                            Some(AccountOperation::Creating) => "Creating account…",
-                            Some(AccountOperation::Importing) => "Importing account…",
+                            Some(AccountOperation::Creating) => "Creating account",
+                            Some(AccountOperation::Importing) => "Importing account",
                             None if creating => "Create account",
                             None => "Import private key",
                         })
@@ -13791,7 +13792,7 @@ impl WalletWindow {
             .child(
                 app_button("save-guided-network")
                     .debug_selector(|| "network-editor-save".to_owned())
-                    .label(if busy { "Saving…" } else { "Save network" })
+                    .label(if busy { "Saving" } else { "Save network" })
                     .primary()
                     .loading(busy)
                     .disabled(busy)
@@ -14919,12 +14920,13 @@ impl WalletWindow {
                                                 "toggle-network-{name}"
                                             )))
                                             .label(if busy {
-                                                "Authenticating…"
+                                                "Authenticating"
                                             } else if disabled {
                                                 "Enable"
                                             } else {
                                                 "Disable"
                                             })
+                                            .loading(busy)
                                             .disabled(busy)
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 view.set_network_disabled(
@@ -15509,12 +15511,15 @@ impl WalletWindow {
                                 app_button("import-owner-token-list")
                                     .label(
                                         if self.token_import_state == TokenImportState::Fetching {
-                                            "Fetching…"
+                                            "Fetching"
                                         } else {
                                             "Fetch for review"
                                         },
                                     )
                                     .primary()
+                                    .loading(
+                                        self.token_import_state == TokenImportState::Fetching,
+                                    )
                                     .disabled(
                                         self.token_import_state == TokenImportState::Fetching,
                                     )
@@ -15523,17 +15528,15 @@ impl WalletWindow {
                                     })),
                             ),
                     )
+                    // The line says what the wait is for; the button beside it
+                    // is the indicator. Two spinners in one group box for one
+                    // operation is the same fact drawn twice.
                     .when(
                         self.token_import_state == TokenImportState::Fetching,
                         |group| {
-                            group.child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(Spinner::new().small())
-                                    .child(selectable_label(
-                                        "Fetching and validating the published list…",
-                                    )),
-                            )
+                            group.child(selectable_label(
+                                "Fetching and validating the published list",
+                            ))
                         },
                     )
                     .when_some(self.token_import_error.clone(), |group, error| {
@@ -15659,14 +15662,20 @@ impl WalletWindow {
                             .gap_2()
                             .child(
                                 app_button("accept-token-proposal-group")
-                                    .label(if self.token_proposal_busy {
-                                        "Working…"
-                                    } else if viewed_to_end {
+                                    // The label stays put while the work runs.
+                                    // It used to become "Working…", which
+                                    // replaced the one thing the button was
+                                    // for with a word that says nothing; the
+                                    // spinner is what reports progress, and it
+                                    // can do that without erasing the
+                                    // commitment the reader is making.
+                                    .label(if viewed_to_end {
                                         "Accept exact list"
                                     } else {
                                         "View complete list to accept"
                                     })
                                     .primary()
+                                    .loading(self.token_proposal_busy)
                                     .disabled(self.token_proposal_busy || !viewed_to_end)
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.accept_token_proposal_group(cx);
@@ -15819,13 +15828,13 @@ impl WalletWindow {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(Spinner::new().small())
-                    .child(selectable_label("Checking for updates…")),
+                    .child(selectable_label("Checking for updates")),
             ),
             ReleaseDisplayState::Downloading => panel.child(
                 h_flex()
                     .gap_2()
                     .child(Spinner::new())
-                    .child(selectable_label("Downloading and verifying the update…")),
+                    .child(selectable_label("Downloading and verifying the update")),
             ),
             ReleaseDisplayState::Ready { check, update } => panel
                 .child(
@@ -16778,11 +16787,12 @@ impl WalletWindow {
                                 buttons.child(
                                     app_button("authenticate-account-export")
                                         .label(match (export.authenticating, expired) {
-                                            (true, _) => "Waiting for confirmation…",
+                                            (true, _) => "Waiting for confirmation",
                                             (false, true) => "Reveal again",
                                             (false, false) => "Confirm & reveal",
                                         })
                                         .danger()
+                                        .loading(export.authenticating)
                                         .disabled(export.authenticating)
                                         .on_click(cx.listener(|view, _, _, cx| {
                                             view.authenticate_account_export(cx);
@@ -17421,7 +17431,7 @@ impl WalletWindow {
                         app_button("install-policy-draft-full-screen")
                             .debug_selector(|| "install-policy-draft-full-screen".to_owned())
                             .label(if self.policy_installing {
-                                "Authenticating…"
+                                "Authenticating"
                             } else {
                                 "Authenticate & install"
                             })
@@ -17903,7 +17913,7 @@ impl WalletWindow {
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
                 .child(Spinner::new())
-                .child(selectable_label("Loading wallet data…"))
+                .child(selectable_label("Loading wallet data"))
         } else {
             self.route_panel(cx)
         };
