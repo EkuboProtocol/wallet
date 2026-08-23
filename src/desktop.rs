@@ -10860,11 +10860,7 @@ impl WalletWindow {
         } else {
             self.sidebar_logo_light.clone()
         };
-        let inbox_badge_color = if cx.theme().is_dark() {
-            gpui::rgb(0x9f_22_1d).into()
-        } else {
-            cx.theme().red
-        };
+        let inbox_badge_color = cx.theme().red;
         let mut menu = div()
             .id("wallet-sidebar")
             .debug_selector(|| "wallet-sidebar".to_owned())
@@ -18670,6 +18666,15 @@ fn apply_interface_palette(cx: &mut App) {
     colors.sidebar_primary_foreground = color(interaction.primary_foreground);
     colors.danger = danger;
     colors.danger_foreground = background;
+    // The count badge on the Inbox rail entry is the one thing that reads
+    // `red` directly, and the library's base red is mixed for a badge fill on
+    // the rail's near-black surface. Its darkened companion belongs here, with
+    // every other colour this product decides, rather than as a literal at the
+    // call site branching on `is_dark()` a second time on every frame. Light
+    // keeps the library value, which already carries the contrast.
+    if dark {
+        colors.red = color(0x9f_22_1d);
+    }
     colors.success = success;
     colors.success_foreground = background;
     colors.warning = warning;
