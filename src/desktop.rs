@@ -18083,19 +18083,18 @@ impl WalletWindow {
                                     .child(self.route.description()),
                             ),
                     )
+                    // The title band carries the page's own actions and
+                    // nothing else. A spinner used to sit here whenever the
+                    // background snapshot reloaded -- unlabelled, in the
+                    // corner furthest from whatever had changed, reporting
+                    // only that something, somewhere, was happening. Every
+                    // page that reloads keeps showing what it last read, and
+                    // the row the owner pressed carries its own progress,
+                    // which is the answer the Portfolio had already been
+                    // given.
                     .when_some(self.route_header_actions(cx), |header, actions| {
                         header.child(actions)
-                    })
-                    .when(
-                        self.desktop_snapshot_loading && self.route != Route::Overview,
-                        |header| {
-                            header.child(
-                                div()
-                                    .id("route-header-loading")
-                                    .child(Spinner::new().small()),
-                            )
-                        },
-                    ),
+                    }),
             )
             .when_some(self.route_account_selector(cx), |header, selector| {
                 header.child(selector)

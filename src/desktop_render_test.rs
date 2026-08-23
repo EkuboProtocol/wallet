@@ -1002,6 +1002,36 @@ fn add_network_is_part_of_the_fixed_header(cx: &mut gpui::TestAppContext) {
     release(cx, &view);
 }
 
+/// Reloading the background snapshot is what enabling, disabling, or adding a
+/// network does, and it used to put an unlabelled spinner in the corner of the
+/// title band on every page but the one that had already worked out the better
+/// answer. A spinner there reports only that something, somewhere, is
+/// happening: the list keeps showing the networks it last read, and the row
+/// the owner pressed carries its own progress.
+#[gpui::test]
+fn reloading_the_snapshot_puts_no_spinner_in_the_title_band(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+        wallet.desktop_snapshot_loading = true;
+        wallet.set_route(Route::Networks);
+    });
+
+    let measured = measure(
+        cx,
+        window,
+        &view,
+        &["route-header-inner", "route-header-loading"],
+    );
+    measured[0].expect("the fixed header must be laid out");
+    assert!(
+        measured[1].is_none(),
+        "a reloading snapshot must not add a spinner to the title band"
+    );
+    release(cx, &view);
+}
+
 #[gpui::test]
 fn portfolio_refresh_sits_with_the_refreshed_line_and_not_in_the_header(
     cx: &mut gpui::TestAppContext,
