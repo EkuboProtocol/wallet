@@ -45,6 +45,7 @@ async fn the_vendored_vetoken_descriptor_interprets_a_stake() {
         &Bytes::from(calldata),
         U256::ZERO,
         &TokenMetadataMap::new(),
+        &crate::approval_summary::OwnAccounts::new(),
     )
     .await
     .expect("descriptor matches");
@@ -65,6 +66,7 @@ async fn descriptor_interpretation_requires_exact_canonical_calldata() {
         &Bytes::from(calldata),
         U256::ZERO,
         &TokenMetadataMap::new(),
+        &crate::approval_summary::OwnAccounts::new(),
     )
     .await;
     assert!(
@@ -92,7 +94,11 @@ async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
             decimals: Some(6),
         },
     )]);
-    let provider = MapProvider(&map);
+    let own = crate::approval_summary::OwnAccounts::new();
+    let provider = MapProvider {
+        metadata: &map,
+        own: &own,
+    };
     let forged = provider.resolve_token(1, &format!("{attacker:#x}")).await;
     assert!(
         forged.is_none(),
@@ -108,10 +114,13 @@ async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
             decimals: Some(6),
         },
     )]);
-    let resolved = MapProvider(&honest)
-        .resolve_token(1, &format!("{attacker:#x}"))
-        .await
-        .expect("a real symbol resolves");
+    let resolved = MapProvider {
+        metadata: &honest,
+        own: &own,
+    }
+    .resolve_token(1, &format!("{attacker:#x}"))
+    .await
+    .expect("a real symbol resolves");
     assert_eq!(resolved.decimals, 6);
     assert!(resolved.symbol.starts_with("USDC ("), "{resolved:?}");
     assert!(
@@ -135,6 +144,7 @@ async fn a_negative_tick_reads_as_a_negative_number() {
         &Bytes::from(calldata),
         U256::ZERO,
         &TokenMetadataMap::new(),
+        &crate::approval_summary::OwnAccounts::new(),
     )
     .await
     .expect("descriptor matches");

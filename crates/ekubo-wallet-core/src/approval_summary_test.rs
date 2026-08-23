@@ -604,6 +604,64 @@ fn an_account_name_can_never_be_read_as_a_second_address() {
     );
 }
 
+/// A descriptor reading returns before the standard-call decoding runs, so the
+/// labels have to reach the engine rather than the branch below it. LBTC ships
+/// a vendored descriptor covering `transfer`, which made a transfer between
+/// two of the owner's own accounts -- the case the labels exist for -- render
+/// its recipient as a bare address.
+///
+/// The engine's name hook *substitutes*: what it answers replaces the address
+/// in that field. So this pins the address surviving, not merely the name
+/// appearing, and it counts the characters: a future engine that annotated
+/// instead of substituting, or a label shape that dropped the address, breaks
+/// here rather than on somebody's approval screen.
+#[tokio::test]
+async fn a_clear_signed_transfer_names_the_owners_own_account() {
+    let lbtc = "0x8236a87084f8b84306f72007f36f2618a5634494"
+        .parse::<Address>()
+        .expect("the vendored LBTC deployment address");
+    let mine = Address::repeat_byte(0x22);
+    let stranger = Address::repeat_byte(0x33);
+    let mut own = OwnAccounts::new();
+    own.insert(mine, "savings".to_owned());
+
+    let read = async |to: Address, own: &OwnAccounts| -> StepInterpretation {
+        let mut step = step(1, lbtc, transfer_calldata(to, U256::from(5_u8)));
+        step.transaction.chain_id = DecimalU256::new("1".to_owned()).unwrap();
+        let mut read = interpret_steps(&[step], &TokenMetadataMap::new(), own).await;
+        read.pop().expect("one step interpreted")
+    };
+
+    let mine_read = read(mine, &own).await;
+    let rendered = mine_read.details.join("\n");
+    // The descriptor path is the one under test; if this stops matching, the
+    // rest of the test is asserting about the fallback instead.
+    assert!(
+        mine_read
+            .description
+            .as_deref()
+            .is_some_and(|intent| intent.contains("Lombard")),
+        "the vendored descriptor must be what rendered this: {mine_read:?}"
+    );
+    let exact = format!("{mine:#x}");
+    assert_eq!(exact.len(), 42);
+    assert!(
+        rendered.contains(&exact),
+        "the address must survive the engine's name substitution: {rendered}"
+    );
+    assert!(
+        rendered.contains("your account savings"),
+        "and be named as the owner's: {rendered}"
+    );
+
+    let stranger_read = read(stranger, &own).await;
+    let rendered = stranger_read.details.join("\n");
+    assert!(
+        !rendered.contains("your account"),
+        "an address the wallet does not hold must never be dressed as one: {rendered}"
+    );
+}
+
 #[test]
 fn fixed_point_rendering_never_rounds() {
     assert_eq!(format_fixed_point("1", 18), "0.000000000000000001");

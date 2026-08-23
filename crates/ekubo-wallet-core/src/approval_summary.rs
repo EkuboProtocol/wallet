@@ -187,6 +187,7 @@ async fn interpret_step(
             &step.transaction.data,
             step_value(step),
             metadata,
+            own,
         )
         .await
     {

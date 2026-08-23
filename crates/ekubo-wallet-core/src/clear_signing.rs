@@ -305,8 +305,16 @@ pub struct ClearSigned {
 }
 
 /// Token metadata provider bridging the plan's already-fetched display
-/// metadata into the engine's formatting.
-struct MapProvider<'a>(&'a TokenMetadataMap);
+/// metadata into the engine's formatting, and the owner's own accounts into
+/// the names it puts on addresses.
+///
+/// Both answer from maps the caller already holds, so a descriptor reading
+/// still contacts no network -- which is the invariant this module is built
+/// on, not a convenience.
+struct MapProvider<'a> {
+    metadata: &'a TokenMetadataMap,
+    own: &'a crate::approval_summary::OwnAccounts,
+}
 
 impl DataProvider for MapProvider<'_> {
     /// A stored symbol reaches this through the same door it reaches
@@ -335,7 +343,7 @@ impl DataProvider for MapProvider<'_> {
         let meta = address
             .parse::<Address>()
             .ok()
-            .and_then(|address| Some((address, self.0.get(&address)?)))
+            .and_then(|address| Some((address, self.metadata.get(&address)?)))
             .and_then(|(address, metadata)| {
                 let symbol = crate::approval_summary::display_symbol(metadata.symbol.as_deref()?)?;
                 let bound = format!("{symbol} ({address:#x})");
@@ -346,6 +354,33 @@ impl DataProvider for MapProvider<'_> {
                 })
             });
         Box::pin(async move { meta })
+    }
+
+    /// Name an address the owner's own account, and say the address while
+    /// doing it.
+    ///
+    /// This hook *substitutes*: whatever it answers replaces the address in
+    /// the rendered field, and answering `None` leaves the engine to print the
+    /// EIP-55 checksum it would have printed anyway. So the answer carries the
+    /// address itself -- an account name alone would take the forty characters
+    /// being authorized off the screen, which is the opposite of the point.
+    ///
+    /// Only the wallet's own account list is consulted. The `types` hint the
+    /// descriptor supplies is ignored: whether an address is one the owner
+    /// holds is a fact about this wallet, not a guess a descriptor makes about
+    /// its parameter.
+    fn resolve_local_name(
+        &self,
+        address: &str,
+        _chain_id: u64,
+        _types: Option<&[String]>,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        let labelled = address.parse::<Address>().ok().and_then(|address| {
+            self.own
+                .contains_key(&address)
+                .then(|| crate::approval_summary::address_label(address, self.own))
+        });
+        Box::pin(async move { labelled })
     }
 }
 
@@ -469,8 +504,9 @@ pub async fn interpret(
     calldata: &Bytes,
     value: U256,
     metadata: &TokenMetadataMap,
+    own: &crate::approval_summary::OwnAccounts,
 ) -> Option<ClearSigned> {
-    let provider = MapProvider(metadata);
+    let provider = MapProvider { metadata, own };
     match run_format(chain_id, &envelope, calldata, value, &provider).await? {
         FormatOutcome::ClearSigned { model, diagnostics } => {
             Some(clear_signed(&model, &diagnostics))
