@@ -44,16 +44,18 @@ state. If the role you need does not exist, add it to the theme layer in
 `src/desktop.rs`'s theme construction, not at the call site.
 
 **Geometry comes from the rem scale.** `p_4()`, `gap_2()`, `text_sm()`,
-`h_8()`, `size_4()` and component `Size` values scale with the window's base
-font; `px(...)` does not. Fixed pixels are for physical or external boundaries
-— a one-device-pixel hairline, a window inset, a raster dimension, a hit-test
-minimum, a virtual-list height hint. This file has ~110 `px(...)` call sites
-and some are exactly those legitimate cases. Treat each one as a question with
-an answer: if the value is product spacing, typography, icon size, or ordinary
-control geometry, it belongs on the relative scale; if it is a real boundary,
-say so in a comment where it is defined. Do not run a blanket sweep — a
-mechanical replacement that changes rhythm at the default zoom is worse than
-the literal it removed.
+`h_8()`, `size_4()`, `rems(...)` and component `Size` values scale with the
+window's base font; `px(...)` does not. The chrome has been converted, so a new
+`px(...)` in a layout position is now the exception and needs a reason beside
+it. The reasons that hold: a one-device-pixel hairline, a scroll epsilon, a
+window inset or bound, a raster dimension, a painted custom element, a
+virtual-list height hint that each row's measurement replaces, and the handful
+of component APIs that only take `Pixels` (`Theme::radius`, `Dialog::w`,
+`Sizable::with_size` — for that last one reach for `Styled::size(rems(...))`
+instead). Everything else — product spacing, typography, icon size, control
+frames, measures, column lanes — is relative. At the default 16px base
+`rems(x)` is exactly `px(16x)`, so a faithful conversion changes nothing on
+screen; if the base-16 screenshots move, the conversion was wrong.
 
 **Emphasis is a budget.** One focal point per surface. `primary` marks the one
 default commitment in a decision area — the thing Enter does — not merely the
@@ -93,9 +95,19 @@ sheet, or window, or that needs more input before it can complete — and on
 nothing else. Name the result: `Delete`, not `Confirm deletion`; `Discard
 changes`, not `Yes`. Errors say what happened and how to recover.
 
+**Work in flight is a spinner, never dots.** `…` means "this opens something"
+in this interface; a trailing ellipsis on `Saving` or `Removing` would give the
+same character two jobs. Use `Button::loading(busy)` or a `Spinner`, and keep
+the label naming the command — a button that becomes `Working…` has erased the
+commitment its reader was in the middle of making. One indicator per operation:
+a loading Button beside an explanatory line does not need a second spinner on
+the line.
+
 **Every state is a design surface.** Empty, loading, error, offline,
 locked/read-only, and permission-denied are not afterthoughts on a page that
-usually has data. An empty state explains the next action.
+usually has data. An empty state explains the next action — and it must be true
+in the state it is drawn in: "no results match your filters" on a collection
+that has no rows and no filter names a cause that does not exist.
 
 ## Wallet amendments
 
@@ -135,12 +147,18 @@ state, has it been seen in a real window.
 Then, mechanically:
 
 - `cargo fmt --all --check`
-- `cargo test --locked --workspace --all-features desktop_render` — every route
+- `cargo test --locked --all-features --lib desktop::render_tests` — every route
   and overlay is laid out and painted in `src/desktop_render_test.rs`. A
   surface that panics or lays out to nothing fails there. It asserts layout,
   not appearance.
+- `EKUBO_SHOT_DIR=target/shots cargo test --locked --all-features --lib
+  screenshots -- --ignored --nocapture` — rasterises all nine routes in light
+  and dark at base fonts of 16 and 20, thirty-six PNGs, offscreen, no display
+  needed. Then *look at them*. Shoot before your change as well as after: at
+  base 16 a faithful `rem` conversion is pixel-identical, so a diff there is a
+  regression, and base 20 is where fixed pixels give themselves away.
 - The full gate in `CLAUDE.md` before landing.
 
-A render test passing is not a design review, and a screenshot is not proof.
-Keyboard path, focus restoration, theme in both modes, window minimum, and the
-failure states are part of the work.
+A render test passing is not a design review, and one screenshot is not proof.
+Keyboard path, focus restoration, window minimum, and the failure states are
+still yours to check by hand.

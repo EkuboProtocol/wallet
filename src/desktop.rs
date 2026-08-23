@@ -15010,35 +15010,18 @@ impl WalletWindow {
                                                         ),
                                                     )),
                                             )
-                                            .child(
-                                                div()
-                                                    .px_2()
-                                                    .py_0p5()
-                                                    .rounded_full()
-                                                    .border_1()
-                                                    .border_color(if disabled {
-                                                        cx.theme().border
-                                                    } else {
-                                                        cx.theme().primary
-                                                    })
-                                                    .when(!disabled, |badge| {
-                                                        badge.bg(cx.theme().primary)
-                                                    })
-                                                    .text_xs()
-                                                    .text_color(if disabled {
-                                                        cx.theme().muted_foreground
-                                                    } else {
-                                                        cx.theme().primary_foreground
-                                                    })
-                                                    .child(selectable_text(
-                                                        format!("network-status-{name}"),
-                                                        if disabled {
-                                                            "Disabled"
-                                                        } else {
-                                                            "Enabled"
-                                                        },
-                                                    )),
-                                            ),
+                                            // No status badge. The rows are
+                                            // already in a section headed
+                                            // "Enabled" or "Disabled", and the
+                                            // button on the row offers the
+                                            // opposite verb, so the badge was
+                                            // the third statement of a fact
+                                            // nobody had asked twice about —
+                                            // and it spent the accent colour
+                                            // on every row of the longer
+                                            // section, which is the surest way
+                                            // to make an accent stop meaning
+                                            // anything.
                                     ),
                                 )
                                 .child(
