@@ -4149,6 +4149,16 @@ fn render_activity_row(
                 })
                 .when(available.discard, |buttons| {
                     buttons.child(
+                        // Danger, and deliberately unconfirmed. It is offered
+                        // only on `Signed`, where `Cancel transaction` is not,
+                        // so the two reds are never on screen together and
+                        // neither flattens the other. And it is the way out of
+                        // a signed-but-unsent transaction: the safe direction,
+                        // the one the owner reaches for when they have changed
+                        // their mind. A confirmation dialog on the escape
+                        // hatch buys nothing on chain -- nothing was
+                        // broadcast, and an agent can ask again -- and charges
+                        // for it in the moment somebody most wants out.
                         app_button(SharedString::from(format!("discard-{request_id}")))
                             .label("Discard")
                             .danger()
@@ -4180,6 +4190,16 @@ fn render_activity_row(
                 )
                 .when(awaiting, |buttons| {
                     buttons.child(
+                        // Primary, and it stays primary even though it repeats
+                        // down a list -- which is the shape demoted on
+                        // Settings and Automations. The difference is what a
+                        // row is. An installed agent and a stopped automation
+                        // are items in an inventory, and the page has no
+                        // default commit; a request waiting on a signature is
+                        // a decision area of its own, with exactly one thing
+                        // the owner is here to do, the same way each network
+                        // proposal card is. Primary marks the default commit
+                        // in a decision area, and every one of these is one.
                         app_button(SharedString::from(format!(
                             "review-message-activity-{request_id}"
                         )))
@@ -12711,8 +12731,19 @@ impl WalletWindow {
                                     ),
                             )
                             .child(
+                                // The tooltip is this control's name, and it
+                                // should not have to be. `Switch` derives its
+                                // accessible name from its own `label`, which
+                                // it also draws — so a settings row whose name
+                                // lives in the left column, which is the
+                                // desktop idiom this pane is built on, cannot
+                                // name its switch without printing the words
+                                // twice. Until the component takes an
+                                // accessible name independent of the label it
+                                // renders, this is the closest thing to one.
                                 Switch::new("testnet-mode")
                                     .checked(self.testnet_mode)
+                                    .tooltip("Testnet mode")
                                     .on_click(cx.listener(|view, enabled, _, cx| {
                                         view.set_testnet_mode(*enabled, cx);
                                     })),
@@ -13661,8 +13692,11 @@ impl WalletWindow {
                             ),
                     )
                     .child(
+                        // Named by tooltip for the same reason the testnet
+                        // switch in Settings is.
                         Switch::new("network-editor-testnet")
                             .checked(self.network_editor_testnet)
+                            .tooltip("Test network")
                             .disabled(busy)
                             .on_click({
                                 let view = view.clone();
