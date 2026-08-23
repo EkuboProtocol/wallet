@@ -343,17 +343,54 @@ fn install_macos_application(application: &Path, bytes: &[u8]) -> Result<()> {
             .is_dir(),
         "the macOS update archive contains no application bundle"
     );
+    // Exchanging `Contents` is a complete replacement only for as long as a
+    // bundle keeps everything it has there. A package that put anything beside
+    // it would have that entry extracted into staging and then removed with
+    // the staging directory -- present in a fresh install and silently absent
+    // from an updated one, which is the kind of difference nobody finds until
+    // it matters. Packaging drift fails here instead.
+    let mut staged_root = std::fs::read_dir(&staged_application)
+        .context("the staged application bundle could not be read")?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    staged_root.sort();
+    ensure!(
+        staged_root.len() == 1 && staged_root[0] == "Contents",
+        "the macOS update archive holds entries beside Contents, which this installer cannot carry over"
+    );
+
     let installed_contents = application.join("Contents");
     let staged_contents = staged_application.join("Contents");
     for (path, description) in [
         (&installed_contents, "the installed macOS application"),
         (&staged_contents, "the macOS update archive"),
     ] {
+        // Distinguished from "no Contents directory", because the reason this
+        // cannot be read is the whole diagnostic when it is a permission the
+        // owner does not have on their own installed bundle.
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("{description}'s Contents directory could not be read"))?;
+        // `symlink_metadata` rather than `metadata`: a symlink's file type is
+        // not a directory, so a `Contents` replaced by a link is refused
+        // rather than followed.
         ensure!(
-            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir()),
+            metadata.file_type().is_dir(),
             "{description} has no Contents directory"
         );
     }
+
+    // Exchanging the contents leaves the bundle -- the identity the Dock,
+    // login items, and Finder aliases resolve -- exactly where it was, which
+    // is the whole reason for doing it this way.
+    //
+    // It takes no capability away to do it here rather than a level up.
+    // Exchanging two directories that sit under different parents rewrites
+    // `..` in both, so either shape needs write permission on each directory
+    // it moves: a bundle owned by `root`, by a management profile, or by
+    // another account on a shared Mac was never updatable through this path,
+    // and falling back to exchanging the bundles would fail in the same place
+    // for the same reason. `an_unwritable_bundle_is_refused_by_either_exchange`
+    // holds that.
     swap_macos_paths(&installed_contents, &staged_contents)
         .context("could not atomically replace the macOS application")?;
 
@@ -370,9 +407,9 @@ fn swap_macos_paths(left: &Path, right: &Path) -> Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
 
     let left = CString::new(left.as_os_str().as_bytes())
-        .context("the installed application path contains a null byte")?;
+        .context("the installed path contains a null byte")?;
     let right = CString::new(right.as_os_str().as_bytes())
-        .context("the staged application path contains a null byte")?;
+        .context("the staged path contains a null byte")?;
     // SAFETY: both pointers come from live `CString`s and remain valid for the
     // duration of the call. `renamex_np` does not retain either pointer.
     let result = unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) };

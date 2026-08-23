@@ -294,6 +294,116 @@ fn an_update_leaves_the_bundle_every_bookmark_points_at() {
     );
 }
 
+/// Neither exchange can update a bundle its owner cannot write.
+///
+/// Exchanging two directories that sit under different parents rewrites `..`
+/// in both, so it needs write permission on each of them -- as true of
+/// exchanging the bundles as of exchanging their `Contents`. An install placed
+/// by `sudo`, by a management profile, or by another account on a shared Mac
+/// was therefore never updatable through this path, which is worth pinning:
+/// moving the exchange inside the bundle took no capability away, and a
+/// fallback to the older shape would fail in the same place for the same
+/// reason.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unwritable_bundle_is_refused_by_either_exchange() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"known-working-wallet").unwrap();
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Root ignores the mode bits entirely, which would make this assert
+    // nothing at all rather than fail.
+    let probe = app.join(".writable");
+    if std::fs::write(&probe, b"").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let refused = install_macos_application(&app, &macos_archive("2.0.0"))
+        .expect_err("an unwritable bundle cannot be exchanged, by contents or whole");
+    assert!(
+        refused.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+        }),
+        "the refusal must say it was a permission, not a missing directory: {refused:#}"
+    );
+
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        std::fs::read(&binary).unwrap(),
+        b"known-working-wallet",
+        "and the working wallet must survive being refused"
+    );
+}
+
+/// Exchanging `Contents` replaces the whole application only while the whole
+/// application is in there. Anything shipped beside it would be extracted into
+/// staging and then deleted with it -- in a fresh install, missing from an
+/// updated one, and nowhere in between to notice.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_archive_holding_anything_beside_contents_is_refused() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, b"known-working-wallet").unwrap();
+
+    let mut compressed = Vec::new();
+    {
+        let encoder =
+            flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, body) in [
+            (
+                "Ekubo Wallet.app/Contents/MacOS/ekubo-wallet",
+                "prefix\0EKUBO-WALLET-PACKAGE-VERSION:2.0.0\0suffix",
+            ),
+            ("Ekubo Wallet.app/Icon\r", "a custom icon, beside Contents"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, path, Cursor::new(body.as_bytes()))
+                .unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+    }
+
+    assert!(install_macos_application(&app, &compressed).is_err());
+    assert_eq!(std::fs::read(binary).unwrap(), b"known-working-wallet");
+}
+
+/// `symlink_metadata` rather than `metadata`, so a `Contents` that is a link
+/// is refused instead of followed to whatever it points at.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_contents_directory_replaced_by_a_symlink_is_refused() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let app = directory.path().join("Ekubo Wallet.app");
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("MacOS")).unwrap();
+    std::fs::write(elsewhere.join("MacOS/ekubo-wallet"), b"not this one").unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, app.join("Contents")).unwrap();
+
+    assert!(install_macos_application(&app, &macos_archive("2.0.0")).is_err());
+    assert_eq!(
+        std::fs::read(elsewhere.join("MacOS/ekubo-wallet")).unwrap(),
+        b"not this one"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn malformed_macos_archive_cannot_move_the_installed_application() {
