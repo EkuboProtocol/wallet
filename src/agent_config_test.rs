@@ -226,6 +226,66 @@ fn claude_desktop_keeps_only_local_stdio_in_its_config() {
     assert!(parsed["mcpServers"].get(COMPANION_SERVER_NAME).is_none());
 }
 
+/// Whether an agent is installed is a question about the two managed entries,
+/// not about the bytes of the file around them. Claude Code rewrites
+/// `~/.claude.json` on every launch — it counts them — and writes it without
+/// the trailing newline this wallet's JSON serializer appends. Comparing whole
+/// files therefore reported a correctly configured harness as uninstalled from
+/// the first launch after installing it, while Codex, whose TOML round-trips
+/// byte for byte, went on reporting the truth.
+#[test]
+fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("claude.json");
+    let helper = installed_bridge_path().unwrap();
+    let adapter = AgentAdapter {
+        kind: AgentKind::ClaudeCode,
+        display_name: "Claude Code",
+        config_path: config.clone(),
+    };
+
+    // Nothing there at all, and a file holding no entries of ours.
+    assert!(!adapter.installed().unwrap());
+    fs::write(&config, r#"{"numStartups":507}"#).unwrap();
+    assert!(!adapter.installed().unwrap());
+
+    let installed = merge_json(
+        r#"{"numStartups":507}"#,
+        "mcpServers",
+        JsonShape::Stdio,
+        &helper.to_string_lossy(),
+        "claude-code",
+        true,
+    )
+    .unwrap();
+    fs::write(&config, &installed).unwrap();
+    assert!(adapter.installed().unwrap());
+
+    // What the harness leaves behind the next time it saves: our exact
+    // entries, its own bytes. The trailing newline alone was the whole of the
+    // difference on the machine this was found on.
+    let without_newline = installed.trim_end().to_owned();
+    assert_ne!(without_newline, installed);
+    fs::write(&config, &without_newline).unwrap();
+    assert!(adapter.installed().unwrap());
+
+    let reformatted =
+        serde_json::to_string(&serde_json::from_str::<Value>(&installed).unwrap()).unwrap();
+    assert_ne!(reformatted, installed);
+    fs::write(&config, &reformatted).unwrap();
+    assert!(adapter.installed().unwrap());
+
+    // A harness that dropped the entries is genuinely not installed.
+    let removed = remove_json(&installed, "mcpServers").unwrap();
+    fs::write(&config, &removed).unwrap();
+    assert!(!adapter.installed().unwrap());
+
+    // A configuration that does not parse is something the owner can act on,
+    // so it must not read as a quiet "not installed".
+    fs::write(&config, "{not json").unwrap();
+    assert!(adapter.installed().is_err());
+}
+
 #[test]
 fn malformed_or_wrong_root_documents_are_rejected() {
     assert!(merge_codex("not = [toml", HELPER, "codex").is_err());

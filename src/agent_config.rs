@@ -482,6 +482,38 @@ impl AgentAdapter {
             }
     }
 
+    /// Whether this agent's configuration already names this wallet.
+    ///
+    /// The question is about the two managed entries, not about the file they
+    /// sit in. Comparing the whole file byte for byte answered a different
+    /// question — one the harness gets a vote in. Claude Code rewrites
+    /// `~/.claude.json` on every launch and writes it without the trailing
+    /// newline this wallet's serializer appends, so a configuration this
+    /// wallet had just written correctly read as absent from that launch
+    /// onward, while Codex — whose TOML round-trips byte for byte — kept
+    /// reporting the truth. The entries are what the harness executes, so
+    /// they are what the answer is about.
+    ///
+    /// A file that does not parse is an error rather than a `false`: the
+    /// owner can act on "your configuration is malformed" and cannot act on
+    /// an agent that silently claims to be uninstalled.
+    pub fn installed(&self) -> Result<bool> {
+        let contents = match fs::read_to_string(&self.config_path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if contents.trim().is_empty() {
+            return Ok(false);
+        }
+        validate_document(&self.config_path, &contents)
+            .with_context(|| format!("{} is not a valid configuration file", self.display_name))?;
+        Ok(
+            validate_server_shape(&contents, ConfigValidation::Installed { kind: self.kind })
+                .is_ok(),
+        )
+    }
+
     pub fn preview_install(&self) -> Result<ConfigPreview> {
         let before = match fs::read_to_string(&self.config_path) {
             Ok(value) => value,

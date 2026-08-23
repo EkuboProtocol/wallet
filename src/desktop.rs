@@ -2069,8 +2069,7 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
             config_path: adapter.config_path.display().to_string(),
             installed: helper.clone().and_then(|()| {
                 adapter
-                    .preview_install()
-                    .map(|preview| !preview.has_changes())
+                    .installed()
                     .map_err(|error| format!("{error:#}").into())
             }),
         })
