@@ -78,6 +78,30 @@ fn receipt_presentation_aggregates_wallet_transfers_with_trusted_metadata() {
     assert!(event.contains("your account spending"), "{event}");
 }
 
+/// The receipt fixtures use repeated digits, which cannot show whether a
+/// token label kept its EIP-55 case. The reference vector from the EIP can.
+#[test]
+fn trusted_token_label_renders_the_address_in_eip55_checksum_case() {
+    let checksummed = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+    let token: Address = checksummed.parse().unwrap();
+
+    assert_eq!(
+        trusted_token_label(token, &TokenMetadataMap::new()),
+        format!("{checksummed} (unlisted token)")
+    );
+    let metadata = TokenMetadataMap::from([(
+        token,
+        TokenMetadata {
+            symbol: Some("USDC".into()),
+            decimals: Some(6),
+        },
+    )]);
+    assert_eq!(
+        trusted_token_label(token, &metadata),
+        format!("USDC ({checksummed})")
+    );
+}
+
 #[test]
 fn export_lease_counts_down_to_zero_and_stays_there() {
     let lease = ExportLease::new_for_duration(

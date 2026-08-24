@@ -196,8 +196,8 @@ fn trusted_token_label(address: Address, metadata: &TokenMetadataMap) -> String 
         .get(&address)
         .and_then(|token| token.symbol.as_deref())
         .map_or_else(
-            || format!("{address:#x} (unlisted token)"),
-            |symbol| format!("{symbol} ({address:#x})"),
+            || format!("{} (unlisted token)", address.to_checksum(None)),
+            |symbol| format!("{symbol} ({})", address.to_checksum(None)),
         )
 }
 
@@ -1032,7 +1032,7 @@ impl OwnerApi {
             "Delete this account's platform credential, local metadata, policy, and queued requests.",
         )
         .fact("Account", &wallet.id)
-        .fact("Address", format!("{:#x}", wallet.address))
+        .fact("Address", wallet.address.to_checksum(None))
         .warning("This cannot be undone unless you have a separate private-key backup.");
         for transaction in in_flight {
             request = request.warning(format!(

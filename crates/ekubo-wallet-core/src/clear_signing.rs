@@ -346,7 +346,7 @@ impl DataProvider for MapProvider<'_> {
             .and_then(|address| Some((address, self.metadata.get(&address)?)))
             .and_then(|(address, metadata)| {
                 let symbol = crate::approval_summary::display_symbol(metadata.symbol.as_deref()?)?;
-                let bound = format!("{symbol} ({address:#x})");
+                let bound = format!("{symbol} ({})", address.to_checksum(None));
                 Some(TokenMeta {
                     symbol: bound.clone(),
                     decimals: metadata.decimals?,

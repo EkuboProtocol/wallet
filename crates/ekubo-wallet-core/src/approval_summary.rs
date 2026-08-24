@@ -230,15 +230,17 @@ async fn interpret_step(
             operator,
             approved: true,
         }) => Some(format!(
-            "setApprovalForAll: grant operator {} control of all {token:#x} tokens",
-            address_label(operator, own)
+            "setApprovalForAll: grant operator {} control of all {} tokens",
+            address_label(operator, own),
+            token.to_checksum(None)
         )),
         Some(StandardCall::SetApprovalForAll {
             operator,
             approved: false,
         }) => Some(format!(
-            "setApprovalForAll: revoke operator {} for {token:#x}",
-            address_label(operator, own)
+            "setApprovalForAll: revoke operator {} for {}",
+            address_label(operator, own),
+            token.to_checksum(None)
         )),
         Some(StandardCall::Multicall { calls }) => {
             let shown = calls.len().min(MAX_DISPLAYED_NESTED_CALLS);
@@ -489,8 +491,9 @@ fn standard_call_warnings(
             if *amount != U256::ZERO && is_effectively_unlimited(*amount) =>
         {
             vec![format!(
-                "Call {step} grants an effectively unlimited {} allowance to {spender:#x}.",
-                token_label(token, display)
+                "Call {step} grants an effectively unlimited {} allowance to {}.",
+                token_label(token, display),
+                spender.to_checksum(None)
             )]
         }
         Some(StandardCall::SetApprovalForAll {
@@ -498,7 +501,9 @@ fn standard_call_warnings(
             approved: true,
         }) => {
             vec![format!(
-                "Call {step} grants {operator:#x} blanket operator control of every {token:#x} token held by this wallet."
+                "Call {step} grants {} blanket operator control of every {} token held by this wallet.",
+                operator.to_checksum(None),
+                token.to_checksum(None)
             )]
         }
         _ => Vec::new(),
@@ -514,9 +519,18 @@ pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
         .as_deref()
         .and_then(display_symbol)
         .map_or_else(
-            || format!("{token:#x} (unlisted token)"),
-            |symbol| format!("{symbol} ({token:#x})"),
+            || format!("{} (unlisted token)", token.to_checksum(None)),
+            |symbol| format!("{symbol} ({})", token.to_checksum(None)),
         )
+}
+
+/// An address that arrived as a string, as a reviewer should read it: in
+/// EIP-55 checksum case when it parses as an address, and untouched otherwise,
+/// so a value that is not an address is never rewritten into one.
+#[must_use]
+pub fn checksummed_or_verbatim(raw: &str) -> String {
+    raw.parse::<Address>()
+        .map_or_else(|_| raw.to_owned(), |address| address.to_checksum(None))
 }
 
 /// An address as a reviewer should read it: the exact address always, and the
@@ -532,8 +546,8 @@ pub fn address_label(address: Address, own: &OwnAccounts) -> String {
         .map(String::as_str)
         .and_then(display_account_name)
         .map_or_else(
-            || format!("{address:#x}"),
-            |name| format!("{address:#x} (your account {name})"),
+            || address.to_checksum(None),
+            |name| format!("{} (your account {name})", address.to_checksum(None)),
         )
 }
 

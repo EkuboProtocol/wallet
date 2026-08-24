@@ -2037,7 +2037,7 @@ fn describe_polled_call(call: &PolledCall) -> String {
         None => format!(" · {} bytes", call.data.len()),
         Some(selector) => format!(" · 0x{} · {} bytes", hex::encode(selector), call.data.len()),
     };
-    format!("{:#x}{value}{data}", call.to)
+    format!("{}{value}{data}", call.to.to_checksum(None))
 }
 
 /// The wait before a moment that has not arrived yet.
@@ -13141,7 +13141,7 @@ impl WalletWindow {
                 let policy_id = item.id.clone();
                 let export_id = item.id.clone();
                 let removal_id = item.id.clone();
-                let address = format!("{:#x}", item.address);
+                let address = item.address.to_checksum(None);
                 let address_for_copy = address.clone();
                 let address_text_id = SharedString::from(format!("account-address-{}", item.id));
                 let address_copy_id =

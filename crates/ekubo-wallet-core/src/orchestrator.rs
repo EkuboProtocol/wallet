@@ -24,8 +24,8 @@ use crate::{
         ReviewPresenter,
     },
     approval_summary::{
-        OwnAccounts, TokenMetadataMap, address_label, interpret_steps, plan_token_targets,
-        render_balance_changes, token_label,
+        OwnAccounts, TokenMetadataMap, address_label, checksummed_or_verbatim, interpret_steps,
+        plan_token_targets, render_balance_changes, token_label,
     },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     core::{
@@ -890,13 +890,17 @@ async fn transaction_approval_request(
             "EIP-7702 authorization",
             format!(
                 "implementation={}; nonce={authorization_nonce}",
-                simulation.implementation.as_deref().unwrap_or("missing")
+                simulation
+                    .implementation
+                    .as_deref()
+                    .map_or_else(|| "missing".to_owned(), checksummed_or_verbatim)
             ),
         );
     }
     if let Some(replaced) = &simulation.replaces_delegated_implementation {
         request = request.warning(format!(
-            "This replaces the wallet's current EIP-7702 delegation to {replaced}."
+            "This replaces the wallet's current EIP-7702 delegation to {}.",
+            checksummed_or_verbatim(replaced)
         ));
     }
     for warning in interpretations

@@ -805,7 +805,7 @@ async fn the_document_a_reviewer_reads_names_the_account_it_sends_from() {
         )
         .find(|fact| fact.label == "Sender")
         .expect("every transaction document names its sender");
-    let exact = format!("{:#x}", wallet.address);
+    let exact = wallet.address.to_checksum(None);
     assert!(
         sender.value.contains(&exact),
         "the exact sending address must be on the document: {sender:?}"

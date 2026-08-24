@@ -757,7 +757,10 @@ fn a_stored_symbol_cannot_forge_the_address_suffix() {
 fn an_unlisted_token_is_named_by_address_alone() {
     let token = Address::repeat_byte(0xab);
     let label = token_label(token, &TokenMetadata::default());
-    assert_eq!(label, format!("{token:#x} (unlisted token)"));
+    assert_eq!(
+        label,
+        format!("{} (unlisted token)", token.to_checksum(None))
+    );
 
     // And its amounts stay in base units rather than being scaled by a
     // decimals value no confirmed list vouched for.
@@ -980,4 +983,63 @@ fn one_past_the_cap_reports_exactly_one_unshown() {
         footer.contains("and 1 further token(s)"),
         "exactly one entry is past the cap, not more or fewer: {footer}"
     );
+}
+
+/// Every fixture above is built from repeated digits, which read the same in
+/// checksum case and lowercase, so none of them can tell a reviewer-facing
+/// label that lost its EIP-55 case from one that kept it. The reference
+/// vector from the EIP pins it.
+#[test]
+fn labels_render_addresses_in_eip55_checksum_case() {
+    let checksummed = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+    let address: Address = checksummed.parse().unwrap();
+
+    assert_eq!(address_label(address, &OwnAccounts::new()), checksummed);
+    let mut own = OwnAccounts::new();
+    own.insert(address, "savings".to_owned());
+    assert_eq!(
+        address_label(address, &own),
+        format!("{checksummed} (your account savings)")
+    );
+
+    assert_eq!(
+        token_label(address, &TokenMetadata::default()),
+        format!("{checksummed} (unlisted token)")
+    );
+    assert_eq!(
+        token_label(
+            address,
+            &TokenMetadata {
+                symbol: Some("USDC".into()),
+                decimals: Some(6),
+            }
+        ),
+        format!("USDC ({checksummed})")
+    );
+
+    // A balance change arrives keyed by the lowercase form the simulation
+    // stores, and is still shown in checksum case.
+    let mut simulation = simulation_with_native_delta("0");
+    simulation.balance_changes.as_mut().unwrap().tokens.insert(
+        format!("{address:#x}"),
+        TokenBalanceChange {
+            before: None,
+            after: None,
+            delta: None,
+            incoming_transfers: "1".into(),
+            outgoing_transfers: "0".into(),
+        },
+    );
+    let network = crate::config::default_networks().remove(0);
+    let lines = render_balance_changes(&simulation, &network, &TokenMetadataMap::new());
+    assert_eq!(lines[0].0, format!("{checksummed} (unlisted token)"));
+
+    // A string the simulation stored lowercase reads back in checksum case,
+    // and anything that is not an address is left exactly as it came.
+    assert_eq!(
+        checksummed_or_verbatim(&format!("{address:#x}")),
+        checksummed
+    );
+    assert_eq!(checksummed_or_verbatim("missing"), "missing");
+    assert_eq!(checksummed_or_verbatim("0x1234"), "0x1234");
 }

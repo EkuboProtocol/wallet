@@ -93,7 +93,7 @@ pub fn typed_data_review_document(
         "EIP-712 typed data may grant permissions or authorize off-chain actions.",
     )
     .fact("Wallet", request.wallet_id.clone())
-    .fact("Signer", format!("{:#x}", request.wallet_address))
+    .fact("Signer", request.wallet_address.to_checksum(None))
     .fact("Chain", request.chain_id.clone())
     .fact(
         "Requester",
@@ -328,7 +328,7 @@ fn scalar_text(value: &serde_json::Value) -> String {
 pub fn message_review_document(request: &PendingMessage, message_bytes: &[u8]) -> ReviewDocument {
     let display = describe_message(message_bytes);
     let siwe = display.text.as_deref().and_then(parse_siwe);
-    let signer = format!("{:#x}", request.wallet_address);
+    let signer = request.wallet_address.to_checksum(None);
     let mut summary = ApprovalRequest::new(
         ApprovalKind::MessageSignature,
         "Review message signature",

@@ -522,3 +522,42 @@ fn message_display_warnings_survive_the_move_into_sections() {
         document.request.warnings
     );
 }
+
+/// `WALLET` is all digits, so it reads the same whether or not the signer
+/// fact kept its EIP-55 case. The reference vector from the EIP pins it for
+/// both signature kinds.
+#[test]
+fn the_signer_fact_is_the_checksummed_address() {
+    let checksummed = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+    let signer: Address = checksummed.parse().unwrap();
+
+    let mut request = message_request("hello");
+    request.wallet_address = signer;
+    let document = message_review_document(&request, b"hello");
+    let fact = document
+        .request
+        .facts
+        .iter()
+        .find(|fact| fact.label == "Signer")
+        .expect("a message review names its signer");
+    assert_eq!(fact.value, checksummed);
+
+    let mut request = typed_data_request(json!({
+        "types": {
+            "EIP712Domain": [{"name": "name", "type": "string"}],
+            "Vote": [{"name": "proposal", "type": "uint256"}]
+        },
+        "primaryType": "Vote",
+        "domain": {"name": "Governance"},
+        "message": {"proposal": "7"}
+    }));
+    request.wallet_address = signer;
+    let document = build(&request, &TokenMetadataMap::new());
+    let fact = document
+        .request
+        .facts
+        .iter()
+        .find(|fact| fact.label == "Signer")
+        .expect("a typed-data review names its signer");
+    assert_eq!(fact.value, checksummed);
+}

@@ -129,6 +129,32 @@ async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
     );
 }
 
+/// The engine asks for a token by its lowercase address, and the label it
+/// gets back carries that address in EIP-55 case. The repeated-digit fixtures
+/// above cannot tell the two apart; the EIP's reference vector can.
+#[tokio::test]
+async fn a_resolved_token_label_carries_the_checksummed_address() {
+    let checksummed = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+    let token: Address = checksummed.parse().unwrap();
+    let map = TokenMetadataMap::from([(
+        token,
+        crate::approval_summary::TokenMetadata {
+            symbol: Some("USDC".into()),
+            decimals: Some(6),
+        },
+    )]);
+    let own = crate::approval_summary::OwnAccounts::new();
+    let resolved = MapProvider {
+        metadata: &map,
+        own: &own,
+    }
+    .resolve_token(1, &format!("{token:#x}"))
+    .await
+    .expect("a real symbol resolves");
+    assert_eq!(resolved.symbol, format!("USDC ({checksummed})"));
+    assert_eq!(resolved.name, resolved.symbol);
+}
+
 #[tokio::test]
 async fn a_negative_tick_reads_as_a_negative_number() {
     // The engine's `raw` formatter prints a signed word through
