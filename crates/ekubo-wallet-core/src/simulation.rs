@@ -630,7 +630,7 @@ async fn simulate_execution_through(
             Some(address) if address == CANONICAL_CALIBUR => {}
             Some(address) => {
                 needs_override = true;
-                replaces = Some(format!("{address:#x}"));
+                replaces = Some(address.to_checksum(None));
             }
             None if wallet_code.is_empty() => needs_override = true,
             None => {
@@ -868,7 +868,7 @@ async fn simulate_execution_through(
         policy_revision: stored_policy.revision,
         execution_mode: planned.mode,
         implementation: (planned.mode == ExecutionMode::CaliburBatch)
-            .then(|| format!("{CANONICAL_CALIBUR:#x}")),
+            .then(|| CANONICAL_CALIBUR.to_checksum(None)),
         will_authorize_delegation: will_authorize,
         replaces_delegated_implementation: replaces,
         prepared_transaction: None,
@@ -1144,7 +1144,7 @@ fn observed_token_spends(
     }
     observed
         .into_iter()
-        .map(|(token, amount)| (format!("{token:#x}"), amount.to_string()))
+        .map(|(token, amount)| (token.to_checksum(None), amount.to_string()))
         .collect()
 }
 
@@ -1166,7 +1166,7 @@ fn token_balance_changes(
             continue;
         }
         changes.insert(
-            format!("{token:#x}"),
+            token.to_checksum(None),
             TokenBalanceChange {
                 before: before_value.map(|value| value.to_string()),
                 after: after_value.map(|value| value.to_string()),
@@ -1475,7 +1475,7 @@ fn inspect_revert(plan: &ExecutionPlan, outer: &str) -> RevertInspection {
                     name: decoded.name,
                     args: Some(Value::Array(decoded.args)),
                     step: Some(step.step),
-                    target: Some(format!("{:#x}", step.transaction.to)),
+                    target: Some(step.transaction.to.to_checksum(None)),
                 });
                 break;
             }
@@ -1538,7 +1538,7 @@ fn base_failure_result(
         policy_revision: stored_policy.revision,
         execution_mode: mode,
         implementation: (mode == ExecutionMode::CaliburBatch)
-            .then(|| format!("{CANONICAL_CALIBUR:#x}")),
+            .then(|| CANONICAL_CALIBUR.to_checksum(None)),
         will_authorize_delegation: mode == ExecutionMode::CaliburBatch,
         replaces_delegated_implementation: None,
         prepared_transaction: None,

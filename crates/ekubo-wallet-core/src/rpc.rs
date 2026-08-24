@@ -407,13 +407,13 @@ pub async fn wallet_status(
     .await?;
     Ok(WalletStatus {
         wallet_id: wallet.id.clone(),
-        address: format!("{:#x}", wallet.address),
+        address: wallet.address.to_checksum(None),
         network: network.name.clone(),
         chain_id: chain_id.to_string(),
         native_balance: balance.to_string(),
         transaction_count,
         delegated_implementation: delegated_implementation(&code)
-            .map(|address| format!("{address:#x}")),
+            .map(|address| address.to_checksum(None)),
         fork: None,
         transaction_count_is_pinned_parent: None,
     })
@@ -453,13 +453,13 @@ async fn fork_wallet_status(
     .await?;
     let (balance, _) = native_balance(network, preface, wallet.address).await?;
     let delegated = if preface.requires_calibur() {
-        Some(format!("{CANONICAL_CALIBUR:#x}"))
+        Some(CANONICAL_CALIBUR.to_checksum(None))
     } else {
-        delegated_implementation(&code).map(|address| format!("{address:#x}"))
+        delegated_implementation(&code).map(|address| address.to_checksum(None))
     };
     Ok(WalletStatus {
         wallet_id: wallet.id.clone(),
-        address: format!("{:#x}", wallet.address),
+        address: wallet.address.to_checksum(None),
         network: network.name.clone(),
         chain_id: chain_id.to_string(),
         native_balance: balance.to_string(),

@@ -514,7 +514,8 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
     use alloy::primitives::{Address, Bytes};
 
     let wallet = Address::repeat_byte(0x11);
-    let other = Address::repeat_byte(0x22);
+    // Letters, so its lowercase and checksum spellings differ.
+    let other = Address::repeat_byte(0xab);
     let designator = |address: Address| {
         let mut bytes = vec![0xef, 0x01, 0x00];
         bytes.extend_from_slice(address.as_slice());
@@ -550,10 +551,22 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
     );
     assert!(error.contains("delegation changed"), "{error}");
 
-    // Reviewed as replacing `other`, and that is still what is there.
+    // Reviewed as replacing `other`, and that is still what is there. The
+    // record spells the address in checksum case now and spelled it lowercase
+    // before this was compared as an address, and both name the same thing.
     assert!(
         authorization_for_send(&designator(other), wallet, Some(&format!("{other:#x}"))).unwrap()
     );
+    assert!(
+        authorization_for_send(&designator(other), wallet, Some(&other.to_checksum(None))).unwrap()
+    );
+    // A record that is not an address at all matches nothing.
+    let error = format!(
+        "{:#}",
+        authorization_for_send(&designator(other), wallet, Some("not-an-address"))
+            .expect_err("a record that names no address must stop the send")
+    );
+    assert!(error.contains("delegation changed"), "{error}");
 
     // Code that is not a designator at all is not something to sign against.
     assert!(authorization_for_send(&Bytes::from(vec![0x60, 0x00]), wallet, None).is_err());

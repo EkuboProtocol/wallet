@@ -142,8 +142,8 @@ impl PreparedExecution {
             max_priority_fee_per_gas: self.max_priority_fee_per_gas.to_string(),
             delegation: self
                 .authorize_delegation
-                .then(|| format!("{CANONICAL_CALIBUR:#x}")),
-            to: format!("{:#x}", self.planned.to),
+                .then(|| CANONICAL_CALIBUR.to_checksum(None)),
+            to: self.planned.to.to_checksum(None),
             native_value: self.planned.value.to_string(),
         }
     }
@@ -457,20 +457,29 @@ pub(crate) fn authorization_for_send(
         // Already delegated to the implementation this batch targets, so the
         // authorization would be a no-op that still consumes a nonce.
         Some(address) if address == CANONICAL_CALIBUR => (false, None),
-        Some(address) => (true, Some(format!("{address:#x}"))),
+        Some(address) => (true, Some(address)),
         None if code.is_empty() => (true, None),
         None => bail!(
             "wallet {wallet} has code that is not an EIP-7702 delegation designator, so this \
              batch cannot be sent"
         ),
     };
+    // Compared as addresses rather than strings: the simulation record spells
+    // the delegation in checksum case now and spelled it in lowercase before,
+    // and either way it names the same implementation. A recorded value that
+    // is not an address parses to `Some(None)`, which matches nothing, so the
+    // send still stops.
+    let recorded = recorded_replaces.map(|raw| raw.parse::<alloy::primitives::Address>().ok());
     ensure!(
-        replaces.as_deref() == recorded_replaces,
+        recorded == replaces.map(Some),
         "the account's EIP-7702 delegation changed after this plan was simulated: the simulation \
          was evaluated against {}, and the account now has {}. Simulate the plan again and send \
          the new simulation.",
         recorded_replaces.unwrap_or("no delegation to replace"),
-        replaces.as_deref().unwrap_or("no delegation to replace")
+        replaces.map_or_else(
+            || "no delegation to replace".to_owned(),
+            |address| address.to_checksum(None)
+        )
     );
     Ok(authorize)
 }

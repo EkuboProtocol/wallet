@@ -1323,7 +1323,7 @@ impl WalletMcpServer {
                 .into_iter()
                 .map(|wallet| PublicWallet {
                     id: wallet.id,
-                    address: format!("{:#x}", wallet.address),
+                    address: wallet.address.to_checksum(None),
                     source: wallet.source,
                     created_at: wallet.created_at,
                 })
@@ -2914,7 +2914,7 @@ impl WalletMcpServer {
             .calls
             .iter()
             .map(|call| DryRunCall {
-                to: format!("{:#x}", call.to),
+                to: call.to.to_checksum(None),
                 value: call.value.to_string(),
                 data: format!("0x{}", hex::encode(&call.data)),
             })

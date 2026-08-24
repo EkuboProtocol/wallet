@@ -398,7 +398,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
     assert_eq!(
         result
             .token_spends
-            .get(&format!("{weth:#x}"))
+            .get(&weth.to_checksum(None))
             .map(String::as_str),
         Some("0")
     );
