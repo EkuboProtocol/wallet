@@ -271,11 +271,11 @@ credentials; an isolated job that executes no candidate source attests the
 resulting bytes. Before any credential-bearing job, every byte must have a
 GitHub attestation from the exact trusted build workflow revision on `main`, and
 the manifested artifact SHA and release tag must resolve to protected `main`
-history. CI results are deliberately not release authority. While Azure
-public-trust validation is pending, a
-protected release variable may require Windows to remain Authenticode-unsigned;
-the workflow verifies that state and still requires the detached updater
-signature. Apple and enabled Windows signing services and release keys remain
+history. CI results are deliberately not release authority. A protected release variable
+selects the Windows Authenticode mode, and the workflow proves the installer
+matches the selected state before publication: a valid signature when signing is
+enabled, no signature at all when it is disabled, and a failed release when the
+variable says neither. The detached updater signature is required either way. Apple and enabled Windows signing services and release keys remain
 trust dependencies whose compromise requires publication halt, key rotation
 through a trusted channel, and an audit of released bytes and workflow logs.
 
