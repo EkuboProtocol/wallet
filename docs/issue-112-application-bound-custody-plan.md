@@ -120,15 +120,18 @@ protection against this one:
 - **fscrypt** — documented as not hiding plaintext from other users on the same
   system once the key is added. **Landlock** — definitionally self-restriction.
   **AppArmor shipped in our own `.deb`** — cannot confine unprofiled peers.
-- **Any daemon that authenticates by checking `/proc/PID/exe`.** systemd's own
-  documentation says the exe path "should not be used for more than explanatory
-  information, in particular it should not be used for security-relevant
-  decisions," because the executable "might have been replaced or removed by the
-  time the value can be processed." `SO_PEERPIDFD` (Linux 6.5) fixes PID reuse,
-  not identity. There is no precedent of a daemon authenticating a specific
-  same-UID binary without an LSM: polkit authenticates the *human*, and
-  ssh-agent concedes it is "easily abused by … another instance of the same
-  user."
+- **Any daemon that authenticates by checking `/proc/PID/exe`.** systemd
+  documents `sd_bus_creds_get_exe()` as a property that "should not be used for
+  more than explanatory information, in particular it should not be used for
+  security-relevant decisions, because the executable might have been replaced
+  or removed by the time the value can be processed"
+  ([sd_bus_creds_get_pid(3)](https://man7.org/linux/man-pages/man3/sd_bus_creds_get_pid.3.html)).
+  `SO_PEERPIDFD` (Linux 6.5) fixes PID reuse, not identity. There is no
+  precedent of a daemon authenticating a specific same-UID binary without an
+  LSM: polkit authenticates the *human*, and `ssh-agent`'s own manual says its
+  socket "is accessible only to the current user, but is easily abused by root
+  or another instance of the same user"
+  ([ssh-agent(1)](https://man7.org/linux/man-pages/man1/ssh-agent.1.html)).
 
 The current Secret Service default collection belongs in this list, which is why
 issue #112 is right on the diagnosis.
@@ -149,17 +152,22 @@ It also buys something the threat model did not ask for and currently disclaims.
 Set-ID exec resets the dumpable flag to `/proc/sys/fs/suid_dumpable`, which
 defaults to 0
 ([PR_SET_DUMPABLE](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)),
-and `ptrace` denies access to a non-dumpable target without `CAP_SYS_PTRACE`.
+and [`ptrace(2)`](https://man7.org/linux/man-pages/man2/ptrace.2.html) denies
+access to a non-dumpable target without `CAP_SYS_PTRACE`.
 So same-UID `ptrace`, `process_vm_readv`, and `/proc/PID/mem` are
 **kernel-blocked**, and `execve` ignores the set-ID bits when the process is
 already traced, closing the attach-before-exec variant. On Linux the wallet
 would stop depending on the threat model's ptrace exclusion.
 
-**GUI viability checks out, with one library to watch.** libdbus hard-refuses
-under set-ID — `_dbus_getenv` returns NULL when `rgid != egid` and autolaunch
-fails — and GTK calls `exit(1)` on the same check. Neither is fatal here: GPUI
-does not link GTK, and **zbus, which the wallet's `keyring` and polkit paths
-use, is unaffected** (plain `env::var` with an `$XDG_RUNTIME_DIR/bus` fallback).
+**GUI viability checks out, with one library to watch.** libdbus is reported to
+hard-refuse under set-ID — `_dbus_getenv` returning NULL when `rgid != egid`,
+and autolaunch failing — with GTK calling `exit(1)` on the same check. Flagged
+as *unverified at primary source*: freedesktop's GitLab and cgit both refused
+the research pass's connections, so this needs a look at `_dbus_check_setuid`
+in `dbus/dbus-sysdeps.c` before anyone relies on it. Neither is fatal here in
+any case: GPUI does not link GTK, and **zbus, which the wallet's `keyring` and
+polkit paths use, is unaffected** (plain `env::var` with an
+`$XDG_RUNTIME_DIR/bus` fallback).
 Wayland and X11/xauth work. Mesa and Vulkan ignore env *overrides* under set-ID
 but load system drivers normally. NVIDIA disables its shader disk cache for
 set-ID binaries, which costs a per-launch recompile.
@@ -177,10 +185,14 @@ plugins from it through plain `getenv`), and the bus address.
 That does not hand over the key. It does mean the last line of the boundary is
 the wallet's own robustness in a hostile execution context rather than the
 kernel — the CVE-2021-4034 (PwnKit) and CVE-2023-4911 (Looney Tunables) class.
-Debian's games team reached exactly this verdict while removing setgid from
-games in August 2026, calling that use of setgid "basically security theatre"
-because the linked GUI libraries "make no attempt to avoid privilege escalation
-from the caller."
+A Debian maintainer reached exactly this verdict about setgid games: "this use
+of setgid is basically security theatre: it's essentially equivalent to making
+the high scores world-writeable", because "this game depends on libraries that
+make no attempt to avoid privilege escalation from the caller to the games
+group" (Simon McVittie, [Bug#1124332](https://bugs.debian.org/1124332),
+30 December 2025; same text in [Bug#1124336](https://bugs.debian.org/1124336)).
+That is a per-package argument about the games group rather than Debian policy,
+but the reasoning transfers exactly.
 
 The difference between our case and theirs is that we would be writing the
 hardening deliberately rather than inheriting it. Required, and release-blocking:
@@ -224,7 +236,10 @@ maintenance cost against Mesa and driver updates. Defense in depth at most.
 - **`cargo-packager` cannot ship this.** Its `DebianConfig` has exactly six
   fields — `depends`, `desktop_template`, `section`, `priority`, `files`,
   `package_name` — with no maintainer scripts and no file modes or ownership,
-  and its `data.tar` is written with deterministic headers. A setgid or
+  and its `data.tar` is written with deterministic headers
+  ([`crates/packager/src/config/mod.rs` L180-L234](https://github.com/crabnebula-dev/cargo-packager/blob/main/crates/packager/src/config/mod.rs#L180-L234),
+  read on `main`; the release workflow pins **cargo-packager 0.11.8**, so
+  confirm against that tag before acting on it). A setgid or
   system-service design requires switching the Linux `.deb` to **cargo-deb**
   (which has `maintainer-scripts` and `systemd-units`) or post-processing the
   archive. The correct Debian idiom is `addgroup --system` in `postinst` plus
@@ -366,7 +381,7 @@ process an additional SID because of which executable it is. So Windows can
 only change principal (a service account) or change packaging (AppContainer —
 preview, fails open, GPUI-under-AppContainer untested).
 
-That is a genuine fork, and it is the maintainer's call (§9). What the research
+That is a genuine fork, and it is the maintainer's call (§10). What the research
 does settle is that the comment's third option — a CNG key DACL'd to a package
 SID, with the wallet staying full-trust and same-principal — is not a boundary
 at all.
@@ -626,8 +641,8 @@ These are not implementation details and should be settled before code:
 - Issue #112 and its comment; `docs/threat-model.md`,
   `docs/security-boundary.md`, `docs/storage.md`, `docs/releasing.md`.
 - `crates/ekubo-wallet-core/src/custody.rs`, `policy_store.rs`,
-  `human_presence.rs`, `update_trust.rs`; the `KeyStore` trait's seven
-  non-test call sites.
+  `human_presence.rs`, `update_trust.rs`; the `KeyStore` trait's call sites
+  across seven non-test files.
 - `Cargo.toml` packager metadata, `.github/workflows/build-release-artifacts.yml`,
   `.github/workflows/release.yml`.
 - `keyring` 4.1.6 resolves on macOS to `apple-native-keyring-store::keychain`,
