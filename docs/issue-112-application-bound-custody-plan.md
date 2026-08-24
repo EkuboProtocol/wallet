@@ -69,7 +69,173 @@ same user does not move the boundary. Neither does encrypting the key with
 something else stored beside it. The missing ingredient is an OS-enforced
 *application identity* that a sibling process cannot forge.
 
-<!-- SLOT: Linux mechanism, §3 -->
+## 3. Linux
+
+### 3.1 There is no Linux equivalent of the Keychain ACL
+
+State this first, because it governs everything after it: **no Linux mechanism
+authenticates which program is making a request to a same-UID peer.** macOS can
+say "this item is readable by the binary bearing this code-signing identity."
+Linux has no such concept. Every mechanism that genuinely keeps a same-UID
+attacker out does it by moving the secret to a **different GID or UID**, moving
+it **off the host**, or adding a **password**.
+
+The result that settles the design space: an attacker can **exec the genuine
+installed wallet binary** under `LD_PRELOAD` with a hostile environment. That
+process's `/proc/PID/exe` is genuine, its `SO_PEERCRED` credentials are genuine,
+and its `SO_PEERPIDFD` resolves to a real, non-reused PID. So the discriminator
+can never be a credential API — it must be **whatever defeats `LD_PRELOAD`**,
+and only two things do: set-ID execution (`AT_SECURE`) or a tightly written LSM
+profile.
+
+### 3.2 What is theater
+
+Named plainly, because each of these protects against a *different* attacker —
+offline disk theft, other users, other machines — and is easily mistaken for
+protection against this one:
+
+- **Flatpak's Secret portal.** The per-app master secret is stored by
+  gnome-keyring as an ordinary item in the login collection keyed on `app_id`,
+  with no ACL in the code path, and the Secret Service specification states that
+  it ["does not mandate any form of access control"](https://specifications.freedesktop.org/secret-service/latest/ch10.html).
+  An unconfined process reads it out and then decrypts `~/.var/app/<id>`, a
+  plain user-owned directory. Flatpak's process isolation is outbound-only.
+- **Snap strict confinement.** Same shared Secret Service, and `~/snap` is
+  documented as user-accessible from outside the snap. The
+  [AppArmor kernel documentation](https://docs.kernel.org/admin-guide/LSM/apparmor.html)
+  is explicit that unprofiled tasks "run in an unconfined state which is
+  equivalent to standard Linux DAC permissions" — AppArmor confines the snap,
+  not the snap's attacker.
+- **TPM 2.0 sealing without a PIN.** systemd's guarantee is machine-binding —
+  sealed credentials "can only be decrypted again by the local machine." Access
+  to `/dev/tpmrm0` is an ordinary file permission (`0660`, group `tss`), so the
+  enrollment that lets the wallet use the TPM grants every same-UID process the
+  same channel. PCR policies are global system state any local process can
+  satisfy. Only an authValue/PIN helps, which is the password criterion 1
+  forbids.
+- **Kernel keyrings.** Permissions are possessor/user/group/other; there is no
+  per-binary subject, and the user keyring is shared by all processes with that
+  UID. A possessor-only session key is real isolation but dies with the session,
+  and whatever re-provisions it is reachable by the attacker.
+- **fscrypt** — documented as not hiding plaintext from other users on the same
+  system once the key is added. **Landlock** — definitionally self-restriction.
+  **AppArmor shipped in our own `.deb`** — cannot confine unprofiled peers.
+- **Any daemon that authenticates by checking `/proc/PID/exe`.** systemd's own
+  documentation says the exe path "should not be used for more than explanatory
+  information, in particular it should not be used for security-relevant
+  decisions," because the executable "might have been replaced or removed by the
+  time the value can be processed." `SO_PEERPIDFD` (Linux 6.5) fixes PID reuse,
+  not identity. There is no precedent of a daemon authenticating a specific
+  same-UID binary without an LSM: polkit authenticates the *human*, and
+  ssh-agent concedes it is "easily abused by … another instance of the same
+  user."
+
+The current Secret Service default collection belongs in this list, which is why
+issue #112 is right on the diagnosis.
+
+### 3.3 The recommended design: setgid, `.deb` only
+
+Install the wallet binary root-owned and set-group-ID to a dedicated system
+group nobody is a member of, with the protected state root under
+`/var/lib/ekubo-wallet` traversable only with that group. This is the design in
+issue #112's comment, and it holds.
+
+It works because set-ID execution triggers the loader's secure-execution mode:
+`AT_SECURE` is set when the real and effective group IDs differ, and
+`LD_PRELOAD`, `LD_LIBRARY_PATH`, and `LD_AUDIT` are stripped
+([ld.so(8)](https://man7.org/linux/man-pages/man8/ld.so.8.html)).
+
+It also buys something the threat model did not ask for and currently disclaims.
+Set-ID exec resets the dumpable flag to `/proc/sys/fs/suid_dumpable`, which
+defaults to 0
+([PR_SET_DUMPABLE](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)),
+and `ptrace` denies access to a non-dumpable target without `CAP_SYS_PTRACE`.
+So same-UID `ptrace`, `process_vm_readv`, and `/proc/PID/mem` are
+**kernel-blocked**, and `execve` ignores the set-ID bits when the process is
+already traced, closing the attach-before-exec variant. On Linux the wallet
+would stop depending on the threat model's ptrace exclusion.
+
+**GUI viability checks out, with one library to watch.** libdbus hard-refuses
+under set-ID — `_dbus_getenv` returns NULL when `rgid != egid` and autolaunch
+fails — and GTK calls `exit(1)` on the same check. Neither is fatal here: GPUI
+does not link GTK, and **zbus, which the wallet's `keyring` and polkit paths
+use, is unaffected** (plain `env::var` with an `$XDG_RUNTIME_DIR/bus` fallback).
+Wayland and X11/xauth work. Mesa and Vulkan ignore env *overrides* under set-ID
+but load system drivers normally. NVIDIA disables its shader disk cache for
+set-ID binaries, which costs a per-launch recompile.
+
+### 3.4 The gap the issue comment does not address
+
+The comment says same-UID processes "cannot traverse, copy, replace, or roll
+back this state." That is correct. But **any same-UID process can execute the
+setgid binary itself**, obtaining a process that legitimately holds the group,
+under attacker-controlled argv, file descriptors, cwd, and every environment
+variable *not* on the loader's strip list — `HOME`, `XDG_*`, `WAYLAND_SOCKET`
+(libwayland reads it as a raw fd number), `SPA_PLUGIN_DIR` (PipeWire loads
+plugins from it through plain `getenv`), and the bus address.
+
+That does not hand over the key. It does mean the last line of the boundary is
+the wallet's own robustness in a hostile execution context rather than the
+kernel — the CVE-2021-4034 (PwnKit) and CVE-2023-4911 (Looney Tunables) class.
+Debian's games team reached exactly this verdict while removing setgid from
+games in August 2026, calling that use of setgid "basically security theatre"
+because the linked GUI libraries "make no attempt to avoid privilege escalation
+from the caller."
+
+The difference between our case and theirs is that we would be writing the
+hardening deliberately rather than inheriting it. Required, and release-blocking:
+
+- verify `getresuid`/`getresgid` show the expected effective and saved GID at
+  the first instruction, and **fail closed** if not — a `nosuid` mount makes
+  set-ID exec fail *silently*;
+- derive every protected path from the **real UID only** — never from `HOME`,
+  `XDG_*`, argv, cwd, or any caller-supplied path;
+- treat `WAYLAND_SOCKET`, `SPA_PLUGIN_DIR`, the bus address, and all inherited
+  descriptors as untrusted; close every unrecognized inherited fd;
+- set `no_new_privs`, disable core dumps explicitly;
+- `setresgid(rgid, rgid, rgid)` irreversibly and close protected descriptors
+  before spawning the MCP bridge or any other child.
+
+### 3.5 The stronger variant, and why it is a *combination*
+
+A dedicated **system-UID broker** — a socket-activated systemd service running
+as its own user, which holds the key and never releases it, signing in-process —
+is strictly stronger for key *confidentiality* than §3.3, because a different
+UID owns the key and the guarantee stops depending on the wallet's hostile-env
+robustness at all.
+
+The trade is that any same-UID caller can *request* a signature, so the policy
+engine becomes the entire authorization boundary. That is why it is best as a
+**combination** with §3.3 rather than an alternative: setgid keeps arbitrary
+callers away from the request path, and the broker keeps the key away from a
+wallet process that was started under a hostile environment.
+
+Note the repo already ships `contrib/polkit/com.ekubo.wallet.policy` with
+`auth_self`. That remains the right home for owner-only operations precisely
+because polkit authenticates the **human**, never the binary.
+
+An AppArmor profile plus `SO_PEERSEC` is the only LSM path that could work, and
+only because a tight executable-mmap allowlist blocks the injected `.so` — not
+because the label proves identity. Ubuntu/Debian only, with real ongoing
+maintenance cost against Mesa and driver updates. Defense in depth at most.
+
+### 3.6 Two packaging blockers
+
+- **`cargo-packager` cannot ship this.** Its `DebianConfig` has exactly six
+  fields — `depends`, `desktop_template`, `section`, `priority`, `files`,
+  `package_name` — with no maintainer scripts and no file modes or ownership,
+  and its `data.tar` is written with deterministic headers. A setgid or
+  system-service design requires switching the Linux `.deb` to **cargo-deb**
+  (which has `maintainer-scripts` and `systemd-units`) or post-processing the
+  archive. The correct Debian idiom is `addgroup --system` in `postinst` plus
+  **`dpkg-statoverride`**, whose database — not the package payload — carries
+  the group and mode, and therefore survives upgrade and rollback.
+- **AppImage is definitively out**, on three independent grounds: libfuse's
+  `fusermount` applies `MS_NOSUID | MS_NODEV` unconditionally; `execve` ignores
+  set-ID bits on a `nosuid` mount; and a user-owned file cannot carry a group
+  the user is not in, while unprivileged `chown` clears the set-ID bits anyway.
+  See §5.2 for what that costs the update channel.
+
 ## 4. Windows
 
 ### 4.1 The install directory is the root of trust, and ours is not
@@ -403,4 +569,71 @@ Alongside either, `docs/security-boundary.md`, `docs/threat-model.md`, and
 `docs/storage.md` must change in the same commits as the code they describe;
 the repo already treats that as a rule for trust-boundary changes.
 
-<!-- SLOT: open decisions, §9 -->
+## 9. The one sentence both platforms produced
+
+The Windows and Linux investigations were run independently and converged:
+
+> The only application boundary these operating systems actually enforce
+> against a same-user attacker is a **change of principal**. Everything that
+> keeps the wallet as the same principal and tries to distinguish it by
+> identity, signature, image path, package SID, or credential-store namespace
+> is defeated by the attacker presenting the same credentials.
+
+Linux can satisfy that in-process, because `setgid` lets the kernel grant the
+wallet process an extra group at exec keyed to the installed image. Windows
+cannot — there is no way to give a process an additional SID because of which
+executable it is — so Windows must either run a component under a different
+account or adopt AppContainer packaging that is still preview and fails open.
+
+That asymmetry, not a difference of taste, is why the two platform designs in
+this document do not look alike.
+
+## 10. Decisions for the maintainer
+
+These are not implementation details and should be settled before code:
+
+1. **Windows: broker service, AppContainer, or narrowed threat model?**
+   Issue #112's comment forbids a broker; the research shows the comment's own
+   alternative (CNG key DACL'd to a package SID, wallet full-trust and
+   same-principal) is not a boundary. *Recommendation:* accept the broker for
+   the wrapping key only (§4.5), keeping signing and policy in
+   `ekubo-wallet-core`, which preserves the invariant's intent.
+2. **Windows: accept a per-machine install and one UAC prompt at install time?**
+   Without it there is no tamper-resistant trust anchor and the rest is moot.
+3. **Windows: the backend is blocked on `AZURE_TRUSTED_SIGNING_ENABLED`.**
+   Confirm the ordering — signing first, then the custody backend.
+4. **Linux: setgid alone, or setgid plus a system-UID broker?**
+   *Recommendation:* ship setgid first (it meets all three UX constraints and
+   blocks ptrace as a bonus), with the broker as a follow-on, since together
+   they cover each other's gap (§3.5).
+5. **Linux: approve the `cargo-packager` → `cargo-deb` switch** for the `.deb`,
+   with `dpkg-statoverride` carrying the mode across upgrades (§3.6).
+6. **Linux: what happens to AppImage and to in-app updates?**
+   AppImage cannot hold the boundary. Choose between notify-only updates, a
+   polkit-authorized install, or an apt repository (§5.2), and choose whether
+   AppImage ships at all or ships explicitly labelled unprotected.
+7. **Re-affirm or retire the ptrace exclusion.** On Linux, setgid removes the
+   need for it. On Windows, a broker design still relies on it. The threat model
+   should say so per-platform rather than globally.
+8. **Rotation guidance for existing Windows and Linux wallets.** §6.1 — this is
+   forward protection only, and the release notes must say it.
+9. **Does macOS change too?** Moving private keys into SQLCipher rows (§6) is
+   cross-platform. *Recommendation:* yes, for one custody path everywhere, with
+   the keychain holding only the wrapping key.
+
+## 11. What was checked to write this
+
+- Issue #112 and its comment; `docs/threat-model.md`,
+  `docs/security-boundary.md`, `docs/storage.md`, `docs/releasing.md`.
+- `crates/ekubo-wallet-core/src/custody.rs`, `policy_store.rs`,
+  `human_presence.rs`, `update_trust.rs`; the `KeyStore` trait's seven
+  non-test call sites.
+- `Cargo.toml` packager metadata, `.github/workflows/build-release-artifacts.yml`,
+  `.github/workflows/release.yml`.
+- `keyring` 4.1.6 resolves on macOS to `apple-native-keyring-store::keychain`,
+  i.e. `SecKeychain::set_generic_password` against the legacy file keychain with
+  its default ACL. Worth stating precisely: the macOS boundary is a
+  **code-identity-bound consent prompt**, not a hard denial. A Linux or Windows
+  design that produces a hard denial therefore exceeds the macOS bar rather than
+  merely matching it.
+- Primary platform documentation cited inline in §3 and §4.
