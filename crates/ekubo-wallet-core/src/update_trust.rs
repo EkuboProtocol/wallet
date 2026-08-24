@@ -275,13 +275,27 @@ pub fn install_update(
 ///
 /// `Contents` rather than the bundle around it, because the `.app` directory
 /// is an identity other software holds on to. The Dock pins an application by
-/// a bookmark that resolves by file ID and only falls back to a path when that
-/// ID is gone; login items and Finder aliases resolve the same way. Swapping
-/// the bundle handed all of them the ID of a directory this function then
-/// deleted, so an updated wallet came back beside its own pinned tile instead
-/// of in it. A bundle keeps everything it has under `Contents`, so exchanging
-/// that replaces the application completely and leaves the identity where it
-/// was.
+/// a bookmark that resolves by file ID and only falls back to a path once that
+/// ID is gone; login items and Finder aliases resolve the same way. Exchanging
+/// the bundle gave all of them the ID of a directory this function then
+/// deleted. A bundle keeps everything it has under `Contents`, so exchanging
+/// that replaces the application just as completely and leaves the identity
+/// where it was.
+///
+/// This is not what put an updated wallet beside its own Dock tile, and the
+/// history is worth writing down because it was diagnosed here twice. That was
+/// the relaunch asking `open` for `-n`, which requests a *separate* instance
+/// and gets a tile of its own; `Relaunch into the Dock tile the old wallet was
+/// using` fixed it by waiting for the departing process instead, and shipped in
+/// 1.4.2. The duplicate seen after that release came from 1.4.1 performing the
+/// install, because the updater that runs is always the one already installed
+/// -- and the first update driven by the fixed relaunch produced a single tile.
+/// That commit weighed this exchange at the time and left it alone, reasoning
+/// that the stale tile belongs to a process about to exit.
+///
+/// So this stands on what it does rather than on that symptom: an identity a
+/// bookmark resolved once survives an update, which is worth having whether or
+/// not anything is currently observed to depend on it.
 #[cfg(target_os = "macos")]
 fn install_macos_application(application: &Path, bytes: &[u8]) -> Result<()> {
     use std::path::Component;

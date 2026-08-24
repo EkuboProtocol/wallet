@@ -263,8 +263,11 @@ fn failed_macos_swap_leaves_the_installed_application_untouched() {
 /// The Dock pins an application by a bookmark that resolves by file ID before
 /// it falls back to a path, and login items and Finder aliases resolve the
 /// same way. An update that exchanged the bundle directory itself handed every
-/// one of them an ID that the update then deleted -- which is how a pinned
-/// wallet came back beside a second tile for the same application.
+/// one of them an ID the update then deleted.
+///
+/// Not the cause of the duplicate Dock tile -- that was the relaunch's `open
+/// -n`, fixed for 1.4.2 -- so this pins identity for its own sake: whatever
+/// resolved this bundle once still resolves it afterwards.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_update_leaves_the_bundle_every_bookmark_points_at() {
