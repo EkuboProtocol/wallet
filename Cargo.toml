@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.4.3"
+version = "1.4.4"
 
 # GPUI is Apache-2.0, but its pinned workspace dependency named `ztracing`
 # is GPL-3.0-or-later. The wallet only needs that crate's tracing facade, so
