@@ -112,6 +112,13 @@ external-binaries = ["target/release/ekubo-wallet-mcp-bridge"]
 resources = ["schemas", "contrib/polkit/com.ekubo.wallet.policy"]
 icons = ["assets/app-icon-512.png"]
 
+# polkit reads action definitions only from this root-owned directory, so a
+# package that can write there puts the definition in place itself; the copy
+# under `usr/lib/ekubo-wallet/` above is what the AppImage — which cannot —
+# offers to install through pkexec from Settings → Owner authentication.
+[package.metadata.packager.deb]
+files = { "contrib/polkit/com.ekubo.wallet.policy" = "/usr/share/polkit-1/actions/com.ekubo.wallet.policy" }
+
 [package.metadata.gpui-revisions]
 zed = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
 gpui-component = "26cc9366abb27ccedce386ac99a615a8fa7018da"

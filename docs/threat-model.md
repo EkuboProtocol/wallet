@@ -84,6 +84,24 @@ Agents cannot invoke them. Re-enabling a network, widening or ambiguously
 changing policy, and adding or replacing token metadata require owner
 authentication.
 
+On Linux the owner-authentication backend is polkit, which reads action
+definitions only from root-owned `/usr/share/polkit-1/actions`. The `.deb`
+installs `com.ekubo.wallet.policy` there itself. The AppImage cannot, so until
+the definition is present every owner operation fails closed with one message,
+and Settings → Owner authentication offers to install it: the wallet runs
+`pkexec install` on the bundled copy under polkit's own always-present
+`org.freedesktop.policykit.exec` action, which is `auth_admin` and prompts
+through the session's authentication agent. The wallet process holds no
+privilege before, during, or after; it compares the bundled file's bytes to the
+copy compiled into the build before asking, and the only thing that runs as
+root is coreutils `install(1)` on that file. A same-user attacker who can
+already replace the AppImage or ptrace the process gains nothing new from this
+path that they could not get by running `pkexec` themselves, which is the
+boundary the
+[credential-store limitation](#critical-windows-and-linux-credential-store-limitation)
+already describes. When no agent can prompt, the pane shows the equivalent
+`sudo install` command instead of falling back to weaker authorization.
+
 ## Local MCP IPC
 
 Harnesses spawn a minimal stdio bridge which survives wallet downtime and

@@ -38,6 +38,8 @@ pub mod orchestrator;
 pub mod pending;
 pub mod plan_fetch;
 pub mod policy_store;
+#[cfg(target_os = "linux")]
+pub mod polkit;
 pub mod reconcile;
 pub mod rpc;
 pub mod sanitize;

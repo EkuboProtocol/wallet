@@ -449,7 +449,13 @@ updates unless a new mechanism replaces them, because installing a `.deb`
 requires authorization the wallet process must not hold. The realistic options
 are (a) no in-app update on Linux, only a notification pointing at the package,
 (b) a polkit-authorized install action, or (c) an apt repository. Each is
-work that this plan must not pretend is free.
+work that this plan must not pretend is free. A narrow precedent for (b)
+already ships: Settings → Owner authentication installs the wallet's own
+action definition through `pkexec install` under
+`org.freedesktop.policykit.exec`, and the `.deb` places that file directly.
+Whatever (b) becomes must keep the same shape — a bundled artifact verified
+against the build before polkit is asked, and nothing running as root but a
+coreutils copy.
 
 The AppImage does not have to disappear. It has to stop claiming a custody
 guarantee it cannot provide: either it refuses to hold keys at all, or it is

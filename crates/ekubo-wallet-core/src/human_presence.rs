@@ -372,20 +372,24 @@ impl HumanPresence for PlatformHumanPresence {
         use zbus::Connection;
         use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
 
-        const ACTION: &str = "com.ekubo.wallet.human-presence";
-        let connection = Connection::system()
-            .await
-            .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
-        let authority = AuthorityProxy::new(&connection)
-            .await
-            .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
+        const ACTION: &str = crate::polkit::ACTION_ID;
+        let connection = Connection::system().await.map_err(|error| {
+            HumanPresenceError::Unavailable(format!("polkit is not reachable ({error})"))
+        })?;
+        let authority = AuthorityProxy::new(&connection).await.map_err(|error| {
+            HumanPresenceError::Unavailable(format!("polkit is not reachable ({error})"))
+        })?;
         let actions = authority
             .enumerate_actions("")
             .await
             .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
         if !actions.iter().any(|action| action.action_id == ACTION) {
+            // The desktop's Settings pane installs the definition through
+            // pkexec; this message is what every owner operation shows until
+            // someone gets there.
             return Err(HumanPresenceError::Unavailable(
-                "install contrib/polkit/com.ekubo.wallet.policy under /usr/share/polkit-1/actions"
+                "the wallet's polkit policy is not installed yet; \
+                 open Settings → Owner authentication to set it up"
                     .into(),
             ));
         }

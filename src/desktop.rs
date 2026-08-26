@@ -2383,6 +2383,8 @@ pub struct WalletWindow {
     agent_reinstall: AgentReinstallState,
     detected_agents: AgentDetectionState,
     detected_agents_generation: u64,
+    #[cfg(target_os = "linux")]
+    owner_auth: OwnerAuthState,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
     account_entry_mode: AccountEntryMode,
@@ -4487,6 +4489,29 @@ enum AgentDetectionState {
     Failed(SharedString),
 }
 
+/// Whether polkit can authenticate the owner on this machine, and what the
+/// Settings pane is doing about it.
+///
+/// Linux only: macOS and Windows ship their owner-authentication backend with
+/// the operating system, and there is nothing to set up. On Linux the wallet
+/// depends on one root-owned action definition that an `AppImage` cannot
+/// install by itself, and until it is there every owner operation fails with
+/// the same sentence. This state is what turns that sentence into a button.
+#[cfg(target_os = "linux")]
+enum OwnerAuthState {
+    Probing,
+    Ready,
+    /// polkit runs but has never seen the wallet's action definition.
+    PolicyMissing {
+        /// Where the bundled definition is, for the command shown when
+        /// pkexec cannot help; or why it could not be found.
+        source: std::result::Result<std::path::PathBuf, SharedString>,
+        installing: bool,
+        error: Option<SharedString>,
+    },
+    Unreachable(SharedString),
+}
+
 /// One thing to try in the guided setup.
 ///
 /// The order here is the order they are listed, and it is a reading order
@@ -6268,6 +6293,8 @@ impl WalletWindow {
             agent_reinstall: AgentReinstallState::Idle,
             detected_agents: AgentDetectionState::Loading,
             detected_agents_generation: 0,
+            #[cfg(target_os = "linux")]
+            owner_auth: OwnerAuthState::Probing,
             account_id_input: None,
             private_key_input: None,
             account_entry_mode: AccountEntryMode::Create,
@@ -6362,6 +6389,8 @@ impl WalletWindow {
         };
         window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
+        #[cfg(target_os = "linux")]
+        window.probe_owner_auth(cx);
         window.reload_desktop_snapshot(cx);
         window
     }
@@ -6800,6 +6829,135 @@ impl WalletWindow {
             });
         })
         .detach();
+    }
+
+    /// Ask polkit whether it knows the wallet's action, and where the bundled
+    /// definition is if it does not.
+    #[cfg(target_os = "linux")]
+    fn probe_owner_auth(&mut self, cx: &mut Context<Self>) {
+        use ekubo_wallet_core::polkit;
+
+        if matches!(
+            self.owner_auth,
+            OwnerAuthState::PolicyMissing {
+                installing: true,
+                ..
+            }
+        ) {
+            return;
+        }
+        self.owner_auth = OwnerAuthState::Probing;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let readiness = polkit::readiness().await;
+            let source = if readiness == polkit::Readiness::PolicyMissing {
+                Some(
+                    tokio::task::spawn_blocking(polkit::bundled_policy)
+                        .await
+                        .context("polkit bundle lookup task failed")?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>((readiness, source))
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                // Only an answer to a question still being asked lands. A
+                // state set meanwhile — by an install that finished, or by a
+                // test pinning the section — is not overwritten by a probe
+                // that was started before it.
+                if !matches!(view.owner_auth, OwnerAuthState::Probing) {
+                    return;
+                }
+                view.owner_auth = match result {
+                    Ok((polkit::Readiness::Ready, _)) => OwnerAuthState::Ready,
+                    Ok((polkit::Readiness::PolicyMissing, source)) => {
+                        OwnerAuthState::PolicyMissing {
+                            source: source
+                                .unwrap_or_else(polkit::bundled_policy)
+                                .map_err(|error| SharedString::from(error.to_string())),
+                            installing: false,
+                            error: None,
+                        }
+                    }
+                    Ok((polkit::Readiness::Unreachable(detail), _)) => {
+                        OwnerAuthState::Unreachable(detail.into())
+                    }
+                    Err(error) => OwnerAuthState::Unreachable(format!("{error:#}").into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Install the bundled definition through pkexec, then wait for polkit to
+    /// notice it. The prompt that appears is polkit's own, for its own
+    /// `org.freedesktop.policykit.exec` action: the wallet asks for nothing it
+    /// could keep.
+    #[cfg(target_os = "linux")]
+    fn install_owner_auth_policy(&mut self, cx: &mut Context<Self>) {
+        use ekubo_wallet_core::polkit::{self, Readiness, SetupError};
+
+        let OwnerAuthState::PolicyMissing {
+            installing, error, ..
+        } = &mut self.owner_auth
+        else {
+            return;
+        };
+        if *installing {
+            return;
+        }
+        *installing = true;
+        *error = None;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let installed = tokio::task::spawn_blocking(polkit::install_policy)
+                .await
+                .context("polkit setup task failed")?;
+            let outcome = match installed {
+                Ok(()) => Ok(polkit::await_readiness(std::time::Duration::from_secs(5)).await),
+                Err(error) => Err(error),
+            };
+            Ok::<_, anyhow::Error>(outcome)
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                let (replacement, message): (Option<OwnerAuthState>, Option<SharedString>) =
+                    match result {
+                        Ok(Ok(Readiness::Ready)) => (Some(OwnerAuthState::Ready), None),
+                        Ok(Ok(Readiness::PolicyMissing)) => (
+                            None,
+                            Some(
+                                "The policy was installed, but polkit has not reloaded it yet. \
+                                 Check again in a moment."
+                                    .into(),
+                            ),
+                        ),
+                        Ok(Ok(Readiness::Unreachable(detail))) => {
+                            (Some(OwnerAuthState::Unreachable(detail.into())), None)
+                        }
+                        // Closing the dialog is an answer, not a failure.
+                        Ok(Err(SetupError::Dismissed)) => (None, None),
+                        Ok(Err(error)) => (None, Some(error.to_string().into())),
+                        Err(error) => (None, Some(format!("{error:#}").into())),
+                    };
+                if let Some(replacement) = replacement {
+                    view.owner_auth = replacement;
+                } else if let OwnerAuthState::PolicyMissing {
+                    installing, error, ..
+                } = &mut view.owner_auth
+                {
+                    *installing = false;
+                    *error = message;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn reload_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -12744,7 +12902,7 @@ impl WalletWindow {
             }
         }
 
-        div()
+        let page = div()
             // Named so the prose-specific render test can still inspect the
             // pane within the route-wide cap. `debug_selector` is a documented
             // no-op in release builds.
@@ -12765,8 +12923,13 @@ impl WalletWindow {
             // thing the account form fixed for itself. The reference desktop
             // settings spacing is 20-28px between groups against 16px within
             // one; these were both 16.
-            .gap_6()
-            .child(settings_section(
+            .gap_6();
+        // First, because until it is done nothing below it that needs the
+        // owner can be changed — and on a working machine it is one quiet
+        // line.
+        #[cfg(target_os = "linux")]
+        let page = page.child(self.render_owner_authentication(cx));
+        page.child(settings_section(
                 "Appearance",
                 GroupBox::new()
                     .id("appearance-settings")
@@ -16197,6 +16360,154 @@ impl WalletWindow {
         settings_section(
             "Updates",
             GroupBox::new().id("software-updates").child(panel),
+        )
+    }
+
+    /// The one settings group that exists because of how the wallet was
+    /// installed rather than what the owner wants from it. It is quiet when
+    /// polkit is ready and becomes the way out when it is not: the `AppImage`
+    /// cannot write the one root-owned file polkit reads, so this offers to
+    /// have polkit itself do the copy, and shows the equivalent shell command
+    /// for a session pkexec cannot prompt in.
+    #[cfg(target_os = "linux")]
+    fn render_owner_authentication(&self, cx: &mut Context<Self>) -> gpui::Div {
+        use ekubo_wallet_core::polkit;
+
+        let prose = |text: &'static str| {
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .max_w(PROSE_MEASURE)
+                .child(selectable_label(text))
+        };
+        let recheck = |cx: &Context<Self>, disabled: bool| {
+            app_button("recheck-polkit")
+                .debug_selector(|| "recheck-polkit".to_owned())
+                .self_start()
+                .label("Check again")
+                .disabled(disabled)
+                .on_click(cx.listener(|view, _, _, cx| view.probe_owner_auth(cx)))
+        };
+        let mut panel = div().flex().flex_col().gap_3().child(prose(
+            "Signing, revealing a private key, removing an account, and widening a policy each ask \
+             polkit to confirm you are at the keyboard, through the same prompt your desktop uses \
+             for administrative tasks.",
+        ));
+        panel = match &self.owner_auth {
+            OwnerAuthState::Probing => panel.child(
+                h_flex()
+                    .debug_selector(|| "polkit-probe-progress".to_owned())
+                    .gap_2()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Spinner::new().small())
+                    .child(selectable_label("Checking polkit")),
+            ),
+            OwnerAuthState::Ready => panel.child(
+                h_flex()
+                    .debug_selector(|| "polkit-ready".to_owned())
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(cx.theme().success)
+                            .child(Icon::new(IconName::CircleCheck)),
+                    )
+                    .child(selectable_label("polkit is set up and ready.")),
+            ),
+            OwnerAuthState::PolicyMissing {
+                source,
+                installing,
+                error,
+            } => {
+                let installing = *installing;
+                let mut panel = panel
+                    .child(prose(
+                        "polkit reads action definitions only from /usr/share/polkit-1/actions, \
+                         which this installation cannot write to. Installing the wallet's \
+                         definition there is a one-time step that asks for an administrator \
+                         password; nothing else changes.",
+                    ))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                app_button("install-polkit-policy")
+                                    .debug_selector(|| "install-polkit-policy".to_owned())
+                                    .self_start()
+                                    .label("Install polkit policy…")
+                                    .primary()
+                                    .disabled(installing)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.install_owner_auth_policy(cx);
+                                    })),
+                            )
+                            .when(installing, |row| {
+                                row.child(Spinner::new().small()).child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(selectable_label("Waiting for polkit")),
+                                )
+                            }),
+                    );
+                if let Some(error) = error {
+                    panel =
+                        panel.child(selectable_error_alert("polkit-setup-error", error.clone()));
+                }
+                panel = match source {
+                    Ok(path) => panel
+                        .child(prose(
+                            "If no prompt appears — a session without a polkit authentication \
+                             agent cannot show one — run this in a terminal instead, then check \
+                             again:",
+                        ))
+                        .child(
+                            div()
+                                .debug_selector(|| "polkit-manual-install".to_owned())
+                                .text_sm()
+                                .font_family(MONO_FONT_FAMILY)
+                                .child(selectable_text(
+                                    "polkit-manual-install",
+                                    &polkit::manual_install_command(path),
+                                )),
+                        ),
+                    Err(missing) => panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .max_w(PROSE_MEASURE)
+                            .child(selectable_label(format!(
+                                "The bundled policy could not be found, so it cannot be installed \
+                                 from here: {missing}"
+                            ))),
+                    ),
+                };
+                panel.child(recheck(cx, installing))
+            }
+            OwnerAuthState::Unreachable(detail) => panel
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .max_w(PROSE_MEASURE)
+                        .child(selectable_label(format!(
+                            "polkit is not running on this computer: {detail}"
+                        ))),
+                )
+                .child(prose(
+                    "Install your distribution's polkit package and an authentication agent — \
+                     GNOME, KDE, and most desktop environments include one — then check again.",
+                ))
+                .child(recheck(cx, false)),
+        };
+        settings_section(
+            "Owner authentication",
+            GroupBox::new()
+                .id("owner-authentication-settings")
+                .child(panel),
         )
     }
 

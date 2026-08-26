@@ -90,6 +90,16 @@ fn wallet(
         )
     });
     let view = window.root(cx).expect("root view");
+    // The window asks the machine's polkit whether it is set up, and the
+    // answer — which depends on the machine, and lands whenever the tokio
+    // thread gets to it — changes the height of the Settings page. Pinning
+    // the state here settles it for every test; a probe result only ever
+    // replaces a state that is still `Probing`, so the late answer is
+    // dropped rather than raced. A test about the section sets its own.
+    #[cfg(target_os = "linux")]
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::Ready;
+    });
     ((directory, lock), view, window.into())
 }
 
@@ -966,6 +976,13 @@ fn checking_for_updates_keeps_the_action_in_place(cx: &mut gpui::TestAppContext)
 
     cx.update_entity(&view, |wallet, _| {
         wallet.release_state = ReleaseDisplayState::Checking;
+        // Agent detection runs on the tokio thread from construction and
+        // lands whenever it lands. On a machine with agents installed it
+        // arrived between the two measurements, grew the list above this
+        // button, and the assertion below blamed the state change it was
+        // written to check. Pin the list again so only `release_state`
+        // differs between the two layouts.
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
     });
     let checking = measure(cx, window, &view, &["check-latest-release"])[0]
         .expect("the checking update action must remain laid out");
@@ -976,6 +993,74 @@ fn checking_for_updates_keeps_the_action_in_place(cx: &mut gpui::TestAppContext)
     assert!(
         measure(cx, window, &view, &["release-check-progress"])[0].is_some(),
         "the version-status line must show checking progress and its spinner"
+    );
+    release(cx, &view);
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn a_missing_polkit_policy_offers_one_click_install_and_the_manual_command(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
+        wallet.release_state = ReleaseDisplayState::Idle;
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/usr/lib/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            installing: false,
+            error: None,
+        };
+    });
+    let missing = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "install-polkit-policy",
+            "polkit-manual-install",
+            "recheck-polkit",
+        ],
+    );
+    assert!(
+        missing.iter().all(Option::is_some),
+        "a missing policy must offer the pkexec install, the shell fallback, and a re-check: {missing:?}"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/usr/lib/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            installing: true,
+            error: None,
+        };
+    });
+    let installing = measure(cx, window, &view, &["install-polkit-policy"])[0]
+        .expect("the install action stays in place while pkexec prompts");
+    assert_eq!(
+        installing,
+        missing[0].unwrap(),
+        "installing must disable the action without moving it"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::Ready;
+    });
+    let ready = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "polkit-ready",
+            "install-polkit-policy",
+            "polkit-manual-install",
+        ],
+    );
+    assert!(ready[0].is_some(), "a ready backend says so");
+    assert!(
+        ready[1].is_none() && ready[2].is_none(),
+        "a ready backend offers nothing to install: {ready:?}"
     );
     release(cx, &view);
 }
