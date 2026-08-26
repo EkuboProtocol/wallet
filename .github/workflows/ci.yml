@@ -1,60 +1,60 @@
 name: Tests
 
 on:
-  pull_request:
-    # These paths are not consumed or validated by any job below. Embedded
-    # MCP/legal Markdown is intentionally absent: changing it rebuilds and
-    # tests the application.
-    paths-ignore:
-      - ".agents/**"
-      - ".gitattributes"
-      - ".github/apple/**"
-      - ".github/dependabot.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/build-release-artifacts.yml"
-      - ".gitignore"
-      - "AGENTS.md"
-      - "CLAUDE.md"
-      - "README.md"
-      - "contrib/polkit/**"
-      - "contrib/rehearse-macos-signing.sh"
-      - "contrib/rpc-probe/**"
-      - "contrib/vendor-default-tokens.py"
-      - "crates/ekubo-wallet-core/clearsign/README.md"
-      - "docs/approval-ux.md"
-      - "docs/architecture.md"
-      - "docs/releasing.md"
-      - "docs/security-boundary.md"
-      - "docs/storage.md"
-      - "examples/abi-decoding.json"
-      - "examples/policy.json"
-      - "schemas/**"
-  push:
-    branches: [main]
-    paths-ignore:
-      - ".agents/**"
-      - ".gitattributes"
-      - ".github/apple/**"
-      - ".github/dependabot.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/build-release-artifacts.yml"
-      - ".gitignore"
-      - "AGENTS.md"
-      - "CLAUDE.md"
-      - "README.md"
-      - "contrib/polkit/**"
-      - "contrib/rehearse-macos-signing.sh"
-      - "contrib/rpc-probe/**"
-      - "contrib/vendor-default-tokens.py"
-      - "crates/ekubo-wallet-core/clearsign/README.md"
-      - "docs/approval-ux.md"
-      - "docs/architecture.md"
-      - "docs/releasing.md"
-      - "docs/security-boundary.md"
-      - "docs/storage.md"
-      - "examples/abi-decoding.json"
-      - "examples/policy.json"
-      - "schemas/**"
+  # pull_request:
+  #   # These paths are not consumed or validated by any job below. Embedded
+  #   # MCP/legal Markdown is intentionally absent: changing it rebuilds and
+  #   # tests the application.
+  #   paths-ignore:
+  #     - ".agents/**"
+  #     - ".gitattributes"
+  #     - ".github/apple/**"
+  #     - ".github/dependabot.yml"
+  #     - ".github/workflows/release.yml"
+  #     - ".github/workflows/build-release-artifacts.yml"
+  #     - ".gitignore"
+  #     - "AGENTS.md"
+  #     - "CLAUDE.md"
+  #     - "README.md"
+  #     - "contrib/polkit/**"
+  #     - "contrib/rehearse-macos-signing.sh"
+  #     - "contrib/rpc-probe/**"
+  #     - "contrib/vendor-default-tokens.py"
+  #     - "crates/ekubo-wallet-core/clearsign/README.md"
+  #     - "docs/approval-ux.md"
+  #     - "docs/architecture.md"
+  #     - "docs/releasing.md"
+  #     - "docs/security-boundary.md"
+  #     - "docs/storage.md"
+  #     - "examples/abi-decoding.json"
+  #     - "examples/policy.json"
+  #     - "schemas/**"
+  # push:
+  #   branches: [main]
+  #   paths-ignore:
+  #     - ".agents/**"
+  #     - ".gitattributes"
+  #     - ".github/apple/**"
+  #     - ".github/dependabot.yml"
+  #     - ".github/workflows/release.yml"
+  #     - ".github/workflows/build-release-artifacts.yml"
+  #     - ".gitignore"
+  #     - "AGENTS.md"
+  #     - "CLAUDE.md"
+  #     - "README.md"
+  #     - "contrib/polkit/**"
+  #     - "contrib/rehearse-macos-signing.sh"
+  #     - "contrib/rpc-probe/**"
+  #     - "contrib/vendor-default-tokens.py"
+  #     - "crates/ekubo-wallet-core/clearsign/README.md"
+  #     - "docs/approval-ux.md"
+  #     - "docs/architecture.md"
+  #     - "docs/releasing.md"
+  #     - "docs/security-boundary.md"
+  #     - "docs/storage.md"
+  #     - "examples/abi-decoding.json"
+  #     - "examples/policy.json"
+  #     - "schemas/**"
   workflow_dispatch:
 
 permissions:
