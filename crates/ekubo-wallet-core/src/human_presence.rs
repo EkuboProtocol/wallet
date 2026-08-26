@@ -369,25 +369,32 @@ impl HumanPresence for PlatformHumanPresence {
 impl HumanPresence for PlatformHumanPresence {
     async fn confirm(&self, _request: &PresenceRequest) -> Result<(), HumanPresenceError> {
         use std::collections::HashMap;
-        use zbus::Connection;
-        use zbus_polkit::policykit1::{AuthorityProxy, CheckAuthorizationFlags, Subject};
+        use zbus_polkit::policykit1::{CheckAuthorizationFlags, Subject};
 
-        const ACTION: &str = "com.ekubo.wallet.human-presence";
-        let connection = Connection::system()
-            .await
-            .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
-        let authority = AuthorityProxy::new(&connection)
-            .await
-            .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
-        let actions = authority
-            .enumerate_actions("")
-            .await
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
-        if !actions.iter().any(|action| action.action_id == ACTION) {
-            return Err(HumanPresenceError::Unavailable(
-                "install contrib/polkit/com.ekubo.wallet.policy under /usr/share/polkit-1/actions"
-                    .into(),
-            ));
+        use crate::polkit::{ACTION_ID as ACTION, Readiness};
+
+        // The same probe the Settings pane runs, so the two never disagree
+        // about what a polkit failure is called.
+        let authority = crate::polkit::connect().await.map_err(|detail| {
+            HumanPresenceError::Unavailable(format!("polkit is not reachable ({detail})"))
+        })?;
+        match crate::polkit::probe(&authority).await {
+            Readiness::Ready => {}
+            // The desktop's Settings pane installs the definition through
+            // pkexec; this message is what every owner operation shows until
+            // someone gets there.
+            Readiness::PolicyMissing => {
+                return Err(HumanPresenceError::Unavailable(
+                    "the wallet's polkit policy is not installed yet; \
+                     open Settings → Owner authentication to set it up"
+                        .into(),
+                ));
+            }
+            Readiness::Unreachable(detail) => {
+                return Err(HumanPresenceError::Unavailable(format!(
+                    "polkit is not reachable ({detail})"
+                )));
+            }
         }
 
         let subject = Subject::new_for_owner(std::process::id(), None, None)

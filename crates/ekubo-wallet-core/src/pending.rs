@@ -1715,7 +1715,13 @@ fn parse_cancel_hashes(bytes: &[u8]) -> Result<Vec<B256>> {
             && bytes.len() / 32 <= MAX_CANCELLATION_ATTEMPTS,
         "stored cancellation hash list has an invalid length"
     );
-    Ok(bytes.chunks_exact(32).map(B256::from_slice).collect())
+    Ok(bytes
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .copied()
+        .map(B256::new)
+        .collect())
 }
 
 fn encode_cancel_hashes(hashes: &[B256]) -> Vec<u8> {

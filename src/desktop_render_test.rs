@@ -90,6 +90,22 @@ fn wallet(
         )
     });
     let view = window.root(cx).expect("root view");
+    // The constructor starts two lookups on the tokio thread whose answers
+    // depend on the machine and land whenever that thread gets to them:
+    // agent detection, and on Linux the polkit probe. Either one changes the
+    // height of the Settings page, and on a machine with agents installed
+    // detection landed between two measurements of one test. Settle both
+    // here for every test; a test about either section sets its own state.
+    cx.update_entity(&view, |wallet, _| {
+        // A result only lands for the generation that asked for it.
+        wallet.detected_agents_generation = wallet.detected_agents_generation.wrapping_add(1);
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
+        // A probe result only ever replaces a state that is still `Probing`.
+        #[cfg(target_os = "linux")]
+        {
+            wallet.owner_auth = OwnerAuthState::Ready;
+        }
+    });
     ((directory, lock), view, window.into())
 }
 
@@ -999,6 +1015,127 @@ fn checking_for_updates_keeps_the_action_in_place(cx: &mut gpui::TestAppContext)
     assert!(
         measure(cx, window, &view, &["release-check-progress"])[0].is_some(),
         "the version-status line must show checking progress and its spinner"
+    );
+    release(cx, &view);
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn a_missing_polkit_policy_offers_one_click_install_and_the_manual_command(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::Settings);
+        wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
+        wallet.release_state = ReleaseDisplayState::Idle;
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            pkexec: true,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::Writable,
+            installing: false,
+            error: None,
+        };
+    });
+    let missing = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "install-polkit-policy",
+            "polkit-manual-install",
+            "recheck-polkit",
+        ],
+    );
+    assert!(
+        missing.iter().all(Option::is_some),
+        "a missing policy must offer the pkexec install, the shell fallback, and a re-check: {missing:?}"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            pkexec: true,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::Writable,
+            installing: true,
+            error: None,
+        };
+    });
+    let installing = measure(cx, window, &view, &["install-polkit-policy"])[0]
+        .expect("the install action stays in place while pkexec prompts");
+    assert_eq!(
+        installing,
+        missing[0].unwrap(),
+        "installing must disable the action without moving it"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            pkexec: false,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::Writable,
+            installing: false,
+            error: None,
+        };
+    });
+    let no_pkexec = measure(
+        cx,
+        window,
+        &view,
+        &["install-polkit-policy", "polkit-manual-install"],
+    );
+    assert!(
+        no_pkexec[0].is_none() && no_pkexec[1].is_some(),
+        "without pkexec there is nothing to click, only the command to run: {no_pkexec:?}"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            pkexec: true,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::ReadOnly,
+            installing: false,
+            error: None,
+        };
+    });
+    let immutable = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "install-polkit-policy",
+            "polkit-manual-install",
+            "polkit-policy-file",
+            "recheck-polkit",
+        ],
+    );
+    assert!(
+        immutable[0].is_none() && immutable[1].is_none(),
+        "a read-only /usr offers neither pkexec nor sudo, which would both fail: {immutable:?}"
+    );
+    assert!(
+        immutable[2].is_some() && immutable[3].is_some(),
+        "it names the file to layer and can be re-checked: {immutable:?}"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::Ready;
+    });
+    let ready = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "polkit-ready",
+            "install-polkit-policy",
+            "polkit-manual-install",
+        ],
+    );
+    assert!(ready[0].is_some(), "a ready backend says so");
+    assert!(
+        ready[1].is_none() && ready[2].is_none(),
+        "a ready backend offers nothing to install: {ready:?}"
     );
     release(cx, &view);
 }
