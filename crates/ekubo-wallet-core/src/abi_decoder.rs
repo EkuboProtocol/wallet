@@ -1,8 +1,9 @@
 use alloy::{
     dyn_abi::{DynSolType, DynSolValue, ErrorExt, FunctionExt, Specifier},
     json_abi::{Function, JsonAbi, Param},
-    primitives::U256,
+    primitives::{U256, aliases::U96},
 };
+use ekubo_sdk::chain::evm::float_sqrt_ratio_to_fixed;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -1249,18 +1250,20 @@ fn execute_semantic_codec(
             details: None,
         })
     })?;
-    // The encoding is 89 mantissa bits under a 7-bit exponent, so anything at
+    // The encoding is a 94-bit mantissa under a 2-bit exponent, so anything at
     // or above 2^96 was never one. Refusing it here is what keeps a hostile
     // return value a `decode_status: "failed"` rather than an unwind out of the
-    // tool handler: `to::<u8>()` panics on a value too wide for the target.
+    // tool handler, and it is what makes the 12-byte slice below exact.
     if encoded >= U256::from(1_u8) << 96_usize {
         return codec_failure("sqrt ratio float exceeds its 96-bit encoding", path);
     }
-    let mantissa_mask = (U256::from(1_u8) << 89) - U256::from(1_u8);
-    let exponent = (encoded >> 89_usize).to::<u8>();
-    let shift = usize::from(exponent) + 2;
-    let fixed: U256 = (encoded & mantissa_mask) << shift;
-    Ok(fixed.to_string())
+    // Defer the layout to ekubo_sdk, which is the same implementation the
+    // allowlisted npm export mirrors, rather than restating it here. The
+    // exponent occupies bits 94..=95 and scales the shift by 32, so splitting
+    // the fields at the wrong width returns a plausible-looking ratio instead
+    // of failing loudly.
+    let float = U96::from_be_slice(&encoded.to_be_bytes::<32>()[20..]);
+    Ok(float_sqrt_ratio_to_fixed(float).to_string())
 }
 
 fn codec_failure<T>(message: &str, path: Option<&str>) -> Result<T, DecodeFailure> {
