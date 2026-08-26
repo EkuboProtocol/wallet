@@ -252,13 +252,15 @@ fn an_out_of_domain_sqrt_ratio_fails_the_decode_rather_than_panicking() {
 
     // The widest value the domain does contain still decodes: every mantissa
     // bit set under the largest exponent, which the guard must not exclude.
+    // The exponent is bits 94..=95, so that is a 94-bit mantissa shifted by
+    // 2 + 32 * 3, landing just under 2^192 rather than anywhere near 2^256.
     let widest = (U256::from(1_u8) << 96_usize) - U256::from(1_u8);
     let decoded = decode_abi_result(&format!("0x{widest:x}"), &plan, false);
     assert_eq!(decoded.decode_status, DecodeStatus::Decoded);
     assert_eq!(
         decoded.decoded.unwrap()["semantic_value"],
         Value::String(
-            (((U256::from(1_u8) << 89_usize) - U256::from(1_u8)) << 129_usize).to_string()
+            (((U256::from(1_u8) << 94_usize) - U256::from(1_u8)) << 98_usize).to_string()
         )
     );
 }
@@ -432,5 +434,79 @@ mod shared_budget_tests {
             result.return_data.is_some(),
             "the raw result survives a decode that could not run"
         );
+    }
+}
+
+#[cfg(test)]
+mod sqrt_ratio_float_codec {
+    use super::*;
+
+    fn codec() -> CodecIdentity {
+        CodecIdentity {
+            id: ALLOWED_CODEC_ID.into(),
+            version: ALLOWED_CODEC_VERSION,
+            implementations: vec![CodecImplementation {
+                ecosystem: "npm".into(),
+                registry: ALLOWED_REGISTRY.into(),
+                package_url: ALLOWED_PACKAGE_URL.into(),
+                export_name: ALLOWED_EXPORT.into(),
+                integrity: ALLOWED_INTEGRITY.into(),
+            }],
+        }
+    }
+
+    fn convert(value: &str) -> String {
+        execute_semantic_codec(
+            ALLOWED_SEMANTIC_TYPE,
+            &codec(),
+            &Value::String(value.into()),
+            None,
+        )
+        .expect("codec succeeds")
+    }
+
+    // Observed on mainnet: Ekubo Core pool 0x2412d98b... (USDC/USDG) at tick
+    // -165, cross-checked against CoreDataFetcher.poolState over RPC. The
+    // mantissa here has bits 89..=93 set, which is what a 7-bit exponent split
+    // gets wrong: it used to return 22775868403039233396916548160160193078693462016.
+    #[test]
+    fn converts_a_mantissa_that_overlaps_the_old_exponent_field() {
+        assert_eq!(
+            convert("39612452387559955993027354319"),
+            "340254383154770049453632155902269194240"
+        );
+    }
+
+    // Ekubo Core pool 0x9efd723a... (ETH/USDC) at tick -19822811. Bits 89..=93
+    // are clear here, so this case agreed with the old split too and is kept as
+    // the control.
+    #[test]
+    fn converts_a_mantissa_clear_of_the_exponent_field() {
+        assert_eq!(
+            convert("19808023174916859018689618395"),
+            "16880017773524553883647693211828224"
+        );
+    }
+
+    // The vector the SDK and evm-contracts pin for exponent 0.
+    #[test]
+    fn converts_the_zero_exponent_vector() {
+        assert_eq!(
+            convert("0x3ffffffffffffffff9ba1f6d"),
+            "79228162514264337593122979252"
+        );
+    }
+
+    #[test]
+    fn rejects_a_value_wider_than_the_encoding() {
+        let too_wide = (U256::from(1_u8) << 96_usize).to_string();
+        let error = execute_semantic_codec(
+            ALLOWED_SEMANTIC_TYPE,
+            &codec(),
+            &Value::String(too_wide),
+            None,
+        )
+        .expect_err("a value that never was a sqrt ratio float is refused");
+        assert_eq!(error.0.code, "codec_failure");
     }
 }
