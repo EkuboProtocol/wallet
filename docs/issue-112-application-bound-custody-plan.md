@@ -453,9 +453,9 @@ work that this plan must not pretend is free. A narrow precedent for (b)
 already ships: Settings → Owner authentication installs the wallet's own
 action definition through `pkexec install` under
 `org.freedesktop.policykit.exec`, and the `.deb` places that file directly.
-Whatever (b) becomes must keep the same shape — a bundled artifact verified
-against the build before polkit is asked, and nothing running as root but a
-coreutils copy.
+Whatever (b) becomes must keep the same shape — content that comes from the
+build itself rather than from a file the user can rewrite between check and
+use, and nothing running as root but a coreutils copy.
 
 The AppImage does not have to disappear. It has to stop claiming a custody
 guarantee it cannot provide: either it refuses to hold keys at all, or it is

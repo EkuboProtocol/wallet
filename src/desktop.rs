@@ -4501,14 +4501,18 @@ enum AgentDetectionState {
 enum OwnerAuthState {
     Probing,
     Ready,
-    /// polkit runs but has never seen the wallet's action definition.
+    /// polkit answered and has never seen the wallet's action definition.
     PolicyMissing {
-        /// Where the bundled definition is, for the command shown when
-        /// pkexec cannot help; or why it could not be found.
+        /// Where this build's copy was written for the command shown when
+        /// pkexec cannot help; or why it could not be written.
         source: std::result::Result<std::path::PathBuf, SharedString>,
+        /// Whether `pkexec` exists at all — a package of its own, separate
+        /// from the daemon, on Debian and Ubuntu.
+        pkexec: bool,
         installing: bool,
         error: Option<SharedString>,
     },
+    /// polkit gave no answer: not running, or one call that failed.
     Unreachable(SharedString),
 }
 
@@ -6847,18 +6851,29 @@ impl WalletWindow {
             return;
         }
         self.owner_auth = OwnerAuthState::Probing;
+        let data_dir = self.update_data_dir.clone();
+        // The whole next state is built off the main thread: the export is
+        // file I/O, and nothing here needs the view.
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let readiness = polkit::readiness().await;
-            let source = if readiness == polkit::Readiness::PolicyMissing {
-                Some(
-                    tokio::task::spawn_blocking(polkit::bundled_policy)
-                        .await
-                        .context("polkit bundle lookup task failed")?,
-                )
-            } else {
-                None
+            let state = match polkit::readiness().await {
+                polkit::Readiness::Ready => OwnerAuthState::Ready,
+                polkit::Readiness::PolicyMissing => {
+                    let source =
+                        tokio::task::spawn_blocking(move || polkit::export_policy(&data_dir))
+                            .await
+                            .context("polkit policy export task failed")?;
+                    OwnerAuthState::PolicyMissing {
+                        source: source.map_err(|error| SharedString::from(error.to_string())),
+                        pkexec: polkit::pkexec_available(),
+                        installing: false,
+                        error: None,
+                    }
+                }
+                polkit::Readiness::Unreachable(detail) => {
+                    OwnerAuthState::Unreachable(detail.into())
+                }
             };
-            Ok::<_, anyhow::Error>((readiness, source))
+            Ok::<_, anyhow::Error>(state)
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -6870,22 +6885,9 @@ impl WalletWindow {
                 if !matches!(view.owner_auth, OwnerAuthState::Probing) {
                     return;
                 }
-                view.owner_auth = match result {
-                    Ok((polkit::Readiness::Ready, _)) => OwnerAuthState::Ready,
-                    Ok((polkit::Readiness::PolicyMissing, source)) => {
-                        OwnerAuthState::PolicyMissing {
-                            source: source
-                                .unwrap_or_else(polkit::bundled_policy)
-                                .map_err(|error| SharedString::from(error.to_string())),
-                            installing: false,
-                            error: None,
-                        }
-                    }
-                    Ok((polkit::Readiness::Unreachable(detail), _)) => {
-                        OwnerAuthState::Unreachable(detail.into())
-                    }
-                    Err(error) => OwnerAuthState::Unreachable(format!("{error:#}").into()),
-                };
+                view.owner_auth = result.unwrap_or_else(|error| {
+                    OwnerAuthState::Unreachable(format!("{error:#}").into())
+                });
                 cx.notify();
             });
         })
@@ -6936,9 +6938,19 @@ impl WalletWindow {
                                     .into(),
                             ),
                         ),
-                        Ok(Ok(Readiness::Unreachable(detail))) => {
-                            (Some(OwnerAuthState::Unreachable(detail.into())), None)
-                        }
+                        // polkit answered a moment ago and took a password;
+                        // one lost call afterwards is not "not running", and
+                        // must not hide the button and the command.
+                        Ok(Ok(Readiness::Unreachable(detail))) => (
+                            None,
+                            Some(
+                                format!(
+                                    "The policy was installed, but polkit did not answer \
+                                     afterwards: {detail}. Check again in a moment."
+                                )
+                                .into(),
+                            ),
+                        ),
                         // Closing the dialog is an answer, not a failure.
                         Ok(Err(SetupError::Dismissed)) => (None, None),
                         Ok(Err(error)) => (None, Some(error.to_string().into())),
@@ -16418,18 +16430,19 @@ impl WalletWindow {
             ),
             OwnerAuthState::PolicyMissing {
                 source,
+                pkexec,
                 installing,
                 error,
             } => {
                 let installing = *installing;
-                let mut panel = panel
-                    .child(prose(
-                        "polkit reads action definitions only from /usr/share/polkit-1/actions, \
-                         which this installation cannot write to. Installing the wallet's \
-                         definition there is a one-time step that asks for an administrator \
-                         password; nothing else changes.",
-                    ))
-                    .child(
+                let mut panel = panel.child(prose(
+                    "polkit reads action definitions only from /usr/share/polkit-1/actions, \
+                     which this installation cannot write to. Installing the wallet's \
+                     definition there is a one-time step that asks for an administrator \
+                     password; nothing else changes.",
+                ));
+                if *pkexec {
+                    panel = panel.child(
                         h_flex()
                             .items_center()
                             .gap_3()
@@ -16453,17 +16466,21 @@ impl WalletWindow {
                                 )
                             }),
                     );
+                }
                 if let Some(error) = error {
                     panel =
                         panel.child(selectable_error_alert("polkit-setup-error", error.clone()));
                 }
                 panel = match source {
                     Ok(path) => panel
-                        .child(prose(
+                        .child(prose(if *pkexec {
                             "If no prompt appears — a session without a polkit authentication \
                              agent cannot show one — run this in a terminal instead, then check \
-                             again:",
-                        ))
+                             again:"
+                        } else {
+                            "This system has no pkexec — on Debian and Ubuntu it is a package of \
+                             its own — so run this in a terminal, then check again:"
+                        }))
                         .child(
                             div()
                                 .debug_selector(|| "polkit-manual-install".to_owned())
@@ -16480,8 +16497,7 @@ impl WalletWindow {
                             .text_color(cx.theme().danger)
                             .max_w(PROSE_MEASURE)
                             .child(selectable_label(format!(
-                                "The bundled policy could not be found, so it cannot be installed \
-                                 from here: {missing}"
+                                "The policy could not be written for a manual install: {missing}"
                             ))),
                     ),
                 };
@@ -16493,13 +16509,12 @@ impl WalletWindow {
                         .text_sm()
                         .text_color(cx.theme().danger)
                         .max_w(PROSE_MEASURE)
-                        .child(selectable_label(format!(
-                            "polkit is not running on this computer: {detail}"
-                        ))),
+                        .child(selectable_label(format!("polkit did not answer: {detail}"))),
                 )
                 .child(prose(
-                    "Install your distribution's polkit package and an authentication agent — \
-                     GNOME, KDE, and most desktop environments include one — then check again.",
+                    "If polkit is not installed, add your distribution's polkit package and an \
+                     authentication agent — GNOME, KDE, and most desktop environments include \
+                     one — then check again.",
                 ))
                 .child(recheck(cx, false)),
         };

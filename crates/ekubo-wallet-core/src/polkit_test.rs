@@ -16,37 +16,42 @@ fn the_shipped_definition_declares_the_action_the_backend_asks_for() {
 }
 
 #[test]
-fn a_workspace_build_finds_and_verifies_its_own_source_file() {
-    let path = bundled_policy().expect("the workspace checkout ships the policy");
+fn the_exported_copy_is_this_builds_document_and_root_readable() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("state");
+    let path = export_policy(&nested).expect("a fresh directory is created on the way");
     assert!(path.is_absolute());
     assert_eq!(path.file_name().unwrap(), POLICY_FILE_NAME);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), POLICY_DOCUMENT);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+
+    std::fs::write(&path, "stale").unwrap();
+    export_policy(&nested).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        POLICY_DOCUMENT,
+        "an older build's copy is replaced, not kept"
+    );
 }
 
 #[test]
-fn a_bundled_file_that_differs_from_this_build_is_refused() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join(POLICY_FILE_NAME);
-    std::fs::write(&path, format!("{POLICY_DOCUMENT}\n<!-- edited -->")).unwrap();
-    assert!(matches!(
-        verify_bundled_policy(&path),
-        Err(SetupError::BundleMismatch(_))
-    ));
-    std::fs::write(&path, POLICY_DOCUMENT).unwrap();
-    assert!(verify_bundled_policy(&path).is_ok());
-}
-
-#[test]
-fn the_manual_command_installs_the_same_file_to_the_same_place() {
-    let command = manual_install_command(Path::new("/opt/ekubo wallet/lib/it's.policy"));
+fn the_manual_command_installs_the_exported_file_to_the_same_place() {
+    let command = manual_install_command(Path::new("/home/o wner/.local/state/it's.policy"));
     assert_eq!(
         command,
-        "sudo install -m 644 '/opt/ekubo wallet/lib/it'\\''s.policy' \
+        "sudo install -m 644 '/home/o wner/.local/state/it'\\''s.policy' \
          /usr/share/polkit-1/actions/com.ekubo.wallet.policy"
     );
     assert_eq!(
-        manual_install_command(Path::new("/usr/lib/ekubo-wallet/com.ekubo.wallet.policy")),
-        "sudo install -m 644 /usr/lib/ekubo-wallet/com.ekubo.wallet.policy \
+        manual_install_command(Path::new(
+            "/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy"
+        )),
+        "sudo install -m 644 /home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy \
          /usr/share/polkit-1/actions/com.ekubo.wallet.policy"
     );
 }
@@ -80,6 +85,29 @@ fn pkexec_exit_codes_map_to_what_the_owner_did() {
         Err(SetupError::InstallFailed(detail)) => assert!(detail.contains("exit")),
         other => panic!("unexpected {other:?}"),
     }
+}
+
+#[test]
+fn a_failed_poll_does_not_outrank_an_answer_polkit_already_gave() {
+    let lost = || Readiness::Unreachable("lost".into());
+    assert_eq!(prefer(None, lost()), lost());
+    assert_eq!(
+        prefer(None, Readiness::PolicyMissing),
+        Readiness::PolicyMissing
+    );
+    assert_eq!(
+        prefer(Some(Readiness::PolicyMissing), lost()),
+        Readiness::PolicyMissing
+    );
+    assert_eq!(
+        prefer(Some(lost()), Readiness::PolicyMissing),
+        Readiness::PolicyMissing
+    );
+    assert_eq!(prefer(Some(Readiness::Ready), lost()), Readiness::Ready);
+    assert_eq!(
+        prefer(Some(lost()), Readiness::Unreachable("again".into())),
+        Readiness::Unreachable("again".into())
+    );
 }
 
 #[tokio::test]

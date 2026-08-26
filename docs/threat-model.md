@@ -89,18 +89,21 @@ definitions only from root-owned `/usr/share/polkit-1/actions`. The `.deb`
 installs `com.ekubo.wallet.policy` there itself. The AppImage cannot, so until
 the definition is present every owner operation fails closed with one message,
 and Settings → Owner authentication offers to install it: the wallet runs
-`pkexec install` on the bundled copy under polkit's own always-present
-`org.freedesktop.policykit.exec` action, which is `auth_admin` and prompts
-through the session's authentication agent. The wallet process holds no
-privilege before, during, or after; it compares the bundled file's bytes to the
-copy compiled into the build before asking, and the only thing that runs as
-root is coreutils `install(1)` on that file. A same-user attacker who can
-already replace the AppImage or ptrace the process gains nothing new from this
-path that they could not get by running `pkexec` themselves, which is the
-boundary the
+`pkexec install … /dev/stdin` under polkit's own `org.freedesktop.policykit.exec`
+action, which ships with the daemon, is `auth_admin`, and prompts through the
+session's authentication agent. The definition is compiled into the build and
+streamed to `install(1)` over standard input, so root reads no file a same-user
+process could swap between check and use, and no path inside the AppImage's
+FUSE mount — which root cannot read — is involved. The wallet process holds no
+privilege before, during, or after; the only thing that runs as root is
+coreutils `install(1)`. A same-user attacker who can already replace the
+AppImage or ptrace the process gains nothing new from this path that they could
+not get by running `pkexec` themselves, which is the boundary the
 [credential-store limitation](#critical-windows-and-linux-credential-store-limitation)
-already describes. When no agent can prompt, the pane shows the equivalent
-`sudo install` command instead of falling back to weaker authorization.
+already describes. When `pkexec` is absent (a separate package on Debian 12 and
+Ubuntu 23.04 onward) or no agent can prompt, the pane writes the same document
+into the wallet's data directory and shows the equivalent `sudo install`
+command, rather than falling back to weaker authorization.
 
 ## Local MCP IPC
 

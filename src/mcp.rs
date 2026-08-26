@@ -3856,6 +3856,9 @@ fn resource_contents(uri: &str) -> Result<(String, &'static str), ErrorData> {
 // `unused_async_trait_impl` fires on the ones whose bodies never await —
 // including the `get_info` that `tool_handler` generates and this file cannot
 // rewrite. The trait's shape is rmcp's, so the lint is silenced for the impl.
+// The lint name itself is unknown to the 1.94 toolchain the manifest still
+// admits, and `-D warnings` would make that unknown name an error there.
+#[allow(unknown_lints)]
 #[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = Self::sanitized_tool_router())]
 impl ServerHandler for WalletMcpServer {
