@@ -135,16 +135,28 @@ fn only_the_four_primary_defaults_start_enabled() {
 }
 
 #[test]
-fn each_fresh_default_uses_exactly_the_highest_ranked_endpoint() {
+fn each_fresh_default_carries_every_ranked_endpoint() {
     for network in default_networks() {
         let profile = known_network(network.chain_id).expect("default is in the registry");
         assert_eq!(
-            network.rpc_urls.len(),
-            1,
-            "{} has multiple defaults",
+            network.rpc_urls, profile.config.rpc_urls,
+            "{} does not seed the registry's ranked endpoints",
             network.name
         );
-        assert_eq!(network.rpc_urls[0], profile.config.rpc_urls[0]);
+    }
+}
+
+/// One endpoint is a network with no failover, which is the state a fresh
+/// configuration must never start in for a chain the wallet enables itself.
+#[test]
+fn each_enabled_fresh_default_has_more_than_one_endpoint() {
+    let defaults = default_networks();
+    for network in defaults.iter().filter(|network| !network.disabled) {
+        assert!(
+            network.rpc_urls.len() > 1,
+            "{} starts with no fallback endpoint",
+            network.name
+        );
     }
 }
 

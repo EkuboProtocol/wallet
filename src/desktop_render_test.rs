@@ -93,6 +93,24 @@ fn wallet(
     ((directory, lock), view, window.into())
 }
 
+/// Make a test's detected-agent list the one the page actually draws.
+///
+/// Assigning the field alone is not enough. Startup detection is a real read
+/// of this machine's filesystem on a background task, and whenever it lands it
+/// overwrites whatever a test put there — so on a machine that genuinely has
+/// one of these agents installed, rows appear that the test never asked for
+/// and every control below them moves. Which side of a `measure` the read
+/// finished on decided whether the test passed, which is what made these
+/// flake.
+///
+/// `refresh_detected_agents` already stamps each run with a generation and
+/// drops a result whose generation has been superseded. Bumping it here uses
+/// that existing guard rather than adding a test-only escape hatch: the
+/// in-flight read still completes, and is still discarded.
+fn supersede_agent_detection(wallet: &mut WalletWindow) {
+    wallet.detected_agents_generation = wallet.detected_agents_generation.wrapping_add(1);
+}
+
 /// Wait for the background snapshot to arrive.
 ///
 /// Without it every page renders its loading spinner and `route_panel` is
@@ -359,6 +377,7 @@ fn settings_remain_scrollable_in_a_short_window(cx: &mut gpui::TestAppContext) {
     settle(cx, &view);
     cx.update_entity(&view, |wallet, _| {
         wallet.set_route(Route::Settings);
+        supersede_agent_detection(wallet);
         wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
     });
     let short = gpui::size(px(900.0), px(420.0));
@@ -894,6 +913,7 @@ fn claude_connector_instructions_require_detected_claude_desktop(cx: &mut gpui::
     settle(cx, &view);
     cx.update_entity(&view, |wallet, _| {
         wallet.set_route(Route::Settings);
+        supersede_agent_detection(wallet);
         wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
     });
     assert!(
@@ -902,6 +922,7 @@ fn claude_connector_instructions_require_detected_claude_desktop(cx: &mut gpui::
     );
 
     cx.update_entity(&view, |wallet, _| {
+        supersede_agent_detection(wallet);
         wallet.detected_agents = AgentDetectionState::Ready(vec![DetectedAgent {
             kind: AgentKind::ClaudeDesktop,
             display_name: "Claude Desktop",
@@ -922,6 +943,7 @@ fn every_detected_agent_has_its_own_configuration_action(cx: &mut gpui::TestAppC
     settle(cx, &view);
     cx.update_entity(&view, |wallet, _| {
         wallet.set_route(Route::Settings);
+        supersede_agent_detection(wallet);
         wallet.detected_agents = AgentDetectionState::Ready(vec![
             DetectedAgent {
                 kind: AgentKind::Codex,
@@ -958,6 +980,7 @@ fn checking_for_updates_keeps_the_action_in_place(cx: &mut gpui::TestAppContext)
     settle(cx, &view);
     cx.update_entity(&view, |wallet, _| {
         wallet.set_route(Route::Settings);
+        supersede_agent_detection(wallet);
         wallet.detected_agents = AgentDetectionState::Ready(Vec::new());
         wallet.release_state = ReleaseDisplayState::Idle;
     });
@@ -1147,23 +1170,30 @@ fn draw_network_editor(
     visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
         gpui::AnyView::from(dialog_view.clone()).into_any_element()
     });
-    visual.run_until_parked();
 
+    // Read the frame that was just drawn, before parking — the same order
+    // `measure_at` uses, and for the same reason. Parking first lets anything
+    // still pending repaint the window from its own root, which has no dialog
+    // in it; the bounds recorded for the dialog are replaced by that frame's,
+    // and the form reads as never laid out. Whether a repaint happened to be
+    // pending is what decided this test, and under a loaded machine it usually
+    // was.
     let form = visual
         .debug_bounds("network-editor-body")
         .expect("the network editor form must be laid out");
     let save = visual
         .debug_bounds("network-editor-save")
         .expect("the network editor's Save button must be laid out");
+    let pane = visual
+        .debug_bounds("network-editor-scroll")
+        .expect("the network editor's scroll pane must be laid out");
     let content = visual.update(|_, cx| {
         view.read(cx)
             .network_editor_scroll_handle
             .content_size()
             .height
     });
-    let pane = visual
-        .debug_bounds("network-editor-scroll")
-        .expect("the network editor's scroll pane must be laid out");
+    visual.run_until_parked();
     drop(dialog_view);
     NetworkEditorLayout {
         form,

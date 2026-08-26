@@ -191,7 +191,13 @@ pub fn default_networks() -> Vec<NetworkConfig> {
         .filter(|profile| profile.is_default)
         .map(|profile| {
             let mut network = profile.config.clone();
-            network.rpc_urls.truncate(1);
+            // Every ranked endpoint the registry probed, not just the best
+            // one. A fresh configuration is the one no owner has tuned, so it
+            // is exactly the case that must survive a provider going down on
+            // its own; keeping one URL left `clients_for`'s failover and the
+            // shuffle strategy with nothing to choose between. The registry
+            // ships well under `MAX_NETWORK_RPC_URLS`, so the list is taken
+            // whole and `validate_network` still holds it to the cap.
             network.disabled = !matches!(
                 network.name.as_str(),
                 "ethereum" | "base" | "arbitrum" | "robinhood"

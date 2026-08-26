@@ -222,12 +222,25 @@ where
 /// objects without changing either operation.
 pub async fn clients_for(network: &NetworkConfig) -> Result<Vec<SharedChainClient>> {
     let mut clients = Vec::new();
+    let mut failures = Vec::new();
     for endpoint in endpoint_order(network) {
-        clients.push(
-            client_for(endpoint)
-                .await
-                .map_err(|error| redacted_endpoint_error(endpoint, &error))?,
-        );
+        // One endpoint that cannot even be built is a reason to leave it out
+        // of the attempt order, not a reason to fail the request. Building a
+        // client resolves the endpoint's domain and requires it to answer with
+        // a public address, so a provider that has shut its domain down, or a
+        // resolver that refuses it, fails here rather than on a call — and
+        // taking the whole network down for that would mean a list of six
+        // endpoints had six ways to fail where a list of one had one. The
+        // point of listing several is that any of them can carry the request.
+        match client_for(endpoint).await {
+            Ok(client) => clients.push(client),
+            Err(error) => failures.push((endpoint, error)),
+        }
+    }
+    // Nothing to attempt is still an error, and it is the one failover already
+    // reports: every endpoint this network has, with the reason each refused.
+    if clients.is_empty() {
+        return Err(all_endpoints_failed(network, &failures));
     }
     Ok(clients)
 }
@@ -734,10 +747,6 @@ fn redact_endpoint_text(endpoint: &url::Url, text: &str) -> String {
         redacted = redacted.replace(query, "<redacted>");
     }
     redacted
-}
-
-fn redacted_endpoint_error(endpoint: &url::Url, error: &impl std::fmt::Display) -> anyhow::Error {
-    anyhow::anyhow!(redact_endpoint_text(endpoint, &error.to_string()))
 }
 
 /// One shared spelling for a failed RPC request, preserving the provider's
