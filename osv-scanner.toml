@@ -59,3 +59,15 @@ version = "0.5.3"
 license.override = ["Apache-2.0"]
 effectiveUntil = 2027-02-15
 reason = "Declared Apache-2.0 WITH LLVM-exception; OSV's allowlist parser does not accept exception identifiers."
+
+# ekubo_sdk is first-party EkuboProtocol code, published by the same copyright
+# holder as this wallet, so its LGPL-2.1 terms create no obligation the project
+# does not already control. Do not widen the allowlist to LGPL-2.1 for every
+# dependency to accommodate one first-party crate; keep the exception narrow
+# and expiring, and relicense the SDK permissively upstream before it lapses.
+[[PackageOverrides]]
+name = "ekubo_sdk"
+version = "3.2.0"
+license.ignore = true
+effectiveUntil = 2027-02-15
+reason = "First-party EkuboProtocol crate under the same copyright holder; relicense the upstream SDK permissively before this exception expires."
