@@ -1010,6 +1010,7 @@ fn a_missing_polkit_policy_offers_one_click_install_and_the_manual_command(
         wallet.owner_auth = OwnerAuthState::PolicyMissing {
             source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
             pkexec: true,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::Writable,
             installing: false,
             error: None,
         };
@@ -1033,6 +1034,7 @@ fn a_missing_polkit_policy_offers_one_click_install_and_the_manual_command(
         wallet.owner_auth = OwnerAuthState::PolicyMissing {
             source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
             pkexec: true,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::Writable,
             installing: true,
             error: None,
         };
@@ -1049,6 +1051,7 @@ fn a_missing_polkit_policy_offers_one_click_install_and_the_manual_command(
         wallet.owner_auth = OwnerAuthState::PolicyMissing {
             source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
             pkexec: false,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::Writable,
             installing: false,
             error: None,
         };
@@ -1062,6 +1065,35 @@ fn a_missing_polkit_policy_offers_one_click_install_and_the_manual_command(
     assert!(
         no_pkexec[0].is_none() && no_pkexec[1].is_some(),
         "without pkexec there is nothing to click, only the command to run: {no_pkexec:?}"
+    );
+
+    cx.update_entity(&view, |wallet, _| {
+        wallet.owner_auth = OwnerAuthState::PolicyMissing {
+            source: Ok("/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy".into()),
+            pkexec: true,
+            actions_dir: ekubo_wallet_core::polkit::ActionsDir::ReadOnly,
+            installing: false,
+            error: None,
+        };
+    });
+    let immutable = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "install-polkit-policy",
+            "polkit-manual-install",
+            "polkit-policy-file",
+            "recheck-polkit",
+        ],
+    );
+    assert!(
+        immutable[0].is_none() && immutable[1].is_none(),
+        "a read-only /usr offers neither pkexec nor sudo, which would both fail: {immutable:?}"
+    );
+    assert!(
+        immutable[2].is_some() && immutable[3].is_some(),
+        "it names the file to layer and can be re-checked: {immutable:?}"
     );
 
     cx.update_entity(&view, |wallet, _| {

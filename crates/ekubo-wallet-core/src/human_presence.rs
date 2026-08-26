@@ -371,22 +371,30 @@ impl HumanPresence for PlatformHumanPresence {
         use std::collections::HashMap;
         use zbus_polkit::policykit1::{CheckAuthorizationFlags, Subject};
 
-        const ACTION: &str = crate::polkit::ACTION_ID;
-        let authority = crate::polkit::authority().await.map_err(|error| {
-            HumanPresenceError::Unavailable(format!("polkit is not reachable ({error})"))
+        use crate::polkit::{ACTION_ID as ACTION, Readiness};
+
+        // The same probe the Settings pane runs, so the two never disagree
+        // about what a polkit failure is called.
+        let authority = crate::polkit::connect().await.map_err(|detail| {
+            HumanPresenceError::Unavailable(format!("polkit is not reachable ({detail})"))
         })?;
-        let known = crate::polkit::action_known(&authority)
-            .await
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
-        if !known {
+        match crate::polkit::probe(&authority).await {
+            Readiness::Ready => {}
             // The desktop's Settings pane installs the definition through
             // pkexec; this message is what every owner operation shows until
             // someone gets there.
-            return Err(HumanPresenceError::Unavailable(
-                "the wallet's polkit policy is not installed yet; \
-                 open Settings → Owner authentication to set it up"
-                    .into(),
-            ));
+            Readiness::PolicyMissing => {
+                return Err(HumanPresenceError::Unavailable(
+                    "the wallet's polkit policy is not installed yet; \
+                     open Settings → Owner authentication to set it up"
+                        .into(),
+                ));
+            }
+            Readiness::Unreachable(detail) => {
+                return Err(HumanPresenceError::Unavailable(format!(
+                    "polkit is not reachable ({detail})"
+                )));
+            }
         }
 
         let subject = Subject::new_for_owner(std::process::id(), None, None)

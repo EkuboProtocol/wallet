@@ -4499,6 +4499,10 @@ enum AgentDetectionState {
 /// the same sentence. This state is what turns that sentence into a button.
 #[cfg(target_os = "linux")]
 enum OwnerAuthState {
+    /// Nobody has opened Settings yet. The probe costs a system-bus
+    /// connection and polkit's whole action list, so it waits for the pane
+    /// that shows the answer, the way the release check does.
+    Unknown,
     Probing,
     Ready,
     /// polkit answered and has never seen the wallet's action definition.
@@ -4509,6 +4513,9 @@ enum OwnerAuthState {
         /// Whether `pkexec` exists at all — a package of its own, separate
         /// from the daemon, on Debian and Ubuntu.
         pkexec: bool,
+        /// Whether anything can be installed into polkit's directory at
+        /// all; an immutable `/usr` cannot be, by pkexec or by sudo.
+        actions_dir: ekubo_wallet_core::polkit::ActionsDir,
         installing: bool,
         error: Option<SharedString>,
     },
@@ -6298,7 +6305,7 @@ impl WalletWindow {
             detected_agents: AgentDetectionState::Loading,
             detected_agents_generation: 0,
             #[cfg(target_os = "linux")]
-            owner_auth: OwnerAuthState::Probing,
+            owner_auth: OwnerAuthState::Unknown,
             account_id_input: None,
             private_key_input: None,
             account_entry_mode: AccountEntryMode::Create,
@@ -6393,8 +6400,6 @@ impl WalletWindow {
         };
         window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
-        #[cfg(target_os = "linux")]
-        window.probe_owner_auth(cx);
         window.reload_desktop_snapshot(cx);
         window
     }
@@ -6858,13 +6863,19 @@ impl WalletWindow {
             let state = match polkit::readiness().await {
                 polkit::Readiness::Ready => OwnerAuthState::Ready,
                 polkit::Readiness::PolicyMissing => {
-                    let source =
-                        tokio::task::spawn_blocking(move || polkit::export_policy(&data_dir))
-                            .await
-                            .context("polkit policy export task failed")?;
+                    let (source, pkexec, actions_dir) = tokio::task::spawn_blocking(move || {
+                        (
+                            polkit::export_policy(&data_dir),
+                            polkit::pkexec_available(),
+                            polkit::actions_dir(),
+                        )
+                    })
+                    .await
+                    .context("polkit policy export task failed")?;
                     OwnerAuthState::PolicyMissing {
                         source: source.map_err(|error| SharedString::from(error.to_string())),
-                        pkexec: polkit::pkexec_available(),
+                        pkexec,
+                        actions_dir,
                         installing: false,
                         error: None,
                     }
@@ -6927,38 +6938,34 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                let (replacement, message): (Option<OwnerAuthState>, Option<SharedString>) =
-                    match result {
-                        Ok(Ok(Readiness::Ready)) => (Some(OwnerAuthState::Ready), None),
-                        Ok(Ok(Readiness::PolicyMissing)) => (
-                            None,
-                            Some(
-                                "The policy was installed, but polkit has not reloaded it yet. \
-                                 Check again in a moment."
-                                    .into(),
-                            ),
-                        ),
-                        // polkit answered a moment ago and took a password;
-                        // one lost call afterwards is not "not running", and
-                        // must not hide the button and the command.
-                        Ok(Ok(Readiness::Unreachable(detail))) => (
-                            None,
-                            Some(
-                                format!(
-                                    "The policy was installed, but polkit did not answer \
-                                     afterwards: {detail}. Check again in a moment."
-                                )
-                                .into(),
-                            ),
-                        ),
-                        // Closing the dialog is an answer, not a failure.
-                        Ok(Err(SetupError::Dismissed)) => (None, None),
-                        Ok(Err(error)) => (None, Some(error.to_string().into())),
-                        Err(error) => (None, Some(format!("{error:#}").into())),
-                    };
-                if let Some(replacement) = replacement {
-                    view.owner_auth = replacement;
-                } else if let OwnerAuthState::PolicyMissing {
+                // Every outcome but success leaves the section where it was,
+                // button and command included, with at most a message.
+                let message: Option<SharedString> = match result {
+                    Ok(Ok(Readiness::Ready)) => {
+                        view.owner_auth = OwnerAuthState::Ready;
+                        cx.notify();
+                        return;
+                    }
+                    Ok(Ok(Readiness::PolicyMissing)) => Some(
+                        "The policy was installed, but polkit has not reloaded it yet. \
+                         Check again in a moment."
+                            .into(),
+                    ),
+                    // polkit answered a moment ago and took a password; one
+                    // lost call afterwards is not "not running".
+                    Ok(Ok(Readiness::Unreachable(detail))) => Some(
+                        format!(
+                            "The policy was installed, but polkit did not answer afterwards: \
+                             {detail}. Check again in a moment."
+                        )
+                        .into(),
+                    ),
+                    // Closing the dialog is an answer, not a failure.
+                    Ok(Err(SetupError::Dismissed)) => None,
+                    Ok(Err(error)) => Some(error.to_string().into()),
+                    Err(error) => Some(format!("{error:#}").into()),
+                };
+                if let OwnerAuthState::PolicyMissing {
                     installing, error, ..
                 } = &mut view.owner_auth
                 {
@@ -11059,6 +11066,10 @@ impl WalletWindow {
         }
         if route == Route::Settings && matches!(self.release_state, ReleaseDisplayState::Idle) {
             self.check_latest_release(cx);
+        }
+        #[cfg(target_os = "linux")]
+        if route == Route::Settings && matches!(self.owner_auth, OwnerAuthState::Unknown) {
+            self.probe_owner_auth(cx);
         }
         self.command_palette = false;
         cx.notify();
@@ -16406,7 +16417,7 @@ impl WalletWindow {
              for administrative tasks.",
         ));
         panel = match &self.owner_auth {
-            OwnerAuthState::Probing => panel.child(
+            OwnerAuthState::Unknown | OwnerAuthState::Probing => panel.child(
                 h_flex()
                     .debug_selector(|| "polkit-probe-progress".to_owned())
                     .gap_2()
@@ -16431,9 +16442,12 @@ impl WalletWindow {
             OwnerAuthState::PolicyMissing {
                 source,
                 pkexec,
+                actions_dir,
                 installing,
                 error,
             } => {
+                use ekubo_wallet_core::polkit::ActionsDir;
+
                 let installing = *installing;
                 let mut panel = panel.child(prose(
                     "polkit reads action definitions only from /usr/share/polkit-1/actions, \
@@ -16441,6 +16455,53 @@ impl WalletWindow {
                      definition there is a one-time step that asks for an administrator \
                      password; nothing else changes.",
                 ));
+                // Nothing this pane can run will write into a read-only or
+                // absent /usr; saying so beats asking for a password first.
+                if *actions_dir != ActionsDir::Writable {
+                    panel = panel.child(prose(match actions_dir {
+                        ActionsDir::ReadOnly => {
+                            "/usr is read-only on this system, so neither this button nor sudo \
+                             can put a file there. Add the definition with the distribution's \
+                             own tooling — rpm-ostree on Fedora Silverblue and Kinoite, the \
+                             system configuration on NixOS — then check again. The file to add \
+                             is:"
+                        }
+                        ActionsDir::Missing | ActionsDir::Writable => {
+                            "This system has no /usr/share/polkit-1/actions, the one directory \
+                             polkit reads, so the wallet cannot install its definition. Add it \
+                             wherever this distribution keeps polkit's actions, then check \
+                             again. The file to add is:"
+                        }
+                    }));
+                    panel = match source {
+                        Ok(path) => panel.child(
+                            div()
+                                .debug_selector(|| "polkit-policy-file".to_owned())
+                                .text_sm()
+                                .font_family(MONO_FONT_FAMILY)
+                                .child(selectable_text(
+                                    "polkit-policy-file",
+                                    &path.display().to_string(),
+                                )),
+                        ),
+                        Err(missing) => panel.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .max_w(PROSE_MEASURE)
+                                .child(selectable_label(format!(
+                                    "The policy could not be written for a manual install: \
+                                     {missing}"
+                                ))),
+                        ),
+                    };
+                    return settings_section(
+                        "Owner authentication",
+                        GroupBox::new()
+                            .id("owner-authentication-settings")
+                            .child(panel.child(recheck(cx, false))),
+                    );
+                }
                 if *pkexec {
                     panel = panel.child(
                         h_flex()

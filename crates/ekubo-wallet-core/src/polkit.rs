@@ -18,17 +18,20 @@
 //! root cannot read at all, `allow_other` being off — is ever handed across.
 //! The wallet holds no privilege before, during, or after.
 //!
-//! Two things it does not paper over. `pkexec` is a separate package from the
-//! daemon on Debian 12 and Ubuntu 23.04 onward, so a machine can have polkit
-//! and no way to prompt; and a session can lack an authentication agent. For
-//! both, [`export_policy`] writes the same document somewhere root *can* read
-//! and [`manual_install_command`] is the `sudo` line to run instead. A `.deb`
-//! install never gets here — the package puts the definition in place itself
-//! (`deb.files` in the workspace manifest).
+//! Three things it does not paper over. `pkexec` is a separate package from
+//! the daemon on Debian 12 and Ubuntu 23.04 onward, so a machine can have
+//! polkit and no way to prompt; a session can lack an authentication agent;
+//! and on an immutable distribution `/usr` is read-only, or polkit's actions
+//! directory is somewhere else entirely, so neither `pkexec` nor `sudo` can
+//! put the file where polkit looks. [`actions_dir`] tells the three apart up
+//! front, [`export_policy`] writes the document somewhere root *can* read,
+//! and [`manual_install_command`] is the `sudo` line for the sessions where
+//! that is the answer. A `.deb` install never gets here — the package puts
+//! the definition in place itself (`deb.files` in the workspace manifest).
 
 use std::{
+    future::Future,
     io::Write as _,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     time::Duration,
@@ -56,6 +59,11 @@ pub const POLICY_DOCUMENT: &str = include_str!("../../../contrib/polkit/com.ekub
 const PKEXEC: &str = "/usr/bin/pkexec";
 const INSTALL: &str = "/usr/bin/install";
 
+/// zbus 5 sets no method timeout of its own, and a polkit daemon that is
+/// running but stuck — blocked on a slow name service, say — would otherwise
+/// hold a probe open for as long as it liked.
+const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Whether polkit can currently answer an owner-authentication request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Readiness {
@@ -66,71 +74,83 @@ pub enum Readiness {
     /// the state of every fresh `AppImage` install.
     PolicyMissing,
     /// No answer from polkit on the system bus: not installed, not running,
-    /// the bus unreachable, or one call that failed.
+    /// the bus unreachable, or one call that failed or timed out.
     Unreachable(String),
 }
 
-impl Readiness {
-    #[must_use]
-    pub fn is_ready(&self) -> bool {
-        matches!(self, Self::Ready)
+/// One question to the bus, with a deadline, and its failure as one line of
+/// text fit for a label. A D-Bus error's text is whatever the peer put in
+/// it.
+async fn ask<T>(question: impl Future<Output = zbus::Result<T>>) -> Result<T, String> {
+    match tokio::time::timeout(CALL_TIMEOUT, question).await {
+        Ok(Ok(answer)) => Ok(answer),
+        Ok(Err(error)) => Err(crate::sanitize::terminal_safe_line(&error.to_string())),
+        Err(_) => Err(format!(
+            "no answer within {} seconds",
+            CALL_TIMEOUT.as_secs()
+        )),
     }
 }
 
 /// polkit's authority on the system bus.
-pub(crate) async fn authority() -> zbus::Result<AuthorityProxy<'static>> {
-    let connection = zbus::Connection::system().await?;
-    AuthorityProxy::new(&connection).await
+pub(crate) async fn connect() -> Result<AuthorityProxy<'static>, String> {
+    ask(async {
+        let connection = zbus::Connection::system().await?;
+        AuthorityProxy::new(&connection).await
+    })
+    .await
 }
 
 /// Whether the authority knows [`ACTION_ID`].
-pub(crate) async fn action_known(authority: &AuthorityProxy<'_>) -> zbus::Result<bool> {
-    let actions = authority.enumerate_actions("").await?;
-    Ok(actions.iter().any(|action| action.action_id == ACTION_ID))
+///
+/// polkit has no lookup for one action; `EnumerateActions` is the only
+/// question it answers, and the reply lists every action on the system.
+pub(crate) async fn probe(authority: &AuthorityProxy<'_>) -> Readiness {
+    match ask(authority.enumerate_actions("")).await {
+        Ok(actions) if actions.iter().any(|action| action.action_id == ACTION_ID) => {
+            Readiness::Ready
+        }
+        Ok(_) => Readiness::PolicyMissing,
+        Err(detail) => Readiness::Unreachable(detail),
+    }
 }
 
 /// Ask polkit whether it knows the wallet's action.
 pub async fn readiness() -> Readiness {
-    let authority = match authority().await {
-        Ok(authority) => authority,
-        Err(error) => return Readiness::Unreachable(error.to_string()),
-    };
-    match action_known(&authority).await {
-        Ok(true) => Readiness::Ready,
-        Ok(false) => Readiness::PolicyMissing,
-        Err(error) => Readiness::Unreachable(error.to_string()),
+    match connect().await {
+        Ok(authority) => probe(&authority).await,
+        Err(detail) => Readiness::Unreachable(detail),
     }
 }
 
-/// Poll [`readiness`] until it reports [`Readiness::Ready`] or `timeout`
-/// passes. polkit watches its actions directory and reloads on its own; the
-/// reload is quick but not synchronous with the `install(1)` that triggered
-/// it. The answer is the best one seen, not the last: one failed call at the
-/// end of the wait must not turn a definition polkit had already listed as
-/// missing into "polkit is not running".
+/// Poll polkit until it knows the action or `timeout` passes. polkit watches
+/// its actions directory and reloads on its own; the reload is quick but not
+/// synchronous with the `install(1)` that triggered it. One connection
+/// serves every poll, and the answer is the best one seen, not the last: one
+/// failed call at the end of the wait must not turn a definition polkit had
+/// already listed as missing into "polkit did not answer".
 pub async fn await_readiness(timeout: Duration) -> Readiness {
-    const INTERVAL: Duration = Duration::from_millis(200);
+    const INTERVAL: Duration = Duration::from_millis(250);
     let deadline = tokio::time::Instant::now() + timeout;
+    let authority = match connect().await {
+        Ok(authority) => authority,
+        Err(detail) => return Readiness::Unreachable(detail),
+    };
     let mut best = None;
     loop {
-        let state = readiness().await;
-        if state.is_ready() {
-            return state;
+        match probe(&authority).await {
+            Readiness::Ready => return Readiness::Ready,
+            Readiness::PolicyMissing => best = Some(Readiness::PolicyMissing),
+            unreachable @ Readiness::Unreachable(_) => {
+                if best.is_none() {
+                    best = Some(unreachable);
+                }
+            }
         }
-        best = Some(prefer(best, state));
         if tokio::time::Instant::now() >= deadline {
             return best.expect("one poll has run");
         }
         tokio::time::sleep(INTERVAL).await;
-    }
-}
-
-/// An answer from polkit outranks a call that got none.
-fn prefer(previous: Option<Readiness>, next: Readiness) -> Readiness {
-    match (previous, next) {
-        (Some(Readiness::Ready), _) => Readiness::Ready,
-        (Some(Readiness::PolicyMissing), Readiness::Unreachable(_)) => Readiness::PolicyMissing,
-        (_, next) => next,
     }
 }
 
@@ -139,6 +159,63 @@ fn prefer(previous: Option<Readiness>, next: Readiness) -> Readiness {
 #[must_use]
 pub fn pkexec_available() -> bool {
     Path::new(PKEXEC).is_file()
+}
+
+/// Whether anything can be put into [`ACTIONS_DIR`] at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionsDir {
+    /// The ordinary case: root can write it, so `pkexec` or `sudo` can.
+    Writable,
+    /// The directory does not exist. NixOS keeps polkit's definitions under
+    /// `/run/current-system`, and a distribution that ships no polkit at all
+    /// has nothing here either.
+    Missing,
+    /// The directory is on a read-only mount — Fedora Silverblue, `SteamOS`,
+    /// and the other immutable distributions — so neither `pkexec` nor
+    /// `sudo` can install into it; the definition has to be layered with the
+    /// distribution's own tooling.
+    ReadOnly,
+}
+
+#[must_use]
+pub fn actions_dir() -> ActionsDir {
+    if !Path::new(ACTIONS_DIR).is_dir() {
+        return ActionsDir::Missing;
+    }
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    if mounted_read_only(&mounts, ACTIONS_DIR) {
+        ActionsDir::ReadOnly
+    } else {
+        ActionsDir::Writable
+    }
+}
+
+/// Whether the mount holding `path` is read-only, from the kernel's own
+/// mount table: the innermost mount point that contains `path`, and of two
+/// mounts on the same point the later one, which is the one on top.
+fn mounted_read_only(mounts: &str, path: &str) -> bool {
+    // The innermost mount so far, as (length of its mount point, options).
+    let mut innermost: Option<(usize, &str)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(_device), Some(point), Some(_kind), Some(options)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        // /proc escapes the four characters that would break the format;
+        // a space in a mount point is the one that occurs in practice.
+        let point = point.replace("\\040", " ");
+        let contains = point == "/"
+            || path == point
+            || path
+                .strip_prefix(point.as_str())
+                .is_some_and(|rest| rest.starts_with('/'));
+        if contains && innermost.is_none_or(|(deepest, _)| point.len() >= deepest) {
+            innermost = Some((point.len(), options));
+        }
+    }
+    innermost.is_some_and(|(_, options)| options.split(',').any(|option| option == "ro"))
 }
 
 #[derive(Debug, Error)]
@@ -172,20 +249,22 @@ pub fn installed_policy_path() -> PathBuf {
 
 /// Write [`POLICY_DOCUMENT`] to `directory`, for the owner to install by hand.
 ///
-/// The wallet's own data directory is the right `directory`: root can read it
-/// with `sudo`, which is not true of the `AppImage`'s FUSE mount. The file is
-/// rewritten every time so it is always this build's copy.
+/// The wallet's own data directory is the right `directory`: root can read
+/// anything there, which is not true of the `AppImage`'s FUSE mount. The
+/// file is rewritten every time so it is always this build's copy, through
+/// the kernel's own private-file path — the name is opened `O_NOFOLLOW` and
+/// the handle is what gets written, so a link planted at that name is
+/// refused rather than followed to the database beside it.
 pub fn export_policy(directory: &Path) -> Result<PathBuf, SetupError> {
     let path = directory.join(POLICY_FILE_NAME);
-    let write = || -> std::io::Result<PathBuf> {
-        std::fs::create_dir_all(directory)?;
-        std::fs::write(&path, POLICY_DOCUMENT)?;
-        // The document is public and root has to be able to read it; the
-        // directory's own mode decides who else gets that far.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
-        path.canonicalize()
+    let write = || -> anyhow::Result<PathBuf> {
+        crate::config::create_private_dir(directory)?;
+        let mut file = crate::config::open_private_file(&path)?;
+        file.set_len(0)?;
+        file.write_all(POLICY_DOCUMENT.as_bytes())?;
+        Ok(path.canonicalize()?)
     };
-    write().map_err(|error| SetupError::ExportFailed(format!("{}: {error}", path.display())))
+    write().map_err(|error| SetupError::ExportFailed(format!("{}: {error:#}", path.display())))
 }
 
 /// The command to run by hand when `pkexec` cannot help — it is not
@@ -226,6 +305,10 @@ pub fn install_policy() -> Result<(), SetupError> {
         // Without an agent pkexec would otherwise try to authenticate on a
         // controlling terminal, and a desktop process has none to offer.
         .arg("--disable-internal-agent")
+        // pkexec refuses, before asking polkit anything, a caller whose
+        // SHELL is not listed in /etc/shells — a shell from nix or Homebrew,
+        // say. Unset, it uses the account's login shell instead.
+        .env_remove("SHELL")
         .arg(INSTALL)
         .args(["-m", "644", "-o", "root", "-g", "root", "/dev/stdin"])
         .arg(installed_policy_path())
@@ -247,9 +330,11 @@ pub fn install_policy() -> Result<(), SetupError> {
 
 /// Map pkexec's documented exit codes: 126 when the owner dismissed the
 /// dialog, 127 when polkit would not authorize or could not ask, anything
-/// else from `install(1)`. pkexec also exits 127 when it cannot run the
-/// program; with the program's presence checked first, that case is left to
-/// the stderr text, which every non-zero branch carries into the message.
+/// else from `install(1)`. pkexec also exits 127 for its own refusals —
+/// a program it cannot run, a `SHELL` it will not accept — so the stderr
+/// text, which every non-zero branch carries into the message, is what
+/// tells those apart; the program's presence and the shell are dealt with
+/// before it is asked.
 fn classify(status: ExitStatus, stderr: &str) -> Result<(), SetupError> {
     let detail = || {
         let trimmed = stderr.trim();

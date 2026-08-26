@@ -103,7 +103,10 @@ not get by running `pkexec` themselves, which is the boundary the
 already describes. When `pkexec` is absent (a separate package on Debian 12 and
 Ubuntu 23.04 onward) or no agent can prompt, the pane writes the same document
 into the wallet's data directory and shows the equivalent `sudo install`
-command, rather than falling back to weaker authorization.
+command, rather than falling back to weaker authorization. On an immutable
+distribution, where `/usr` is read-only or polkit's directory is elsewhere, it
+says so and names the file to layer instead of asking for a password that
+could not help.
 
 ## Local MCP IPC
 

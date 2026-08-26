@@ -16,26 +16,39 @@ fn the_shipped_definition_declares_the_action_the_backend_asks_for() {
 }
 
 #[test]
-fn the_exported_copy_is_this_builds_document_and_root_readable() {
-    use std::os::unix::fs::PermissionsExt as _;
-
+fn the_exported_copy_is_this_builds_document_and_replaces_a_stale_one() {
     let directory = tempfile::tempdir().unwrap();
     let nested = directory.path().join("state");
     let path = export_policy(&nested).expect("a fresh directory is created on the way");
     assert!(path.is_absolute());
     assert_eq!(path.file_name().unwrap(), POLICY_FILE_NAME);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), POLICY_DOCUMENT);
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o644
-    );
 
-    std::fs::write(&path, "stale").unwrap();
+    std::fs::write(&path, format!("{POLICY_DOCUMENT}{POLICY_DOCUMENT}")).unwrap();
     export_policy(&nested).unwrap();
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         POLICY_DOCUMENT,
-        "an older build's copy is replaced, not kept"
+        "an older or longer copy is replaced whole, not overwritten in place"
+    );
+}
+
+#[test]
+fn a_link_planted_at_the_export_name_is_refused_not_followed() {
+    let directory = tempfile::tempdir().unwrap();
+    let victim = directory.path().join("wallet.db");
+    std::fs::write(&victim, "precious").unwrap();
+    std::os::unix::fs::symlink(&victim, directory.path().join(POLICY_FILE_NAME)).unwrap();
+
+    let refused = export_policy(directory.path());
+    assert!(
+        matches!(refused, Err(SetupError::ExportFailed(_))),
+        "{refused:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "precious",
+        "the link's target must be untouched"
     );
 }
 
@@ -88,26 +101,43 @@ fn pkexec_exit_codes_map_to_what_the_owner_did() {
 }
 
 #[test]
-fn a_failed_poll_does_not_outrank_an_answer_polkit_already_gave() {
-    let lost = || Readiness::Unreachable("lost".into());
-    assert_eq!(prefer(None, lost()), lost());
-    assert_eq!(
-        prefer(None, Readiness::PolicyMissing),
-        Readiness::PolicyMissing
+fn the_innermost_mount_decides_whether_the_actions_directory_is_writable() {
+    const ORDINARY: &str = "\
+/dev/mapper/root / btrfs rw,relatime,compress=zstd:3 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev 0 0
+";
+    const SILVERBLUE: &str = "\
+composefs / overlay ro,relatime,seclabel 0 0
+/dev/nvme0n1p3 /sysroot btrfs rw,seclabel,relatime 0 0
+/dev/nvme0n1p3 /usr overlay ro,seclabel,relatime,lowerdir=/usr 0 0
+/dev/nvme0n1p3 /var btrfs rw,seclabel,relatime 0 0
+";
+    const REMOUNTED: &str = "\
+/dev/sda1 / ext4 rw,relatime 0 0
+/dev/sda1 /usr ext4 ro,relatime 0 0
+/dev/sda1 /usr ext4 rw,relatime 0 0
+";
+    const SPACED: &str = "\
+/dev/sda1 / ext4 rw,relatime 0 0
+/dev/sdb1 /usr/share\\040extra ext4 ro 0 0
+/dev/sdc1 /usr/shar ext4 ro 0 0
+";
+    assert!(!mounted_read_only(ORDINARY, ACTIONS_DIR));
+    assert!(mounted_read_only(SILVERBLUE, ACTIONS_DIR));
+    assert!(
+        !mounted_read_only(SILVERBLUE, "/var/lib/thing"),
+        "the read-only root must not shadow a writable mount beneath it"
     );
-    assert_eq!(
-        prefer(Some(Readiness::PolicyMissing), lost()),
-        Readiness::PolicyMissing
+    assert!(
+        !mounted_read_only(REMOUNTED, ACTIONS_DIR),
+        "the later mount on the same point is the one on top"
     );
-    assert_eq!(
-        prefer(Some(lost()), Readiness::PolicyMissing),
-        Readiness::PolicyMissing
+    assert!(
+        !mounted_read_only(SPACED, ACTIONS_DIR),
+        "neither a sibling with a space nor a prefix that is not a path component counts"
     );
-    assert_eq!(prefer(Some(Readiness::Ready), lost()), Readiness::Ready);
-    assert_eq!(
-        prefer(Some(lost()), Readiness::Unreachable("again".into())),
-        Readiness::Unreachable("again".into())
-    );
+    assert!(mounted_read_only(SPACED, "/usr/share extra/file"));
+    assert!(!mounted_read_only("", ACTIONS_DIR));
 }
 
 #[tokio::test]

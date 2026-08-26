@@ -109,13 +109,14 @@ identifier = "org.ekubo.wallet"
 formats = ["app", "dmg", "nsis", "appimage", "deb"]
 before-packaging-command = "cargo build --release --workspace"
 external-binaries = ["target/release/ekubo-wallet-mcp-bridge"]
-resources = ["schemas", "contrib/polkit/com.ekubo.wallet.policy"]
+resources = ["schemas"]
 icons = ["assets/app-icon-512.png"]
 
 # polkit reads action definitions only from this root-owned directory, so a
-# package that can write there puts the definition in place itself; the copy
-# under `usr/lib/ekubo-wallet/` above is what the AppImage — which cannot —
-# offers to install through pkexec from Settings → Owner authentication.
+# package that can write there puts the definition in place itself. The
+# AppImage cannot; it carries the same document compiled into the binary
+# (`ekubo_wallet_core::polkit::POLICY_DOCUMENT`) and streams it to pkexec's
+# install(1) from Settings → Owner authentication, so it ships no copy here.
 [package.metadata.packager.deb]
 files = { "contrib/polkit/com.ekubo.wallet.policy" = "/usr/share/polkit-1/actions/com.ekubo.wallet.policy" }
 
