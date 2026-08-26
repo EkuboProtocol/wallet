@@ -93,12 +93,6 @@ fn wallet(
     ((directory, lock), view, window.into())
 }
 
-/// Wait for the background snapshot to arrive.
-///
-/// Without it every page renders its loading spinner and `route_panel` is
-/// never called, so a test that only asserted "no panic" would pass while
-/// drawing nothing it claimed to draw. The read happens on a real tokio
-/// runtime this scheduler does not drive, so waiting means actually waiting.
 /// Make a test's detected-agent list the one the page actually draws.
 ///
 /// Assigning the field alone is not enough. Startup detection is a real read
@@ -117,6 +111,12 @@ fn supersede_agent_detection(wallet: &mut WalletWindow) {
     wallet.detected_agents_generation = wallet.detected_agents_generation.wrapping_add(1);
 }
 
+/// Wait for the background snapshot to arrive.
+///
+/// Without it every page renders its loading spinner and `route_panel` is
+/// never called, so a test that only asserted "no panic" would pass while
+/// drawing nothing it claimed to draw. The read happens on a real tokio
+/// runtime this scheduler does not drive, so waiting means actually waiting.
 fn settle(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
     cx.run_until_parked();
     cx.update_entity(view, |wallet, _| {

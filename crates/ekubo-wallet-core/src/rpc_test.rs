@@ -176,6 +176,54 @@ fn network_with(chain_id: u64, rpc_urls: Vec<Url>) -> NetworkConfig {
     }
 }
 
+/// An endpoint whose client cannot be built at all, as distinct from one that
+/// is built and then does not answer.
+///
+/// A domain host is resolved when its client is built, and one that resolves
+/// to a loopback address is refused. `localhost` reaches that refusal without
+/// a name server, so this is the construction failure a shut-down provider
+/// domain or a resolver that refuses it produces, reproduced offline.
+fn unbuildable_endpoint() -> Url {
+    "http://localhost:1/"
+        .parse()
+        .expect("unbuildable endpoint URL")
+}
+
+/// One endpoint that cannot be built is left out of the attempt order, not
+/// fatal to the network.
+///
+/// This is the whole point of listing several. Building the clients eagerly
+/// and failing the set on the first refusal meant a list of six endpoints had
+/// six ways to fail where a list of one had one, so seeding the ranked list
+/// would have made a fresh install more fragile rather than less.
+/// `try_clients` already skipped these; this is the same rule.
+#[tokio::test]
+async fn an_endpoint_that_cannot_be_built_is_left_out_rather_than_fatal() {
+    let (healthy, _server) = stub_endpoint(7, 4242);
+    let network = network_with(7, vec![unbuildable_endpoint(), healthy]);
+    let clients = clients_for(&network)
+        .await
+        .expect("the endpoint that could be built is enough");
+    assert_eq!(clients.len(), 1, "only the buildable endpoint is offered");
+}
+
+/// Nothing left to attempt is still an error, and it names what refused.
+#[tokio::test]
+async fn clients_for_fails_only_when_no_endpoint_can_be_built() {
+    let network = network_with(7, vec![unbuildable_endpoint()]);
+    let error = match clients_for(&network).await {
+        Ok(clients) => panic!(
+            "an unbuildable endpoint alone leaves nothing to attempt, got {} clients",
+            clients.len()
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(
+        error.contains("all 1 RPC endpoints configured for failovernet failed"),
+        "the failure must name the network and how many it tried: {error}"
+    );
+}
+
 /// The property the whole feature exists for: one healthy endpoint anywhere in
 /// the list is enough, however many dead ones precede it.
 #[tokio::test]
