@@ -20,3 +20,8 @@
 disallowed-methods = []
 
 disallowed-types = []
+
+# Repeated from the workspace root for the reason stated above: this file
+# replaces that one for this crate, so a threshold set only there would leave
+# the kernel on clippy's built-in default with nothing saying so.
+cognitive-complexity-threshold = 25

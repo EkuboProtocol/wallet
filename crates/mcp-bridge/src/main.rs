@@ -434,6 +434,12 @@ async fn main() {
     }
 }
 
+// The bridge's whole stdio lifecycle in one place: read the initialize frame,
+// hand it to the client, then pump frames in both directions until stdin
+// closes, translating every transport and protocol error into a response the
+// caller can still parse. Splitting it means passing the reader, the writer and
+// the client through every piece, and the sequence is the thing worth reading.
+#[allow(clippy::cognitive_complexity)]
 async fn run() -> Result<()> {
     let client = arguments()?;
     let mut stdin = BufReader::new(tokio::io::stdin());

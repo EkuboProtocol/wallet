@@ -13,6 +13,39 @@ def fail(message: str) -> None:
     raise SystemExit(f"packaged MCP bridge verification failed: {message}")
 
 
+def check_initialize(initialized: dict, expected_version: str) -> None:
+    """The initialize handshake: identity, version, and advertised capabilities."""
+    result = initialized.get("result", {})
+    server = result.get("serverInfo", {})
+    capabilities = result.get("capabilities", {})
+
+    if initialized.get("id") != "package-initialize":
+        fail("initialize response did not preserve its request ID")
+    if server.get("name") != "ekubo-wallet-mcp-bridge":
+        fail("initialize response has the wrong server name")
+    if server.get("version") != expected_version:
+        fail(
+            f"initialize response reports version {server.get('version')!r}, "
+            f"expected {expected_version!r}"
+        )
+    # A harness keeps these answers for its whole session, so a package that
+    # forgets to claim resources here makes every wallet:// document
+    # unreachable no matter what the wallet itself serves.
+    for capability in ("tools", "resources"):
+        if capabilities.get(capability, {}).get("listChanged") is not True:
+            fail(f"initialize response does not advertise {capability}.listChanged")
+
+
+def check_empty_catalog(response: dict, kind: str) -> None:
+    """Offline, both list methods must answer with the deterministic empty catalog."""
+    if response != {
+        "jsonrpc": "2.0",
+        "id": f"package-{kind}",
+        "result": {kind: []},
+    }:
+        fail(f"offline {kind}/list response is not the deterministic empty catalog")
+
+
 def main() -> None:
     if len(sys.argv) != 3:
         fail("usage: verify-mcp-bridge.py <binary> <expected-version>")
@@ -73,36 +106,9 @@ def main() -> None:
         fail(f"{binary} emitted {len(responses)} MCP frames instead of 3")
 
     initialized, tools, resources = responses
-    result = initialized.get("result", {})
-    server = result.get("serverInfo", {})
-    if initialized.get("id") != "package-initialize":
-        fail("initialize response did not preserve its request ID")
-    if server.get("name") != "ekubo-wallet-mcp-bridge":
-        fail("initialize response has the wrong server name")
-    if server.get("version") != expected_version:
-        fail(
-            f"initialize response reports version {server.get('version')!r}, "
-            f"expected {expected_version!r}"
-        )
-    if result.get("capabilities", {}).get("tools", {}).get("listChanged") is not True:
-        fail("initialize response does not advertise tools.listChanged")
-    # A harness keeps this answer for its whole session, so a package that
-    # forgets to claim resources here makes every wallet:// document
-    # unreachable no matter what the wallet itself serves.
-    if result.get("capabilities", {}).get("resources", {}).get("listChanged") is not True:
-        fail("initialize response does not advertise resources.listChanged")
-    if tools != {
-        "jsonrpc": "2.0",
-        "id": "package-tools",
-        "result": {"tools": []},
-    }:
-        fail("offline tools/list response is not the deterministic empty catalog")
-    if resources != {
-        "jsonrpc": "2.0",
-        "id": "package-resources",
-        "result": {"resources": []},
-    }:
-        fail("offline resources/list response is not the deterministic empty catalog")
+    check_initialize(initialized, expected_version)
+    check_empty_catalog(tools, "tools")
+    check_empty_catalog(resources, "resources")
 
 
 if __name__ == "__main__":

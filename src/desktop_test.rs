@@ -2896,6 +2896,10 @@ fn a_draft_that_matches_the_installed_policy_cannot_be_installed() {
 }
 
 #[test]
+// A test that reads desktop.rs as text and asserts on where the rationale is
+// rendered. The branch count is the number of things being asserted about the
+// source, which is the point of the test.
+#[allow(clippy::cognitive_complexity)]
 fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff() {
     let source = include_str!("desktop.rs");
     let editor = source
