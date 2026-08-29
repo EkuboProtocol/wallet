@@ -34,3 +34,8 @@ disallowed-methods = [
 disallowed-types = [
     { path = "alloy::signers::local::PrivateKeySigner", reason = "holding one is holding the wallet; presentation code receives signatures, never signers" },
 ]
+
+# clippy's default, set explicitly so changing it is a deliberate edit. Repeated
+# in `crates/ekubo-wallet-core/clippy.toml`, which replaces this file for that
+# crate rather than merging with it.
+cognitive-complexity-threshold = 25

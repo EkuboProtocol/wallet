@@ -614,6 +614,11 @@ async fn one_shot_simulation_covers_direct_and_batch(
     }
 }
 
+// An integration test against a live fork: a long sequence of steps, each
+// guarded so the test skips rather than fails when the network cannot support
+// it. The guards are the branch count, and they belong with the steps they
+// guard.
+#[allow(clippy::cognitive_complexity)]
 async fn a_fork_carries_state_between_dependent_plans(
     network: &NetworkConfig,
     capabilities: Capabilities,

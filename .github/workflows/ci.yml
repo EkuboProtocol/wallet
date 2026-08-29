@@ -175,6 +175,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      - name: Check Python complexity
+        run: pipx run ruff==0.16.4 check --output-format concise .
+
       - name: Verify bundled third-party notices are current
         run: contrib/generate-third-party-licenses.py --check
 

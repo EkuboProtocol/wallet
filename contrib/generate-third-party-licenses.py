@@ -137,6 +137,87 @@ def reachable_packages(data):
     ]
 
 
+def render_package_index(by_license):
+    """The body of the document: every package, grouped by license expression."""
+    lines = []
+    for expression in sorted(by_license):
+        lines.append(f"## {expression}")
+        lines.append("")
+        for package in by_license[expression]:
+            source = package.get("repository") or package.get("homepage") or ""
+            suffix = f" — {source}" if source else ""
+            authors = ", ".join(package.get("authors") or [])
+            author_suffix = f" — {authors}" if authors else ""
+            lines.append(
+                f"- {package['name']} {package['version']}{author_suffix}{suffix}"
+            )
+        lines.append("")
+    return lines
+
+
+def collect_license_texts(packages):
+    """Deduplicate the shipped license files by normalized text.
+
+    Returns the texts keyed by whitespace-collapsed content, each carrying the
+    packages that ship it, plus the packages that ship no license file at all.
+    """
+    seen_texts = {}
+    missing = []
+    for package in packages:
+        files = license_files_for(package)
+        if not files:
+            missing.append(package)
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            key = re.sub(r"\s+", " ", text)
+            seen_texts.setdefault(key, (text, []))[1].append(
+                f"{package['name']} {package['version']}"
+            )
+    return seen_texts, missing
+
+
+def fallback_reference(package):
+    """Where to point a reader when a package ships no license text of its own."""
+    for identifier in re.split(r"\s+(?:OR|AND|WITH)\s+", normalized_expression(package)):
+        fallback = CANONICAL_FALLBACKS.get(identifier.strip("()"))
+        if fallback:
+            return fallback
+    return "see the package repository for the license text"
+
+
+def render_license_appendix(packages):
+    """The appendix: one block per distinct license text, plus the packages
+    that ship none."""
+    seen_texts, missing = collect_license_texts(packages)
+
+    lines = ["# Appendix: License Texts", ""]
+
+    if missing:
+        lines.append("## Packages without a shipped license file")
+        lines.append("")
+        for package in missing:
+            lines.append(
+                f"- {package['name']} {package['version']}: "
+                f"{normalized_expression(package)} — {fallback_reference(package)}"
+            )
+        lines.append("")
+
+    for text, holders in sorted(seen_texts.values(), key=lambda item: item[1][0]):
+        lines.append(f"## License text for: {', '.join(holders)}")
+        lines.append("")
+        lines.append("```text")
+        lines.append(
+            "\n".join(line.rstrip() for line in text.replace("```", "` ` `").splitlines())
+        )
+        lines.append("```")
+        lines.append("")
+
+    return lines
+
+
 def main():
     check = "--check" in sys.argv[1:]
     data = metadata()
@@ -162,62 +243,8 @@ def main():
         "",
     ]
 
-    for expression in sorted(by_license):
-        lines.append(f"## {expression}")
-        lines.append("")
-        for package in by_license[expression]:
-            source = package.get("repository") or package.get("homepage") or ""
-            suffix = f" — {source}" if source else ""
-            authors = ", ".join(package.get("authors") or [])
-            author_suffix = f" — {authors}" if authors else ""
-            lines.append(
-                f"- {package['name']} {package['version']}{author_suffix}{suffix}"
-            )
-        lines.append("")
-
-    lines.append("# Appendix: License Texts")
-    lines.append("")
-
-    seen_texts = {}
-    missing = []
-    for package in packages:
-        files = license_files_for(package)
-        if not files:
-            missing.append(package)
-        for path in files:
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                continue
-            key = re.sub(r"\s+", " ", text)
-            seen_texts.setdefault(key, (text, []))[1].append(
-                f"{package['name']} {package['version']}"
-            )
-    if missing:
-        lines.append("## Packages without a shipped license file")
-        lines.append("")
-        for package in missing:
-            fallback = None
-            for identifier in re.split(r"\s+(?:OR|AND|WITH)\s+", normalized_expression(package)):
-                fallback = CANONICAL_FALLBACKS.get(identifier.strip("()"))
-                if fallback:
-                    break
-            reference = fallback or "see the package repository for the license text"
-            lines.append(
-                f"- {package['name']} {package['version']}: "
-                f"{normalized_expression(package)} — {reference}"
-            )
-        lines.append("")
-
-    for text, holders in sorted(seen_texts.values(), key=lambda item: item[1][0]):
-        lines.append(f"## License text for: {', '.join(holders)}")
-        lines.append("")
-        lines.append("```text")
-        lines.append(
-            "\n".join(line.rstrip() for line in text.replace("```", "` ` `").splitlines())
-        )
-        lines.append("```")
-        lines.append("")
+    lines.extend(render_package_index(by_license))
+    lines.extend(render_license_appendix(packages))
 
     document = "\n".join(lines).rstrip() + "\n"
     if check:

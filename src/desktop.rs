@@ -6404,6 +6404,11 @@ impl WalletWindow {
         window
     }
 
+    // Window setup: each block is an independent "if this background task is
+    // not running yet, start it" and the branches do not interact. GPUI's
+    // spawn closures capture `cx`, so extracting them buys indirection rather
+    // than clarity.
+    #[allow(clippy::cognitive_complexity)]
     fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut token_lists_created = false;
         if self.activity_refresh_task.is_none() {

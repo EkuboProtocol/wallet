@@ -1,0 +1,15 @@
+# Complexity gate for the repository's own Python -- the contrib and scripts
+# helpers that CI runs. Deliberately narrow: this is not a general Python lint
+# adoption, just a guardrail against a helper script quietly becoming
+# unreviewable.
+#
+# .agents/skills holds vendored agent skill packs. They are third-party source
+# that this repository does not maintain, so gating them would report debt
+# nobody here can pay down.
+extend-exclude = [".agents"]
+
+[lint]
+select = ["C901"]
+
+[lint.mccabe]
+max-complexity = 10

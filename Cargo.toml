@@ -160,6 +160,13 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 too_many_arguments = "allow"
 too_many_lines = "allow"
+# Not in `all` or `pedantic`: it lives in clippy's `restriction` group, and
+# clippy's own docs say it does not measure cognitive complexity especially
+# well. It is on as a coarse guardrail against a function quietly becoming
+# unreviewable, not as a precise metric. The threshold is in `clippy.toml` --
+# and note that `crates/ekubo-wallet-core/clippy.toml` replaces that file
+# rather than merging with it, so the threshold is written in both.
+cognitive_complexity = "warn"
 # The custody bans in `clippy.toml` refuse the build rather than warning in it.
 # Everything else here is advice about how the code reads; these two say that
 # presentation code has reached for a private key or a signer, and a warning is
