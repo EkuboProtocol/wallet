@@ -4077,6 +4077,64 @@ fn the_walletconnect_page_offers_the_handoff_as_one_press(cx: &mut gpui::TestApp
     release(cx, &view);
 }
 
+/// A network card's buttons still reach the window from inside the list.
+///
+/// The cards moved into a virtualized list, whose rows are built with an `App`
+/// rather than this window's `Context` and so cannot hold `cx.listener`. Their
+/// commands are dispatched as actions instead, and a dispatch that never
+/// arrives is a button that silently does nothing — which no type and no
+/// layout assertion would catch. This presses one for real.
+#[gpui::test]
+fn a_network_card_button_dispatches_to_the_window(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let networks = ekubo_wallet_core::config::default_networks();
+    let toggles = networks
+        .iter()
+        .map(|network| {
+            (
+                network.name.clone(),
+                &*format!("toggle-network-{}", network.name).leak(),
+            )
+        })
+        .collect::<Vec<(String, &'static str)>>();
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.networks = Ok(networks);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Networks);
+    });
+    draw(cx, window, &view);
+
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    let drawn_view = view.clone();
+    visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
+        gpui::AnyView::from(drawn_view).into_any_element()
+    });
+    let (pressed_name, bounds) = toggles
+        .into_iter()
+        .find_map(|(name, selector)| visual.debug_bounds(selector).map(|bounds| (name, bounds)))
+        .expect("at least one network's toggle must be on screen");
+    visual.simulate_click(bounds.center(), gpui::Modifiers::none());
+    visual.run_until_parked();
+    drop(visual);
+
+    // `set_network_disabled` marks the network busy before it writes, so the
+    // command having arrived is observable without waiting on the store.
+    let arrived = cx.update_entity(&view, |wallet, _| {
+        wallet.network_action_busy.contains(&pressed_name)
+            || wallet.network_action_errors.contains_key(&pressed_name)
+    });
+    assert!(
+        arrived,
+        "pressing {pressed_name}'s toggle must reach the window's action handler"
+    );
+
+    release(cx, &view);
+}
+
 /// A source's proposals are collected when the group is opened, not per frame.
 ///
 /// The Tokens page used to group the whole proposal queue on every frame, which
@@ -4141,6 +4199,63 @@ fn opening_a_token_proposal_group_reads_back_only_that_source(cx: &mut gpui::Tes
         opened,
         (Some("https://example.invalid/small.json".to_owned()), 10),
         "opening a group must read back that source's proposals and no others"
+    );
+
+    release(cx, &view);
+}
+
+/// The Networks page builds only the cards that are on screen.
+///
+/// It used to draw a card for every configured network — 52 of them ship by
+/// default — which cost 34ms a frame, four times the budget of a 120Hz redraw
+/// and paid again on every frame of a scroll. Asserting on layout rather than
+/// on a clock: the first card must be drawn and the last must not, which is
+/// true only while the list is virtualized.
+#[gpui::test]
+fn the_networks_page_draws_only_the_cards_on_screen(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let networks = ekubo_wallet_core::config::default_networks();
+    let total = networks.len();
+    assert!(
+        total > 20,
+        "this test is only meaningful while more networks ship than fit on a screen; got {total}"
+    );
+    // `debug_bounds` takes a `&'static str` and the names are only known at run
+    // time, so this test leaks one selector per shipped network. Fifty-odd
+    // small strings, once, in one test.
+    let selectors = networks
+        .iter()
+        .map(|network| &*format!("network-card-{}", network.name).leak())
+        .collect::<Vec<&'static str>>();
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.networks = Ok(networks);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Networks);
+    });
+    draw(cx, window, &view);
+
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    let drawn_view = view.clone();
+    visual.draw(gpui::point(px(0.0), px(0.0)), VIEWPORT, |_, _| {
+        gpui::AnyView::from(drawn_view).into_any_element()
+    });
+    let drawn = selectors
+        .into_iter()
+        .filter(|selector| visual.debug_bounds(selector).is_some())
+        .count();
+    drop(visual);
+    assert!(
+        drawn > 0,
+        "the networks that are on screen must actually draw"
+    );
+    assert!(
+        drawn * 2 < total,
+        "the list is virtualized so the page costs what is on screen rather than \
+         what is configured, but {drawn} of {total} cards were built"
     );
 
     release(cx, &view);

@@ -1043,6 +1043,231 @@ struct EditAccountPolicy {
     wallet_id: String,
 }
 
+/// One row of the virtualized Networks list.
+///
+/// The two sections are rows of the same list rather than two `GroupBox`
+/// children, because a page that draws every card to show the six on screen is
+/// the thing being fixed: 52 configured networks cost 34ms a frame, which is
+/// four times the budget of a 120Hz redraw and was paid again on every frame of
+/// a scroll.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NetworkListRow {
+    SectionHeader(&'static str),
+    Card { name: String },
+}
+
+/// One network's card, built without borrowing the window.
+///
+/// A virtualized row is built with an `App`, not this window's `Context`, so
+/// this cannot be a method and its buttons cannot hold `cx.listener`. Everything
+/// the card draws is passed in, and its commands reach the window through the
+/// weak handle — the same way the network editor's form already does.
+fn render_network_card(
+    view: &WeakEntity<WalletWindow>,
+    network: &NetworkConfig,
+    busy: bool,
+    action_error: Option<SharedString>,
+    recorded: Option<f64>,
+    cx: &App,
+) -> AnyElement {
+    let name = network.name.clone();
+    let disabled = network.disabled;
+    div()
+        .p_4()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            h_flex()
+                .flex_wrap()
+                .items_center()
+                .w_full()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div().min_w_0().flex_1().flex().flex_col().gap_2().child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().min_w_0().font_semibold().truncate().child(
+                                selectable_text(
+                                    format!("network-title-{name}"),
+                                    network.display_name.as_deref().unwrap_or(&name),
+                                ),
+                            ))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_text(
+                                        format!("network-metadata-{name}"),
+                                        &format!(
+                                            "{} · chain {}{}",
+                                            name,
+                                            network.chain_id,
+                                            if network.testnet { " · testnet" } else { "" },
+                                        ),
+                                    )),
+                            ), // No status badge. The rows are
+                               // already in a section headed
+                               // "Enabled" or "Disabled", and the
+                               // button on the row offers the
+                               // opposite verb, so the badge was
+                               // the third statement of a fact
+                               // nobody had asked twice about —
+                               // and it spent the accent colour
+                               // on every row of the longer
+                               // section, which is the surest way
+                               // to make an accent stop meaning
+                               // anything.
+                    ),
+                )
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap_2()
+                        .child(accessible_button(
+                            app_button(SharedString::from(format!("edit-network-{name}")))
+                                .icon(Icon::default().path(PENCIL_ICON))
+                                .label("Edit…")
+                                .tooltip("Edit network")
+                                .disabled(busy)
+                                .on_click({
+                                    let view = view.clone();
+                                    let edit = network.clone();
+                                    move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let _ = view.update(cx, |view, cx| {
+                                            view.edit_network(&edit, window, cx);
+                                        });
+                                    }
+                                }),
+                            "Edit network",
+                        ))
+                        .child(
+                            app_button(SharedString::from(format!("toggle-network-{name}")))
+                                .debug_selector({
+                                    let name = name.clone();
+                                    move || format!("toggle-network-{name}")
+                                })
+                                .label(if busy {
+                                    "Authenticating"
+                                } else if disabled {
+                                    "Enable"
+                                } else {
+                                    "Disable"
+                                })
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click({
+                                    let view = view.clone();
+                                    let toggle = network.clone();
+                                    move |_, _, cx| {
+                                        let _ = view.update(cx, |view, cx| {
+                                            view.set_network_disabled(
+                                                toggle.clone(),
+                                                !disabled,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        ),
+                ),
+        )
+        // A chain's own currency has no row in the token
+        // database — it has no contract — so this is where its
+        // approximate value is set, beside the currency it
+        // belongs to. Like a token's, it decides only where
+        // the balance sorts on the Portfolio tab and whether
+        // that tab holds it back as dust.
+        .when_some(network.resolved_native_currency(), |card, currency| {
+            let chain_id = network.chain_id;
+            let symbol = currency.symbol.clone();
+            let shipped = ekubo_wallet_core::token_prices::native_usd_price(chain_id);
+            let label = SharedString::from(symbol.clone());
+            card.child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_text(
+                        format!("network-native-value-{name}"),
+                        &match (recorded, shipped) {
+                            (Some(price), _) => {
+                                format!("1 {symbol} ≈ {} · your value", format_usd(price))
+                            }
+                            (None, Some(price)) => {
+                                format!("1 {symbol} ≈ {} · shipped estimate", format_usd(price))
+                            }
+                            (None, None) => format!("1 {symbol} has no approximate value"),
+                        },
+                    ))
+                    .child(
+                        app_button(SharedString::from(format!("set-native-value-{name}")))
+                            .debug_selector({
+                                let name = name.clone();
+                                move || format!("set-native-value-{name}")
+                            })
+                            // A ghost Button, not a link: this
+                            // opens the price dialog, and link
+                            // styling on an in-app command hides
+                            // the affordance and hands assistive
+                            // technology the wrong role. The
+                            // ellipsis is the dialog.
+                            .label(if recorded.is_some() {
+                                "Change value…"
+                            } else {
+                                "Set value…"
+                            })
+                            .ghost()
+                            .h(rems(1.375))
+                            .px_1()
+                            .text_sm()
+                            .font_normal()
+                            .on_click({
+                                let view = view.clone();
+                                move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.open_token_price_editor(
+                                            PriceEditorTarget::NativeCurrency {
+                                                chain_id,
+                                                label: label.clone(),
+                                                recorded,
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                    ),
+            )
+        })
+        .when_some(action_error, |card, error| {
+            card.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(selectable_text(
+                        format!("network-action-error-{name}"),
+                        &error,
+                    )),
+            )
+        })
+        .into_any_element()
+}
+
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = ekubo_wallet, no_json)]
 struct ExportAccountKey {
@@ -2448,6 +2673,10 @@ pub struct WalletWindow {
     show_low_value_balances: bool,
     portfolio_list: VariableListState,
     portfolio_rows: Cell<usize>,
+    /// The Networks page's cards, virtualized for the same reason the
+    /// portfolio's balances are.
+    network_list: VariableListState,
+    network_rows: Cell<usize>,
     /// How many times this window has derived the Portfolio's rows, for the
     /// test that holds it to once per reading rather than once per frame.
     ///
@@ -6340,6 +6569,8 @@ impl WalletWindow {
             show_low_value_balances: false,
             portfolio_list: virtual_inbox_list(0),
             portfolio_rows: Cell::new(0),
+            network_list: virtual_inbox_list(0),
+            network_rows: Cell::new(0),
             #[cfg(test)]
             portfolio_rows_derived: Cell::new(0),
             portfolio_row_cache: RefCell::new(None),
@@ -15149,7 +15380,7 @@ impl WalletWindow {
     }
 
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut content = div().flex().flex_col().gap_4();
+        let mut content = div().flex().flex_col().gap_4().flex_1().min_h_0();
         match self.cached_reviews().map(|reviews| {
             reviews
                 .network_proposals
@@ -15298,229 +15529,103 @@ impl WalletWindow {
                     networks_for_display(networks, self.testnet_mode)
                         .into_iter()
                         .partition(|network| !network.disabled);
-                let network_card = |network: &NetworkConfig, cx: &mut Context<Self>| {
-                    let name = network.name.clone();
-                    let edit = network.clone();
-                    let toggle_network = network.clone();
-                    let disabled = network.disabled;
-                    let busy = self.network_action_busy.contains(&name);
-                    let action_error = self.network_action_errors.get(&name).cloned();
-                    div()
-                        .p_4()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            h_flex()
-                                .flex_wrap()
-                                .items_center()
-                                .w_full()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div().min_w_0().flex_1().flex().flex_col().gap_2().child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .font_semibold()
-                                                    .truncate()
-                                                    .child(selectable_text(
-                                                        format!("network-title-{name}"),
-                                                        network
-                                                            .display_name
-                                                            .as_deref()
-                                                            .unwrap_or(&name),
-                                                    )),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(selectable_text(
-                                                        format!("network-metadata-{name}"),
-                                                        &format!(
-                                                            "{} · chain {}{}",
-                                                            name,
-                                                            network.chain_id,
-                                                            if network.testnet {
-                                                                " · testnet"
-                                                            } else {
-                                                                ""
-                                                            },
-                                                        ),
-                                                    )),
-                                            )
-                                            // No status badge. The rows are
-                                            // already in a section headed
-                                            // "Enabled" or "Disabled", and the
-                                            // button on the row offers the
-                                            // opposite verb, so the badge was
-                                            // the third statement of a fact
-                                            // nobody had asked twice about —
-                                            // and it spent the accent colour
-                                            // on every row of the longer
-                                            // section, which is the surest way
-                                            // to make an accent stop meaning
-                                            // anything.
-                                    ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .flex_none()
-                                        .gap_2()
-                                        .child(accessible_button(
-                                            app_button(SharedString::from(format!(
-                                                "edit-network-{name}"
-                                            )))
-                                            .icon(Icon::default().path(PENCIL_ICON))
-                                            .label("Edit…")
-                                            .tooltip("Edit network")
-                                            .disabled(busy)
-                                            .on_click(cx.listener(
-                                                move |view, _, window, cx| {
-                                                    cx.stop_propagation();
-                                                    view.edit_network(&edit, window, cx);
-                                                },
-                                            )),
-                                            "Edit network",
-                                        ))
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "toggle-network-{name}"
-                                            )))
-                                            .label(if busy {
-                                                "Authenticating"
-                                            } else if disabled {
-                                                "Enable"
-                                            } else {
-                                                "Disable"
-                                            })
-                                            .loading(busy)
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.set_network_disabled(
-                                                    toggle_network.clone(),
-                                                    !disabled,
-                                                    cx,
-                                                );
-                                            })),
-                                        ),
-                                ),
-                        )
-                        // A chain's own currency has no row in the token
-                        // database — it has no contract — so this is where its
-                        // approximate value is set, beside the currency it
-                        // belongs to. Like a token's, it decides only where
-                        // the balance sorts on the Portfolio tab and whether
-                        // that tab holds it back as dust.
-                        .when_some(network.resolved_native_currency(), |card, currency| {
-                            let chain_id = network.chain_id;
-                            let symbol = currency.symbol.clone();
-                            let recorded = self
-                                .snapshot()
-                                .ok()
-                                .and_then(|snapshot| {
-                                    snapshot.native_token_prices.get(&chain_id).copied()
-                                });
-                            let shipped =
-                                ekubo_wallet_core::token_prices::native_usd_price(chain_id);
-                            let label = SharedString::from(symbol.clone());
-                            card.child(
-                                h_flex()
-                                    .w_full()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_text(
-                                        format!("network-native-value-{name}"),
-                                        &match (recorded, shipped) {
-                                            (Some(price), _) => format!(
-                                                "1 {symbol} ≈ {} · your value",
-                                                format_usd(price)
-                                            ),
-                                            (None, Some(price)) => format!(
-                                                "1 {symbol} ≈ {} · shipped estimate",
-                                                format_usd(price)
-                                            ),
-                                            (None, None) => format!(
-                                                "1 {symbol} has no approximate value"
-                                            ),
-                                        },
-                                    ))
-                                    .child(
-                                        app_button(SharedString::from(format!(
-                                            "set-native-value-{name}"
-                                        )))
-                                        .debug_selector({
-                                            let name = name.clone();
-                                            move || format!("set-native-value-{name}")
-                                        })
-                                        // A ghost Button, not a link: this
-                                        // opens the price dialog, and link
-                                        // styling on an in-app command hides
-                                        // the affordance and hands assistive
-                                        // technology the wrong role. The
-                                        // ellipsis is the dialog.
-                                        .label(if recorded.is_some() {
-                                            "Change value…"
-                                        } else {
-                                            "Set value…"
-                                        })
-                                        .ghost()
-                                        .h(rems(1.375))
-                                        .px_1()
-                                        .text_sm()
-                                        .font_normal()
-                                        .on_click(cx.listener(move |view, _, window, cx| {
-                                            cx.stop_propagation();
-                                            view.open_token_price_editor(
-                                                PriceEditorTarget::NativeCurrency {
-                                                    chain_id,
-                                                    label: label.clone(),
-                                                    recorded,
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                    ),
-                            )
-                        })
-                        .when_some(action_error, |card, error| {
-                            card.child(div().text_sm().text_color(cx.theme().danger).child(
-                                selectable_text(format!("network-action-error-{name}"), &error),
-                            ))
-                        })
-            };
-                let mut sections = content;
-                for (id, title, group) in [
-                    ("networks-enabled", "Enabled", enabled),
-                    ("networks-disabled", "Disabled", disabled_networks),
+                // The section headers are rows of the list rather than frames
+                // around it, so the whole page scrolls as one and only the
+                // cards actually on screen are ever built.
+                let mut rows = Vec::with_capacity(enabled.len() + disabled_networks.len() + 2);
+                for (title, group) in [
+                    ("Enabled", &enabled),
+                    ("Disabled", &disabled_networks),
                 ] {
                     if group.is_empty() {
                         continue;
                     }
-                    sections = sections.child(
-                        GroupBox::new().id(id).title(title).children(
-                            group
-                                .into_iter()
-                                .map(|network| network_card(network, cx))
-                                .collect::<Vec<_>>(),
-                        ),
-                    );
+                    rows.push(NetworkListRow::SectionHeader(title));
+                    rows.extend(group.iter().map(|network| NetworkListRow::Card {
+                        name: network.name.clone(),
+                    }));
                 }
-                sections
+                Self::resize_list(&self.network_list, &self.network_rows, rows.len());
+                self.route_overflow_indicator
+                    .set_scroll_handle(self.network_list.clone());
+                // Cheap handles rather than the page's data: an `Arc` bump for
+                // the reading the cards are looked up in, and the two small
+                // per-network maps a card reads its own state out of.
+                let snapshot = self.desktop_snapshot.clone();
+                let busy = self.network_action_busy.clone();
+                let errors = self.network_action_errors.clone();
+                let testnet_mode = self.testnet_mode;
+                // A virtualized row is built with an `App` rather than this
+                // window's `Context`, so its buttons reach the window through
+                // a weak handle -- the same way the network editor's form
+                // already does.
+                let view = cx.entity().downgrade();
+                content.child(
+                    div()
+                        .id("network-list")
+                        .debug_selector(|| "network-list".to_owned())
+                        .flex_1()
+                        // A floor rather than `min_h_0`, for the same reason
+                        // the token inventory has one: this page is not always
+                        // given a definite height, and a virtualized list in an
+                        // auto-height column collapses to nothing.
+                        .min_h(rems(16.25))
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            variable_list(self.network_list.clone(), move |index, _, cx| {
+                                let Some(row) = rows.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                match row {
+                                    NetworkListRow::SectionHeader(title) => div()
+                                        .w_full()
+                                        .pt_4()
+                                        .pb_2()
+                                        .font_semibold()
+                                        .child(selectable_label(*title))
+                                        .into_any_element(),
+                                    NetworkListRow::Card { name } => {
+                                        let Some(snapshot) = snapshot.as_ref() else {
+                                            return div().into_any_element();
+                                        };
+                                        let Ok(networks) = snapshot.networks.as_deref() else {
+                                            return div().into_any_element();
+                                        };
+                                        let Some(network) =
+                                            networks_for_display(networks, testnet_mode)
+                                                .into_iter()
+                                                .find(|network| &network.name == name)
+                                        else {
+                                            return div().into_any_element();
+                                        };
+                                        let recorded = snapshot
+                                            .native_token_prices
+                                            .get(&network.chain_id)
+                                            .copied();
+                                        div()
+                                            .w_full()
+                                            .pb_3()
+                                            .debug_selector({
+                                                let name = name.clone();
+                                                move || format!("network-card-{name}")
+                                            })
+                                            .child(render_network_card(
+                                                &view,
+                                                network,
+                                                busy.contains(name),
+                                                errors.get(name).cloned(),
+                                                recorded,
+                                                cx,
+                                            ))
+                                            .into_any_element()
+                                    }
+                                }
+                            })
+                            .size_full(),
+                        ),
+                )
             }
             Err(error) => content.child(selectable_error_alert(
                 "network-list-error",
@@ -18612,7 +18717,7 @@ impl WalletWindow {
         // them must not grow with the list.
         let route_fills_window = matches!(
             self.route,
-            Route::Tokens | Route::Activity | Route::Overview
+            Route::Tokens | Route::Activity | Route::Overview | Route::Networks
         );
         // The chevron belongs to whatever actually scrolls here. A route with
         // its own list points it at that list while it draws; every other
