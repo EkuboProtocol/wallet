@@ -10,6 +10,8 @@ use std::{
     fs::{File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table, value};
@@ -119,18 +121,25 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
     let parent = helpers_dir()?;
     let installed = parent.join(BRIDGE_FILE_NAME);
     let bytes = packaged_bridge_bytes()?;
-    fs::create_dir_all(&parent)?;
+    install_bridge_image(&parent, &installed, &bytes)?;
+    Ok(installed)
+}
+
+/// The filesystem half of [`install_bridge_helper`], against explicit paths so
+/// a test can exercise the replacement without a wallet data directory.
+fn install_bridge_image(parent: &Path, installed: &Path, bytes: &[u8]) -> Result<()> {
+    fs::create_dir_all(parent)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
-    remove_superseded_helpers(&parent);
-    if installed.is_file() && fs::read(&installed)? == bytes {
-        return Ok(installed);
+    remove_superseded_helpers(parent);
+    if installed.is_file() && fs::read(installed)? == bytes {
+        return Ok(());
     }
-    let mut temporary = NamedTempFile::new_in(&parent)?;
-    temporary.write_all(&bytes)?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     #[cfg(unix)]
     {
@@ -139,12 +148,78 @@ pub fn install_bridge_helper() -> Result<PathBuf> {
             .as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o700))?;
     }
-    replace_installed_helper(temporary, &installed)?;
+    replace_installed_helper(temporary, installed)?;
     ensure!(
-        fs::read(&installed)? == bytes,
+        fs::read(installed)? == bytes,
         "installed MCP bridge failed verification"
     );
-    Ok(installed)
+    Ok(())
+}
+
+/// How long the socket owner waits before checking the helper bytes again.
+///
+/// A bridge connection is the only trigger and a harness makes one per agent
+/// session, so this would be cheap at zero. The interval is here so that a
+/// harness respawning a mismatched bridge in a tight loop cannot turn the
+/// repair into a pair of megabyte reads per attempt.
+const REASSERT_INTERVAL: Duration = Duration::from_secs(30);
+
+static LAST_REASSERT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Whether a connection arriving at `now` should re-check the helper bytes,
+/// recording the decision in `last`. The first connection after launch always
+/// checks: a helper clobbered while this wallet was already running is exactly
+/// the case the re-assertion exists for.
+fn reassert_is_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_some_and(|last| now.duration_since(last) < REASSERT_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Restore this build's helper at the shared path when a bridge connects.
+///
+/// The helper lives at one fixed path shared by every wallet build on this
+/// machine, and [`install_bridge_helper`] claims it once, at launch. That
+/// leaves a gap the user cannot get out of: anything writing another build's
+/// bytes there afterwards goes unnoticed by the wallet already running, so
+/// every harness keeps spawning a helper that version-mismatches against it.
+/// The bridge then tells the user to start a new agent session — but a new
+/// session executes those same stale bytes, so the advice cannot work and the
+/// only escape is re-adding the connector, which repairs the helper as a side
+/// effect of the wallet's settings page listing agents.
+///
+/// Whoever answers `mcp.sock` is whose bridge belongs at that path, so the
+/// socket owner re-asserts it whenever one connects. The bridge that
+/// triggered the repair is still the wrong build and still exits; the next
+/// one the harness spawns is this build's, which makes the advice true.
+pub fn reassert_bridge_helper() {
+    {
+        let mut last = LAST_REASSERT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !reassert_is_due(&mut last, Instant::now()) {
+            return;
+        }
+    }
+    match bridge_helper_is_current() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not check the installed MCP bridge helper");
+            return;
+        }
+    }
+    match install_bridge_helper() {
+        Ok(path) => tracing::warn!(
+            path = %path.display(),
+            "replaced an MCP bridge helper left behind by another wallet build"
+        ),
+        Err(error) => {
+            tracing::error!(%error, "failed to restore this build's MCP bridge helper");
+        }
+    }
 }
 
 /// Rename the freshly written helper over the installed one.

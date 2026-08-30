@@ -102,6 +102,11 @@ impl McpIpcServer {
                         tracing::warn!("rejected local MCP peer owned by another user");
                         continue;
                     }
+                    // An authenticated bridge just connected, so a harness
+                    // spawned whatever bytes sit at the shared helper path.
+                    // This wallet answers the socket, so those bytes are its
+                    // to own; see `reassert_bridge_helper`.
+                    tokio::task::spawn_blocking(crate::agent_config::reassert_bridge_helper);
                     let agent = agent.clone();
                     let events = listener_events.clone();
                     let active = connection_count.clone();
@@ -159,6 +164,9 @@ impl McpIpcServer {
                             continue;
                         }
                     }
+                    // See the Unix arm: the wallet answering this pipe owns
+                    // the bytes at the shared helper path.
+                    tokio::task::spawn_blocking(crate::agent_config::reassert_bridge_helper);
                     let agent = agent.clone();
                     let events = listener_events.clone();
                     let active = connection_count.clone();

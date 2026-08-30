@@ -34,6 +34,52 @@ fn a_helper_from_another_build_is_not_reported_as_the_current_one() {
     assert!(installed_image_matches(&installed, packaged).unwrap());
 }
 
+/// The wallet claims the shared helper path once, at launch. When another
+/// build's bytes land there afterwards, every harness keeps spawning a bridge
+/// that version-mismatches against the running wallet, and the bridge's advice
+/// to start a new agent session cannot help because the new session executes
+/// the same stale bytes. The socket owner must be able to put its own image
+/// back while it is still running.
+#[test]
+fn a_helper_clobbered_by_another_build_is_restored_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("helpers");
+    let installed = parent.join(BRIDGE_FILE_NAME);
+    let packaged = b"bridge 1.5.0".as_slice();
+
+    install_bridge_image(&parent, &installed, packaged).unwrap();
+    assert!(installed_image_matches(&installed, packaged).unwrap());
+
+    // Another wallet build takes the path over while this one keeps running.
+    fs::write(&installed, b"bridge 1.5.0+7af8600.dirty").unwrap();
+    assert!(!installed_image_matches(&installed, packaged).unwrap());
+
+    install_bridge_image(&parent, &installed, packaged).unwrap();
+    assert_eq!(fs::read(&installed).unwrap(), packaged);
+}
+
+/// Re-asserting is triggered by a bridge connection, and a mismatched bridge
+/// exits immediately — so a harness that respawns it must not make the wallet
+/// re-read two helper images per attempt. The first check after launch is
+/// never suppressed.
+#[test]
+fn reasserting_is_due_once_per_interval_but_never_skips_the_first() {
+    let start = Instant::now();
+    let just_inside = REASSERT_INTERVAL
+        .checked_sub(Duration::from_millis(1))
+        .expect("the interval is longer than a millisecond");
+    let mut last = None;
+    assert!(reassert_is_due(&mut last, start));
+    assert!(!reassert_is_due(&mut last, start + REASSERT_INTERVAL / 2));
+    assert!(!reassert_is_due(&mut last, start + just_inside));
+    assert!(reassert_is_due(&mut last, start + REASSERT_INTERVAL));
+    // The window restarts from the check that ran, not from launch.
+    assert!(!reassert_is_due(
+        &mut last,
+        start + REASSERT_INTERVAL + Duration::from_millis(1)
+    ));
+}
+
 #[test]
 fn superseded_helper_path_skips_names_already_taken() {
     let directory = tempfile::tempdir().unwrap();
