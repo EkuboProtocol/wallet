@@ -9839,12 +9839,25 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn review_token_proposal_group(
-        &mut self,
-        source: String,
-        proposals: Vec<TokenProposal>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Open one source's proposals for review.
+    ///
+    /// The rows on the Tokens page carry only the source and its count, so the
+    /// proposals themselves are collected here -- once, when a group is
+    /// actually opened -- rather than being cloned into every row's click
+    /// handler on every frame.
+    fn review_token_proposal_group(&mut self, source: String, cx: &mut Context<Self>) {
+        let Ok(proposals) = self.cached_reviews().map(|reviews| {
+            reviews
+                .token_proposals
+                .iter()
+                .filter(|proposal| {
+                    proposal.source == source && self.token_proposal_is_visible(proposal)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        }) else {
+            return;
+        };
         let Some(list) = self.token_proposal_list.as_ref() else {
             return;
         };
@@ -16061,26 +16074,30 @@ impl WalletWindow {
                     }),
                 );
         }
+        // Only the per-source counts are drawn, so only they are derived. An
+        // imported token list proposes thousands of names at once, and
+        // grouping the proposals themselves cloned every one of them twice per
+        // frame -- once into the group and again into each row's click
+        // handler -- to draw a handful of rows that say a number. The group a
+        // click asks for is read back out of the same queue by
+        // `review_token_proposal_group`, once, when it is actually opened.
         match self.cached_reviews().map(|reviews| {
-            reviews
+            let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+            for proposal in reviews
                 .token_proposals
                 .iter()
                 .filter(|proposal| self.token_proposal_is_visible(proposal))
-                .collect::<Vec<_>>()
+            {
+                *counts.entry(proposal.source.as_str()).or_default() += 1;
+            }
+            counts
         }) {
-            Ok(proposals) if !proposals.is_empty() => {
-                let mut grouped = std::collections::BTreeMap::<String, Vec<TokenProposal>>::new();
-                for proposal in proposals {
-                    grouped
-                        .entry(proposal.source.clone())
-                        .or_default()
-                        .push(proposal.clone());
-                }
+            Ok(grouped) if !grouped.is_empty() => {
                 let mut groups = div().flex().flex_col().gap_2();
-                for (index, (source, proposals)) in grouped.into_iter().enumerate() {
-                    let count = proposals.len();
-                    let selected = selected_source.as_deref() == Some(source.as_str());
-                    let review_source = source.clone();
+                for (index, (source, count)) in grouped.into_iter().enumerate() {
+                    let selected = selected_source.as_deref() == Some(source);
+                    let review_source = source.to_owned();
+                    let source = SharedString::from(source.to_owned());
                     groups = groups.child(
                         div()
                             .p_3()
@@ -16109,11 +16126,7 @@ impl WalletWindow {
                                     .toggled(selected)
                                     .when(selected, ButtonVariants::primary)
                                     .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.review_token_proposal_group(
-                                            review_source.clone(),
-                                            proposals.clone(),
-                                            cx,
-                                        );
+                                        view.review_token_proposal_group(review_source.clone(), cx);
                                     })),
                             ),
                     );

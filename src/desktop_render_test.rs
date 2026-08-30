@@ -4077,6 +4077,75 @@ fn the_walletconnect_page_offers_the_handoff_as_one_press(cx: &mut gpui::TestApp
     release(cx, &view);
 }
 
+/// A source's proposals are collected when the group is opened, not per frame.
+///
+/// The Tokens page used to group the whole proposal queue on every frame, which
+/// deep-cloned every pending name twice — once into its group and again into
+/// each row's click handler — to draw one row per source saying how many were
+/// waiting. An imported token list proposes thousands at once, so a page that
+/// only ever draws a handful of rows was doing work proportional to the import
+/// on every redraw, including every frame of a scroll. The rows carry only the
+/// source and its count now, and this asserts the group a click asks for is
+/// still exactly the one it names.
+#[gpui::test]
+fn opening_a_token_proposal_group_reads_back_only_that_source(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let proposal = |source: &str, index: u32| ekubo_wallet_core::token_store::TokenProposal {
+        token: ekubo_wallet_core::token_store::ListedToken {
+            chain_id: 1,
+            address: alloy::primitives::Address::from(alloy::primitives::U160::from(index)),
+            symbol: format!("TKN{index}"),
+            name: Some(format!("Token {index}")),
+            decimals: 18,
+        },
+        source: source.to_owned(),
+        proposed_at: chrono::Utc::now(),
+    };
+
+    // Large enough that a per-frame clone of the queue would be the dominant
+    // cost of drawing this page, and split so the read-back has something to
+    // exclude.
+    let mut proposals = Vec::new();
+    for index in 0..2_000 {
+        proposals.push(proposal("https://example.invalid/big.json", index));
+    }
+    for index in 2_000..2_010 {
+        proposals.push(proposal("https://example.invalid/small.json", index));
+    }
+
+    cx.update_entity(&view, |wallet, _| {
+        let mut snapshot = quiet_snapshot();
+        if let Ok(reviews) = snapshot.reviews.as_mut() {
+            reviews.token_proposals = proposals;
+        }
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Tokens);
+    });
+    draw(cx, window, &view);
+
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.review_token_proposal_group("https://example.invalid/small.json".to_owned(), cx);
+    });
+
+    let opened = cx.update_entity(&view, |wallet, cx| {
+        let list = wallet
+            .token_proposal_list
+            .as_ref()
+            .expect("the proposal list must exist once the page has drawn");
+        let delegate = list.read(cx).delegate();
+        (delegate.source.clone(), delegate.proposals.len())
+    });
+    assert_eq!(
+        opened,
+        (Some("https://example.invalid/small.json".to_owned()), 10),
+        "opening a group must read back that source's proposals and no others"
+    );
+
+    release(cx, &view);
+}
+
 fn run_fixture(
     automation_id: uuid::Uuid,
     outcome: RunOutcome,
