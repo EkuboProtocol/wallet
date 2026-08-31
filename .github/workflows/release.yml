@@ -169,7 +169,7 @@ jobs:
             --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID"
           xcrun stapler staple "dist/Ekubo.Wallet_${version}_aarch64.dmg"
       - name: Sign updater artifacts
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-packager@0.11.8
       - shell: bash
@@ -232,7 +232,7 @@ jobs:
           exclude-azure-powershell-credential: true
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
-      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-packager@0.11.8
       - name: Sign final installer for updater and enforce Authenticode mode
@@ -272,7 +272,7 @@ jobs:
           path: input
       - shell: bash
         run: mkdir dist && cp input/unsigned-linux-x86_64/*.AppImage input/unsigned-linux-x86_64/*.deb dist/
-      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-packager@0.11.8
       - name: Sign Linux updater artifacts
@@ -332,7 +332,7 @@ jobs:
             --arg wu "$(url "$windows_bundle")" --arg ws "$(cat "$windows_bundle.sig")" --arg wh "$(sha256sum "$windows_bundle" | cut -d ' ' -f 1)" \
             --arg lu "$(url "$linux_bundle")" --arg ls "$(cat "$linux_bundle.sig")" --arg lh "$(sha256sum "$linux_bundle" | cut -d ' ' -f 1)" \
             '{version:$version,pub_date:$pub_date,platforms:{"macos-aarch64":{url:$mu,signature:$ms,sha256:$mh,format:"app"},"windows-x86_64":{url:$wu,signature:$ws,sha256:$wh,format:"nsis"},"linux-x86_64":{url:$lu,signature:$ls,sha256:$lh,format:"appimage"}}}' > dist/latest.json
-      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
         with:
           tool: cargo-packager@0.11.8
       - name: Sign metadata
