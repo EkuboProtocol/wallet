@@ -2109,6 +2109,12 @@ fn set_agent_installed(kind: AgentKind, installed: bool) -> Result<()> {
 /// helper replaces it rather than reporting a state the owner has no action
 /// for.
 fn repair_bridge_helper() -> Result<()> {
+    // Detection also runs from windows built outside a wallet that won the
+    // single-instance lock — the desktop render tests build one — and such a
+    // process must not touch the helper every agent on the machine executes.
+    if !crate::agent_config::holds_helper_write_authority() {
+        return Ok(());
+    }
     if crate::agent_config::bridge_helper_is_current()? {
         return Ok(());
     }
@@ -19612,7 +19618,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     // one fixed path. A second launch of a *different* build would otherwise
     // overwrite the helper, hand the user off to the running primary, and
     // exit — leaving every bridge to version-mismatch against a wallet whose
-    // bytes no longer match the installed helper.
+    // bytes no longer match the installed helper. Winning the lock is the
+    // whole entitlement, so it is also what unlocks every later write.
+    crate::agent_config::grant_helper_write_authority();
     crate::agent_config::install_bridge_helper()?;
     let data_dir = config.data_dir().to_path_buf();
     let _ = crate::release_check::record_update_diagnostic(&data_dir, "wallet process started");

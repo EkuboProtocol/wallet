@@ -10,7 +10,10 @@ use std::{
     fs::{File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
@@ -46,6 +49,34 @@ const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-mcp-bridge";
 const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge.exe";
 #[cfg(not(windows))]
 const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge";
+
+/// Whether this process is the one entitled to write the shared helper.
+///
+/// The helper path is shared by every wallet build and every wallet process on
+/// a machine, and the only process that may own it is the one answering
+/// `mcp.sock` — the holder of the single-instance lock. That is a property of
+/// the process, not of any view or data directory, so it is recorded once here
+/// rather than threaded through the callers.
+///
+/// It defaults to false so that anything which is not a wallet that won the
+/// lock — a test binary above all — cannot reach the write path at all. The
+/// desktop render tests build a wallet window, and the constructor kicks off
+/// agent detection, which repairs the helper; without this gate a plain
+/// `cargo test` rewrote the real `~/.local/state` helper with the build tree's
+/// debug bridge and broke every agent session on the developer's machine until
+/// a wallet replaced it again.
+static HELPER_WRITE_AUTHORITY: AtomicBool = AtomicBool::new(false);
+
+/// Record that this process won the single-instance lock and so owns the
+/// shared helper path. Called once, immediately after the lock is acquired.
+pub fn grant_helper_write_authority() {
+    HELPER_WRITE_AUTHORITY.store(true, Ordering::Release);
+}
+
+#[must_use]
+pub fn holds_helper_write_authority() -> bool {
+    HELPER_WRITE_AUTHORITY.load(Ordering::Acquire)
+}
 
 fn helpers_dir() -> Result<PathBuf> {
     Ok(ekubo_wallet_core::config::default_data_dir()?.join("helpers"))
@@ -118,6 +149,10 @@ fn installed_image_matches(installed: &Path, packaged: &[u8]) -> Result<bool> {
 /// directory therefore share one helper — whichever launched last owns it,
 /// which is the same bridge the running wallet answers.
 pub fn install_bridge_helper() -> Result<PathBuf> {
+    ensure!(
+        holds_helper_write_authority(),
+        "refusing to install the MCP bridge helper: this process does not hold the single-instance lock"
+    );
     let parent = helpers_dir()?;
     let installed = parent.join(BRIDGE_FILE_NAME);
     let bytes = packaged_bridge_bytes()?;
@@ -195,6 +230,11 @@ fn reassert_is_due(last: &mut Option<Instant>, now: Instant) -> bool {
 /// triggered the repair is still the wrong build and still exits; the next
 /// one the harness spawns is this build's, which makes the advice true.
 pub fn reassert_bridge_helper() {
+    // A wallet that does not own the path has nothing to re-assert, and
+    // reading two helper images to decide that would be wasted work.
+    if !holds_helper_write_authority() {
+        return;
+    }
     {
         let mut last = LAST_REASSERT
             .lock()

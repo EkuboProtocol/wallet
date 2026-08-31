@@ -34,6 +34,27 @@ fn a_helper_from_another_build_is_not_reported_as_the_current_one() {
     assert!(installed_image_matches(&installed, packaged).unwrap());
 }
 
+/// The desktop render tests build a wallet window, and its constructor starts
+/// agent detection, which repairs the helper. Nothing in a test process won
+/// the single-instance lock, so nothing in a test process may write the path
+/// every agent on the machine executes — a plain `cargo test` used to replace
+/// the installed release helper with the build tree's debug bridge and break
+/// every agent session until a wallet reinstalled it.
+///
+/// The test process never grants authority, so this asserts the real default.
+#[test]
+fn a_process_that_lost_the_instance_lock_cannot_write_the_shared_helper() {
+    assert!(
+        !holds_helper_write_authority(),
+        "a test process must never hold helper write authority"
+    );
+    let error = install_bridge_helper().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("single-instance lock"),
+        "unexpected error: {error:#}"
+    );
+}
+
 /// The wallet claims the shared helper path once, at launch. When another
 /// build's bytes land there afterwards, every harness keeps spawning a bridge
 /// that version-mismatches against the running wallet, and the bridge's advice
