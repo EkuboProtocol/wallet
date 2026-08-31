@@ -6,11 +6,27 @@ initialization without the wallet, keeps stdout exclusively for MCP frames,
 and uses stderr for diagnostics. It remains alive while the harness stdin is
 open, reconnects automatically when a same-version wallet opens or restarts,
 and enforces a 24 MiB frame ceiling in both directions. If wallet
-initialization reports a different version, the bridge exits with a diagnostic
-instead of retrying; the harness must launch the matching installed helper in
-a new agent session. The installed path is fixed rather than versioned, so it
-always holds the current wallet's helper and that next launch matches without
-any change to the harness configuration.
+initialization reports an incompatible bridge protocol, the bridge exits with a
+diagnostic instead of retrying; the harness must launch the matching installed
+helper in a new agent session. The installed path is fixed rather than
+versioned, so it always holds the current wallet's helper and that next launch
+matches without any change to the harness configuration.
+
+Compatibility is decided on the bridge protocol in `bridge_protocol.rs`, which
+the wallet publishes under a private `_meta` key in its `initialize` result —
+not on build identity. The bridge forwards frames without interpreting tool
+schemas, arguments, or results, so a wallet that adds a tool or changes any
+behaviour behind one stays compatible with a bridge built before it, and only
+a change to the framing, the hello frame, the sentinel ids, the reconnect
+replay, or the capability set is a reason to refuse. Requiring exact build
+agreement instead made every wallet update break live agent sessions. A wallet
+that publishes no protocol predates the constant, and is still held to exact
+build agreement, which is what those builds expect.
+
+This is a compatibility guard and not an authorization control. The helper is
+not an authorization boundary, and a bridge is not trusted by virtue of its
+version: the wallet authenticates the peer by UID and applies its own policy
+and approval rules to every request whatever bridge delivered it.
 
 The wallet singleton listens on same-user local IPC only. macOS and Linux use
 `mcp.sock` inside the wallet's private `0700` data directory; the socket is

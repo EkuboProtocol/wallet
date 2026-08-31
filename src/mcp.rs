@@ -3877,7 +3877,7 @@ impl ServerHandler for WalletMcpServer {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+        let mut info = ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -3887,7 +3887,17 @@ impl ServerHandler for WalletMcpServer {
             Implementation::new("ekubo_wallet", crate::BUILD_VERSION)
                 .with_title("Ekubo Wallet — Local EVM Execution"),
         )
-        .with_instructions(SERVER_INSTRUCTIONS)
+        .with_instructions(SERVER_INSTRUCTIONS);
+        // What the stdio bridge checks to decide whether it may serve this
+        // wallet. Build identity is deliberately not that test: the bridge
+        // forwards frames without interpreting them, so it stays compatible
+        // across every wallet change that leaves `bridge_protocol` alone.
+        // Harnesses receive `_meta` and ignore it.
+        info.meta.get_or_insert_default().insert(
+            crate::bridge_protocol::BRIDGE_PROTOCOL_META_KEY.to_owned(),
+            crate::bridge_protocol::BRIDGE_PROTOCOL_VERSION.into(),
+        );
+        info
     }
 
     async fn list_resources(

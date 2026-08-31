@@ -96,10 +96,14 @@ harness while the wallet is closed, then open, close, and reopen the wallet.
 The harness must observe `notifications/tools/list_changed` and resume tool
 calls after both connections without restarting its own process. A harness
 release that no longer supports dynamic tool refresh blocks the wallet release.
-Also connect a packaged bridge to a test server that reports a different build
-version during MCP initialization. The bridge must exit unsuccessfully after
-that one attempt, print both versions to stderr, and never enter its reconnect
-loop.
+Also connect a packaged bridge to a test server that reports a different
+`bridge_protocol` version during MCP initialization. The bridge must exit
+unsuccessfully after that one attempt, print both versions to stderr, and never
+enter its reconnect loop. Then repeat with a server that reports a different
+build version but the *same* bridge protocol: that bridge must serve the
+session normally, because compatibility follows the shared contract rather than
+build identity. A server that reports no protocol at all stands in for a wallet
+built before the constant, and must still be held to exact build agreement.
 
 Native update artifacts are signed by a dedicated Minisign key held only in the
 protected release environment. The trusted workflow publishes a signed

@@ -289,6 +289,26 @@ fn advertised_version_matches_crate() {
     assert_eq!(server.get_info().server_info.version, crate::BUILD_VERSION);
 }
 
+/// The bridge decides whether it may serve this wallet by reading the
+/// protocol out of the serialized `initialize` result. Its own tests answer
+/// with a fake wallet, so only this one proves the real handshake carries what
+/// they assume — without it the field could vanish and every bridge would
+/// quietly fall back to demanding an exact build match again.
+#[test]
+fn the_initialize_result_publishes_the_bridge_protocol() {
+    let (_directory, server) = server();
+    let info = serde_json::to_value(server.get_info()).unwrap();
+    assert_eq!(
+        info.pointer(&format!(
+            "/_meta/{}",
+            crate::bridge_protocol::BRIDGE_PROTOCOL_META_KEY
+        ))
+        .and_then(serde_json::Value::as_u64),
+        Some(u64::from(crate::bridge_protocol::BRIDGE_PROTOCOL_VERSION)),
+        "serialized initialize result: {info}"
+    );
+}
+
 #[test]
 fn tool_schemas_contain_no_boolean_schemas() {
     // Schemars renders serde_json::Value as the boolean schema `true`,

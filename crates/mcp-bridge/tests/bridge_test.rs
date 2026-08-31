@@ -8,6 +8,55 @@ use std::{
 
 const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
 
+#[path = "../../../bridge_protocol.rs"]
+mod bridge_protocol;
+use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
+
+/// The offline capability set recorded for each bridge protocol version.
+///
+/// The bridge answers `initialize` alone whenever the wallet is down, and a
+/// harness keeps that answer for the whole session — so a bridge that fails to
+/// claim a capability the wallet has makes it unreachable for that session no
+/// matter what the wallet serves afterwards. Once the bridge stopped requiring
+/// an exact build match, nothing else tied the two sides' capability sets
+/// together, and that failure is silent.
+///
+/// So the set is pinned per protocol version. Changing the capabilities makes
+/// this table's current row wrong; the fix is to bump
+/// `BRIDGE_PROTOCOL_VERSION` and append a row, never to edit the row of a
+/// version that has shipped.
+const CAPABILITY_CONTRACT: &[(u32, &str)] = &[(
+    1,
+    r#"{"resources":{"listChanged":true},"tools":{"listChanged":true}}"#,
+)];
+
+/// Canonical form: parsed and re-serialized, so whitespace and key order in
+/// the source file cannot make this pass or fail on their own.
+fn canonical(text: &str) -> String {
+    let value: std::collections::BTreeMap<String, Value> = serde_json::from_str(text).unwrap();
+    serde_json::to_string(&value).unwrap()
+}
+
+#[test]
+fn the_offline_capabilities_match_the_protocol_version() {
+    let declared = include_str!("../src/offline_capabilities.json");
+    let Some((_, recorded)) = CAPABILITY_CONTRACT
+        .iter()
+        .find(|(version, _)| *version == BRIDGE_PROTOCOL_VERSION)
+    else {
+        panic!(
+            "bridge protocol {BRIDGE_PROTOCOL_VERSION} has no recorded capability set; \
+             append one to CAPABILITY_CONTRACT"
+        )
+    };
+    assert_eq!(
+        canonical(declared),
+        canonical(recorded),
+        "the offline capability set changed without a bridge protocol bump; a capability the \
+         wallet has and the bridge does not claim is unreachable for a whole agent session"
+    );
+}
+
 fn send(stdin: &mut std::process::ChildStdin, value: &Value) {
     serde_json::to_writer(&mut *stdin, &value).unwrap();
     stdin.write_all(b"\n").unwrap();
@@ -618,5 +667,141 @@ fn standard_server_version_mismatch_terminates_the_bridge() {
     assert!(stderr.contains("Start a new agent session"), "{stderr}");
     assert!(stderr.contains("999.0.0"), "{stderr}");
     assert!(stderr.contains(BUILD_VERSION), "{stderr}");
+    wallet.join().unwrap();
+}
+
+/// Shared fake wallet for the protocol tests: answers `initialize` with the
+/// given build version and optional advertised protocol, then serves both
+/// catalogs so a compatible bridge can finish its handshake.
+#[cfg(unix)]
+fn spawn_fake_wallet(
+    home: &std::path::Path,
+    version: &str,
+    protocol: Option<u32>,
+) -> std::thread::JoinHandle<()> {
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    fn read(stream: &mut BufReader<UnixStream>) -> Option<Value> {
+        let mut line = String::new();
+        stream.read_line(&mut line).ok()?;
+        serde_json::from_str(&line).ok()
+    }
+    fn write(stream: &mut UnixStream, value: &Value) {
+        serde_json::to_writer(&mut *stream, value).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+    }
+
+    let listener = UnixListener::bind(home.join("mcp.sock")).unwrap();
+    let version = version.to_owned();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let _hello = read(&mut reader);
+        let initialize = read(&mut reader).expect("initialize");
+        let mut result = json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}, "resources": {}},
+            "serverInfo": {"name": "fake-wallet", "version": version},
+        });
+        if let Some(protocol) = protocol {
+            result["_meta"] = json!({ BRIDGE_PROTOCOL_META_KEY: protocol });
+        }
+        write(
+            &mut writer,
+            &json!({"jsonrpc":"2.0","id":initialize["id"],"result":result}),
+        );
+        // An incompatible bridge stops here; a compatible one asks for both
+        // catalogs, so answering them is what tells the two apart.
+        for _ in 0..2 {
+            let Some(request) = read(&mut reader) else {
+                return;
+            };
+            let listed = match request["method"].as_str() {
+                Some("tools/list") => json!({"tools": []}),
+                Some("resources/list") => json!({"resources": []}),
+                _ => continue,
+            };
+            write(
+                &mut writer,
+                &json!({"jsonrpc":"2.0","id":request["id"],"result":listed}),
+            );
+        }
+    })
+}
+
+/// The point of versioning the contract rather than the build: a wallet that
+/// updated underneath a running harness, or a helper left behind by another
+/// build, stays usable as long as the shared contract did not move.
+#[cfg(unix)]
+#[test]
+fn a_different_build_speaking_the_same_protocol_is_served() {
+    use std::{fs, os::unix::fs::PermissionsExt as _};
+
+    let home = tempfile::tempdir().unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let wallet = spawn_fake_wallet(home.path(), "999.0.0", Some(BRIDGE_PROTOCOL_VERSION));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        .args(["--client", "codex"])
+        .env("EKUBO_WALLET_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+    );
+    let initialized = receive(&mut stdout);
+    assert_eq!(initialized["id"], 1);
+    // The wallet's own handshake reached the harness, so the bridge served
+    // this wallet rather than answering offline on its behalf.
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "fake-wallet");
+    assert_eq!(initialized["result"]["serverInfo"]["version"], "999.0.0");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    wallet.join().unwrap();
+}
+
+/// A moved contract is still a hard stop, and still after exactly one attempt:
+/// reconnecting would spin against a wallet that can never answer.
+#[cfg(unix)]
+#[test]
+fn a_wallet_speaking_another_protocol_terminates_the_bridge() {
+    use std::{fs, os::unix::fs::PermissionsExt as _};
+
+    let home = tempfile::tempdir().unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    // Identical build identity, so only the protocol can be what rejects it.
+    let wallet = spawn_fake_wallet(
+        home.path(),
+        BUILD_VERSION,
+        Some(BRIDGE_PROTOCOL_VERSION + 999),
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        .args(["--client", "codex"])
+        .env("EKUBO_WALLET_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    send(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+    );
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("bridge protocol"), "{stderr}");
+    assert!(stderr.contains("Start a new agent session"), "{stderr}");
     wallet.join().unwrap();
 }

@@ -10,6 +10,9 @@ pub mod agent_config;
 pub mod assets;
 pub mod authority;
 pub mod batch_read;
+/// Shared verbatim with the stdio bridge, which includes the same file.
+#[path = "../bridge_protocol.rs"]
+pub mod bridge_protocol;
 pub mod dapp_identity;
 pub mod desktop;
 pub mod events;

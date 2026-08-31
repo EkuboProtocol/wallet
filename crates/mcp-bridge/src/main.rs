@@ -7,6 +7,11 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::{collections::BTreeSet, env, fmt, time::Duration};
+
+/// Shared verbatim with the wallet, which includes the same file.
+#[path = "../../../bridge_protocol.rs"]
+mod bridge_protocol;
+use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
@@ -16,12 +21,20 @@ const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
 #[derive(Debug)]
 struct VersionMismatch {
     wallet_version: String,
+    wallet_protocol: Option<u32>,
 }
 
 impl VersionMismatch {
     fn message(&self) -> String {
+        let contract = match self.wallet_protocol {
+            Some(protocol) => format!(
+                "it speaks bridge protocol {protocol} and this bridge speaks {BRIDGE_PROTOCOL_VERSION}"
+            ),
+            None => "it predates bridge protocol versioning, so the builds must match exactly"
+                .to_owned(),
+        };
         format!(
-            "Ekubo Wallet {} is running, but this agent session is using MCP bridge {BUILD_VERSION}. Start a new agent session so the harness launches the matching bridge.",
+            "Ekubo Wallet {} is running, but this agent session is using MCP bridge {BUILD_VERSION}: {contract}. Start a new agent session so the harness launches the matching bridge.",
             self.wallet_version
         )
     }
@@ -51,6 +64,31 @@ fn safe_reported_version(version: Option<&Value>) -> String {
 
 fn reported_wallet_version(initialize_response: &Value) -> String {
     safe_reported_version(initialize_response.pointer("/result/serverInfo/version"))
+}
+
+/// The bridge protocol the wallet publishes, or `None` for a wallet built
+/// before the constant existed.
+fn reported_wallet_protocol(initialize_response: &Value) -> Option<u32> {
+    initialize_response
+        .pointer("/result/_meta")?
+        .get(BRIDGE_PROTOCOL_META_KEY)?
+        .as_u64()?
+        .try_into()
+        .ok()
+}
+
+/// Whether this bridge may serve the wallet that just described itself.
+///
+/// A wallet that publishes a protocol is compared on that alone, so every
+/// wallet change that leaves the shared contract untouched — a new tool, a
+/// fixed quote path, a repaired helper — keeps working with a bridge the
+/// harness started earlier. A wallet that publishes nothing predates the
+/// constant and still expects exact build agreement, which is what it gets.
+fn wallet_is_compatible(wallet_version: &str, wallet_protocol: Option<u32>) -> bool {
+    wallet_protocol.map_or_else(
+        || wallet_version == BUILD_VERSION,
+        |protocol| protocol == BRIDGE_PROTOCOL_VERSION,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -343,8 +381,13 @@ where
         "wallet rejected MCP initialization"
     );
     let wallet_version = reported_wallet_version(&initialize_response);
-    if wallet_version != BUILD_VERSION {
-        return Err(VersionMismatch { wallet_version }.into());
+    let wallet_protocol = reported_wallet_protocol(&initialize_response);
+    if !wallet_is_compatible(&wallet_version, wallet_protocol) {
+        return Err(VersionMismatch {
+            wallet_version,
+            wallet_protocol,
+        }
+        .into());
     }
     let mut initialize_result = initialize_response["result"].clone();
     for capability in ["tools", "resources"] {
