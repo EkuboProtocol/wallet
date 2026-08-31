@@ -19,7 +19,7 @@ test-hooks = []
 [dependencies]
 cargo-packager-updater = "0.2.3"
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
-alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
+alloy-dyn-abi = { version = "=1.7.1", features = ["eip712"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 base64 = "0.23.0"
