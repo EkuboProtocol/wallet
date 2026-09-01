@@ -218,7 +218,7 @@ file follows in the appendix. Regenerate this document with
 - usvg 0.46.0 — https://github.com/linebender/resvg
 - utf8_iter 1.0.4 — Henri Sivonen <hsivonen@hsivonen.fi> — https://github.com/hsivonen/utf8_iter
 - uuid 0.8.2 — Ashley Mannix<ashleymannix@live.com.au>, Christopher Armstrong, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com> — https://github.com/uuid-rs/uuid
-- uuid 1.25.0 — Ashley Mannix<ashleymannix@live.com.au>, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com> — https://github.com/uuid-rs/uuid
+- uuid 1.26.0 — Ashley Mannix<ashleymannix@live.com.au>, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com> — https://github.com/uuid-rs/uuid
 - value-bag 1.13.2 — Ashley Mannix <ashleymannix@live.com.au> — https://github.com/sval-rs/value-bag
 - value-bag-serde1 1.13.2 — Ashley Mannix <ashleymannix@live.com.au>
 - value-bag-sval2 1.13.2 — Ashley Mannix <ashleymannix@live.com.au>
@@ -634,7 +634,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-consensus-any 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-contract 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-core 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-dyn-abi 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-dyn-abi 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-eip2124 0.2.0 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip2930 0.2.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7702 0.6.3 — Alloy Contributors — https://github.com/alloy-rs/eips
@@ -642,12 +642,12 @@ file follows in the appendix. Regenerate this document with
 - alloy-eips 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-ens 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-genesis 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-json-abi 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-json-abi 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-json-rpc 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-network 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-network-primitives 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-primitives 0.6.4 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-primitives 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-primitives 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-provider 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-rlp 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
 - alloy-rlp-derive 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
@@ -658,11 +658,11 @@ file follows in the appendix. Regenerate this document with
 - alloy-serde 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-signer 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-signer-local 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-sol-macro 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-macro-expander 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-macro-input 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-type-parser 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-types 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro-expander 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro-input 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-type-parser 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-types 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-transport 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-transport-http 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-trie 0.9.5 — rkrasiuk <rokrassyuk@gmail.com>, gakonst <me@gakonst.com>, DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/alloy-rs/trie
@@ -803,7 +803,7 @@ file follows in the appendix. Regenerate this document with
 - fixed-cache 0.1.10 — DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/DaniPopes/fixed-cache
 - fixed-hash 0.8.0 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/parity-common
 - fixedbitset 0.5.7 — bluss — https://github.com/petgraph/fixedbitset
-- flate2 1.1.9 — Alex Crichton <alex@alexcrichton.com>, Josh Triplett <josh@joshtriplett.org> — https://github.com/rust-lang/flate2-rs
+- flate2 1.1.10 — Alex Crichton <alex@alexcrichton.com>, Josh Triplett <josh@joshtriplett.org> — https://github.com/rust-lang/flate2-rs
 - float-ord 0.3.2 — Michael Howell <michael@notriddle.com> — https://github.com/notriddle/rust-float-ord
 - font-types 0.11.3 — https://github.com/googlefonts/fontations
 - font-types 0.12.2 — https://github.com/googlefonts/fontations
@@ -1062,7 +1062,7 @@ file follows in the appendix. Regenerate this document with
 - syn 1.0.109 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
 - syn 2.0.119 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
 - syn 3.0.3 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
-- syn-solidity 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- syn-solidity 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - sys-locale 0.3.2 — 1Password — https://github.com/1Password/sys-locale
 - system-configuration 0.6.1 — Mullvad VPN — https://github.com/mullvad/system-configuration-rs
 - system-configuration-sys 0.6.0 — Mullvad VPN — https://github.com/mullvad/system-configuration-rs
@@ -1242,6 +1242,7 @@ file follows in the appendix. Regenerate this document with
 ## MIT OR Zlib OR Apache-2.0
 
 - miniz_oxide 0.8.9 — Frommi <daniil.liferenko@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>, Rich Geldreich richgel99@gmail.com — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
+- miniz_oxide 0.9.1 — Frommi <daniil.liferenko@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>, Rich Geldreich richgel99@gmail.com — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
 
 ## MPL-2.0
 
@@ -1339,7 +1340,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-consensus-any 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-contract 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-core 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-dyn-abi 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-dyn-abi 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2124 0.2.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2930 0.2.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7702 0.6.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1347,12 +1348,12 @@ file follows in the appendix. Regenerate this document with
 - alloy-eips 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-ens 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-genesis 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-json-abi 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-json-abi 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-rpc 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-network 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-network-primitives 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-primitives 0.6.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-primitives 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-primitives 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-provider 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp-derive 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1363,11 +1364,11 @@ file follows in the appendix. Regenerate this document with
 - alloy-serde 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-signer 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-signer-local 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro-expander 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro-input 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-type-parser 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-types 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro-expander 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro-input 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-type-parser 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-types 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-transport 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-transport-http 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-tx-macros 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1469,7 +1470,7 @@ file follows in the appendix. Regenerate this document with
 - spirv 0.4.0+sdk-1.4.341.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - starknet-types-core 1.0.0: MIT — MIT License: https://opensource.org/license/mit
 - svg_fmt 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- syn-solidity 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- syn-solidity 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - taffy 0.13.0: MIT — MIT License: https://opensource.org/license/mit
 - tree-sitter-json 0.24.8: MIT — MIT License: https://opensource.org/license/mit
 - uint 0.9.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -8083,7 +8084,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: flate2 1.1.9
+## License text for: flate2 1.1.10
 
 ```text
 Copyright (c) 2014-2026 Alex Crichton
@@ -11049,7 +11050,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: miniz_oxide 0.8.9
+## License text for: miniz_oxide 0.8.9, miniz_oxide 0.9.1
 
 ```text
 MIT License
@@ -15909,7 +15910,7 @@ DEALINGS IN THE SOFTWARE.
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## License text for: uuid 0.8.2, uuid 1.25.0
+## License text for: uuid 0.8.2, uuid 1.26.0
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
