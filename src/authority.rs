@@ -14,7 +14,7 @@ use ekubo_wallet_core::{
     },
     approval_summary::{
         OwnAccounts, TokenMetadataMap, address_label, format_fixed_point, interpret_steps,
-        plan_token_targets,
+        plan_headline, plan_token_targets,
     },
     automation::{Automation, AutomationState, PollFailure, PolledCall},
     automation_store::{AutomationRun, AutomationStore},
@@ -2084,6 +2084,71 @@ impl OwnerApi {
                 })
             }
         }
+    }
+
+    /// One decoded headline per transaction, for the list rows that name a
+    /// request before anybody opens it.
+    ///
+    /// A batch rather than a lookup, because a list draws every row: the
+    /// records are grouped by chain so the token database answers once per
+    /// chain instead of once per row, and a history list holds hundreds of
+    /// rows naming a handful of chains between them.
+    ///
+    /// A record whose plan decodes to nothing recognizable is simply absent
+    /// from the map. Interpretation is entirely local — see
+    /// [`plan_headline`] for what a headline is allowed to be built from —
+    /// so no part of this contacts a network, and `block_on` waits on
+    /// nothing but the descriptor engine's own map lookups.
+    pub fn transaction_headlines(
+        &self,
+        transactions: &[&PendingTransaction],
+    ) -> Result<BTreeMap<Uuid, String>> {
+        let own_accounts = self
+            .config
+            .load()?
+            .wallets
+            .into_iter()
+            .map(|account| (account.address, account.id))
+            .collect::<OwnAccounts>();
+        let store = TokenStore::production(self.config.data_dir())?;
+        let mut targets: BTreeMap<u64, std::collections::BTreeSet<Address>> = BTreeMap::new();
+        let mut by_chain: BTreeMap<u64, Vec<&PendingTransaction>> = BTreeMap::new();
+        for pending in transactions {
+            let Ok(chain_id) = pending.chain_id.parse::<u64>() else {
+                continue;
+            };
+            let steps = &pending.execution_plan.ordered_steps;
+            targets
+                .entry(chain_id)
+                .or_default()
+                .extend(futures::executor::block_on(plan_token_targets(steps)));
+            by_chain.entry(chain_id).or_default().push(pending);
+        }
+        let mut headlines = BTreeMap::new();
+        for (chain_id, records) in by_chain {
+            let addresses = targets
+                .remove(&chain_id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+            // A chain whose metadata cannot be read still gets headlines,
+            // with its tokens unnamed. That is the same fallback an unlisted
+            // token already has, and a list that draws is worth more than one
+            // that names every symbol.
+            let metadata = store
+                .display_metadata(chain_id, &addresses)
+                .unwrap_or_default();
+            for pending in records {
+                if let Some(headline) = futures::executor::block_on(plan_headline(
+                    &pending.execution_plan.ordered_steps,
+                    &metadata,
+                    &own_accounts,
+                )) {
+                    headlines.insert(pending.request_id, headline);
+                }
+            }
+        }
+        Ok(headlines)
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {

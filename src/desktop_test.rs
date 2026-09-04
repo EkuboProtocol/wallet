@@ -3004,3 +3004,93 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
     assert!(!review.contains(r#".label("Back to editing")"#));
     assert!(!review.contains(r#".label("Edit this draft")"#));
 }
+
+/// One transaction record, at the only two settings these tests vary.
+fn activity_transaction(chain_id: &str) -> OwnerActivityRecord {
+    let now = chrono::Utc::now();
+    OwnerActivityRecord::Transaction(Box::new(
+        serde_json::from_value(serde_json::json!({
+            "request_id": uuid::Uuid::new_v4(),
+            "wallet_instance_id": uuid::Uuid::new_v4(),
+            "wallet_id": "primary",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "network_name": "ethereum",
+            "chain_id": chain_id,
+            "execution_plan": {
+                "schema_version": "1",
+                "chain_id": chain_id,
+                "caip2_chain_id": format!("eip155:{chain_id}"),
+                "sender": "0x1111111111111111111111111111111111111111",
+                "ordered_steps": [{
+                    "step": 1,
+                    "kind": "execution",
+                    "transaction": {
+                        "chain_id": chain_id,
+                        "from": "0x1111111111111111111111111111111111111111",
+                        "to": "0x2222222222222222222222222222222222222222",
+                        "data": "0x",
+                        "value": "1"
+                    }
+                }]
+            },
+            "digest": "0x00",
+            "policy_revision": 1,
+            "approval_required": false,
+            "status": "confirmed",
+            "created_at": now,
+            "updated_at": now
+        }))
+        .expect("test transaction"),
+    ))
+}
+
+#[test]
+fn a_row_is_titled_by_what_the_plan_does_and_names_its_network_after_the_account() {
+    // The title used to be "Transaction on Ethereum Mainnet", which spent the
+    // most prominent line on the one fact every row on the screen shares. The
+    // network moves down beside the account, where the rest of the row's
+    // context already is, and the title says what the plan actually does.
+    let networks = BTreeMap::from([(1_u64, SharedString::from("Ethereum Mainnet"))]);
+    let record = activity_transaction("1");
+    let now = chrono::Utc::now();
+
+    let headline = SharedString::from("Approve 1 USDC, swap");
+    let decoded = activity_row_summary(&record, &networks, None, Some(&headline), now);
+    assert_eq!(decoded.title, "Approve 1 USDC, swap");
+    assert!(
+        decoded
+            .subtitle
+            .starts_with("primary · Ethereum Mainnet · "),
+        "the network belongs after the account: {}",
+        decoded.subtitle
+    );
+
+    // A plan nothing recognized keeps a title that is at least honest, and
+    // loses nothing: its network is in the subtitle either way.
+    let undecoded = activity_row_summary(&record, &networks, None, None, now);
+    assert_eq!(undecoded.title, "Transaction");
+    assert_eq!(undecoded.subtitle, decoded.subtitle);
+}
+
+#[test]
+fn a_record_on_no_network_is_not_given_one() {
+    // `chain_label` answers "no network" for a record that names no chain,
+    // which is a sentence worth printing in a review and not worth spending a
+    // subtitle segment on. An absent part is left out instead.
+    assert_eq!(
+        row_subtitle(&["primary", "", "2 hours ago"]),
+        "primary · 2 hours ago"
+    );
+    assert_eq!(optional_chain_label(None, &BTreeMap::new()), "");
+    assert_eq!(
+        optional_chain_label(Some("not a chain"), &BTreeMap::new()),
+        ""
+    );
+    assert_eq!(
+        optional_chain_label(
+            Some("1"),
+            &BTreeMap::from([(1_u64, SharedString::from("Ethereum Mainnet"))])
+        ),
+        "Ethereum Mainnet"
+    );
+}
