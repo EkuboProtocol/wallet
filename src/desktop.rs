@@ -4704,6 +4704,10 @@ fn render_activity_row(
     let mut card = div()
         .w_full()
         .min_w_0()
+        // Named so a test can measure how tall one row got. A title that is a
+        // sentence rather than a category has to be allowed to wrap, and the
+        // only place that is visible is the height the card ends up with.
+        .debug_selector(|| format!("activity-row-{request_id}"))
         .p_3()
         .rounded(cx.theme().radius_lg)
         .border_1()
@@ -4742,7 +4746,16 @@ fn render_activity_row(
                                         format!("activity-row-title-{request_id}"),
                                         &summary.title,
                                     )
-                                    .font_medium(),
+                                    .font_medium()
+                                    // A title that says what a plan does is a
+                                    // sentence, and a flex item will not shrink
+                                    // below its longest line unless it is told
+                                    // it may. Without this the sentence keeps
+                                    // its full width, overflows the card, and
+                                    // is clipped -- silently, because there is
+                                    // no ellipsis to show that it happened.
+                                    .flex_1()
+                                    .min_w_0(),
                                 ),
                         )
                         .child(

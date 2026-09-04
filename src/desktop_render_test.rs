@@ -830,6 +830,128 @@ fn a_long_history_scrolls_inside_the_inbox_rather_than_the_page(cx: &mut gpui::T
     release(cx, &view);
 }
 
+/// The one record every headline measurement draws, so the only thing that
+/// differs between two draws is the length of its title.
+const HEADLINE_ROW: uuid::Uuid = uuid::Uuid::from_u128(1);
+const HEADLINE_ROW_SELECTOR: &str = "activity-row-00000000-0000-0000-0000-000000000001";
+
+/// Two titles that both sit on their own line under the status pill, so the
+/// only thing between their two heights is how many lines each needs.
+///
+/// A title short enough to share the pill's line would measure the flex row
+/// reflowing rather than the sentence wrapping, and those look identical from
+/// the outside -- which is how the first version of this test passed against a
+/// title that was overflowing the card and being clipped.
+const TWO_LINE_HEADLINE: &str =
+    "Approve unlimited USDC, transfer 0.25 USDC to your account savings";
+/// About as long as [`plan_headline`] can make a title, which is what the row
+/// has to survive.
+const THREE_LINE_HEADLINE: &str = "Approve unlimited USDC, transfer 0.25 USDC to your account savings, grant operator \
+     control of every ABC token and 4 more calls";
+
+fn history_row_bounds(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    headline: &str,
+) -> (gpui::Bounds<gpui::Pixels>, gpui::Bounds<gpui::Pixels>) {
+    let headline = SharedString::from(headline.to_owned());
+    cx.update_entity(view, |wallet, cx| {
+        let mut snapshot = quiet_snapshot();
+        snapshot.activity = Ok(Arc::from(vec![OwnerActivityRecord::Transaction(Box::new(
+            cleared_transaction_fixture(HEADLINE_ROW),
+        ))]));
+        snapshot
+            .transaction_headlines
+            .insert(HEADLINE_ROW, headline);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Activity);
+        wallet.set_inbox_tab(InboxTab::Decided, cx);
+    });
+    let bounds = measure(
+        cx,
+        window,
+        view,
+        &[HEADLINE_ROW_SELECTOR, "activity-records"],
+    );
+    (
+        bounds[0].expect("the history row must draw"),
+        bounds[1].expect("the history list must draw"),
+    )
+}
+
+fn waiting_card_bounds(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    headline: &str,
+) -> gpui::Bounds<gpui::Pixels> {
+    let headline = SharedString::from(headline.to_owned());
+    cx.update_entity(view, |wallet, cx| {
+        let mut snapshot = quiet_snapshot();
+        let mut waiting = cleared_transaction_fixture(HEADLINE_ROW);
+        waiting.status = ekubo_wallet_core::pending::PendingStatus::AwaitingApproval;
+        snapshot
+            .reviews
+            .as_mut()
+            .expect("the queues are built ready")
+            .transactions = vec![waiting];
+        snapshot
+            .transaction_headlines
+            .insert(HEADLINE_ROW, headline);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.set_route(Route::Activity);
+        wallet.set_inbox_tab(InboxTab::Waiting, cx);
+    });
+    measure(cx, window, view, &["inbox-waiting-card"])[0].expect("the waiting card must draw")
+}
+
+/// A title that says what a plan does is a sentence, not a category, so it is
+/// as long as the plan is.
+///
+/// The row answers that by growing taller. It must not answer it by keeping
+/// the sentence on one line and running off the side of the card, which is
+/// what a flex item does by default -- it will not shrink below its longest
+/// line unless it is told it may, and the overflow is then clipped with no
+/// ellipsis to show that anything was cut. That is the failure this measures,
+/// and the reason it compares two titles that both already sit on their own
+/// line: a shorter one would only prove the flex row reflowed.
+#[gpui::test]
+fn a_long_row_title_wraps_inside_the_card_rather_than_overflowing_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let (two_line, list) = history_row_bounds(cx, window, &view, TWO_LINE_HEADLINE);
+    let (three_line, _) = history_row_bounds(cx, window, &view, THREE_LINE_HEADLINE);
+    assert!(
+        three_line.size.height > two_line.size.height,
+        "a longer title must take another line rather than overflow the card: \
+         {} against {} for a title one line shorter",
+        three_line.size.height,
+        two_line.size.height
+    );
+    assert!(
+        three_line.right() <= list.right() + px(1.0),
+        "the row must stay inside the list it is drawn in: it ended at {} against {}",
+        three_line.right(),
+        list.right()
+    );
+
+    // The waiting queue draws its own card rather than reusing the history
+    // row, so it has its own chance to get this wrong.
+    let two_line = waiting_card_bounds(cx, window, &view, TWO_LINE_HEADLINE);
+    let three_line = waiting_card_bounds(cx, window, &view, THREE_LINE_HEADLINE);
+    assert!(
+        three_line.size.height > two_line.size.height,
+        "a waiting card must grow with its title too: {} against {}",
+        three_line.size.height,
+        two_line.size.height
+    );
+    release(cx, &view);
+}
+
 /// The two facts under the balances — which balances are listed, and how old
 /// they are — belong on one line at the bottom of the tab, and have to stay on
 /// screen however many balances the account holds.
