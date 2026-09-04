@@ -172,6 +172,7 @@ fn quiet_snapshot() -> DesktopSnapshot {
         }),
         activity: Ok(Arc::from(Vec::new())),
         activity_sources: BTreeMap::new(),
+        transaction_headlines: BTreeMap::new(),
         accounts: Ok(Vec::new()),
         automations: Ok(Vec::new()),
         automation_runs: BTreeMap::new(),

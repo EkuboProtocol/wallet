@@ -2831,6 +2831,15 @@ struct DesktopSnapshot {
     /// it carries, and a history list is not worth failing to draw over the
     /// attribution it could not read.
     activity_sources: BTreeMap<uuid::Uuid, SharedString>,
+    /// What each transaction record's plan does, in one line, for the rows
+    /// that name a request before anybody opens it. Decoded here for the same
+    /// reason everything else is: the drawing path may not open the database,
+    /// and it certainly may not run the descriptor engine over a history list
+    /// once a frame.
+    ///
+    /// Absent for a plan nothing recognized, which is what leaves such a row
+    /// titled by its kind alone.
+    transaction_headlines: BTreeMap<uuid::Uuid, SharedString>,
     accounts: std::result::Result<Vec<WalletMetadata>, SharedString>,
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
     legal_status: std::result::Result<LegalStatus, SharedString>,
@@ -2913,10 +2922,12 @@ impl DesktopSnapshot {
                 }
             }
         }
+        let transaction_headlines = capture_transaction_headlines(owner, &reviews, &activity);
         Self {
             reviews,
             activity,
             activity_sources,
+            transaction_headlines,
             accounts,
             policies,
             legal_status,
@@ -2932,6 +2943,42 @@ impl DesktopSnapshot {
 
 fn cache_result<T>(result: Result<T>) -> std::result::Result<T, SharedString> {
     result.map_err(|error| format!("{error:#}").into())
+}
+
+/// Decode a headline for every transaction record either list can draw.
+///
+/// The inbox and the history are separate reads, and neither is a subset of
+/// the other: a request leaves the inbox the moment it is decided, and the
+/// history is capped. Both are collected, and a request that appears in both
+/// is decoded once.
+///
+/// A failed batch leaves the map empty rather than failing the snapshot. A
+/// headline is what a row is titled, never what it means — the review behind
+/// it is unaffected — so a list that draws with its rows named by kind is
+/// worth more than a wallet that will not show its history at all.
+fn capture_transaction_headlines(
+    owner: &OwnerApi,
+    reviews: &std::result::Result<OwnerReviewQueues, SharedString>,
+    activity: &std::result::Result<Arc<[OwnerActivityRecord]>, SharedString>,
+) -> BTreeMap<uuid::Uuid, SharedString> {
+    let mut records: Vec<&PendingTransaction> = Vec::new();
+    if let Ok(queues) = reviews {
+        records.extend(queues.transactions.iter());
+    }
+    if let Ok(activity) = activity {
+        records.extend(activity.iter().filter_map(|record| match record {
+            OwnerActivityRecord::Transaction(record) => Some(record.as_ref()),
+            OwnerActivityRecord::Message(_) | OwnerActivityRecord::TypedData(_) => None,
+        }));
+    }
+    records.sort_unstable_by_key(|record| record.request_id);
+    records.dedup_by_key(|record| record.request_id);
+    owner
+        .transaction_headlines(&records)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(request_id, headline)| (request_id, SharedString::from(headline)))
+        .collect()
 }
 
 enum ReleaseDisplayState {
@@ -4237,49 +4284,72 @@ struct ActivityRowSummary {
     tone: StatusTone,
 }
 
+/// The parts of a row's subtitle, in the order a reader asks for them: whose
+/// account, on which network, who asked, and when.
+///
+/// The network sits here rather than in the title because the title has
+/// something more specific to say. A part nothing is known about is left out
+/// entirely — a record with no chain is not on a network called "none".
+fn row_subtitle(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The network a record names, or nothing when it names none.
+fn optional_chain_label(chain_id: Option<&str>, networks: &BTreeMap<u64, SharedString>) -> String {
+    chain_id
+        .and_then(|chain_id| chain_id.parse::<u64>().ok())
+        .map(|chain_id| chain_label(Some(chain_id), networks))
+        .unwrap_or_default()
+}
+
+/// `headline` is the decoded reading of a transaction's plan, absent when the
+/// snapshot recognized nothing in it. See
+/// [`ekubo_wallet_core::approval_summary::plan_headline`] for the sources it
+/// is allowed to draw on — the requester's own account of its request is not
+/// among them, which is exactly why it can be the title of a row.
 fn activity_row_summary(
     record: &OwnerActivityRecord,
     networks: &BTreeMap<u64, SharedString>,
     agent: Option<&SharedString>,
+    headline: Option<&SharedString>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> ActivityRowSummary {
     match record {
         OwnerActivityRecord::Transaction(item) => ActivityRowSummary {
-            title: format!(
-                "Transaction on {}",
-                chain_label(item.chain_id.parse().ok(), networks)
-            ),
-            subtitle: format!(
-                "{} · {} · {}",
-                item.wallet_id,
-                activity_source_label(item.plan_source.as_deref(), agent),
-                relative_time_label(item.created_at, now)
-            ),
+            title: headline.map_or_else(|| "Transaction".to_owned(), ToString::to_string),
+            subtitle: row_subtitle(&[
+                &item.wallet_id,
+                &chain_label(item.chain_id.parse().ok(), networks),
+                &activity_source_label(item.plan_source.as_deref(), agent),
+                &relative_time_label(item.created_at, now),
+            ]),
             status: transaction_record_label(item),
             tone: transaction_record_tone(item),
         },
         OwnerActivityRecord::Message(item) => ActivityRowSummary {
             title: "Message signature".to_owned(),
-            subtitle: format!(
-                "{} · {} · {}",
-                item.wallet_id,
-                signature_source_label(item.requester.as_deref(), agent),
-                relative_time_label(item.created_at, now)
-            ),
+            subtitle: row_subtitle(&[
+                &item.wallet_id,
+                &optional_chain_label(item.chain_id.as_deref(), networks),
+                &signature_source_label(item.requester.as_deref(), agent),
+                &relative_time_label(item.created_at, now),
+            ]),
             status: item.status.label(),
             tone: message_status_tone(item.status),
         },
         OwnerActivityRecord::TypedData(item) => ActivityRowSummary {
-            title: format!(
-                "Typed-data signature on {}",
-                chain_label(item.chain_id.parse().ok(), networks)
-            ),
-            subtitle: format!(
-                "{} · {} · {}",
-                item.wallet_id,
-                signature_source_label(item.requester.as_deref(), agent),
-                relative_time_label(item.created_at, now)
-            ),
+            title: "Typed-data signature".to_owned(),
+            subtitle: row_subtitle(&[
+                &item.wallet_id,
+                &chain_label(item.chain_id.parse().ok(), networks),
+                &signature_source_label(item.requester.as_deref(), agent),
+                &relative_time_label(item.created_at, now),
+            ]),
             status: item.status.label(),
             tone: typed_data_status_tone(item.status),
         },
@@ -4453,12 +4523,13 @@ fn render_activity_row(
     feedback: Option<ActivityFeedback>,
     networks: &BTreeMap<u64, SharedString>,
     agent: Option<&SharedString>,
+    headline: Option<&SharedString>,
     now: chrono::DateTime<chrono::Utc>,
     editor: WeakEntity<WalletWindow>,
     cx: &mut App,
 ) -> gpui::Div {
     let request_id = record.request_id();
-    let summary = activity_row_summary(record, networks, agent, now);
+    let summary = activity_row_summary(record, networks, agent, headline, now);
     // Always "Details": the detail opens over the list, so the row's own
     // button is never the thing that closes it.
     let detail_label = "Details";
@@ -11745,6 +11816,7 @@ impl WalletWindow {
     /// snapshot ended.
     fn inbox_waiting_cards(&self) -> Result<Vec<InboxWaitingCard>> {
         let queues = self.cached_reviews()?;
+        let headlines = &self.snapshot()?.transaction_headlines;
         let networks = self.network_display_names();
         let now = chrono::Utc::now();
         let mut cards = Vec::new();
@@ -11756,15 +11828,14 @@ impl WalletWindow {
             let request_id = request.request_id;
             cards.push(InboxWaitingCard {
                 id: SharedString::from(format!("review-transaction-{request_id}")),
-                title: format!(
-                    "Transaction on {}",
-                    chain_label(request.chain_id.parse().ok(), &networks)
-                ),
-                subtitle: format!(
-                    "{} · asked {}",
-                    request.wallet_id,
-                    relative_time_label(request.created_at, now)
-                ),
+                title: headlines
+                    .get(&request_id)
+                    .map_or_else(|| "Transaction".to_owned(), ToString::to_string),
+                subtitle: row_subtitle(&[
+                    &request.wallet_id,
+                    &chain_label(request.chain_id.parse().ok(), &networks),
+                    &format!("asked {}", relative_time_label(request.created_at, now)),
+                ]),
                 action_label: "Review",
                 action: InboxWaitingAction::ReviewTransaction(request_id),
             });
@@ -11777,16 +11848,13 @@ impl WalletWindow {
             let request_id = request.request_id;
             cards.push(InboxWaitingCard {
                 id: SharedString::from(format!("review-typed-data-{request_id}")),
-                title: format!(
-                    "Typed-data signature on {}",
-                    chain_label(request.chain_id.parse().ok(), &networks)
-                ),
-                subtitle: format!(
-                    "{} · {} · asked {}",
-                    request.wallet_id,
+                title: "Typed-data signature".to_owned(),
+                subtitle: row_subtitle(&[
+                    &request.wallet_id,
+                    &chain_label(request.chain_id.parse().ok(), &networks),
                     request.requester.as_deref().unwrap_or("unnamed requester"),
-                    relative_time_label(request.created_at, now)
-                ),
+                    &format!("asked {}", relative_time_label(request.created_at, now)),
+                ]),
                 action_label: "Review",
                 action: InboxWaitingAction::ReviewTypedData(request_id),
             });
@@ -11803,12 +11871,12 @@ impl WalletWindow {
             cards.push(InboxWaitingCard {
                 id: SharedString::from(format!("review-message-{request_id}")),
                 title: "Message signature".to_owned(),
-                subtitle: format!(
-                    "{} · {} · asked {}",
-                    request.wallet_id,
+                subtitle: row_subtitle(&[
+                    &request.wallet_id,
+                    &optional_chain_label(request.chain_id.as_deref(), &networks),
                     request.requester.as_deref().unwrap_or("unnamed requester"),
-                    relative_time_label(request.created_at, now)
-                ),
+                    &format!("asked {}", relative_time_label(request.created_at, now)),
+                ]),
                 action_label: "Review",
                 action: InboxWaitingAction::ReviewMessage(request_id),
             });
@@ -12892,6 +12960,11 @@ impl WalletWindow {
                 .map(|snapshot| snapshot.activity_sources.clone())
                 .unwrap_or_default(),
         );
+        let headlines = Arc::new(
+            self.snapshot()
+                .map(|snapshot| snapshot.transaction_headlines.clone())
+                .unwrap_or_default(),
+        );
         let networks = Arc::new(self.network_display_names());
         let now = chrono::Utc::now();
         let editor = cx.entity().downgrade();
@@ -12921,6 +12994,7 @@ impl WalletWindow {
                 feedback.get(&request_id).cloned(),
                 &networks,
                 sources.get(&request_id),
+                headlines.get(&request_id),
                 now,
                 editor.clone(),
                 cx,
