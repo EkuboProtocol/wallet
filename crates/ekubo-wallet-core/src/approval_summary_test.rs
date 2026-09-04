@@ -1222,3 +1222,28 @@ async fn a_descriptor_supplies_the_headline_it_matches() {
         "the descriptor's own intent should be the headline: {headline}"
     );
 }
+
+#[test]
+fn a_headline_needs_no_runtime() {
+    // The desktop decodes headlines inside `spawn_blocking`, where there is no
+    // async context to await from, so it drives this future with a bare
+    // executor. That is only sound while the descriptor engine awaits nothing
+    // but the maps it was handed -- the `clear-signing` crate does carry a
+    // tokio dependency, used by its network registry source and its uniffi
+    // bindings, neither of which this path touches. A version that moved a
+    // runtime primitive onto the formatting path would hang the wallet's
+    // snapshot thread rather than fail to build, so the claim is tested here
+    // with no runtime present at all.
+    let token = Address::repeat_byte(0x44);
+    let spender = Address::repeat_byte(0x22);
+    let headline = futures::executor::block_on(plan_headline(
+        &[step(
+            1,
+            token,
+            approve_calldata(spender, U256::from(1_000_000)),
+        )],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    ));
+    assert_eq!(headline.as_deref(), Some("Approve 1 USDC"));
+}

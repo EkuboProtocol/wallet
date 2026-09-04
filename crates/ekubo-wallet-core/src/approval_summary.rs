@@ -292,10 +292,18 @@ const MAX_HEADLINE_LEN: usize = 120;
 /// `None` when no call was recognized, so the caller can fall back to naming
 /// the record rather than printing a headline that says nothing.
 ///
-/// Unlike the review, a headline names a token by symbol alone. It has no room
-/// for the address beside it, so it is a way to find a request and never a
-/// basis for approving one: the review it leads to carries every address in
-/// full. A token the owner's database does not name stays unnamed here too.
+/// Unlike the review, the phrases decoded here name a token by symbol alone.
+/// There is no room for the address beside it, so a headline is a way to find
+/// a request and never a basis for approving one: the review it leads to
+/// carries every address in full. A token the owner's database does not name
+/// stays unnamed here too. A descriptor's own intent line is passed through as
+/// written, and may carry a full address where the descriptor interpolates one
+/// — that is the engine's rendering, already capped and sanitized, and a
+/// complete address is the one form that cannot be mistaken for another.
+///
+/// Awaits nothing but the descriptor engine's own lookups against the maps it
+/// is handed, so a caller with no async runtime may drive it to completion
+/// with a bare executor. `a_headline_needs_no_runtime` holds that.
 #[must_use]
 pub async fn plan_headline(
     steps: &[ExecutionStep],
