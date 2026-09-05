@@ -3094,3 +3094,73 @@ fn a_record_on_no_network_is_not_given_one() {
         "Ethereum Mainnet"
     );
 }
+
+#[test]
+fn a_request_withdrawn_before_signing_is_not_called_a_won_nonce_race() {
+    use ekubo_wallet_core::{
+        core::{policy::ReviewRequest, source::RequestSource},
+        pending::PendingStore,
+        policy_store::{DatabaseKey, PolicyStore},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let plan = ekubo_wallet_core::core::execution_plan::ExecutionPlan::parse(serde_json::json!({
+        "schema_version": "1",
+        "chain_id": "1",
+        "caip2_chain_id": "eip155:1",
+        "sender": "0x1111111111111111111111111111111111111111",
+        "ordered_steps": [{
+            "step": 1,
+            "kind": "execution",
+            "transaction": {
+                "chain_id": "1",
+                "from": "0x1111111111111111111111111111111111111111",
+                "to": "0x2222222222222222222222222222222222222222",
+                "data": "0x",
+                "value": "1"
+            }
+        }]
+    }))
+    .unwrap();
+    let mut database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    database
+        .put_for_wallet(
+            "primary",
+            plan.sender,
+            &ekubo_wallet_core::core::policy::WalletPolicy::allow_anything(),
+            None,
+        )
+        .unwrap();
+    let instance_id = database.get("primary").unwrap().unwrap().wallet_instance_id;
+    let mut pending = PendingStore::new(database);
+    let queued = pending
+        .create_for_instance(
+            "primary",
+            instance_id,
+            "ethereum",
+            &plan,
+            Some("mcp.ekubo.org"),
+            &RequestSource::agent(Some("claude_code"), None),
+            1,
+            ReviewRequest::PolicyDecides,
+        )
+        .unwrap();
+    let withdrawn = pending.withdraw(queued.request_id).unwrap();
+
+    // The stored status is `cancelled`, which the status-only wording reads as
+    // a replacement of the owner's having won a nonce race. There is no such
+    // replacement here — the row never held an envelope — so the activity list
+    // must not name a transaction the owner never sent.
+    assert_eq!(withdrawn.status, PendingStatus::Cancelled);
+    assert_eq!(transaction_record_label(&withdrawn), "Withdrawn");
+    let explanation = transaction_record_explanation(&withdrawn);
+    assert!(
+        explanation.contains("never signed or sent"),
+        "{explanation}"
+    );
+    assert!(!explanation.contains("mined first"), "{explanation}");
+}

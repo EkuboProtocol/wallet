@@ -11,6 +11,14 @@ pub enum TransactionStage {
     Reverted,
     Replaced,
     Cancelled,
+    /// The agent that queued a request took it back before anyone decided.
+    ///
+    /// Separate from [`Self::Cancelled`], which is the on-chain outcome of a
+    /// replacement winning a nonce race. Both leave the row `cancelled`, but
+    /// the owner is being told two different things: one that their money
+    /// moved a way they asked for, and one that a review they had not looked
+    /// at yet is gone and nothing happened.
+    Withdrawn,
 }
 
 /// Which signature request a [`DomainEventKind::Signature`] is about. The two

@@ -2498,7 +2498,15 @@ impl WalletMcpServer {
             Err(error) => self.withdrawal_refusal(input.request_id, &error)?,
         };
         let output = execution_status_output(withdrawn);
-        self.publish_execution_status(&output);
+        // Not `publish_execution_status`: that maps `Cancelled` to the stage
+        // whose notification says a replacement was mined first, which is a
+        // sentence about a nonce race that did not happen here. The owner is
+        // being told a review vanished from their inbox, so they have to be
+        // told the true reason it did.
+        self.events.publish(DomainEventKind::Transaction {
+            request_id: output.request_id,
+            stage: TransactionStage::Withdrawn,
+        });
         Ok(Json(output))
     }
 
@@ -3402,11 +3410,12 @@ impl WalletMcpServer {
     /// a lost race is an error naming the live status rather than an `Ok` with
     /// an advisory field somebody may not read.
     ///
-    /// An already-withdrawn row is the exception and returns success, because
-    /// a retry of a call that worked asked for a state the row is already in.
-    /// That reading only holds for a row that never had an envelope: a
-    /// `Cancelled` row carrying signed bytes was cancelled on chain, which is
-    /// a different event this tool did not cause and must not claim.
+    /// A row already out of the queue with no envelope is the exception and
+    /// returns success: the agent asked for a state the row is in, whether it
+    /// got there through this tool or through a policy replacement dropping
+    /// it. The envelope is what makes that reading safe — a `Cancelled` row
+    /// carrying signed bytes was cancelled on chain, which is a different
+    /// event this tool did not cause and must not claim.
     fn withdrawal_refusal(
         &self,
         request_id: uuid::Uuid,
@@ -3415,6 +3424,13 @@ impl WalletMcpServer {
         let Ok(current) = self.pending_record_by_id(request_id) else {
             return Err(tool_error(error));
         };
+        // Still queued means the refusal was about whose request it is, not
+        // about a race, and core already said so exactly. Re-describing it as
+        // a row that moved would send the agent to reconcile a transaction
+        // sitting untouched in the owner's inbox.
+        if current.status == PendingStatus::AwaitingApproval {
+            return Err(tool_error(error));
+        }
         if current.status == PendingStatus::Cancelled
             && current.serialized_transaction.is_none()
             && matches!(
@@ -4267,6 +4283,13 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ExecutionStatus::Cancelled if record.settlement_transaction_hash.is_some()
             && record.finalized_at.is_none() => Some(
             "A cancellation receipt was observed but is not final yet. The wallet is revalidating it and will not sign another transaction for this wallet and chain until finality.".into(),
+        ),
+        // A row that never held an envelope was never signed, so no nonce race
+        // and no policy-revision cancellation of signed bytes can describe it.
+        // It left the queue undecided: withdrawn by the agent that queued it,
+        // or dropped when the wallet's policy was replaced while it waited.
+        ExecutionStatus::Cancelled if record.serialized_transaction.is_none() => Some(
+            "This request left the queue without being signed, sent, or decided by the user, so nothing was executed. Queue a fresh plan only if the user still wants the action.".into(),
         ),
         ExecutionStatus::Cancelled => Some(if record.cancel_transaction_hashes.is_empty() {
             "The signed request was cancelled because its policy revision changed before initial submission.".into()

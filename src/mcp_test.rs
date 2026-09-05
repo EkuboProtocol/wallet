@@ -2378,11 +2378,49 @@ fn withdrawing_a_queued_request_clears_it_and_repeats_harmlessly() {
             .is_empty()
     );
 
+    // The instruction the agent reads next must describe a withdrawal, not
+    // the nonce race or the policy-revision cancellation the other
+    // `Cancelled` rows got here by.
+    let instruction = output.instruction.clone().unwrap();
+    assert!(
+        instruction.contains("without being signed, sent, or decided"),
+        "{instruction}"
+    );
+
     // A retry of a call that already worked asked for a state the row is
     // already in, so it succeeds rather than making the agent decide whether
     // its own earlier success counts.
     let Json(again) = withdraw(&server, request_id).unwrap();
     assert_eq!(again.status, ExecutionStatus::Cancelled);
+}
+
+#[test]
+fn withdrawal_tells_the_owner_their_review_ended_without_a_transaction() {
+    let (_directory, server) = server();
+    let mut events = server.events.subscribe();
+    let request_id = queue_agent_request(&server, &sendable_plan());
+    withdraw(&server, request_id).unwrap();
+
+    // `Cancelled` is the stage whose notification says a replacement was mined
+    // first. That sentence is about a nonce race, and this owner had a review
+    // disappear out of their inbox without anything being signed — so the two
+    // must not share a stage however much they share a stored status.
+    let stages = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event.kind {
+            DomainEventKind::Transaction { request_id, stage } => Some((request_id, stage)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        stages.contains(&(request_id, TransactionStage::Withdrawn)),
+        "{stages:?}"
+    );
+    assert!(
+        !stages
+            .iter()
+            .any(|(_, stage)| *stage == TransactionStage::Cancelled),
+        "{stages:?}"
+    );
 }
 
 #[test]
@@ -2432,7 +2470,22 @@ fn a_dapps_queued_request_is_not_an_agents_to_withdraw() {
         .unwrap()
         .request_id;
 
-    assert!(withdraw(&server, request_id).is_err());
+    let Err(error) = withdraw(&server, request_id) else {
+        panic!("a dapp's request must not withdraw");
+    };
+    // The refusal is about whose request it is. Describing a row that never
+    // moved as one that moved would send the agent off to reconcile a
+    // transaction still sitting in the owner's inbox.
+    assert!(
+        error.message.contains("not made by an agent"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("wallet_get_execution_status"),
+        "{}",
+        error.message
+    );
     assert_eq!(
         server
             .pending

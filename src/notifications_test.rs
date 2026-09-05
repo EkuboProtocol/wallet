@@ -42,7 +42,7 @@ fn transaction_event(stage: TransactionStage, request_id: Uuid) -> DomainEvent {
     }
 }
 
-const EVERY_STAGE: [TransactionStage; 7] = [
+const EVERY_STAGE: [TransactionStage; 8] = [
     TransactionStage::Proposed,
     TransactionStage::Signed,
     TransactionStage::Broadcast,
@@ -50,6 +50,7 @@ const EVERY_STAGE: [TransactionStage; 7] = [
     TransactionStage::Reverted,
     TransactionStage::Replaced,
     TransactionStage::Cancelled,
+    TransactionStage::Withdrawn,
 ];
 
 fn detailed() -> NotificationPreferences {
@@ -68,6 +69,7 @@ fn every_transaction_lifecycle_stage_says_what_happened_and_where() {
         (TransactionStage::Reverted, "Transaction failed on chain"),
         (TransactionStage::Replaced, "Transaction superseded"),
         (TransactionStage::Cancelled, "Transaction cancelled"),
+        (TransactionStage::Withdrawn, "Request withdrawn"),
     ] {
         let event = transaction_event(stage, Uuid::new_v4());
         let notification = notification_for(&event, &context(), detailed()).unwrap();

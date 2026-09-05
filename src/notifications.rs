@@ -197,6 +197,13 @@ fn transaction_notification(
             format!("{where_from}. Your replacement was mined first."),
             false,
         ),
+        TransactionStage::Withdrawn => (
+            "Request withdrawn",
+            format!(
+                "{where_from}. The agent took back its request before you decided, so nothing was signed or sent."
+            ),
+            false,
+        ),
     };
     WalletNotification {
         title: title.to_owned(),

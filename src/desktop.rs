@@ -2101,14 +2101,30 @@ fn transaction_record_label(record: &PendingTransaction) -> &'static str {
             PendingStatus::Cancelled => "Cancellation confirming",
             _ => record.status.label(),
         }
+    } else if withdrawn_before_signing(record) {
+        "Withdrawn"
     } else {
         record.status.label()
     }
 }
 
+/// A `cancelled` row that never held an envelope.
+///
+/// The status is reached two ways and only says which for a row that has
+/// signed bytes. Those were cancelled on chain by a replacement winning their
+/// nonce. A row without them never got that far: it left the queue before
+/// anyone decided, because the agent that queued it withdrew it or because a
+/// replaced policy dropped it. Telling that owner a replacement of theirs was
+/// mined first would name a transaction that does not exist.
+fn withdrawn_before_signing(record: &PendingTransaction) -> bool {
+    record.status == PendingStatus::Cancelled && record.serialized_transaction.is_none()
+}
+
 fn transaction_record_explanation(record: &PendingTransaction) -> &'static str {
     if transaction_receipt_is_provisional(record) {
         "A receipt was observed, but its block is not final yet. The wallet is rechecking it and will not sign another transaction for this account and network meanwhile."
+    } else if withdrawn_before_signing(record) {
+        "This left your queue before you decided, so it was never signed or sent. Whoever asked took the request back, or the wallet dropped it because your policy changed while it waited."
     } else {
         record.status.explanation()
     }
