@@ -28,6 +28,15 @@ current request. An explicit policy denial cannot be queued. Approval itself
 attempts to submit the exact signed bytes; follow the returned lifecycle
 instruction, and retry by `request_id` only if the row remains signed.
 
+A queued plan does not expire, so stopping the wait is not the same as ending
+the request: it stays approvable, and an approval hours later executes a quote
+that is long gone. When the plan has gone stale or the user has moved on, call
+`wallet_withdraw_request` to take it back — that is the agent withdrawing its
+own offer, not the user rejecting it, and it clears the review out of their
+wallet. Withdrawal only reaches a request still awaiting approval; if it
+reports that the row moved, reconcile with `wallet_get_execution_status` rather
+than assuming nothing was signed.
+
 When the user asks to see a particular transaction before it goes out, and
 their policy would have sent it automatically, send it with `must_review` true.
 That queues this one submission for their review without touching their policy.

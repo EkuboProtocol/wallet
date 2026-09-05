@@ -31,6 +31,13 @@ instruction returned by the wait; call `wallet_send_execution_plan` with the
 When a request is queued, direct the user to its review in the Ekubo Wallet
 application and continue polling the corresponding wait tool. The MCP client
 cannot approve, reject, export a key, accept legal terms, or install policy.
+It can withdraw its own queued transaction with `wallet_withdraw_request`, which
+is not a rejection: it takes back an offer the agent is no longer standing
+behind. Do that instead of abandoning a wait, because a queued plan never
+expires — left alone it stays approvable at a quote that has since gone stale,
+and re-sending the identical plan deduplicates into that same row. Withdrawal
+reaches nothing signed; an envelope already broadcast is `wallet_attempt_cancel`
+instead.
 
 Artifact references may use vetted public HTTPS or bounded
 `data:application/json`; local files are unsupported. Temporary forks are

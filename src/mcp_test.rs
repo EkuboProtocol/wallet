@@ -681,6 +681,7 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_wait_for_execution",
             "wallet_wait_for_message",
             "wallet_wait_for_typed_data",
+            "wallet_withdraw_request",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -2319,4 +2320,157 @@ fn the_application_license_is_served_like_every_other_legal_document() {
     assert!(advertised.contains(&APPLICATION_LICENSE_RESOURCE_URI.to_string()));
     let (contents, _) = resource_contents(APPLICATION_LICENSE_RESOURCE_URI).unwrap();
     assert_eq!(contents, LegalDocument::ApplicationLicense.text());
+}
+
+/// Queue a plan the way a send that fell to human review does, carrying the
+/// agent origin withdrawal is gated on, and hand back the request id.
+fn queue_agent_request(server: &WalletMcpServer, plan: &ExecutionPlan) -> uuid::Uuid {
+    let wallet = server.config.wallet("primary").unwrap();
+    server
+        .pending
+        .lock()
+        .unwrap()
+        .create_for_instance(
+            "primary",
+            wallet.instance_id,
+            "ethereum",
+            plan,
+            Some("mcp.ekubo.org"),
+            &crate::core::source::RequestSource::agent(Some("claude_code"), Some("mcp.ekubo.org")),
+            1,
+            crate::core::policy::ReviewRequest::PolicyDecides,
+        )
+        .unwrap()
+        .request_id
+}
+
+fn withdraw(
+    server: &WalletMcpServer,
+    request_id: uuid::Uuid,
+) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(server.wallet_withdraw_request(Parameters(WithdrawInput { request_id })))
+}
+
+#[test]
+fn withdrawing_a_queued_request_clears_it_and_repeats_harmlessly() {
+    let (_directory, server) = server();
+    let request_id = queue_agent_request(&server, &sendable_plan());
+
+    let Json(output) = withdraw(&server, request_id).unwrap();
+    assert_eq!(output.status, ExecutionStatus::Cancelled);
+    assert_eq!(output.request_id, request_id);
+    // Withdrawal is the agent taking back its own offer, so the row must not
+    // read as a decision the user made either way.
+    assert!(output.approved_at.is_none());
+    assert!(output.rejected_at.is_none());
+    // The review is gone from what the owner is asked to look at.
+    assert!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .awaiting_approval(Some("primary"))
+            .unwrap()
+            .is_empty()
+    );
+
+    // A retry of a call that already worked asked for a state the row is
+    // already in, so it succeeds rather than making the agent decide whether
+    // its own earlier success counts.
+    let Json(again) = withdraw(&server, request_id).unwrap();
+    assert_eq!(again.status, ExecutionStatus::Cancelled);
+}
+
+#[test]
+fn losing_the_race_to_the_owner_is_an_error_that_names_the_live_status() {
+    let (_directory, server) = server();
+    let request_id = queue_agent_request(&server, &sendable_plan());
+    // The owner's verdict wins the same compare-and-set the withdrawal wanted.
+    server.pending.lock().unwrap().reject(request_id).unwrap();
+
+    let Err(error) = withdraw(&server, request_id) else {
+        panic!("a decided request must not withdraw");
+    };
+    // The agent has to be able to tell "nothing happened" from "the opposite
+    // of what I wanted happened", so the refusal carries the live status and
+    // the two tools that settle what became of the bytes.
+    assert!(error.message.contains("Rejected"), "{}", error.message);
+    assert!(
+        error.message.contains("wallet_get_execution_status"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("wallet_attempt_cancel"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_dapps_queued_request_is_not_an_agents_to_withdraw() {
+    let (_directory, server) = server();
+    let wallet = server.config.wallet("primary").unwrap();
+    let request_id = server
+        .pending
+        .lock()
+        .unwrap()
+        .create_for_instance(
+            "primary",
+            wallet.instance_id,
+            "ethereum",
+            &sendable_plan(),
+            Some("mcp.ekubo.org"),
+            &crate::core::source::RequestSource::walletconnect(Some("https://app.example.org")),
+            1,
+            crate::core::policy::ReviewRequest::PolicyDecides,
+        )
+        .unwrap()
+        .request_id;
+
+    assert!(withdraw(&server, request_id).is_err());
+    assert_eq!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .get(request_id)
+            .unwrap()
+            .status,
+        PendingStatus::AwaitingApproval
+    );
+}
+
+#[test]
+fn the_approval_wait_timeout_offers_withdrawal_as_the_way_out() {
+    let (_directory, server) = server();
+    let request_id = queue_agent_request(&server, &sendable_plan());
+    let Json(waited) = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(
+            server.wallet_wait_for_approval(Parameters(ApprovalWaitInput {
+                request_id,
+                timeout_seconds: 1,
+            })),
+        )
+        .unwrap();
+    assert_eq!(waited.status, ExecutionStatus::TimedOut);
+    let instruction = waited.instruction.unwrap();
+    // A timed-out wait is exactly where a stuck agent stands, so it is where
+    // the escape hatch has to be named — along with the standing instruction
+    // not to treat the timeout itself as an ending.
+    assert!(
+        instruction.contains("wallet_wait_for_approval"),
+        "{instruction}"
+    );
+    assert!(
+        instruction.contains("wallet_withdraw_request"),
+        "{instruction}"
+    );
 }

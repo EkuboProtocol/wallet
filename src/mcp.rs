@@ -621,6 +621,20 @@ struct WaitInput {
     confirmations: u16,
 }
 
+/// A queued request named on its own.
+///
+/// Deliberately not a [`RequestInput`]: an agent that has given up on a wait
+/// is holding a `request_id` and nothing else, and demanding it reconstruct
+/// the wallet and chain to let go of a request would be asking for exactly the
+/// bookkeeping it just lost. The row names its own wallet and chain, and
+/// withdrawal grants nothing, so there is no authorization for a matching
+/// triple to carry here.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WithdrawInput {
+    request_id: uuid::Uuid,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApprovalWaitInput {
@@ -2445,11 +2459,46 @@ impl WalletMcpServer {
         let mut output = execution_status_output(record);
         if timed_out {
             output.status = ExecutionStatus::TimedOut;
-            output.instruction = Some(still_awaiting_instruction(
-                "wallet_wait_for_approval",
-                output.request_id,
+            output.instruction = Some(format!(
+                "{} If the plan has gone stale while you waited — an aged-out quote, a step the \
+                 user has moved on from — withdraw it with wallet_withdraw_request rather than \
+                 leaving it approvable at a price that no longer exists.",
+                still_awaiting_instruction("wallet_wait_for_approval", output.request_id)
             ));
         }
+        Ok(Json(output))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_request",
+        description = "Take back a request this agent queued that is still awaiting human approval, so it stops being approvable. Use it when the plan has gone stale — a quote that has aged out, a step the user redirected away from, a wait you are done with — because a queued plan does not expire: left alone it can be approved an hour later at a price that no longer exists, and re-sending the identical plan deduplicates into that same stale row instead of making a fresh one. Withdrawing is not rejecting: it records that the agent stopped offering the plan, not that the user refused it, and the user's own review disappears from their wallet. Nothing signed can be withdrawn. If the owner approved while you were deciding, this fails and reports the live status: reconcile with wallet_get_execution_status, and for an envelope already broadcast use wallet_attempt_cancel, which is the unrelated on-chain operation of outbidding it at its own nonce. Only agent-made requests are withdrawable; a dapp's or an automation's are not this agent's to take back.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn wallet_withdraw_request(
+        &self,
+        Parameters(input): Parameters<WithdrawInput>,
+    ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
+        // The same admission every request-id tool makes: the row has to name
+        // a wallet and network this server is configured for before anything
+        // reads or writes it.
+        self.pending_record_by_id(input.request_id)
+            .map_err(|error| tool_error(&error))?;
+        let attempt = self
+            .pending
+            .lock()
+            .map_err(|_| ErrorData::internal_error("pending database lock was poisoned", None))?
+            .withdraw(input.request_id);
+        let withdrawn = match attempt {
+            Ok(withdrawn) => withdrawn,
+            Err(error) => self.withdrawal_refusal(input.request_id, &error)?,
+        };
+        let output = execution_status_output(withdrawn);
+        self.publish_execution_status(&output);
         Ok(Json(output))
     }
 
@@ -3339,6 +3388,48 @@ impl WalletMcpServer {
                 Some(ArtifactSource::InlineDataUri) | None => None,
             },
         )
+    }
+
+    /// Explain a refused withdrawal, distinguishing the one case that already
+    /// got what it asked for from the one the caller must not misread.
+    ///
+    /// The guard is a compare-and-set on `awaiting_approval`, and the owner's
+    /// approval is the same guard, so exactly one of them wins. Losing it does
+    /// not mean nothing happened — it means the opposite of what the agent
+    /// wanted happened, and the exact bytes may by now be signed and in
+    /// flight. An agent that reads "withdraw failed" as "the request is still
+    /// harmlessly waiting" is the recovery bug this tool exists to remove, so
+    /// a lost race is an error naming the live status rather than an `Ok` with
+    /// an advisory field somebody may not read.
+    ///
+    /// An already-withdrawn row is the exception and returns success, because
+    /// a retry of a call that worked asked for a state the row is already in.
+    /// That reading only holds for a row that never had an envelope: a
+    /// `Cancelled` row carrying signed bytes was cancelled on chain, which is
+    /// a different event this tool did not cause and must not claim.
+    fn withdrawal_refusal(
+        &self,
+        request_id: uuid::Uuid,
+        error: &anyhow::Error,
+    ) -> Result<PendingTransaction, ErrorData> {
+        let Ok(current) = self.pending_record_by_id(request_id) else {
+            return Err(tool_error(error));
+        };
+        if current.status == PendingStatus::Cancelled
+            && current.serialized_transaction.is_none()
+            && matches!(
+                current.request_source,
+                crate::core::source::RequestSource::Agent { .. }
+            )
+        {
+            return Ok(current);
+        }
+        Err(tool_error(&anyhow::anyhow!(
+            "request {request_id} is no longer awaiting approval and cannot be withdrawn; it is \
+             now {}. Do not assume nothing was signed: reconcile with wallet_get_execution_status, \
+             and cancel an envelope that is already broadcast with wallet_attempt_cancel.",
+            current.status.label()
+        )))
     }
 
     fn pending_record_by_id(&self, request_id: uuid::Uuid) -> Result<PendingTransaction> {
