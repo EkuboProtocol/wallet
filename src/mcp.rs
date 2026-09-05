@@ -336,6 +336,12 @@ impl WalletMcpServer {
             }
             ExecutionStatus::Submitted => Some(TransactionStage::Confirmed),
             ExecutionStatus::Reverted => Some(TransactionStage::Reverted),
+            // No signed hash means the row never held an envelope, so nothing
+            // of the owner's was ever mined against this nonce. Reconciling a
+            // withdrawn row must not ring "your replacement was mined first".
+            ExecutionStatus::Cancelled if output.transaction_hash.is_none() => {
+                Some(TransactionStage::Withdrawn)
+            }
             ExecutionStatus::Cancelled => Some(TransactionStage::Cancelled),
             ExecutionStatus::Replaced => Some(TransactionStage::Replaced),
             ExecutionStatus::TimedOut | ExecutionStatus::Rejected => None,
@@ -2494,20 +2500,22 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("pending database lock was poisoned", None))?
             .withdraw(input.request_id);
         let withdrawn = match attempt {
-            Ok(withdrawn) => withdrawn,
+            Ok(withdrawn) => {
+                // Announced only on the pass that moved the row. Every tool
+                // here takes hostile input, and a retry that changed nothing
+                // has nothing to tell the owner: publishing on the idempotent
+                // arm too would let a caller ring their notifications as often
+                // as it liked, and would blame this agent for a row some
+                // policy replacement had dropped.
+                self.events.publish(DomainEventKind::Transaction {
+                    request_id: withdrawn.request_id,
+                    stage: TransactionStage::Withdrawn,
+                });
+                withdrawn
+            }
             Err(error) => self.withdrawal_refusal(input.request_id, &error)?,
         };
-        let output = execution_status_output(withdrawn);
-        // Not `publish_execution_status`: that maps `Cancelled` to the stage
-        // whose notification says a replacement was mined first, which is a
-        // sentence about a nonce race that did not happen here. The owner is
-        // being told a review vanished from their inbox, so they have to be
-        // told the true reason it did.
-        self.events.publish(DomainEventKind::Transaction {
-            request_id: output.request_id,
-            stage: TransactionStage::Withdrawn,
-        });
-        Ok(Json(output))
+        Ok(Json(execution_status_output(withdrawn)))
     }
 
     #[tool(

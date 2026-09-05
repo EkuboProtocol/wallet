@@ -2421,6 +2421,17 @@ fn withdrawal_tells_the_owner_their_review_ended_without_a_transaction() {
             .any(|(_, stage)| *stage == TransactionStage::Cancelled),
         "{stages:?}"
     );
+
+    // The idempotent retry moved nothing, so it announces nothing. Otherwise a
+    // caller could ring the owner's notifications as many times as it liked by
+    // withdrawing an already-withdrawn request.
+    withdraw(&server, request_id).unwrap();
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .next()
+            .is_none(),
+        "a withdrawal that changed nothing must not notify the owner"
+    );
 }
 
 #[test]

@@ -1929,6 +1929,12 @@ impl OwnerApi {
             {
                 Some(crate::events::TransactionStage::Broadcast)
             }
+            // A `cancelled` row with no envelope was never signed, so it left
+            // the queue undecided rather than losing a nonce to a replacement
+            // the owner sent.
+            PendingStatus::Cancelled if record.serialized_transaction.is_none() => {
+                Some(crate::events::TransactionStage::Withdrawn)
+            }
             PendingStatus::Cancelled => Some(crate::events::TransactionStage::Cancelled),
             PendingStatus::Replaced => Some(crate::events::TransactionStage::Replaced),
             PendingStatus::Rejected => None,
