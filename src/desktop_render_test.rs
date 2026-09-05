@@ -2122,6 +2122,10 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
                         tokens_skipped: None,
                         fork: None,
                     }),
+                    ekubo_positions: Ok(crate::authority::OwnerEkuboPositions {
+                        positions: Vec::new(),
+                        total_items: 0,
+                    }),
                 }],
             }],
         });
@@ -2186,6 +2190,26 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         3,
         "changing what the list holds back must derive the rows again"
     );
+
+    // A landed position refresh must invalidate the same cache as balances.
+    cx.update_entity(&view, |wallet, _| {
+        let PortfolioState::Ready(portfolio) = &mut wallet.portfolio else {
+            panic!("the portfolio is ready");
+        };
+        portfolio.accounts[0].networks[0].ekubo_positions =
+            Err("Position index unavailable".to_owned());
+        wallet.portfolio_generation = wallet.portfolio_generation.wrapping_add(1);
+    });
+    draw(cx, window, &view);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.portfolio_rows_derived.get(), 4);
+        let cached = wallet.portfolio_row_cache.borrow();
+        assert!(cached.as_ref().unwrap().rows.iter().any(|row| matches!(
+            row,
+            PortfolioListRow::PositionsUnavailable { error, .. }
+                if error == "Position index unavailable"
+        )));
+    });
 
     release(cx, &view);
 }
