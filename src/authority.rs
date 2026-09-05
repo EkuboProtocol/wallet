@@ -1,7 +1,9 @@
 //! Long-lived application authority and compile-time capability surfaces.
 
 use crate::{
-    ekubo_positions::{IndexedEkuboPosition, IndexedEkuboPositions, fetch_open_positions},
+    ekubo_positions::{
+        IndexedEkuboPosition, IndexedEkuboPositions, fetch_open_positions, fetch_position_states,
+    },
     events::{DomainEventKind, EventBus, SignatureKind, SignatureStage},
     mcp::{GlobalAgentQuota, WalletMcpServer},
 };
@@ -112,6 +114,16 @@ pub struct OwnerPortfolioAsset {
     pub address: String,
     pub symbol: Option<String>,
     pub name: Option<String>,
+    pub decimals: Option<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnerEkuboPositionState {
+    pub liquidity: u128,
+    pub principal0: u128,
+    pub principal1: u128,
+    pub fees0: u128,
+    pub fees1: u128,
 }
 
 /// One open Ekubo liquidity position, enriched only with local display names.
@@ -125,6 +137,7 @@ pub struct OwnerEkuboPosition {
     pub lower_tick: i64,
     pub upper_tick: i64,
     pub current_tick: Option<i64>,
+    pub state: std::result::Result<OwnerEkuboPositionState, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +179,10 @@ fn owner_portfolio_asset(
                 .native_currency
                 .as_ref()
                 .map(|currency| currency.name.clone()),
+            decimals: network
+                .native_currency
+                .as_ref()
+                .map(|currency| currency.decimals),
         };
     }
     let token = known
@@ -175,36 +192,52 @@ fn owner_portfolio_asset(
         address,
         symbol: token.and_then(|token| token.symbol.clone()),
         name: token.and_then(|token| token.name.clone()),
+        decimals: token.and_then(|token| token.decimals),
     }
 }
 
-fn owner_ekubo_positions(
+async fn owner_ekubo_positions(
     indexed: IndexedEkuboPositions,
     network: &NetworkConfig,
     known: &[StoredToken],
 ) -> Result<OwnerEkuboPositions> {
+    for position in &indexed.positions {
+        ensure!(
+            position.chain_id == network.chain_id,
+            "Ekubo position index returned chain {} for chain {}",
+            position.chain_id,
+            network.chain_id
+        );
+    }
+    let states = fetch_position_states(network, &indexed.positions).await;
+    ensure!(
+        states.len() == indexed.positions.len(),
+        "Ekubo position state reader returned the wrong number of rows"
+    );
     let positions = indexed
         .positions
         .into_iter()
-        .map(|position: IndexedEkuboPosition| {
-            ensure!(
-                position.chain_id == network.chain_id,
-                "Ekubo position index returned chain {} for chain {}",
-                position.chain_id,
-                network.chain_id
-            );
-            Ok(OwnerEkuboPosition {
+        .zip(states)
+        .map(
+            |(position, state): (IndexedEkuboPosition, _)| OwnerEkuboPosition {
                 id: position.id,
                 chain_id: position.chain_id,
                 positions_address: position.positions_address,
                 token0: owner_portfolio_asset(position.token0, network, known),
                 token1: owner_portfolio_asset(position.token1, network, known),
-                lower_tick: position.lower_tick,
-                upper_tick: position.upper_tick,
-                current_tick: position.current_tick,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+                lower_tick: i64::from(position.lower_tick),
+                upper_tick: i64::from(position.upper_tick),
+                current_tick: position.current_tick.map(i64::from),
+                state: state.map(|state| OwnerEkuboPositionState {
+                    liquidity: state.liquidity,
+                    principal0: state.principal0,
+                    principal1: state.principal1,
+                    fees0: state.fees0,
+                    fees1: state.fees1,
+                }),
+            },
+        )
+        .collect();
     Ok(OwnerEkuboPositions {
         positions,
         total_items: indexed.total_items,
@@ -1577,11 +1610,20 @@ impl OwnerApi {
                     let result = result.map_err(|error| {
                         ekubo_wallet_core::sanitize::stripped_capped(&format!("{error:#}"), 500)
                     });
-                    let ekubo_positions = ekubo_positions
-                        .and_then(|indexed| owner_ekubo_positions(indexed, &network, &known))
-                        .map_err(|error| {
-                            ekubo_wallet_core::sanitize::stripped_capped(&format!("{error:#}"), 500)
-                        });
+                    let ekubo_positions = match ekubo_positions {
+                        Ok(indexed) => owner_ekubo_positions(indexed, &network, &known)
+                            .await
+                            .map_err(|error| {
+                                ekubo_wallet_core::sanitize::stripped_capped(
+                                    &format!("{error:#}"),
+                                    500,
+                                )
+                            }),
+                        Err(error) => Err(ekubo_wallet_core::sanitize::stripped_capped(
+                            &format!("{error:#}"),
+                            500,
+                        )),
+                    };
                     (
                         account_index,
                         network_index,

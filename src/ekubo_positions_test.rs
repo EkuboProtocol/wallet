@@ -7,7 +7,14 @@ fn position_pages_accept_api_quantities_and_normalize_addresses() {
             "id": "0x01",
             "chain_id": "0x1",
             "positions_address": "0x2d9876a21af7545f8632c3af76ec90b5ad4b66d",
-            "pool_key": { "token0": "0x0", "token1": "0x4c46e830bb56ce22735d5d8fc9cb90309317d0f" },
+            "pool_key": {
+                "token0": "0x0",
+                "token1": "0x4c46e830bb56ce22735d5d8fc9cb90309317d0f",
+                "fee": "0x0",
+                "tick_spacing": "0x1",
+                "extension": "0x0",
+                "stableswap_params": null
+            },
             "bounds": { "lower": 8_237_632, "upper": 8_653_474 },
             "pool_state": { "tick": 8_449_558 }
         }],
@@ -27,6 +34,13 @@ fn position_pages_accept_api_quantities_and_normalize_addresses() {
         "0x04c46e830bb56ce22735d5d8fc9cb90309317d0f"
     );
     assert_eq!(position.current_tick, Some(8_449_558));
+    assert_eq!(
+        position.pool_config,
+        B256::from([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            128, 0, 0, 1
+        ])
+    );
 }
 
 #[test]

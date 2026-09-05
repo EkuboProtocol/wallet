@@ -57,6 +57,8 @@ fn privacy_policy_discloses_position_discovery() {
     assert!(policy.contains("wallet\naddress, the chain ID"));
     assert!(policy.contains("until you open or refresh the Portfolio tab"));
     assert!(policy.contains("does not persist it"));
+    assert!(policy.contains("batched read-only contract calls"));
+    assert!(policy.contains("Positions contract, position IDs"));
 }
 
 /// Reference fetches are another outbound path, so the policy has to name

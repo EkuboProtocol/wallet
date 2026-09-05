@@ -704,18 +704,13 @@ fn policy_proposal_for_account<'a>(
 /// filling the same height, with the list region inside it. Only what is in
 /// that region changes, so nothing about the page moves when the balances
 /// land.
-fn portfolio_balances_card(cx: &App) -> gpui::Div {
+fn portfolio_balances_card(_cx: &App) -> gpui::Div {
     div()
         .debug_selector(|| "portfolio-balances-card".to_owned())
         .w_full()
         .min_w_0()
         .flex_1()
         .min_h_0()
-        .p_4()
-        .rounded(cx.theme().radius_lg)
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().secondary)
         .flex()
         .flex_col()
 }
@@ -744,20 +739,23 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
         .overflow_hidden()
         .flex()
         .flex_col();
-    for (index, (identity, metadata, balance)) in ROWS.into_iter().enumerate() {
+    for (identity, metadata, balance) in ROWS {
         rows =
             rows.child(
-                // The balance row's own frame: `py_2`, and a divider under every
-                // row but the last.
+                // The balance card's own frame. Loading and loaded use the
+                // same surface geometry so the section does not jump when the
+                // RPC result lands.
                 div()
                     .debug_selector(|| "portfolio-placeholder-row".to_owned())
                     .w_full()
                     .min_w_0()
                     .flex_none()
-                    .py_2()
-                    .when(index + 1 < ROWS.len(), |row| {
-                        row.border_b_1().border_color(cx.theme().border)
-                    })
+                    .p_4()
+                    .mb_2()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
                     .flex()
                     .items_center()
                     .justify_between()
@@ -791,7 +789,31 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
                     .child(Skeleton::new().h_6().w(balance).flex_none()),
             );
     }
-    rows
+    div()
+        .w_full()
+        .min_w_0()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .debug_selector(|| "portfolio-assets-section".to_owned())
+                .w_full()
+                .pt_3()
+                .pb_2()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(div().font_semibold().child("Assets"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Token balances across enabled networks"),
+                ),
+        )
+        .child(rows)
 }
 
 fn account_switcher(
@@ -1294,9 +1316,20 @@ struct PortfolioPositionRow {
     id: String,
     token0: String,
     token1: String,
+    token0_decimals: Option<u8>,
+    token1_decimals: Option<u8>,
     lower_tick: i64,
     upper_tick: i64,
     current_tick: Option<i64>,
+    amounts: std::result::Result<PortfolioPositionAmounts, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortfolioPositionAmounts {
+    principal0: String,
+    principal1: String,
+    fees0: String,
+    fees1: String,
 }
 
 impl PortfolioPositionRow {
@@ -1306,6 +1339,49 @@ impl PortfolioPositionRow {
             Some(_) => "Out of range",
             None => "Range unavailable",
         }
+    }
+
+    /// Where the indexed pool tick sits inside this position's range.
+    ///
+    /// Values outside the range pin to the closest edge: the accompanying
+    /// status still says "Out of range", while the track makes clear which
+    /// side the market crossed. An unavailable tick has no invented marker.
+    fn range_progress(&self) -> Option<f32> {
+        let current = i128::from(self.current_tick?);
+        let lower = i128::from(self.lower_tick);
+        let upper = i128::from(self.upper_tick);
+        let span = upper - lower;
+        if span <= 0 {
+            return None;
+        }
+        let offset = (current - lower).clamp(0, span);
+        let permille = u16::try_from(offset.saturating_mul(1_000) / span).ok()?;
+        Some(f32::from(permille) / 1_000.0)
+    }
+
+    fn price_at_tick(&self, tick: i64) -> Option<f64> {
+        let tick = i32::try_from(tick).ok()?;
+        let decimals0 = i32::from(self.token0_decimals?);
+        let decimals1 = i32::from(self.token1_decimals?);
+        let price = 1.000_001_f64.powi(tick) * 10_f64.powi(decimals0 - decimals1);
+        price.is_finite().then_some(price)
+    }
+
+    fn price_label(&self, tick: i64) -> String {
+        self.price_at_tick(tick)
+            .map_or_else(|| format!("Tick {tick}"), format_human_price)
+    }
+}
+
+fn format_human_price(price: f64) -> String {
+    if price >= 1_000.0 {
+        format!("{price:.2}")
+    } else if price >= 1.0 {
+        format!("{price:.4}")
+    } else if price >= 0.01 {
+        format!("{price:.6}")
+    } else {
+        format!("{price:.4e}")
     }
 }
 
@@ -1323,6 +1399,19 @@ fn position_asset_label(asset: &OwnerPortfolioAsset) -> String {
         .clone()
         .or_else(|| asset.name.clone())
         .unwrap_or_else(|| compact_identity(&asset.address))
+}
+
+fn position_amount_label(raw: u128, asset: &OwnerPortfolioAsset) -> String {
+    let symbol = position_asset_label(asset);
+    asset.decimals.map_or_else(
+        || format!("{raw} base units · {symbol}"),
+        |decimals| {
+            format!(
+                "{} {symbol}",
+                ekubo_wallet_core::approval_summary::format_fixed_point(&raw.to_string(), decimals,)
+            )
+        },
+    )
 }
 
 fn portfolio_position_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioPositionRow> {
@@ -1345,15 +1434,29 @@ fn portfolio_position_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioPosi
             positions
                 .positions
                 .iter()
-                .map(move |position: &OwnerEkuboPosition| PortfolioPositionRow {
-                    chain_id: position.chain_id,
-                    network_name: network_name.clone(),
-                    id: position.id.clone(),
-                    token0: position_asset_label(&position.token0),
-                    token1: position_asset_label(&position.token1),
-                    lower_tick: position.lower_tick,
-                    upper_tick: position.upper_tick,
-                    current_tick: position.current_tick,
+                .map(move |position: &OwnerEkuboPosition| {
+                    let amounts = position
+                        .state
+                        .as_ref()
+                        .map(|state| PortfolioPositionAmounts {
+                            principal0: position_amount_label(state.principal0, &position.token0),
+                            principal1: position_amount_label(state.principal1, &position.token1),
+                            fees0: position_amount_label(state.fees0, &position.token0),
+                            fees1: position_amount_label(state.fees1, &position.token1),
+                        });
+                    PortfolioPositionRow {
+                        chain_id: position.chain_id,
+                        network_name: network_name.clone(),
+                        id: position.id.clone(),
+                        token0: position_asset_label(&position.token0),
+                        token1: position_asset_label(&position.token1),
+                        token0_decimals: position.token0.decimals,
+                        token1_decimals: position.token1.decimals,
+                        lower_tick: position.lower_tick,
+                        upper_tick: position.upper_tick,
+                        current_tick: position.current_tick,
+                        amounts: amounts.map_err(Clone::clone),
+                    }
                 })
         })
         .collect()
@@ -1555,6 +1658,18 @@ struct PortfolioRowKey {
 /// replacing the list with an error.
 #[derive(Clone, Debug, PartialEq)]
 enum PortfolioListRow {
+    Section {
+        id: &'static str,
+        title: &'static str,
+        subtitle: &'static str,
+        count: usize,
+        singular: &'static str,
+        plural: &'static str,
+    },
+    Empty {
+        id: &'static str,
+        text: &'static str,
+    },
     Position(PortfolioPositionRow),
     Balance(PortfolioBalanceRow),
     Unavailable {
@@ -1580,6 +1695,74 @@ fn render_portfolio_list_row(
     cx: &App,
 ) -> AnyElement {
     match row {
+        PortfolioListRow::Section {
+            id,
+            title,
+            subtitle,
+            count,
+            singular,
+            plural,
+        } => {
+            let selector = format!("portfolio-{id}-section");
+            let count_label = format!("{count} {}", if *count == 1 { singular } else { plural });
+            div()
+                .debug_selector(move || selector.clone())
+                .w_full()
+                .min_w_0()
+                .pt_3()
+                .pb_2()
+                .flex()
+                .flex_wrap()
+                .items_end()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w(px(180.0))
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(div().font_semibold().child(*title))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(*subtitle),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(count_label),
+                )
+                .into_any_element()
+        }
+        PortfolioListRow::Empty { id, text } => {
+            let selector = format!("portfolio-{id}-empty");
+            div()
+                .debug_selector(move || selector.clone())
+                .w_full()
+                .min_w_0()
+                .p_3()
+                .mb_2()
+                .rounded(cx.theme().radius_lg)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(*text)
+                .into_any_element()
+        }
         PortfolioListRow::Position(row) => {
             render_portfolio_position_row(row, wallet_id, divider, cx)
         }
@@ -1590,7 +1773,12 @@ fn render_portfolio_list_row(
             error,
         } => div()
             .w_full()
-            .py_2()
+            .p_3()
+            .mb_2()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().danger.opacity(0.35))
+            .bg(cx.theme().secondary)
             .text_sm()
             .text_color(cx.theme().danger)
             .child(selectable_text(
@@ -1604,7 +1792,12 @@ fn render_portfolio_list_row(
             error,
         } => div()
             .w_full()
-            .py_2()
+            .p_3()
+            .mb_2()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().warning.opacity(0.35))
+            .bg(cx.theme().secondary)
             .text_sm()
             .text_color(cx.theme().warning)
             .child(selectable_text(
@@ -1614,7 +1807,12 @@ fn render_portfolio_list_row(
             .into_any_element(),
         PortfolioListRow::Notice { id, text } => div()
             .w_full()
-            .py_2()
+            .p_3()
+            .mb_2()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
             .text_sm()
             .text_color(cx.theme().muted_foreground)
             .child(selectable_text(
@@ -1628,7 +1826,7 @@ fn render_portfolio_list_row(
 fn render_portfolio_position_row(
     row: &PortfolioPositionRow,
     wallet_id: &str,
-    divider: bool,
+    _divider: bool,
     cx: &App,
 ) -> AnyElement {
     let range_color = match row.current_tick {
@@ -1636,26 +1834,163 @@ fn render_portfolio_position_row(
         Some(_) => cx.theme().warning,
         None => cx.theme().muted_foreground,
     };
-    let current_tick = row.current_tick.map_or_else(
-        || "Current tick unavailable".to_owned(),
-        |tick| format!("Current tick {tick}"),
-    );
+    let range_progress = row.range_progress().unwrap_or(0.5);
+    let range_tone = range_color.opacity(0.85);
+    let current_price = row
+        .current_tick
+        .map_or_else(|| "Unavailable".to_owned(), |tick| row.price_label(tick));
+    let lower_price = row.price_label(row.lower_tick);
+    let upper_price = row.price_label(row.upper_tick);
+    let price_unit = if row.token0_decimals.is_some() && row.token1_decimals.is_some() {
+        format!("{} per {}", row.token1, row.token0)
+    } else {
+        "Pool tick".to_owned()
+    };
+    let amount_group = |title: &'static str,
+                        detail: &'static str,
+                        suffix: &'static str,
+                        amount0: &str,
+                        amount1: &str| {
+        div()
+            .min_w(px(240.0))
+            .flex_1()
+            .flex_basis(px(300.0))
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .font_medium()
+                            .child(row.token0.clone()),
+                    )
+                    .child(
+                        selectable_text(
+                            format!("portfolio-position-{suffix}-0-{wallet_id}-{}", row.id),
+                            amount0,
+                        )
+                        .min_w_0()
+                        .truncate()
+                        .font_family(MONO_FONT_FAMILY)
+                        .text_sm(),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .font_medium()
+                            .child(row.token1.clone()),
+                    )
+                    .child(
+                        selectable_text(
+                            format!("portfolio-position-{suffix}-1-{wallet_id}-{}", row.id),
+                            amount1,
+                        )
+                        .min_w_0()
+                        .truncate()
+                        .font_family(MONO_FONT_FAMILY)
+                        .text_sm(),
+                    ),
+            )
+            .into_any_element()
+    };
+    let amount_panels = match &row.amounts {
+        Ok(amounts) => h_flex()
+            .debug_selector(|| "portfolio-position-amounts".to_owned())
+            .w_full()
+            .min_w_0()
+            .flex_wrap()
+            .items_stretch()
+            .gap_3()
+            .child(amount_group(
+                "POSITION ASSETS",
+                "Principal at the current pool price",
+                "principal",
+                &amounts.principal0,
+                &amounts.principal1,
+            ))
+            .child(amount_group(
+                "ACCRUED FEES",
+                "Before collection-time protocol fees",
+                "fees",
+                &amounts.fees0,
+                &amounts.fees1,
+            ))
+            .into_any_element(),
+        Err(error) => div()
+            .debug_selector(|| "portfolio-position-amounts-unavailable".to_owned())
+            .w_full()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().warning.opacity(0.35))
+            .bg(cx.theme().warning.opacity(0.08))
+            .text_sm()
+            .text_color(cx.theme().warning)
+            .child(selectable_text(
+                format!("portfolio-position-amount-error-{wallet_id}-{}", row.id),
+                &format!("Position amounts unavailable · {error}"),
+            ))
+            .into_any_element(),
+    };
     div()
         .debug_selector(|| "portfolio-position-row".to_owned())
         .w_full()
         .min_w_0()
-        .py_2()
-        .when(divider, |position| {
-            position.border_b_1().border_color(cx.theme().border)
-        })
+        .p_4()
+        .mb_3()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
         .flex()
+        .flex_col()
+        .gap_3()
         .child(
             div()
                 .w_full()
                 .min_w_0()
                 .flex()
                 .flex_wrap()
-                .items_center()
+                .items_start()
                 .justify_between()
                 .gap_3()
                 .child(
@@ -1665,7 +2000,14 @@ fn render_portfolio_position_row(
                         .flex_basis(px(260.0))
                         .flex()
                         .flex_col()
-                        .gap_0p5()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().primary)
+                                .child("EKUBO LP"),
+                        )
                         .child(
                             selectable_text(
                                 format!("portfolio-position-pair-{wallet_id}-{}", row.id),
@@ -1673,7 +2015,8 @@ fn render_portfolio_position_row(
                             )
                             .min_w_0()
                             .truncate()
-                            .font_medium(),
+                            .text_lg()
+                            .font_semibold(),
                         )
                         .child(
                             h_flex()
@@ -1687,7 +2030,7 @@ fn render_portfolio_position_row(
                                 .child(selectable_text(
                                     format!("portfolio-position-network-{wallet_id}-{}", row.id),
                                     &format!(
-                                        "{} · Ekubo liquidity · {}",
+                                        "{} · Position {}",
                                         row.network_name,
                                         compact_identity(&row.id)
                                     ),
@@ -1695,33 +2038,191 @@ fn render_portfolio_position_row(
                         ),
                 )
                 .child(
-                    div()
-                        .min_w_0()
-                        .max_w_full()
+                    h_flex()
                         .flex_none()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap_0p5()
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(range_color.opacity(0.35))
+                        .bg(range_color.opacity(0.12))
+                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(range_color))
                         .child(
                             selectable_text(
                                 format!("portfolio-position-range-{wallet_id}-{}", row.id),
                                 row.range_label(),
                             )
+                            .text_xs()
                             .font_medium()
                             .text_color(range_color),
+                        ),
+                ),
+        )
+        .child(amount_panels)
+        .child(
+            div()
+                .debug_selector(|| "portfolio-position-range-track".to_owned())
+                .w_full()
+                .min_w_0()
+                .p_3()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("POSITION RANGE"),
                         )
                         .child(
-                            selectable_text(
-                                format!("portfolio-position-ticks-{wallet_id}-{}", row.id),
-                                &format!(
-                                    "Ticks {}–{} · {current_tick}",
-                                    row.lower_tick, row.upper_tick
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Current price"),
+                                )
+                                .child(
+                                    selectable_text(
+                                        format!(
+                                            "portfolio-position-current-price-{wallet_id}-{}",
+                                            row.id
+                                        ),
+                                        &current_price,
+                                    )
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .text_sm()
+                                    .text_color(range_color),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(price_unit.clone()),
                                 ),
-                            )
-                            .text_xs()
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_color(cx.theme().muted_foreground),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_0()
+                        .child(
+                            div()
+                                .min_w(px(1.0))
+                                .h(px(3.0))
+                                .rounded_full()
+                                .bg(range_tone)
+                                .flex_grow(range_progress.max(0.01)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(11.0))
+                                .h(px(11.0))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(cx.theme().background)
+                                .bg(range_color),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(1.0))
+                                .h(px(3.0))
+                                .rounded_full()
+                                .bg(cx.theme().border)
+                                .flex_grow((1.0 - range_progress).max(0.01)),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Min price"),
+                                )
+                                .child(
+                                    selectable_text(
+                                        format!(
+                                            "portfolio-position-lower-price-{wallet_id}-{}",
+                                            row.id
+                                        ),
+                                        &lower_price,
+                                    )
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .text_sm(),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(price_unit.clone()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Max price"),
+                                )
+                                .child(
+                                    selectable_text(
+                                        format!(
+                                            "portfolio-position-upper-price-{wallet_id}-{}",
+                                            row.id
+                                        ),
+                                        &upper_price,
+                                    )
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .text_sm(),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(price_unit),
+                                ),
                         ),
                 ),
         )
@@ -1733,7 +2234,7 @@ fn render_portfolio_position_row(
 fn render_portfolio_balance_row(
     row: &PortfolioBalanceRow,
     wallet_id: &str,
-    divider: bool,
+    _divider: bool,
     cx: &App,
 ) -> AnyElement {
     let address = row.asset_address.clone();
@@ -1836,10 +2337,12 @@ fn render_portfolio_balance_row(
         .debug_selector(|| "portfolio-balance-row".to_owned())
         .w_full()
         .min_w_0()
-        .py_2()
-        .when(divider, |row| {
-            row.border_b_1().border_color(cx.theme().border)
-        })
+        .p_4()
+        .mb_2()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary)
         .flex()
         .child(
             div()
@@ -15845,7 +16348,7 @@ impl WalletWindow {
                     // The question this answers — "why is my token missing?" —
                     // only comes up once a list of balances is on screen.
                     .when(holdings, |hint| {
-                        hint.child(selectable_label("Non-zero balances · open Ekubo LPs."))
+                        hint.child(selectable_label("Non-zero assets · open Ekubo positions."))
                             .child(
                                 // A ghost Button rather than the link it used
                                 // to be. This switches tab, and in-app
@@ -15920,70 +16423,124 @@ impl WalletWindow {
             .iter()
             .filter(|row| sortable && row.is_low_value())
             .count();
-        let mut rows = positions
+        let visible_assets = held
             .into_iter()
-            .map(PortfolioListRow::Position)
+            .filter(|row| !sortable || self.show_low_value_balances || !row.is_low_value())
             .collect::<Vec<_>>();
-        rows.extend(
-            held.into_iter()
-                .filter(|row| !sortable || self.show_low_value_balances || !row.is_low_value())
-                .map(PortfolioListRow::Balance),
-        );
+        let asset_count = visible_assets.len();
+        let position_count = positions.len();
         // A network that could not be read is reported under the balances
         // that could, rather than replacing them.
-        rows.extend(account.networks.iter().filter_map(|item| {
-            item.result
-                .as_ref()
-                .err()
-                .map(|error| PortfolioListRow::Unavailable {
-                    chain_id: item.network.chain_id,
-                    network_name: item
-                        .network
-                        .display_name
-                        .as_deref()
-                        .unwrap_or(&item.network.name)
-                        .to_owned(),
-                    error: error.clone(),
-                })
-        }));
-        rows.extend(account.networks.iter().filter_map(|item| {
-            item.ekubo_positions.as_ref().err().map(|error| {
-                PortfolioListRow::PositionsUnavailable {
-                    chain_id: item.network.chain_id,
-                    network_name: item
-                        .network
-                        .display_name
-                        .as_deref()
-                        .unwrap_or(&item.network.name)
-                        .to_owned(),
-                    error: error.clone(),
-                }
-            })
-        }));
-        rows.extend(account.networks.iter().filter_map(|item| {
-            item.ekubo_positions.as_ref().ok().and_then(|positions| {
-                let omitted = positions
-                    .total_items
-                    .saturating_sub(positions.positions.len());
-                (omitted > 0).then(|| PortfolioListRow::Notice {
-                    id: format!("ekubo-positions-{}", item.network.chain_id),
-                    text: format!(
-                        "{} more open Ekubo {} on {}. Only the first {} are shown.",
-                        omitted,
-                        if omitted == 1 {
-                            "position"
-                        } else {
-                            "positions"
-                        },
-                        item.network
+        let balance_errors = account
+            .networks
+            .iter()
+            .filter_map(|item| {
+                item.result
+                    .as_ref()
+                    .err()
+                    .map(|error| PortfolioListRow::Unavailable {
+                        chain_id: item.network.chain_id,
+                        network_name: item
+                            .network
                             .display_name
                             .as_deref()
-                            .unwrap_or(&item.network.name),
-                        positions.positions.len()
-                    ),
+                            .unwrap_or(&item.network.name)
+                            .to_owned(),
+                        error: error.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let position_errors = account
+            .networks
+            .iter()
+            .filter_map(|item| {
+                item.ekubo_positions.as_ref().err().map(|error| {
+                    PortfolioListRow::PositionsUnavailable {
+                        chain_id: item.network.chain_id,
+                        network_name: item
+                            .network
+                            .display_name
+                            .as_deref()
+                            .unwrap_or(&item.network.name)
+                            .to_owned(),
+                        error: error.clone(),
+                    }
                 })
             })
-        }));
+            .collect::<Vec<_>>();
+        let position_notices = account
+            .networks
+            .iter()
+            .filter_map(|item| {
+                item.ekubo_positions.as_ref().ok().and_then(|positions| {
+                    let omitted = positions
+                        .total_items
+                        .saturating_sub(positions.positions.len());
+                    (omitted > 0).then(|| PortfolioListRow::Notice {
+                        id: format!("ekubo-positions-{}", item.network.chain_id),
+                        text: format!(
+                            "{} more open Ekubo {} on {}. Only the first {} are shown.",
+                            omitted,
+                            if omitted == 1 {
+                                "position"
+                            } else {
+                                "positions"
+                            },
+                            item.network
+                                .display_name
+                                .as_deref()
+                                .unwrap_or(&item.network.name),
+                            positions.positions.len()
+                        ),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Assets and LPs are different kinds of ownership. They share one
+        // virtualized scroller so large portfolios stay cheap to draw, but
+        // explicit section rows and independent surfaces keep them visually
+        // and semantically separate. Assets come first; positions follow.
+        let mut rows = vec![PortfolioListRow::Section {
+            id: "assets",
+            title: "Assets",
+            subtitle: "Token balances across enabled networks",
+            count: asset_count,
+            singular: "asset",
+            plural: "assets",
+        }];
+        if visible_assets.is_empty() && balance_errors.is_empty() {
+            rows.push(PortfolioListRow::Empty {
+                id: "assets",
+                text: if hidden > 0 {
+                    "All assets are currently hidden by the low-value filter."
+                } else {
+                    "No non-zero assets."
+                },
+            });
+        } else {
+            rows.extend(visible_assets.into_iter().map(PortfolioListRow::Balance));
+            rows.extend(balance_errors);
+        }
+
+        rows.push(PortfolioListRow::Section {
+            id: "positions",
+            title: "Ekubo positions",
+            subtitle: "Open concentrated liquidity positions",
+            count: position_count,
+            singular: "position",
+            plural: "positions",
+        });
+        if positions.is_empty() && position_errors.is_empty() && position_notices.is_empty() {
+            rows.push(PortfolioListRow::Empty {
+                id: "positions",
+                text: "No open Ekubo positions.",
+            });
+        } else {
+            rows.extend(positions.into_iter().map(PortfolioListRow::Position));
+            rows.extend(position_errors);
+            rows.extend(position_notices);
+        }
         let rows = Arc::<[PortfolioListRow]>::from(rows);
         *self.portfolio_row_cache.borrow_mut() = Some(PortfolioRowCache {
             key,
@@ -16005,15 +16562,6 @@ impl WalletWindow {
         let card = portfolio_balances_card(cx).when(hidden > 0, |card| {
             card.child(self.render_portfolio_dust_control(hidden, cx))
         });
-        if rows.is_empty() {
-            return card.child(div().py_4().text_color(cx.theme().muted_foreground).child(
-                selectable_label(if hidden > 0 {
-                    "Every balance here is worth under a dollar or has no recorded value."
-                } else {
-                    "No balances or open Ekubo positions."
-                }),
-            ));
-        }
         Self::resize_list(&self.portfolio_list, &self.portfolio_rows, rows.len());
         self.portfolio_overflow_indicator
             .set_scroll_handle(self.portfolio_list.clone());

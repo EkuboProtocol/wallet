@@ -5,15 +5,66 @@
 //! enabled chain. The answer is presentation data only: no signing, policy,
 //! simulation, or transaction path reads it, and nothing is persisted.
 
+use alloy::{
+    eips::BlockId,
+    network::TransactionBuilder as _,
+    primitives::{Address, B256, Bytes, U256},
+    rpc::types::TransactionRequest,
+    sol,
+    sol_types::SolCall as _,
+};
 use anyhow::{Context as _, Result, bail, ensure};
+use ekubo_wallet_core::{
+    config::NetworkConfig,
+    rpc::{MULTICALL3_ADDRESS, ensure_serving_chain, try_clients},
+};
 use serde::Deserialize;
-use std::time::Duration;
+use std::{str::FromStr as _, time::Duration};
 
 const POSITIONS_ENDPOINT: &str = "https://prod-api.ekubo.org/positions/";
 const PAGE_SIZE: usize = 200;
 const MAX_PAGES: usize = 5;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_POSITION_CALLS_PER_BATCH: usize = 100;
+const MAX_TICK_SPACING: u32 = 698_605;
+
+sol! {
+    struct PositionPoolKey {
+        address token0;
+        address token1;
+        bytes32 config;
+    }
+
+    function getPositionFeesAndLiquidity(
+        uint256 id,
+        PositionPoolKey poolKey,
+        int32 tickLower,
+        int32 tickUpper
+    ) external view returns (
+        uint128 liquidity,
+        uint128 principal0,
+        uint128 principal1,
+        uint128 fees0,
+        uint128 fees1
+    );
+
+    struct PositionCall3 {
+        address target;
+        bool allowFailure;
+        bytes callData;
+    }
+
+    struct PositionResult3 {
+        bool success;
+        bytes returnData;
+    }
+
+    function aggregate3(PositionCall3[] calls)
+        external payable
+        returns (PositionResult3[] returnData);
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IndexedEkuboPosition {
@@ -22,9 +73,19 @@ pub(crate) struct IndexedEkuboPosition {
     pub positions_address: String,
     pub token0: String,
     pub token1: String,
-    pub lower_tick: i64,
-    pub upper_tick: i64,
-    pub current_tick: Option<i64>,
+    pub pool_config: B256,
+    pub lower_tick: i32,
+    pub upper_tick: i32,
+    pub current_tick: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexedEkuboPositionState {
+    pub liquidity: u128,
+    pub principal0: u128,
+    pub principal1: u128,
+    pub fees0: u128,
+    pub fees1: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +114,16 @@ struct ApiPosition {
 struct ApiPoolKey {
     token0: String,
     token1: String,
+    fee: String,
+    tick_spacing: Option<String>,
+    extension: String,
+    stableswap_params: Option<ApiStableswapParams>,
+}
+
+#[derive(Deserialize)]
+struct ApiStableswapParams {
+    center_tick: i64,
+    amplification: u64,
 }
 
 #[derive(Deserialize)]
@@ -180,19 +251,163 @@ fn parse_position(position: ApiPosition) -> Result<IndexedEkuboPosition> {
         normalize_address(&position.positions_address).context("positions address is invalid")?;
     let token0 = normalize_address(&position.pool_key.token0).context("token0 is invalid")?;
     let token1 = normalize_address(&position.pool_key.token1).context("token1 is invalid")?;
-    ensure!(
-        position.bounds.lower < position.bounds.upper,
-        "position bounds are invalid"
-    );
+    let pool_config = parse_pool_config(&position.pool_key).context("pool config is invalid")?;
+    let lower_tick = i32::try_from(position.bounds.lower).context("lower tick is out of range")?;
+    let upper_tick = i32::try_from(position.bounds.upper).context("upper tick is out of range")?;
+    let current_tick = position
+        .pool_state
+        .map(|state| i32::try_from(state.tick).context("current tick is out of range"))
+        .transpose()?;
+    ensure!(lower_tick < upper_tick, "position bounds are invalid");
     Ok(IndexedEkuboPosition {
         id,
         chain_id,
         positions_address,
         token0,
         token1,
-        lower_tick: position.bounds.lower,
-        upper_tick: position.bounds.upper,
-        current_tick: position.pool_state.map(|state| state.tick),
+        pool_config,
+        lower_tick,
+        upper_tick,
+        current_tick,
+    })
+}
+
+fn parse_pool_config(pool: &ApiPoolKey) -> Result<B256> {
+    let extension = normalize_address(&pool.extension).context("extension is invalid")?;
+    let extension = hex::decode(&extension[2..]).context("extension could not be decoded")?;
+    let fee = parse_quantity(&pool.fee).context("fee is invalid")?;
+    let type_config = match (&pool.tick_spacing, &pool.stableswap_params) {
+        (Some(spacing), None) => {
+            let spacing =
+                u32::try_from(parse_quantity(spacing)?).context("tick spacing is out of range")?;
+            ensure!(
+                (1..=MAX_TICK_SPACING).contains(&spacing),
+                "tick spacing is out of range"
+            );
+            0x8000_0000 | spacing
+        }
+        (None, Some(params)) => {
+            ensure!(params.amplification <= 26, "amplification is out of range");
+            ensure!(
+                params.center_tick % 16 == 0,
+                "stableswap center tick is not aligned"
+            );
+            let scaled = params.center_tick / 16;
+            ensure!(
+                (-8_388_608..=8_388_607).contains(&scaled),
+                "stableswap center tick is out of range"
+            );
+            let encoded_center = i32::try_from(scaled)
+                .context("stableswap center tick is out of range")?
+                .cast_unsigned()
+                & 0x00ff_ffff;
+            let amplification =
+                u32::try_from(params.amplification).context("amplification is out of range")?;
+            (amplification << 24) | encoded_center
+        }
+        (None, None) => 0,
+        (Some(_), Some(_)) => bail!("pool type is ambiguous"),
+    };
+
+    let mut config = [0_u8; 32];
+    config[..20].copy_from_slice(&extension);
+    config[20..28].copy_from_slice(&fee.to_be_bytes());
+    config[28..].copy_from_slice(&type_config.to_be_bytes());
+    Ok(B256::from(config))
+}
+
+pub(crate) async fn fetch_position_states(
+    network: &NetworkConfig,
+    positions: &[IndexedEkuboPosition],
+) -> Vec<std::result::Result<IndexedEkuboPositionState, String>> {
+    let mut states = Vec::with_capacity(positions.len());
+    for chunk in positions.chunks(MAX_POSITION_CALLS_PER_BATCH) {
+        match fetch_position_state_batch(network, chunk).await {
+            Ok(batch) => states.extend(batch),
+            Err(error) => {
+                let error =
+                    ekubo_wallet_core::sanitize::stripped_capped(&format!("{error:#}"), 500);
+                states.extend((0..chunk.len()).map(|_| Err(error.clone())));
+            }
+        }
+    }
+    states
+}
+
+async fn fetch_position_state_batch(
+    network: &NetworkConfig,
+    positions: &[IndexedEkuboPosition],
+) -> Result<Vec<std::result::Result<IndexedEkuboPositionState, String>>> {
+    let calls = positions
+        .iter()
+        .map(position_call)
+        .collect::<Result<Vec<_>>>()?;
+    let encoded = aggregate3Call { calls }.abi_encode();
+    let request = TransactionRequest::default()
+        .with_to(MULTICALL3_ADDRESS)
+        .with_input(encoded);
+    let response = try_clients(network, move |client| {
+        let request = request.clone();
+        async move {
+            tokio::time::timeout(
+                RPC_TIMEOUT,
+                ensure_serving_chain(client.as_ref(), network.chain_id),
+            )
+            .await
+            .context("RPC chain check timed out")??;
+            tokio::time::timeout(RPC_TIMEOUT, client.call(request, BlockId::pending()))
+                .await
+                .context("Ekubo position read timed out")?
+                .context("Ekubo position read failed")
+        }
+    })
+    .await?;
+    let decoded = aggregate3Call::abi_decode_returns(&response)
+        .context("Multicall3 returned undecodable Ekubo position data")?;
+    ensure!(
+        decoded.len() == positions.len(),
+        "Multicall3 returned the wrong number of Ekubo positions"
+    );
+    Ok(decoded
+        .into_iter()
+        .map(|result| {
+            if !result.success {
+                return Err("Positions contract could not read this position".to_owned());
+            }
+            getPositionFeesAndLiquidityCall::abi_decode_returns(&result.returnData)
+                .map(|values| IndexedEkuboPositionState {
+                    liquidity: values.liquidity,
+                    principal0: values.principal0,
+                    principal1: values.principal1,
+                    fees0: values.fees0,
+                    fees1: values.fees1,
+                })
+                .map_err(|_| "Positions contract returned unreadable amounts".to_owned())
+        })
+        .collect())
+}
+
+fn position_call(position: &IndexedEkuboPosition) -> Result<PositionCall3> {
+    let target = Address::from_str(&position.positions_address)
+        .context("positions address could not be decoded")?;
+    let token0 = Address::from_str(&position.token0).context("token0 could not be decoded")?;
+    let token1 = Address::from_str(&position.token1).context("token1 could not be decoded")?;
+    let id = U256::from_str(&position.id).context("position ID could not be decoded")?;
+    let call_data = getPositionFeesAndLiquidityCall {
+        id,
+        poolKey: PositionPoolKey {
+            token0,
+            token1,
+            config: position.pool_config,
+        },
+        tickLower: position.lower_tick,
+        tickUpper: position.upper_tick,
+    }
+    .abi_encode();
+    Ok(PositionCall3 {
+        target,
+        allowFailure: true,
+        callData: Bytes::from(call_data),
     })
 }
 

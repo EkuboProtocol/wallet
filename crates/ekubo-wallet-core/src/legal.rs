@@ -215,6 +215,13 @@ data. The wallet holds that response only for the current Portfolio snapshot
 and does not persist it. A disabled network is not queried, and the wallet
 makes no position request until you open or refresh the Portfolio tab.
 
+To display current principal amounts and accrued fees, the wallet then sends
+batched read-only contract calls for the returned public position IDs, pool
+keys, and position ranges to that network's configured RPC endpoints. An RPC
+operator can observe your IP address, the Positions contract, position IDs,
+pool details, and the time of the request. These calls create no transaction
+and their responses are also held only in the current Portfolio snapshot.
+
 Indexed position data is informational. It does not grant signing authority,
 change policy, or replace the wallet's fresh RPC simulation for any action.
 
