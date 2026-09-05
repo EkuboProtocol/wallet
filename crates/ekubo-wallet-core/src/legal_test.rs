@@ -24,7 +24,7 @@ fn documents_have_stable_nonempty_digests() {
 #[test]
 fn privacy_policy_describes_owner_control_without_embedding_endpoints() {
     let policy = privacy_policy();
-    assert!(policy.contains("Version 7"));
+    assert!(policy.contains("Version 8"));
     assert!(!policy.contains("```json"));
     for network in crate::config::default_networks() {
         for endpoint in network.rpc_urls {
@@ -42,20 +42,31 @@ fn privacy_policy_describes_owner_control_without_embedding_endpoints() {
 #[test]
 fn privacy_policy_discloses_detailed_notification_previews() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 8. Operating-system notifications"));
+    assert!(policy.contains("## 9. Operating-system notifications"));
     assert!(policy.contains("Detailed previews are the default"));
     assert!(policy.contains("local account label and configured network"));
     assert!(policy.contains("never contains the request identifier"));
     assert!(policy.contains("lock screen"));
 }
 
-/// The only outbound requests that are not a configured RPC are the
-/// reference fetches in `crate::plan_fetch`, so the policy has to name
+#[test]
+fn privacy_policy_discloses_position_discovery() {
+    let policy = privacy_policy();
+    assert!(policy.contains("## 4. Ekubo position discovery"));
+    assert!(policy.contains("https://prod-api.ekubo.org"));
+    assert!(policy.contains("wallet\naddress, the chain ID"));
+    assert!(policy.contains("until you open or refresh the Portfolio tab"));
+    assert!(policy.contains("does not persist it"));
+    assert!(policy.contains("batched read-only contract calls"));
+    assert!(policy.contains("Positions contract, position IDs"));
+}
+
+/// Reference fetches are another outbound path, so the policy has to name
 /// them, say the wallet performs the fetch, and say what the host learns.
 #[test]
 fn privacy_policy_discloses_reference_fetches() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 4. Execution plans fetched by reference"));
+    assert!(policy.contains("## 5. Execution plans fetched by reference"));
     assert!(policy.contains("this process fetches the body from that URL\nitself"));
     assert!(policy.contains("observe your IP address, the time of the fetch"));
     assert!(policy.contains("data:application/json"));
@@ -64,7 +75,7 @@ fn privacy_policy_discloses_reference_fetches() {
 #[test]
 fn privacy_policy_discloses_the_hosted_mcp_companion() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 7. Hosted MCP companion and agent tooling"));
+    assert!(policy.contains("## 8. Hosted MCP companion and agent tooling"));
     assert!(policy.contains("https://mcp.ekubo.org/mcp"));
     assert!(policy.contains("temporarily store execution plans"));
     assert!(policy.contains("The hosted companion is operated by Ekubo, Inc."));
@@ -79,15 +90,14 @@ fn privacy_policy_discloses_the_hosted_mcp_companion() {
 #[test]
 fn privacy_policy_discloses_the_walletconnect_relay() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 5. The WalletConnect relay"));
+    assert!(policy.contains("## 6. The WalletConnect relay"));
     assert!(policy.contains("wss://relay.walletconnect.org"));
     assert!(policy.contains("end-to-end encrypted"));
     assert!(policy.contains("the size and timing of every message"));
     // Section 2's "nothing else leaves this machine" claim has to account for
     // it, or the disclosure contradicts the section that promises exhaustion.
     assert!(policy.contains(
-        "the WalletConnect relay described in section 5, and the release and\nupdate activity \
-described in section 6, this software makes no network\nrequests."
+        "the WalletConnect relay\ndescribed in section 6, and the release and update activity described in\nsection 7, this software makes no network requests."
     ));
 }
 
@@ -99,7 +109,7 @@ described in section 6, this software makes no network\nrequests."
 #[test]
 fn privacy_policy_discloses_release_checks_and_updates() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 6. Release checks and software updates"));
+    assert!(policy.contains("## 7. Release checks and software updates"));
     assert!(policy.contains("https://api.github.com/repos/EkuboProtocol/wallet/releases/latest"));
     assert!(
         policy.contains(
@@ -114,11 +124,10 @@ fn privacy_policy_discloses_release_checks_and_updates() {
     assert!(policy.contains("update public key"));
     assert!(policy.contains("compiled into the running application"));
     assert!(policy.contains("GitHub Releases page"));
-    // Section 4's exhaustive claim has to account for it too, not just
+    // Section 5's exhaustive claim has to account for it too, not just
     // section 2's.
     assert!(policy.contains(
-        "Apart from the WalletConnect relay in section 5 and the release and\nupdate activity in \
-section 6,"
+        "Apart from the position discovery in section 4, the WalletConnect relay\nin section 6, and the release and update activity in section 7,"
     ));
 }
 
@@ -136,8 +145,8 @@ fn terms_disclaim_dapp_directed_signing_and_the_relay() {
     assert!(TERMS_OF_SERVICE.contains("CONNECTED OVER WALLETCONNECT"));
     assert!(TERMS_OF_SERVICE.contains("ANY RELAY\nOPERATOR"));
     assert!(TERMS_OF_SERVICE.contains("IMPERSONATED DAPP"));
-    // Section 1 says the developer runs no servers; the relay it now names is
-    // somebody else's, and saying so is what keeps that claim true.
+    // The relay remains somebody else's even though the developer now runs
+    // the separately disclosed public position index and MCP companion.
     assert!(TERMS_OF_SERVICE.contains("wss://relay.walletconnect.org"));
     assert!(TERMS_OF_SERVICE.contains("under the control of the developer"));
 }

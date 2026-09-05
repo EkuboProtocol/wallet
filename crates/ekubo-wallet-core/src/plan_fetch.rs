@@ -17,12 +17,13 @@
 //! URI that never touches the network — there the bytes are the reference,
 //! so integrity is verified only when supplied.
 //!
-//! The `https` fetches are this process's only outbound requests that are not
-//! a configured chain RPC, so admission is deliberately narrow: `https` on the
-//! default port to a public, resolvable host; no credentials, fragments,
-//! redirects, or private/internal addresses; a hard response-size cap; and
-//! errors that describe the failure without echoing a byte of the response
-//! body.
+//! These are the process's only caller-selected outbound requests, so admission
+//! is deliberately narrow: `https` on the default port to a public, resolvable
+//! host; no credentials, fragments, redirects, or private/internal addresses;
+//! a hard response-size cap; and errors that describe the failure without
+//! echoing a byte of the response body. Fixed product endpoints (release
+//! metadata, `WalletConnect`, and display-only Ekubo position discovery) have
+//! their own bounded clients and are disclosed separately.
 //!
 //! One transport takes no envelope at all: [`fetch_token_list_url`] imports a
 //! curated token list from the bare `https` URL its curator publishes it at,

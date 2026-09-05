@@ -37,7 +37,7 @@ pub const APPLICATION_LICENSE: &str = include_str!("../../../LICENSE");
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
 
-Version 4 — Effective 2026-08-13
+Version 5 — Effective 2026-08-19
 
 These terms are an agreement between you and Ekubo, Inc. (the
 \"developer\"). By accepting them you agree to all of the following before
@@ -48,7 +48,8 @@ this software signs anything on your behalf.
 Ekubo Wallet is a local-first native EVM desktop wallet and authenticated MCP server
 developed by Ekubo, Inc. Private keys are generated or imported on your
 machine and stay in your operating system's credential store. The developer
-operates no servers for this software and never has access to your keys or
+operates the public position-data API and optional hosted MCP companion
+described in the Privacy Policy. Neither service has access to your keys or
 funds.
 
 The WalletConnect feature additionally speaks the WalletConnect protocol to a
@@ -141,7 +142,7 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 7 — Effective 2026-08-14
+Version 8 — Effective 2026-08-19
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
@@ -150,9 +151,10 @@ separately from the terms of service.
 
 This software is local-first. The wallet application contains no telemetry,
 analytics, or crash reporting and does not send usage data to the developer.
-Ekubo, Inc. operates the optional public MCP companion described in section 7.
-That service is separate from the local wallet process and can receive data
-when an agent or other client you use contacts it.
+Ekubo, Inc. operates the public position-data API described in section 4 and
+the optional public MCP companion described in section 8.
+Those services are separate from the local wallet process and receive data
+only through the requests described in their respective sections.
 
 ## 2. Requests to RPC endpoints
 
@@ -165,12 +167,13 @@ may log or retain them under their own policies, and are outside the
 developer's control. The developer is not responsible for data those
 endpoints collect.
 
-Apart from these RPC endpoints, the referenced-artifact fetches described in
-section 4, the WalletConnect relay described in section 5, and the release and
-update activity described in section 6, this software makes no network
-requests. An agent or other client can separately contact the hosted companion
-described in section 7. If you add or replace a network, requests for that
-network go to the endpoints you configure. The complete network configuration,
+Apart from these RPC endpoints, the position discovery described in section 4,
+the referenced-artifact fetches described in section 5, the WalletConnect relay
+described in section 6, and the release and update activity described in
+section 7, this software makes no network requests. An agent or other client
+can separately contact the hosted companion described in section 8. If you add
+or replace a network, requests for that network go to the endpoints you
+configure. The complete network configuration,
 including RPC URLs, is owner-controlled and stored in the encrypted local
 database. A fresh installation starts with bundled settings that you can
 inspect and replace in Networks. A disabled network sends no RPC requests until
@@ -195,7 +198,34 @@ authentication challenge because disabling stops that network's RPC requests
 and signing. Enabling it again requires owner authentication. Agents cannot
 change these settings through the MCP interface.
 
-## 4. Execution plans fetched by reference
+## 4. Ekubo position discovery
+
+When you open or refresh the Portfolio tab, the wallet sends an unauthenticated
+HTTPS GET to `https://prod-api.ekubo.org` for each enabled network and the
+account currently selected in that tab. Each request includes the wallet
+address, the chain ID, and that only open positions are requested. Pagination
+may require several requests when an address owns more than 200 open positions
+on one network.
+
+This public index is operated by Ekubo, Inc. It can observe your IP address,
+wallet address, enabled chain IDs, the time of each request, and therefore that
+you are checking whether the address owns Ekubo liquidity positions. It may
+log or retain those requests. The response contains public indexed position
+data. The wallet holds that response only for the current Portfolio snapshot
+and does not persist it. A disabled network is not queried, and the wallet
+makes no position request until you open or refresh the Portfolio tab.
+
+To display current principal amounts and accrued fees, the wallet then sends
+batched read-only contract calls for the returned public position IDs, pool
+keys, and position ranges to that network's configured RPC endpoints. An RPC
+operator can observe your IP address, the Positions contract, position IDs,
+pool details, and the time of the request. These calls create no transaction
+and their responses are also held only in the current Portfolio snapshot.
+
+Indexed position data is informational. It does not grant signing authority,
+change policy, or replace the wallet's fresh RPC simulation for any action.
+
+## 5. Execution plans fetched by reference
 
 The transactions this wallet simulates and signs are built elsewhere. A
 producer — the Ekubo MCP server, another protocol server, a dapp, or any
@@ -203,9 +233,10 @@ other tool — hands the wallet an execution plan, or a bundle of read-only
 calls, as a reference rather than as inline text: a URL where the exact body
 is stored, plus a digest of those bytes. When you or your agent passes such a
 reference to a wallet tool, this process fetches the body from that URL
-itself. Apart from the WalletConnect relay in section 5 and the release and
-update activity in section 6, these fetches are the only network requests this
-software makes that do not go to a configured RPC endpoint.
+itself. Apart from the position discovery in section 4, the WalletConnect relay
+in section 6, and the release and update activity in section 7, these fetches
+are the only network requests this software makes that do not go to a
+configured RPC endpoint.
 
 The request is an unauthenticated HTTPS GET for exactly the URL given. It
 carries no wallet address, key, credential, cookie, policy, or other data of
@@ -229,7 +260,7 @@ A plan or call bundle you hold inline travels instead as a
 `data:application/json` URI, which the wallet decodes locally and never
 fetches over the network.
 
-## 5. The WalletConnect relay
+## 6. The WalletConnect relay
 
 The WalletConnect feature pairs this wallet with a dapp over the
 WalletConnect protocol. While a session is connected — and only then — this software holds
@@ -260,7 +291,7 @@ developer is not responsible for data the relay operator or the dapp collects.
 Having no connected session means this software opens no relay connection at
 all.
 
-## 6. Release checks and software updates
+## 7. Release checks and software updates
 
 To tell you when the copy you are running is out of date, this software sends
 an unauthenticated HTTPS GET to
@@ -293,7 +324,7 @@ compiled into the running application before shutting down, installing it,
 and relaunching. Package formats without in-place update support use the
 GitHub Releases page instead.
 
-## 7. Hosted MCP companion and agent tooling
+## 8. Hosted MCP companion and agent tooling
 
 When you install supported agent connections from Ekubo Wallet, the wallet
 adds a local `ekubo_wallet` entry to the agent's configuration. For harnesses
@@ -324,7 +355,7 @@ determined by your agent stack, not by this software. THE DEVELOPER IS NOT
 RESPONSIBLE FOR ANY DATA DISCLOSED OR LEAKED THROUGH THE AGENT OR ASSOCIATED
 TOOLING.
 
-## 8. Operating-system notifications
+## 9. Operating-system notifications
 
 Transaction lifecycle changes can raise an operating-system notification.
 Detailed previews are the default: the title describes the lifecycle state and
@@ -340,7 +371,7 @@ how long they remain in notification history, and which other local users or
 services can see them. The wallet does not send a separate copy to the
 developer.
 
-## 9. Local data
+## 10. Local data
 
 Keys stay in the operating system credential store. Policies, transaction
 lifecycle records, token metadata, legal acceptance
@@ -352,9 +383,9 @@ configure, are stored in that encrypted database. A dapp session
 is not recorded: the pairing keys live only in memory and are gone when the
 application restarts, though the transactions and signatures it produced are kept
 like any others. Nothing in this section leaves your machine except as
-described in sections 2, 4, 5, 6, and 7.
+described in sections 2, 4, 5, 6, 7, and 8.
 
-## 10. Acknowledgment
+## 11. Acknowledgment
 
 Acknowledgment is recorded locally against the exact text of this document. A
 release that materially changes these privacy disclosures requires a fresh

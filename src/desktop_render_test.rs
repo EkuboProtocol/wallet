@@ -881,6 +881,10 @@ fn the_portfolio_footer_stays_on_screen_under_a_long_list(cx: &mut gpui::TestApp
                         tokens_skipped: None,
                         fork: None,
                     }),
+                    ekubo_positions: Ok(crate::authority::OwnerEkuboPositions {
+                        positions: Vec::new(),
+                        total_items: 0,
+                    }),
                 }],
             }],
         });
@@ -1872,7 +1876,7 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
         "the waiting list must draw the request it holds"
     );
 
-    // The portfolio: one balance.
+    // The portfolio: one balance and one open Ekubo position.
     cx.update_entity(&view, |wallet, _| {
         wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
             accounts: vec![OwnerPortfolioAccount {
@@ -1890,14 +1894,73 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
                         tokens_skipped: None,
                         fork: None,
                     }),
+                    ekubo_positions: Ok(crate::authority::OwnerEkuboPositions {
+                        positions: vec![crate::authority::OwnerEkuboPosition {
+                            id: "0x01".into(),
+                            chain_id: network.chain_id,
+                            positions_address: "0x0000000000000000000000000000000000000002".into(),
+                            token0: crate::authority::OwnerPortfolioAsset {
+                                address: "0x0000000000000000000000000000000000000000".into(),
+                                symbol: Some("ETH".into()),
+                                name: Some("Ether".into()),
+                                decimals: Some(18),
+                            },
+                            token1: crate::authority::OwnerPortfolioAsset {
+                                address: "0x04c46e830bb56ce22735d5d8fc9cb90309317d0f".into(),
+                                symbol: Some("EKUBO".into()),
+                                name: Some("Ekubo Protocol".into()),
+                                decimals: Some(18),
+                            },
+                            lower_tick: 100,
+                            upper_tick: 200,
+                            current_tick: Some(150),
+                            state: Ok(crate::authority::OwnerEkuboPositionState {
+                                liquidity: 1,
+                                principal0: 1_500_000_000_000_000_000,
+                                principal1: 42_000_000_000_000_000_000,
+                                fees0: 2_000_000_000_000_000,
+                                fees1: 100_000_000_000_000_000,
+                            }),
+                        }],
+                        total_items: 1,
+                    }),
                 }],
             }],
         });
         wallet.set_route(Route::Overview);
     });
+    let portfolio_layout = measure(
+        cx,
+        window,
+        &view,
+        &[
+            "portfolio-assets-section",
+            "portfolio-balance-row",
+            "portfolio-positions-section",
+            "portfolio-position-row",
+            "portfolio-position-amounts",
+            "portfolio-position-range-track",
+        ],
+    );
     assert!(
-        measure(cx, window, &view, &["portfolio-balance-row"])[0].is_some(),
-        "the portfolio must draw the balance it holds"
+        portfolio_layout.iter().all(Option::is_some),
+        "the portfolio must draw separate asset and position sections with the position range"
+    );
+    let assets = portfolio_layout[0].expect("assets section");
+    let balance = portfolio_layout[1].expect("balance card");
+    let positions = portfolio_layout[2].expect("positions section");
+    let position = portfolio_layout[3].expect("position card");
+    let amounts = portfolio_layout[4].expect("position amounts");
+    let range = portfolio_layout[5].expect("position range");
+    assert!(
+        assets.origin.y < balance.origin.y
+            && balance.origin.y < positions.origin.y
+            && positions.origin.y < position.origin.y,
+        "assets must appear before Ekubo positions"
+    );
+    assert!(
+        position.origin.y < amounts.origin.y && amounts.origin.y < range.origin.y,
+        "human-readable principal and fee amounts must appear before the price range"
     );
 
     // The permission diff.
@@ -2059,6 +2122,10 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
                         tokens_skipped: None,
                         fork: None,
                     }),
+                    ekubo_positions: Ok(crate::authority::OwnerEkuboPositions {
+                        positions: Vec::new(),
+                        total_items: 0,
+                    }),
                 }],
             }],
         });
@@ -2123,6 +2190,26 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         3,
         "changing what the list holds back must derive the rows again"
     );
+
+    // A landed position refresh must invalidate the same cache as balances.
+    cx.update_entity(&view, |wallet, _| {
+        let PortfolioState::Ready(portfolio) = &mut wallet.portfolio else {
+            panic!("the portfolio is ready");
+        };
+        portfolio.accounts[0].networks[0].ekubo_positions =
+            Err("Position index unavailable".to_owned());
+        wallet.portfolio_generation = wallet.portfolio_generation.wrapping_add(1);
+    });
+    draw(cx, window, &view);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.portfolio_rows_derived.get(), 4);
+        let cached = wallet.portfolio_row_cache.borrow();
+        assert!(cached.as_ref().unwrap().rows.iter().any(|row| matches!(
+            row,
+            PortfolioListRow::PositionsUnavailable { error, .. }
+                if error == "Position index unavailable"
+        )));
+    });
 
     release(cx, &view);
 }
@@ -2233,13 +2320,15 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
         &view,
         &[
             "portfolio-balances-card",
+            "portfolio-assets-section",
             "portfolio-loading-placeholder",
             "portfolio-placeholder-row",
         ],
     );
     let loading_card = loading[0].expect("the card must draw while the balances are being read");
-    let placeholder = loading[1].expect("the placeholder rows must draw inside it");
-    let placeholder_row = loading[2].expect("a placeholder row must draw");
+    let loading_assets = loading[1].expect("the assets section must draw while loading");
+    let placeholder = loading[2].expect("the placeholder rows must draw inside it");
+    let placeholder_row = loading[3].expect("a placeholder row must draw");
 
     cx.update_entity(&view, |wallet, _| {
         wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
@@ -2258,6 +2347,10 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
                         tokens_skipped: None,
                         fork: None,
                     }),
+                    ekubo_positions: Ok(crate::authority::OwnerEkuboPositions {
+                        positions: Vec::new(),
+                        total_items: 0,
+                    }),
                 }],
             }],
         });
@@ -2268,13 +2361,15 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
         &view,
         &[
             "portfolio-balances-card",
+            "portfolio-assets-section",
             "portfolio-balances",
             "portfolio-balance-row",
         ],
     );
     let ready_card = ready[0].expect("the card must still draw once the balances land");
-    let list = ready[1].expect("the list must draw inside it");
-    let row = ready[2].expect("the balance row must draw");
+    let ready_assets = ready[1].expect("the loaded assets section must draw");
+    let list = ready[2].expect("the list must draw inside it");
+    let row = ready[3].expect("the balance row must draw");
 
     assert_eq!(
         loading_card, ready_card,
@@ -2282,12 +2377,12 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
          at the same place and the same size"
     );
     assert_eq!(
-        placeholder.origin, list.origin,
-        "the placeholder rows must stand where the list stands"
+        loading_assets.origin, ready_assets.origin,
+        "the assets heading must stand where it remains after loading"
     );
     assert_eq!(
         placeholder.size.width, list.size.width,
-        "and be as wide as it"
+        "the loading and loaded holdings regions must be equally wide"
     );
     // A placeholder row is the real row's frame, so it stands the same height
     // as one balance rather than the height of some other card's line.
@@ -2360,6 +2455,10 @@ fn the_portfolio_says_how_much_dust_it_is_holding_back(cx: &mut gpui::TestAppCon
                 networks: vec![crate::authority::OwnerPortfolioNetwork {
                     network: network.clone(),
                     result: Ok(portfolio(tokens)),
+                    ekubo_positions: Ok(crate::authority::OwnerEkuboPositions {
+                        positions: Vec::new(),
+                        total_items: 0,
+                    }),
                 }],
             }],
         });

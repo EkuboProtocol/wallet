@@ -408,6 +408,75 @@ fn portfolio_amounts_preserve_every_significant_digit() {
     assert_eq!(format_asset_amount("7", None, "base units"), "7 base units");
 }
 
+#[test]
+fn ekubo_position_range_status_uses_the_indexed_pool_tick() {
+    let mut row = PortfolioPositionRow {
+        chain_id: 1,
+        network_name: "Ethereum".into(),
+        id: "0x01".into(),
+        token0: "ETH".into(),
+        token1: "EKUBO".into(),
+        token0_decimals: Some(18),
+        token1_decimals: Some(18),
+        lower_tick: 100,
+        upper_tick: 200,
+        current_tick: Some(150),
+        amounts: Ok(PortfolioPositionAmounts {
+            principal0: "1 ETH".into(),
+            principal1: "2 EKUBO".into(),
+            fees0: "0.01 ETH".into(),
+            fees1: "0.02 EKUBO".into(),
+        }),
+    };
+    assert_eq!(row.range_label(), "In range");
+    assert_eq!(row.range_progress(), Some(0.5));
+    row.current_tick = Some(200);
+    assert_eq!(row.range_label(), "Out of range");
+    assert_eq!(row.range_progress(), Some(1.0));
+    row.current_tick = Some(50);
+    assert_eq!(row.range_progress(), Some(0.0));
+    row.current_tick = None;
+    assert_eq!(row.range_label(), "Range unavailable");
+    assert_eq!(row.range_progress(), None);
+}
+
+#[test]
+fn ekubo_position_pairs_prefer_locally_trusted_symbols() {
+    let asset = OwnerPortfolioAsset {
+        address: "0x0000000000000000000000000000000000000001".into(),
+        symbol: Some("EKUBO".into()),
+        name: Some("Ekubo Protocol".into()),
+        decimals: Some(18),
+    };
+    assert_eq!(position_asset_label(&asset), "EKUBO");
+
+    let unlabeled = OwnerPortfolioAsset {
+        symbol: None,
+        name: None,
+        ..asset
+    };
+    assert_eq!(position_asset_label(&unlabeled), "0x00000000…000001");
+}
+
+#[test]
+fn ekubo_position_prices_apply_tick_and_token_decimals() {
+    let row = PortfolioPositionRow {
+        chain_id: 1,
+        network_name: "Ethereum".into(),
+        id: "0x01".into(),
+        token0: "USDC".into(),
+        token1: "ETH".into(),
+        token0_decimals: Some(6),
+        token1_decimals: Some(18),
+        lower_tick: 0,
+        upper_tick: 100,
+        current_tick: Some(0),
+        amounts: Err("not read".into()),
+    };
+    assert_eq!(row.price_at_tick(0), Some(1e-12));
+    assert_eq!(row.price_label(0), "1.0000e-12");
+}
+
 fn balance_row(
     chain_id: u64,
     address: &str,
