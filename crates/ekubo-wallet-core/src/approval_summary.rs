@@ -327,51 +327,105 @@ pub async fn plan_headline(
     Some(assemble_headline(&phrases))
 }
 
-/// Join the phrases that fit and count the ones that do not.
-///
-/// The budget is spent before the join rather than after it, so a headline
-/// ends at a phrase boundary. The first phrase is always taken: a plan of one
-/// long call reads better truncated than replaced by "1 more call".
-fn assemble_headline(phrases: &[String]) -> String {
-    let mut text = String::new();
-    let mut shown = 0_usize;
-    for phrase in phrases.iter().take(MAX_HEADLINE_PHRASES) {
-        if shown > 0 && text.chars().count() + 2 + phrase.chars().count() > MAX_HEADLINE_LEN {
-            break;
-        }
-        if shown > 0 {
-            text.push_str(", ");
-        }
-        text.push_str(phrase);
-        shown += 1;
+/// The tail that says how many calls the line did not name.
+fn headline_remainder(remaining: usize) -> String {
+    match remaining {
+        0 => String::new(),
+        1 => " and 1 more call".to_owned(),
+        remaining => format!(" and {remaining} more calls"),
     }
-    let remaining = phrases.len() - shown;
-    if remaining > 0 {
-        let _ = write!(
-            text,
-            " and {remaining} more call{}",
-            if remaining == 1 { "" } else { "s" }
-        );
-    }
-    let mut characters = text.chars();
-    let capitalized = match characters.next() {
+}
+
+/// How wide the line would be if it named this many of the phrases.
+fn headline_width(phrases: &[String], shown: usize) -> usize {
+    phrases[..shown]
+        .iter()
+        .map(|phrase| phrase.chars().count())
+        .sum::<usize>()
+        + 2 * shown.saturating_sub(1)
+        + headline_remainder(phrases.len() - shown).chars().count()
+}
+
+fn capitalized(value: &str) -> String {
+    let mut characters = value.chars();
+    match characters.next() {
         Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-        None => text,
-    };
-    crate::sanitize::stripped_capped(&capitalized, MAX_HEADLINE_LEN)
+        None => String::new(),
+    }
+}
+
+/// Name as many calls as the line can carry, and count the rest.
+///
+/// The count is reserved out of the budget before the phrases are joined, not
+/// appended after them. Appending it is what this did first, and the cap then
+/// cut the count straight back off: five calls of average length were titled
+/// as two, with nothing left on the line to say that three were missing.
+/// Understating a plan is the one thing a title must not do, so where the two
+/// compete for the last characters the count wins and the phrases are what get
+/// shortened -- including in the case of a single phrase that fills the line
+/// on its own, where the last few words of what one call does are worth less
+/// than knowing another call exists.
+fn assemble_headline(phrases: &[String]) -> String {
+    let mut shown = phrases.len().min(MAX_HEADLINE_PHRASES);
+    while shown > 1 && headline_width(phrases, shown) > MAX_HEADLINE_LEN {
+        shown -= 1;
+    }
+    let remainder = headline_remainder(phrases.len() - shown);
+    let budget = MAX_HEADLINE_LEN.saturating_sub(remainder.chars().count());
+    // Capitalized before the cap, so a first character that widens on
+    // uppercasing cannot push the finished line past it.
+    let named =
+        crate::sanitize::stripped_capped(&capitalized(&phrases[..shown].join(", ")), budget);
+    format!("{named}{remainder}")
+}
+
+/// The fact about a call that a descriptor's intent line is not required to
+/// carry, and that a row must not be missing.
+///
+/// This is [`standard_call_warnings`]'s rule at headline scale: a descriptor
+/// changes how a call reads, never what it does, so a token having one must
+/// not be the reason its allowance ceiling goes unmentioned -- and the tokens
+/// most likely to ship a descriptor are exactly the ones worth approving
+/// carefully. Without this, two rows reading `approve(spender, MAX)` disagree:
+/// the undescribed token says "Approve unlimited USDC" and the descriptor-
+/// covered one says whatever its intent says, so the more dangerous of the two
+/// is the one whose title looks tamer.
+///
+/// Direction is the sharper case. The Ekubo Positions descriptor renders
+/// `setApprovalForAll` as "Manage operator rights for" whether the grant is
+/// being made or revoked, so a row carrying the intent alone cannot tell the
+/// two apart at all. Zero-value `approve` is the same trap: it is a
+/// revocation, and a descriptor will still call it an approval.
+fn descriptor_qualifier(call: Option<&StandardCall>) -> Option<&'static str> {
+    match call {
+        Some(StandardCall::Approve { amount, .. }) if *amount == U256::ZERO => Some("revoking"),
+        Some(StandardCall::Approve { amount, .. }) if is_effectively_unlimited(*amount) => {
+            Some("unlimited")
+        }
+        Some(StandardCall::SetApprovalForAll { approved: true, .. }) => {
+            Some("granting operator control")
+        }
+        Some(StandardCall::SetApprovalForAll {
+            approved: false, ..
+        }) => Some("revoking operator control"),
+        _ => None,
+    }
 }
 
 /// What one call does, in the few words a row can carry.
 ///
 /// The precedence is [`interpret_step`]'s: a descriptor matching the exact
 /// chain, address, and selector is the most specific reading available, and
-/// standard token decoding is the fallback for everything else.
+/// standard token decoding is the fallback for everything else. What the
+/// descriptor does not get to decide is whether the call's own outliving
+/// grant is mentioned; see [`descriptor_qualifier`].
 async fn headline_phrase(
     step: &ExecutionStep,
     metadata: &TokenMetadataMap,
     own: &OwnAccounts,
 ) -> Option<String> {
     let token = step.transaction.to;
+    let standard = decode_standard_call(&step.transaction.data);
     if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>()
         && let Some(reading) = crate::clear_signing::interpret(
             chain_id,
@@ -386,10 +440,13 @@ async fn headline_phrase(
         )
         .await
     {
-        return Some(reading.intent);
+        return Some(match descriptor_qualifier(standard.as_ref()) {
+            Some(qualifier) => format!("{} ({qualifier})", reading.intent),
+            None => reading.intent,
+        });
     }
     let display = metadata.get(&token).cloned().unwrap_or_default();
-    match decode_standard_call(&step.transaction.data)? {
+    match standard? {
         StandardCall::Approve { amount, .. } if amount == U256::ZERO => Some(format!(
             "revoke approval for {}",
             headline_token(&display).unwrap_or_else(|| "an unlisted token".to_owned())

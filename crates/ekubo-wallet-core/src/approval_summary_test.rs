@@ -1247,3 +1247,143 @@ fn a_headline_needs_no_runtime() {
     ));
     assert_eq!(headline.as_deref(), Some("Approve 1 USDC"));
 }
+
+/// How many calls a headline claims to account for: the ones it named, plus
+/// the ones its trailing count says it did not.
+fn calls_accounted_for(headline: &str) -> usize {
+    let (named, counted) = match headline.split_once(" and ") {
+        Some((named, tail)) => {
+            let count: usize = tail
+                .trim_end_matches(" more calls")
+                .trim_end_matches(" more call")
+                .parse()
+                .unwrap_or_else(|_| panic!("a headline's tail must be a count: {headline}"));
+            (named, count)
+        }
+        None => (headline, 0),
+    };
+    named.split(", ").count() + counted
+}
+
+#[test]
+fn a_headline_never_drops_the_count_of_what_it_did_not_name() {
+    // Understating a plan is the one thing a title must not do. Spending the
+    // whole width on phrases and appending the count afterwards truncated the
+    // count back off, so a five-call plan was titled as a two-call plan --
+    // with nothing on the line to say that anything was missing.
+    //
+    // Phrase lengths chosen to straddle the budget: two of these fit and the
+    // third does not, which is exactly where the count used to be lost.
+    let long = "transfer 0.25 WSTETH-WETH-LP to your account cold-storage".to_owned();
+    assert_eq!(long.chars().count(), 57);
+    for count in 1..=6_usize {
+        let headline = assemble_headline(&vec![long.clone(); count]);
+        assert!(
+            headline.chars().count() <= MAX_HEADLINE_LEN,
+            "{count} phrases overflowed the cap: {headline}"
+        );
+        assert_eq!(
+            calls_accounted_for(&headline),
+            count,
+            "{count} phrases produced a headline accounting for a different number: {headline}"
+        );
+    }
+
+    // A single phrase already past the cap keeps the count rather than the
+    // tail of the phrase: how many calls there are outranks the last few
+    // words of what the first one does.
+    let overlong = format!("grant operator control of every {} token", "W".repeat(70));
+    let remainder_width = " and 1 more call".len();
+    assert!(
+        overlong.chars().count() > MAX_HEADLINE_LEN - remainder_width,
+        "this phrase has to be too long to sit beside the count, or the case is untested"
+    );
+    let headline = assemble_headline(&[overlong, "approve 1 USDC".to_owned()]);
+    assert!(headline.chars().count() <= MAX_HEADLINE_LEN);
+    assert!(
+        headline.ends_with(" and 1 more call"),
+        "the count must survive a phrase that fills the line: {headline}"
+    );
+}
+
+#[tokio::test]
+async fn a_descriptor_does_not_silence_an_unlimited_allowance_in_the_headline() {
+    // The same stETH descriptor `a_descriptor_does_not_silence_the_unlimited_
+    // allowance_warning` leans on, held to the same rule one level up: the
+    // ceiling is a fact about the call, and a token popular enough to ship a
+    // descriptor is exactly one worth approving carefully. Without the
+    // qualifier this row would read tamer than the same call on an
+    // undescribed token, which is precisely backwards.
+    let steth: Address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+        .parse()
+        .unwrap();
+    let headline = plan_headline(
+        &[step(
+            1,
+            steth,
+            approve_calldata(Address::repeat_byte(0x22), U256::MAX),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !headline.starts_with("Approve "),
+        "the descriptor did not match, so this proves nothing: {headline}"
+    );
+    assert!(
+        headline.ends_with(" (unlimited)"),
+        "a descriptor-read approval must still say what ceiling it grants: {headline}"
+    );
+}
+
+#[tokio::test]
+async fn a_descriptor_that_reads_the_same_both_ways_still_says_which_way_it_went() {
+    // The Ekubo Positions descriptor renders `setApprovalForAll` as "Manage
+    // operator rights for" whether the grant is being made or revoked. A row
+    // carrying that intent alone cannot tell a reader which happened, and the
+    // two are opposites -- so the direction is attached here.
+    let positions: Address = "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D"
+        .parse()
+        .unwrap();
+    let operator = Address::repeat_byte(0x33);
+    let granted = plan_headline(
+        &[step(
+            1,
+            positions,
+            set_approval_for_all_calldata(operator, true),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    let revoked = plan_headline(
+        &[step(
+            1,
+            positions,
+            set_approval_for_all_calldata(operator, false),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !granted.starts_with("Grant operator control"),
+        "the descriptor did not match, so this proves nothing: {granted}"
+    );
+    assert_ne!(
+        granted, revoked,
+        "a grant and a revocation must not share a title: {granted}"
+    );
+    assert!(
+        granted.ends_with(" (granting operator control)"),
+        "{granted}"
+    );
+    assert!(
+        revoked.ends_with(" (revoking operator control)"),
+        "{revoked}"
+    );
+}
