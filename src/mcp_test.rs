@@ -681,7 +681,12 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_wait_for_execution",
             "wallet_wait_for_message",
             "wallet_wait_for_typed_data",
+            "wallet_withdraw_message",
+            "wallet_withdraw_network_proposal",
+            "wallet_withdraw_policy_proposal",
             "wallet_withdraw_request",
+            "wallet_withdraw_token_proposals",
+            "wallet_withdraw_typed_data",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -2536,5 +2541,247 @@ fn the_approval_wait_timeout_offers_withdrawal_as_the_way_out() {
     assert!(
         instruction.contains("wallet_withdraw_request"),
         "{instruction}"
+    );
+}
+
+#[test]
+fn withdrawing_a_queued_message_clears_it_and_tells_the_owner_why() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let Json(queued) = sign_message(&server, "gm").unwrap();
+    let mut events = server.events.subscribe();
+
+    let Json(withdrawn) = server
+        .wallet_withdraw_message(Parameters(WithdrawInput {
+            request_id: queued.request_id,
+        }))
+        .unwrap();
+    assert_eq!(withdrawn.status, MessageStatus::Withdrawn);
+    assert!(withdrawn.signature.is_none());
+    let instruction = withdrawn.instruction.unwrap();
+    assert!(
+        instruction.contains("withdrawn before the user decided"),
+        "{instruction}"
+    );
+
+    // The owner hears that the agent took the request back, not that they
+    // declined it: `Rejected` is their verdict and this was not one.
+    let stages = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event.kind {
+            DomainEventKind::Signature { stage, .. } => Some(stage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stages, vec![SignatureStage::Withdrawn]);
+
+    // The same message queues fresh rather than deduplicating into the row
+    // that is no longer waiting for anyone.
+    let Json(again) = sign_message(&server, "gm").unwrap();
+    assert_ne!(again.request_id, queued.request_id);
+}
+
+#[test]
+fn withdrawing_a_message_the_owner_already_decided_names_the_live_status() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let Json(queued) = sign_message(&server, "gm").unwrap();
+    server
+        .messages
+        .lock()
+        .unwrap()
+        .reject(queued.request_id)
+        .unwrap();
+
+    let Err(error) = server.wallet_withdraw_message(Parameters(WithdrawInput {
+        request_id: queued.request_id,
+    })) else {
+        panic!("a decided request must not withdraw");
+    };
+    assert!(error.message.contains("Rejected"), "{}", error.message);
+}
+
+#[test]
+fn withdrawing_a_queued_typed_data_request_clears_it() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let Json(queued) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: permit_payload(),
+        }))
+        .unwrap();
+
+    let Json(withdrawn) = server
+        .wallet_withdraw_typed_data(Parameters(WithdrawInput {
+            request_id: queued.request_id,
+        }))
+        .unwrap();
+    assert_eq!(withdrawn.status, TypedDataStatus::Withdrawn);
+    assert!(withdrawn.signature.is_none());
+}
+
+#[test]
+fn withdrawing_a_policy_proposal_removes_the_question_and_not_the_policy() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let before = server
+        .wallet_get_policy(Parameters(WalletInput {
+            wallet_id: "primary".into(),
+        }))
+        .unwrap();
+    server
+        .wallet_propose_policy(Parameters(ProposePolicyInput {
+            wallet_id: "primary".into(),
+            source_revision: 1,
+            policy: serde_json::to_value(WalletPolicy::require_approval_for_everything()).unwrap(),
+            rationale: "tighten to approvals-only".into(),
+        }))
+        .unwrap();
+
+    let Json(output) = server
+        .wallet_withdraw_policy_proposal(Parameters(WalletProposalInput {
+            wallet_id: "primary".into(),
+        }))
+        .unwrap();
+    assert_eq!(output.withdrawn, 1);
+    assert!(
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .proposal("primary")
+            .unwrap()
+            .is_none()
+    );
+    // Withdrawal removes the question. It cannot answer it: the active policy
+    // and its revision are exactly what they were.
+    let after = server
+        .wallet_get_policy(Parameters(WalletInput {
+            wallet_id: "primary".into(),
+        }))
+        .unwrap();
+    assert_eq!(after.0.revision, before.0.revision);
+    assert_eq!(after.0.policy, before.0.policy);
+
+    // And a second call finds nothing pending rather than reporting success.
+    assert!(
+        server
+            .wallet_withdraw_policy_proposal(Parameters(WalletProposalInput {
+                wallet_id: "primary".into(),
+            }))
+            .is_err()
+    );
+}
+
+#[test]
+fn withdrawing_token_proposals_takes_back_every_pending_suggestion() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let propose = |list: &str, address: &str| {
+        runtime
+            .block_on(server.wallet_propose_tokens(Parameters(ProposeTokensInput {
+                list_name: Some(list.into()),
+                tokens: vec![ProposeTokenItem {
+                    chain_id: crate::token_store::ChainIdInput::Number(1),
+                    address: address.into(),
+                    symbol: "TKN".into(),
+                    name: Some("Token".into()),
+                    decimals: 18,
+                }],
+                reference: None,
+            })))
+            .unwrap()
+    };
+    propose("curated", "0x3333333333333333333333333333333333333333");
+    propose("other", "0x4444444444444444444444444444444444444444");
+
+    let Json(output) = server
+        .wallet_withdraw_token_proposals(Parameters(TokenProposalsInput {}))
+        .unwrap();
+    assert_eq!(output.withdrawn, 2);
+    assert!(
+        server
+            .tokens
+            .lock()
+            .unwrap()
+            .proposals()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Nothing left to take back is an error, so an agent cannot read a
+    // successful-looking zero as having removed something.
+    assert!(
+        server
+            .wallet_withdraw_token_proposals(Parameters(TokenProposalsInput {}))
+            .is_err()
+    );
+}
+
+#[test]
+fn withdrawing_a_network_proposal_removes_the_question_and_not_a_network() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let configured_before = server.config.load().unwrap().networks.len();
+    // Written straight into the store: `wallet_propose_network` resolves the
+    // endpoint's host over the network, and what is under test here is
+    // withdrawal rather than which endpoints are admissible.
+    let profile = ekubo_wallet_core::config::NetworkConfig {
+        chain_id: 999_999,
+        name: "untrusted".into(),
+        display_name: Some("Untrusted Test".into()),
+        aliases: vec![],
+        testnet: true,
+        disabled: false,
+        rpc_urls: vec!["https://rpc.example.org".parse().unwrap()],
+        rpc_strategy: ekubo_wallet_core::config::RpcStrategy::default(),
+        finality_confirmations: 12,
+        native_currency: Some(NativeCurrency {
+            name: "Test Ether".into(),
+            symbol: "TETH".into(),
+            decimals: 18,
+        }),
+        block_explorer_url: None,
+        documentation_url: None,
+    };
+    server
+        .policies
+        .lock()
+        .unwrap()
+        .put_network_proposal(&profile)
+        .unwrap();
+
+    let Json(output) = server
+        .wallet_withdraw_network_proposal(Parameters(NetworkProposalInput {
+            chain_id: "999999".into(),
+        }))
+        .unwrap();
+    assert_eq!(output.withdrawn, 1);
+    assert!(
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .network_proposals()
+            .unwrap()
+            .is_empty()
+    );
+    // Withdrawal removes a suggestion. It cannot add, enable, or disable a
+    // network, so the configured set is exactly what it was.
+    assert_eq!(
+        server.config.load().unwrap().networks.len(),
+        configured_before
+    );
+
+    assert!(
+        server
+            .wallet_withdraw_network_proposal(Parameters(NetworkProposalInput {
+                chain_id: "999999".into(),
+            }))
+            .is_err()
     );
 }

@@ -1731,10 +1731,11 @@ pub const MAX_PLAN_SOURCE_BYTES: usize = 255;
 /// is refused rather than quietly downgraded to `Unknown`, which is a
 /// different and more permissive answer.
 ///
-/// Shared by the row parser and by [`PendingStore::withdraw`], which reads the
-/// column on its own to decide whether the request is an agent's to take back.
-/// One reading, so the two cannot disagree about what a row's origin is.
-fn parse_request_source(stored: Option<&str>) -> Result<RequestSource> {
+/// Shared by the row parser, by [`PendingStore::withdraw`], and by the two
+/// signature queues, all of which read the column on its own to decide whether
+/// a request is an agent's to take back. One reading, so no two of them can
+/// disagree about what a row's origin is.
+pub(crate) fn parse_request_source(stored: Option<&str>) -> Result<RequestSource> {
     match stored {
         None => Ok(RequestSource::Unknown),
         Some(stored) => serde_json::from_str(stored)

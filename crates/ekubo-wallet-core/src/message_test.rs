@@ -643,3 +643,109 @@ fn invisible_characters_are_escaped_in_the_message_a_person_reads() {
     // Ordinary text is untouched, so the escaping stays readable.
     assert_eq!(escape_for_display("send 10 ETH"), "send 10 ETH");
 }
+
+/// Queue a message the way the MCP adapter does, so the row carries the agent
+/// origin withdrawal is gated on. The shared `create` helper stores `Unknown`,
+/// which is a row nothing claims and therefore nothing may take back.
+fn create_agent_message(store: &mut MessageStore, message: &[u8]) -> Result<PendingMessage> {
+    store.create_bound(
+        Uuid::nil(),
+        "primary",
+        Address::ZERO,
+        Some("1"),
+        message,
+        MessageEncoding::Text,
+        None,
+        &RequestSource::agent(Some("claude_code"), None),
+    )
+}
+
+#[test]
+fn withdrawal_releases_the_message_so_the_same_bytes_can_be_queued_again() {
+    let (_directory, mut store) = store();
+    let first = create_agent_message(&mut store, b"gm").unwrap();
+
+    // Before withdrawal the identical message deduplicates into the stale row,
+    // which is why an agent that gave up waiting cannot simply ask again.
+    let duplicate = create_agent_message(&mut store, b"gm").unwrap();
+    assert_eq!(duplicate.request_id, first.request_id);
+
+    let withdrawn = store.withdraw(first.request_id).unwrap();
+    assert_eq!(withdrawn.status, MessageStatus::Withdrawn);
+    // Nobody decided, so the row carries no decision and no signature.
+    assert!(withdrawn.approved_at.is_none());
+    assert!(withdrawn.rejected_at.is_none());
+    assert!(withdrawn.signature.is_none());
+
+    let fresh = create_agent_message(&mut store, b"gm").unwrap();
+    assert_ne!(fresh.request_id, first.request_id);
+    assert_eq!(fresh.status, MessageStatus::AwaitingApproval);
+}
+
+#[test]
+fn withdrawal_frees_the_bounded_message_queue() {
+    let (_directory, mut store) = store();
+    let first = create_agent_message(&mut store, b"gm 1").unwrap();
+    for index in 2..=crate::signature_requests::MAX_AWAITING_PER_WALLET {
+        create_agent_message(&mut store, format!("gm {index}").as_bytes()).unwrap();
+    }
+    let overflow = format!(
+        "gm {}",
+        crate::signature_requests::MAX_AWAITING_PER_WALLET + 1
+    );
+    assert!(create_agent_message(&mut store, overflow.as_bytes()).is_err());
+
+    store.withdraw(first.request_id).unwrap();
+    assert!(create_agent_message(&mut store, overflow.as_bytes()).is_ok());
+}
+
+#[test]
+fn only_an_agents_own_message_is_withdrawable() {
+    let (_directory, mut store) = store();
+    // A row from before the origin column existed reads back as `Unknown`.
+    let unattributed = store
+        .create("primary", Some("1"), b"gm", MessageEncoding::Text, None)
+        .unwrap();
+    assert!(store.withdraw(unattributed.request_id).is_err());
+    assert_eq!(
+        store.get(unattributed.request_id).unwrap().status,
+        MessageStatus::AwaitingApproval
+    );
+
+    let dapp = store
+        .create_bound(
+            Uuid::nil(),
+            "primary",
+            Address::ZERO,
+            Some("1"),
+            b"gm from a dapp",
+            MessageEncoding::Text,
+            Some("Example (app.example.org)"),
+            &RequestSource::walletconnect(Some("https://app.example.org")),
+        )
+        .unwrap();
+    assert!(store.withdraw(dapp.request_id).is_err());
+    assert_eq!(
+        store.get(dapp.request_id).unwrap().status,
+        MessageStatus::AwaitingApproval
+    );
+}
+
+#[test]
+fn a_message_that_left_the_queue_cannot_be_withdrawn() {
+    let (_directory, mut store) = store();
+    let withdrawn = create_agent_message(&mut store, b"gm").unwrap();
+    store.withdraw(withdrawn.request_id).unwrap();
+    assert!(store.withdraw(withdrawn.request_id).is_err());
+
+    // The owner's verdict wins the same compare-and-set, and stays theirs.
+    let rejected = create_agent_message(&mut store, b"gn").unwrap();
+    store.reject(rejected.request_id).unwrap();
+    assert!(store.withdraw(rejected.request_id).is_err());
+    assert_eq!(
+        store.get(rejected.request_id).unwrap().status,
+        MessageStatus::Rejected
+    );
+
+    assert!(store.withdraw(Uuid::new_v4()).is_err());
+}

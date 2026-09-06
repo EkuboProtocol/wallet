@@ -40,6 +40,9 @@ pub enum SignatureStage {
     Queued,
     Signed,
     Rejected,
+    /// The agent that asked took the request back before the owner decided.
+    /// Distinct from [`Self::Rejected`], which is the owner's verdict.
+    Withdrawn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

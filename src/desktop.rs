@@ -2133,7 +2133,10 @@ fn transaction_record_explanation(record: &PendingTransaction) -> &'static str {
 const fn message_status_tone(status: MessageStatus) -> StatusTone {
     match status {
         MessageStatus::AwaitingApproval => StatusTone::NeedsYou,
-        MessageStatus::Rejected => StatusTone::Failed,
+        // One arm because a tone says only how a row ended, and both of these
+        // ended without a signature. Which of them it was is the wording's
+        // job, not the colour's.
+        MessageStatus::Rejected | MessageStatus::Withdrawn => StatusTone::Failed,
         MessageStatus::Signed => StatusTone::Done,
     }
 }
@@ -2144,6 +2147,9 @@ const fn message_status_explanation(status: MessageStatus) -> &'static str {
             "Nothing has been signed. This message is waiting for your decision."
         }
         MessageStatus::Rejected => "You turned this down, so no signature was ever produced.",
+        MessageStatus::Withdrawn => {
+            "Whoever asked took this back before you decided, so no signature was ever produced."
+        }
         MessageStatus::Signed => {
             "You approved this and the wallet signed it. The signature was returned to whoever asked."
         }
@@ -2153,7 +2159,10 @@ const fn message_status_explanation(status: MessageStatus) -> &'static str {
 const fn typed_data_status_tone(status: TypedDataStatus) -> StatusTone {
     match status {
         TypedDataStatus::AwaitingApproval => StatusTone::NeedsYou,
-        TypedDataStatus::Rejected => StatusTone::Failed,
+        // One arm because a tone says only how a row ended, and both of these
+        // ended without a signature. Which of them it was is the wording's
+        // job, not the colour's.
+        TypedDataStatus::Rejected | TypedDataStatus::Withdrawn => StatusTone::Failed,
         TypedDataStatus::Signed => StatusTone::Done,
     }
 }
@@ -2164,6 +2173,9 @@ const fn typed_data_status_explanation(status: TypedDataStatus) -> &'static str 
             "Nothing has been signed. This structured message is waiting for your decision."
         }
         TypedDataStatus::Rejected => "You turned this down, so no signature was ever produced.",
+        TypedDataStatus::Withdrawn => {
+            "Whoever asked took this back before you decided, so no signature was ever produced."
+        }
         TypedDataStatus::Signed => {
             "You approved this and the wallet signed it. A signed permission of this kind can usually be used until it expires."
         }

@@ -259,6 +259,20 @@ fn signature_notification(
             format!("{where_from}. Nothing was signed."),
             false,
         ),
+        (SignatureKind::Message, SignatureStage::Withdrawn) => (
+            "Message request withdrawn",
+            format!(
+                "{where_from}. The agent took its request back before you decided, so nothing was signed."
+            ),
+            false,
+        ),
+        (SignatureKind::TypedData, SignatureStage::Withdrawn) => (
+            "Typed-data request withdrawn",
+            format!(
+                "{where_from}. The agent took its request back before you decided, so nothing was signed."
+            ),
+            false,
+        ),
     };
     WalletNotification {
         title: title.to_owned(),

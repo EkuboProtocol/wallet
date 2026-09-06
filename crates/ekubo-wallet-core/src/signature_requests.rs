@@ -1,12 +1,26 @@
 //! The shared lifecycle of the two human-only signature queues.
 //!
-//! EIP-712 typed data and EIP-191 messages queue, reject, and sign through
-//! byte-identical SQL: the tables differ only in their payload columns. One
-//! implementation of the state machine keeps the two queues from drifting;
-//! each store keeps only its payload encoding and its integrity
+//! EIP-712 typed data and EIP-191 messages queue, reject, withdraw, and sign
+//! through byte-identical SQL: the tables differ only in their payload
+//! columns. One implementation of the state machine keeps the two queues from
+//! drifting; each store keeps only its payload encoding and its integrity
 //! re-derivation of the stored digest.
+//!
+//! Withdrawal is spelled `withdrawn` here and `cancelled` in
+//! [`crate::pending`], which is not an oversight. A transaction request had a
+//! status already meaning "this left the queue and nobody decided it" —
+//! `cancelled` is what a replaced policy and a retired wallet instance write
+//! over queued rows, and its schema check deliberately says nothing about
+//! whether a person was involved. These two tables had no such status: every
+//! way out of them was a decision, which is what their `decided_at` checks
+//! asserted in so many words. So the constraint was widened and the exit was
+//! given its own name rather than borrowed from `rejected`, which is the
+//! owner's verdict and belongs to them.
 
-use crate::sql::{self, Blob, Millis};
+use crate::{
+    core::source::RequestSource,
+    sql::{self, Blob, Millis},
+};
 use alloy::primitives::B256;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -17,7 +31,7 @@ use uuid::Uuid;
 pub(crate) const MAX_AWAITING_PER_WALLET: i64 = 64;
 
 /// One signature queue: a table whose rows move
-/// `awaiting_approval → rejected | signed` and never again.
+/// `awaiting_approval → rejected | withdrawn | signed` and never again.
 pub(crate) struct SignatureQueue {
     pub table: &'static str,
     /// The noun used in every error message, so a caller can tell which
@@ -106,6 +120,65 @@ impl SignatureQueue {
             params![request_id, Millis(sql::now())],
         )?;
         ensure!(changed == 1, "{} changed during rejection", self.noun);
+        Ok(())
+    }
+
+    /// Take back an agent's own undecided request, freeing the deduplication
+    /// key and the wallet's awaiting capacity.
+    ///
+    /// Not [`Self::reject`]: nothing is written to `decided_at`, because
+    /// nobody decided. The row leaves the queue because whoever asked stopped
+    /// asking, and a queue this table backs never expires on its own — an
+    /// abandoned request stays signable by an owner who opens their wallet
+    /// hours later, and an identical one deduplicates into it rather than
+    /// making a fresh row.
+    ///
+    /// Only an agent-made request is withdrawable, and the check is on the
+    /// stored [`RequestSource`] rather than on `requester` being empty.
+    /// `requester` is a line of display text a dapp half-authors; resting a
+    /// decision on it would put dapp-authored bytes on the authorization path
+    /// and would rely on the label builder never returning an empty string.
+    /// The source's variant is chosen by whichever internal path created the
+    /// row, so it answers the question actually being asked. A row from before
+    /// the column existed reads as `Unknown` and is refused, which is the
+    /// fail-safe direction.
+    pub fn withdraw(&self, connection: &Connection, request_id: Uuid) -> Result<()> {
+        let (status, request_source): (String, Option<String>) = connection
+            .query_row(
+                &format!(
+                    "SELECT status, request_source FROM {} WHERE request_id = ?1",
+                    self.table
+                ),
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .with_context(|| format!("unknown {} request {request_id}", self.noun))?;
+        ensure!(
+            matches!(
+                crate::pending::parse_request_source(request_source.as_deref())?,
+                RequestSource::Agent { .. }
+            ),
+            "{} request {request_id} was not made by an agent, so an agent cannot withdraw it",
+            self.noun
+        );
+        ensure!(
+            status == "awaiting_approval",
+            "{} request is not awaiting approval",
+            self.noun
+        );
+        let changed = connection.execute(
+            &format!(
+                "UPDATE {} SET status = 'withdrawn', updated_at = ?2 \
+                 WHERE request_id = ?1 AND status = 'awaiting_approval'",
+                self.table
+            ),
+            params![request_id, Millis(sql::now())],
+        )?;
+        ensure!(
+            changed == 1,
+            "{} request is not awaiting approval",
+            self.noun
+        );
         Ok(())
     }
 

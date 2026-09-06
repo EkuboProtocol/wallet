@@ -372,6 +372,7 @@ impl DesktopSession {
                 MessageEncoding::Text
             },
             &requester,
+            &RequestSource::walletconnect(Some(request.dapp.url.as_str())),
         )?;
         self.wait_for_message(queued.request_id).await
     }
@@ -391,6 +392,15 @@ impl DesktopSession {
                 MessageStatus::Rejected => {
                     return Ok(RequestOutcome::rejected(
                         "The wallet owner declined this message.",
+                    ));
+                }
+                // Only an agent-made row can be withdrawn and this one is a
+                // dapp's, so this is unreachable rather than merely unlikely.
+                // Still answered: a wait that fell through here would leave
+                // the dapp holding a request nothing will ever resolve.
+                MessageStatus::Withdrawn => {
+                    return Ok(RequestOutcome::rejected(
+                        "This message request was withdrawn before it was decided.",
                     ));
                 }
                 MessageStatus::AwaitingApproval => {}
@@ -413,6 +423,7 @@ impl DesktopSession {
             request.chain_id,
             &payload,
             &requester,
+            &RequestSource::walletconnect(Some(request.dapp.url.as_str())),
         )?;
         let mut events = self.dapp.event_bus().subscribe();
         loop {
@@ -428,6 +439,15 @@ impl DesktopSession {
                 TypedDataStatus::Rejected => {
                     return Ok(RequestOutcome::rejected(
                         "The wallet owner declined this typed data.",
+                    ));
+                }
+                // Only an agent-made row can be withdrawn and this one is a
+                // dapp's, so this is unreachable rather than merely unlikely.
+                // Still answered: a wait that fell through here would leave
+                // the dapp holding a request nothing will ever resolve.
+                TypedDataStatus::Withdrawn => {
+                    return Ok(RequestOutcome::rejected(
+                        "This typed data request was withdrawn before it was decided.",
                     ));
                 }
                 TypedDataStatus::AwaitingApproval => {}

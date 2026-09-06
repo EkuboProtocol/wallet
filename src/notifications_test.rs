@@ -26,13 +26,15 @@ fn signature_event(kind: SignatureKind, stage: SignatureStage, request_id: Uuid)
     }
 }
 
-const EVERY_SIGNATURE: [(SignatureKind, SignatureStage); 6] = [
+const EVERY_SIGNATURE: [(SignatureKind, SignatureStage); 8] = [
     (SignatureKind::Message, SignatureStage::Queued),
     (SignatureKind::Message, SignatureStage::Signed),
     (SignatureKind::Message, SignatureStage::Rejected),
     (SignatureKind::TypedData, SignatureStage::Queued),
     (SignatureKind::TypedData, SignatureStage::Signed),
     (SignatureKind::TypedData, SignatureStage::Rejected),
+    (SignatureKind::Message, SignatureStage::Withdrawn),
+    (SignatureKind::TypedData, SignatureStage::Withdrawn),
 ];
 
 fn transaction_event(stage: TransactionStage, request_id: Uuid) -> DomainEvent {
