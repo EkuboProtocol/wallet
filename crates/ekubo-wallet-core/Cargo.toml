@@ -73,7 +73,7 @@ windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials_
 [target.'cfg(target_os = "linux")'.dependencies]
 backhand = { version = "0.25.1", default-features = false, features = ["gzip", "xz", "zstd"] }
 zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
-zbus_polkit = "5.0.0"
+zbus_polkit = "5.1.0"
 
 [lints]
 workspace = true
