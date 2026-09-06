@@ -28,6 +28,19 @@ current request. An explicit policy denial cannot be queued. Approval itself
 attempts to submit the exact signed bytes; follow the returned lifecycle
 instruction, and retry by `request_id` only if the row remains signed.
 
+Nothing an agent puts in front of the user expires, so stopping a wait is not
+the same as ending a request: a plan stays approvable, a message or typed-data
+payload stays signable, and a proposal keeps asking the user to widen
+permissions or trust an endpoint. Take back whatever is no longer wanted —
+`wallet_withdraw_request`, `wallet_withdraw_message`,
+`wallet_withdraw_typed_data`, `wallet_withdraw_policy_proposal`,
+`wallet_withdraw_network_proposal`, `wallet_withdraw_token_proposals`. That is
+the agent withdrawing its own ask, not the user rejecting it, and it clears the
+review out of their wallet. Withdrawal only ever removes a question: it signs
+nothing, changes no setting, and refuses anything the user already decided. If
+a transaction withdrawal reports that the row moved, reconcile with
+`wallet_get_execution_status` rather than assuming nothing was signed.
+
 When the user asks to see a particular transaction before it goes out, and
 their policy would have sent it automatically, send it with `must_review` true.
 That queues this one submission for their review without touching their policy.

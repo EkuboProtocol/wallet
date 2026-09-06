@@ -15,6 +15,7 @@
 //! it. The `0x19` prefix is what makes the human-review promise keepable: a
 //! prefixed message can never collide with an RLP transaction preimage.
 
+use crate::core::source::RequestSource;
 use crate::{
     config::WalletMetadata,
     policy_store::PolicyStore,
@@ -48,6 +49,9 @@ pub enum MessageStatus {
     AwaitingApproval,
     Rejected,
     Signed,
+    /// The agent that asked took its request back before anyone decided it.
+    /// Distinct from `Rejected`, which is the owner's verdict.
+    Withdrawn,
 }
 
 impl MessageStatus {
@@ -58,6 +62,7 @@ impl MessageStatus {
             Self::AwaitingApproval => "Waiting for you",
             Self::Rejected => "Rejected",
             Self::Signed => "Signed",
+            Self::Withdrawn => "Withdrawn",
         }
     }
 
@@ -66,6 +71,7 @@ impl MessageStatus {
             "awaiting_approval" => Ok(Self::AwaitingApproval),
             "rejected" => Ok(Self::Rejected),
             "signed" => Ok(Self::Signed),
+            "withdrawn" => Ok(Self::Withdrawn),
             _ => bail!("stored message request has invalid status {value}"),
         }
     }
@@ -566,6 +572,7 @@ impl MessageStore {
             message,
             encoding,
             requester,
+            &RequestSource::Unknown,
         )
     }
 
@@ -576,6 +583,7 @@ impl MessageStore {
         message: &[u8],
         encoding: MessageEncoding,
         requester: Option<&str>,
+        request_source: &RequestSource,
     ) -> Result<PendingMessage> {
         self.database
             .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
@@ -588,6 +596,7 @@ impl MessageStore {
             message,
             encoding,
             requester,
+            request_source,
         )
     }
 
@@ -600,6 +609,7 @@ impl MessageStore {
         message: &[u8],
         encoding: MessageEncoding,
         requester: Option<&str>,
+        request_source: &RequestSource,
     ) -> Result<PendingMessage> {
         validate_message_shape(message, encoding)?;
         let digest = message_digest(message);
@@ -624,8 +634,8 @@ impl MessageStore {
                 transaction.execute(
                     "INSERT INTO pending_messages(
                         request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, message, message_encoding, digest,
-                        requester, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'awaiting_approval', ?10, ?10)",
+                        requester, request_source, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11)",
                     params![
                         request_id,
                         wallet_instance_id.to_string(),
@@ -636,6 +646,7 @@ impl MessageStore {
                         encoding.as_str(),
                         Blob(digest),
                         requester,
+                        serde_json::to_string(request_source)?,
                         Millis(now),
                     ],
                 )?;
@@ -656,6 +667,13 @@ impl MessageStore {
             "message request is not awaiting approval"
         );
         QUEUE.reject(&self.database.connection, request_id)?;
+        self.get(request_id)
+    }
+
+    /// Take back an agent's own queued message. See
+    /// [`SignatureQueue::withdraw`] for why this is not a rejection.
+    pub fn withdraw(&mut self, request_id: Uuid) -> Result<PendingMessage> {
+        QUEUE.withdraw(&self.database.connection, request_id)?;
         self.get(request_id)
     }
 

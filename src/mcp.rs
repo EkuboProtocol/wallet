@@ -336,6 +336,12 @@ impl WalletMcpServer {
             }
             ExecutionStatus::Submitted => Some(TransactionStage::Confirmed),
             ExecutionStatus::Reverted => Some(TransactionStage::Reverted),
+            // No signed hash means the row never held an envelope, so nothing
+            // of the owner's was ever mined against this nonce. Reconciling a
+            // withdrawn row must not ring "your replacement was mined first".
+            ExecutionStatus::Cancelled if output.transaction_hash.is_none() => {
+                Some(TransactionStage::Withdrawn)
+            }
             ExecutionStatus::Cancelled => Some(TransactionStage::Cancelled),
             ExecutionStatus::Replaced => Some(TransactionStage::Replaced),
             ExecutionStatus::TimedOut | ExecutionStatus::Rejected => None,
@@ -619,6 +625,57 @@ struct WaitInput {
     #[serde(default = "default_confirmations")]
     #[schemars(range(min = 1, max = 1000))]
     confirmations: u16,
+}
+
+/// What a withdrawal removed, for the surfaces that have no lifecycle row to
+/// report afterwards.
+#[derive(Debug, Serialize, JsonSchema)]
+struct WithdrawnProposalOutput {
+    /// How many of the owner's pending questions this took back. Zero is not
+    /// reported here: a call that found nothing to withdraw is an error, so
+    /// an agent cannot read silence as success.
+    withdrawn: u64,
+    instruction: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WalletProposalInput {
+    wallet_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NetworkProposalInput {
+    chain_id: String,
+}
+
+/// Every token suggestion at once, deliberately without a list filter.
+///
+/// A suggestion is stored under a label the store builds, not under the
+/// `list_name` that was passed: a caller-supplied name is kept behind a
+/// prefix saying the caller is the only thing asserting it, and a fetched
+/// list's is led by the TLS host. An agent knows neither rendering — nothing
+/// reads them back to it — so any list it named here would be a guess, and a
+/// guess that missed would silently take back a different list than the one
+/// meant. The owner reviews and decides these by list; an agent withdraws the
+/// suggestions it left, all of them.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TokenProposalsInput {}
+
+/// A queued request named on its own.
+///
+/// Deliberately not a [`RequestInput`]: an agent that has given up on a wait
+/// is holding a `request_id` and nothing else, and demanding it reconstruct
+/// the wallet and chain to let go of a request would be asking for exactly the
+/// bookkeeping it just lost. The row names its own wallet and chain, and
+/// withdrawal grants nothing, so there is no authorization for a matching
+/// triple to carry here.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WithdrawInput {
+    request_id: uuid::Uuid,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2445,12 +2502,312 @@ impl WalletMcpServer {
         let mut output = execution_status_output(record);
         if timed_out {
             output.status = ExecutionStatus::TimedOut;
-            output.instruction = Some(still_awaiting_instruction(
-                "wallet_wait_for_approval",
-                output.request_id,
+            output.instruction = Some(format!(
+                "{} If the plan has gone stale while you waited — an aged-out quote, a step the \
+                 user has moved on from — withdraw it with wallet_withdraw_request rather than \
+                 leaving it approvable at a price that no longer exists.",
+                still_awaiting_instruction("wallet_wait_for_approval", output.request_id)
             ));
         }
         Ok(Json(output))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_request",
+        description = "Take back a request this agent queued that is still awaiting human approval, so it stops being approvable. Use it when the plan has gone stale — a quote that has aged out, a step the user redirected away from, a wait you are done with — because a queued plan does not expire: left alone it can be approved an hour later at a price that no longer exists, and re-sending the identical plan deduplicates into that same stale row instead of making a fresh one. Withdrawing is not rejecting: it records that the agent stopped offering the plan, not that the user refused it, and the user's own review disappears from their wallet. Nothing signed can be withdrawn. If the owner approved while you were deciding, this fails and reports the live status: reconcile with wallet_get_execution_status, and for an envelope already broadcast use wallet_attempt_cancel, which is the unrelated on-chain operation of outbidding it at its own nonce. Only agent-made requests are withdrawable; a dapp's or an automation's are not this agent's to take back.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn wallet_withdraw_request(
+        &self,
+        Parameters(input): Parameters<WithdrawInput>,
+    ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
+        // The same admission every request-id tool makes: the row has to name
+        // a wallet and network this server is configured for before anything
+        // reads or writes it.
+        self.pending_record_by_id(input.request_id)
+            .map_err(|error| tool_error(&error))?;
+        let attempt = self
+            .pending
+            .lock()
+            .map_err(|_| ErrorData::internal_error("pending database lock was poisoned", None))?
+            .withdraw(input.request_id);
+        let withdrawn = match attempt {
+            Ok(withdrawn) => {
+                // Announced only on the pass that moved the row. Every tool
+                // here takes hostile input, and a retry that changed nothing
+                // has nothing to tell the owner: publishing on the idempotent
+                // arm too would let a caller ring their notifications as often
+                // as it liked, and would blame this agent for a row some
+                // policy replacement had dropped.
+                self.events.publish(DomainEventKind::Transaction {
+                    request_id: withdrawn.request_id,
+                    stage: TransactionStage::Withdrawn,
+                });
+                withdrawn
+            }
+            Err(error) => self.withdrawal_refusal(input.request_id, &error)?,
+        };
+        Ok(Json(execution_status_output(withdrawn)))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_message",
+        description = "Take back a message-signing request this agent queued that is still awaiting the user. Use it when the signature is no longer wanted — a login the user abandoned, a step they redirected away from, a wait you are done with — because a queued request does not expire: left alone it stays signable hours later, for a session or a login nobody is still in, and an identical message deduplicates into that same stale row rather than making a fresh one. Withdrawing is not rejecting: it records that the agent stopped asking, not that the user refused, and their review disappears from the wallet. A request already signed or rejected cannot be withdrawn and reports the live status instead. Only agent-made requests are withdrawable; a dapp's is not this agent's to take back.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_withdraw_message(
+        &self,
+        Parameters(input): Parameters<WithdrawInput>,
+    ) -> Result<Json<MessageOutput>, ErrorData> {
+        let attempt = self
+            .messages
+            .lock()
+            .map_err(|_| ErrorData::internal_error("message store lock was poisoned", None))?
+            .withdraw(input.request_id);
+        let record = match attempt {
+            Ok(record) => {
+                self.publish_signature_stage(
+                    input.request_id,
+                    SignatureKind::Message,
+                    SignatureStage::Withdrawn,
+                );
+                record
+            }
+            Err(error) => Self::signature_withdrawal_refusal(
+                &error,
+                self.messages
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.get(input.request_id).ok())
+                    .map(|record| {
+                        let status = record.status;
+                        (record, status == MessageStatus::Withdrawn, status.label())
+                    }),
+            )?,
+        };
+        Ok(Json(
+            message_output(record, &self.config).map_err(|error| tool_error(&error))?,
+        ))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_typed_data",
+        description = "Take back a typed-data signing request this agent queued that is still awaiting the user. Use it when the signature is no longer wanted, because a queued request does not expire: an EIP-712 permit or order signed hours late is signed against terms and deadlines that have moved, and an identical payload deduplicates into that same stale row rather than making a fresh one. Withdrawing is not rejecting: it records that the agent stopped asking, not that the user refused, and their review disappears from the wallet. A request already signed or rejected cannot be withdrawn and reports the live status instead. Only agent-made requests are withdrawable; a dapp's is not this agent's to take back.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_withdraw_typed_data(
+        &self,
+        Parameters(input): Parameters<WithdrawInput>,
+    ) -> Result<Json<TypedDataOutput>, ErrorData> {
+        let attempt = self
+            .typed_data
+            .lock()
+            .map_err(|_| ErrorData::internal_error("typed data store lock was poisoned", None))?
+            .withdraw(input.request_id);
+        let record = match attempt {
+            Ok(record) => {
+                self.publish_signature_stage(
+                    input.request_id,
+                    SignatureKind::TypedData,
+                    SignatureStage::Withdrawn,
+                );
+                record
+            }
+            Err(error) => Self::signature_withdrawal_refusal(
+                &error,
+                self.typed_data
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.get(input.request_id).ok())
+                    .map(|record| {
+                        let status = record.status;
+                        (record, status == TypedDataStatus::Withdrawn, status.label())
+                    }),
+            )?,
+        };
+        Ok(Json(typed_data_output(record)))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_policy_proposal",
+        description = "Take back this wallet's pending policy proposal, so the user is no longer being asked to decide on it. Use it when the permissions you asked for are no longer the ones you need, or the work that motivated them is done: a proposal does not expire, and one left standing invites the user to widen what the wallet will sign automatically for a reason that has passed. Withdrawing removes the proposal and nothing else — it cannot install, narrow, or alter the active policy, which only the user can change. A proposal the user has already applied or rejected is gone, and withdrawing then reports that there was nothing pending. One proposal exists per wallet and a later one replaces an earlier, so this withdraws whichever is currently pending, not specifically the one this agent wrote.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_withdraw_policy_proposal(
+        &self,
+        Parameters(input): Parameters<WalletProposalInput>,
+    ) -> Result<Json<WithdrawnProposalOutput>, ErrorData> {
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let mut policies = self
+            .policies
+            .lock()
+            .map_err(|_| ErrorData::internal_error("policy store lock was poisoned", None))?;
+        let proposal = policies
+            .proposal_for_instance(wallet.instance_id)
+            .map_err(|error| tool_error(&error))?
+            .ok_or_else(|| {
+                tool_error(&format!(
+                    "wallet {} has no policy proposal awaiting the user",
+                    wallet.id
+                ))
+            })?;
+        // Deleted by its exact reviewed content rather than by wallet, which
+        // is how the owner's own reject path identifies it: a proposal written
+        // between the read above and this line is a different question, and
+        // taking it back under a decision made about its predecessor would
+        // remove something nobody has seen.
+        let removed = policies
+            .delete_proposal(&proposal)
+            .map_err(|error| tool_error(&error))?;
+        drop(policies);
+        ensure_tool(
+            removed,
+            "the proposal was replaced while it was being withdrawn; read it again and withdraw \
+             the current one",
+        )?;
+        // What the owner's own decisions about a proposal publish. The
+        // question is answered, not newly raised, so this must not be the
+        // event that raises a banner.
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(Json(WithdrawnProposalOutput {
+            withdrawn: 1,
+            instruction: format!(
+                "The policy proposal for wallet {} is withdrawn and the user is no longer being asked about it. Their active policy is unchanged. Propose again only if the permissions are wanted.",
+                wallet.id
+            ),
+        }))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_network_proposal",
+        description = "Take back the pending network proposal for one chain, so the user is no longer being asked to decide on it. Use it when the endpoint you suggested is no longer the one you want them to trust, or the work that needed the chain is done: a proposal does not expire, and accepting a stale one points the wallet's reads and broadcasts at an endpoint chosen for a reason that has passed. Withdrawing removes the proposal and nothing else — it cannot enable, disable, or edit a configured network, which only the user can do. Reports that there was nothing pending if the user already decided. One proposal exists per chain and a later one replaces an earlier, so this withdraws whichever is currently pending, not specifically the one this agent wrote.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_withdraw_network_proposal(
+        &self,
+        Parameters(input): Parameters<NetworkProposalInput>,
+    ) -> Result<Json<WithdrawnProposalOutput>, ErrorData> {
+        let chain_id = parse_chain_id(&input.chain_id).map_err(|error| tool_error(&error))?;
+        let mut policies = self
+            .policies
+            .lock()
+            .map_err(|_| ErrorData::internal_error("policy store lock was poisoned", None))?;
+        let proposal = policies
+            .network_proposals()
+            .map_err(|error| tool_error(&error))?
+            .into_iter()
+            .find(|profile| profile.chain_id == chain_id)
+            .ok_or_else(|| {
+                tool_error(&format!(
+                    "chain {chain_id} has no network proposal awaiting the user"
+                ))
+            })?;
+        let removed = policies
+            .discard_network_proposal(&proposal)
+            .map_err(|error| tool_error(&error))?;
+        drop(policies);
+        ensure_tool(
+            removed,
+            "the proposal was replaced while it was being withdrawn; read it again and withdraw \
+             the current one",
+        )?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(Json(WithdrawnProposalOutput {
+            withdrawn: 1,
+            instruction: format!(
+                "The network proposal for chain {chain_id} is withdrawn and the user is no longer being asked about it. Their configured networks are unchanged."
+            ),
+        }))
+    }
+
+    #[tool(
+        name = "wallet_withdraw_token_proposals",
+        description = "Take back every token suggestion still awaiting the user. Use it when the list you cited is no longer one you would stand behind, or the work that needed the names is done: suggestions do not expire, and a name accepted later is a name the wallet then shows on every transaction that moves that token. This covers all pending suggestions rather than one list, because the label the user reviews them under is built by the wallet and is not read back to you, so naming a list here would be a guess. Withdrawing removes the suggestions and nothing else — it cannot add, rename, or remove a token the user already confirmed. Reports how many were withdrawn, and is an error when there were none.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_withdraw_token_proposals(
+        &self,
+        Parameters(_): Parameters<TokenProposalsInput>,
+    ) -> Result<Json<WithdrawnProposalOutput>, ErrorData> {
+        let mut tokens = self
+            .tokens
+            .lock()
+            .map_err(|_| ErrorData::internal_error("token store lock was poisoned", None))?;
+        // Each row is named by the same triple the owner's own reject path
+        // uses, timestamp included, so a suggestion replaced since this read
+        // is left for the user to see rather than taken back under a decision
+        // about the row it displaced.
+        let doomed = tokens
+            .proposals()
+            .map_err(|error| tool_error(&error))?
+            .into_iter()
+            .map(|proposal| {
+                (
+                    proposal.token.chain_id,
+                    proposal.token.address,
+                    proposal.proposed_at,
+                )
+            })
+            .collect::<Vec<_>>();
+        ensure_tool(
+            !doomed.is_empty(),
+            "there are no token suggestions awaiting the user to withdraw",
+        )?;
+        let withdrawn = tokens
+            .discard_proposals(&doomed)
+            .map_err(|error| tool_error(&error))?;
+        drop(tokens);
+        // Each row is deleted by its exact content, timestamp included, so a
+        // suggestion replaced between the read above and here is left alone
+        // and counted out. Every one of them being replaced leaves nothing
+        // removed, which is not the success the count would otherwise report
+        // — and publishing it would tell the owner their list changed when it
+        // did not.
+        ensure_tool(
+            withdrawn > 0,
+            "every token suggestion was replaced while it was being withdrawn; read them again \
+             and withdraw the current ones",
+        )?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(Json(WithdrawnProposalOutput {
+            withdrawn,
+            instruction: format!(
+                "{withdrawn} token suggestion(s) are withdrawn and the user is no longer being asked about them. Tokens they had already confirmed are unchanged."
+            ),
+        }))
     }
 
     #[tool(
@@ -3088,7 +3445,14 @@ impl WalletMcpServer {
             .typed_data
             .lock()
             .map_err(|_| ErrorData::internal_error("typed-data database lock was poisoned", None))?
-            .create_for_wallet(&wallet, chain_id, &input.typed_data, digest, None)
+            .create_for_wallet(
+                &wallet,
+                chain_id,
+                &input.typed_data,
+                digest,
+                None,
+                &self.request_source(None),
+            )
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_typed_data(record.request_id, client_id)
@@ -3124,9 +3488,11 @@ impl WalletMcpServer {
         .await?;
         let mut output = typed_data_output(record);
         if timed_out {
-            output.instruction = Some(still_awaiting_instruction(
-                "wallet_wait_for_typed_data",
-                output.request_id,
+            output.instruction = Some(format!(
+                "{} If the signature is no longer wanted — the user moved on, or what it \
+                 authorizes has gone stale — withdraw it with wallet_withdraw_typed_data rather than \
+                 leaving it signable.",
+                still_awaiting_instruction("wallet_wait_for_typed_data", output.request_id)
             ));
         }
         Ok(Json(output))
@@ -3182,7 +3548,14 @@ impl WalletMcpServer {
             .messages
             .lock()
             .map_err(|_| ErrorData::internal_error("message database lock was poisoned", None))?
-            .create_for_wallet(&wallet, input.chain_id.as_deref(), &message, encoding, None)
+            .create_for_wallet(
+                &wallet,
+                input.chain_id.as_deref(),
+                &message,
+                encoding,
+                None,
+                &self.request_source(None),
+            )
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
             desktop.attribute_message(record.request_id, client_id)
@@ -3221,9 +3594,11 @@ impl WalletMcpServer {
         let mut output =
             message_output(record, &self.config).map_err(|error| tool_error(&error))?;
         if timed_out {
-            output.instruction = Some(still_awaiting_instruction(
-                "wallet_wait_for_message",
-                output.request_id,
+            output.instruction = Some(format!(
+                "{} If the signature is no longer wanted — the user moved on, or what it \
+                 authorizes has gone stale — withdraw it with wallet_withdraw_message rather than \
+                 leaving it signable.",
+                still_awaiting_instruction("wallet_wait_for_message", output.request_id)
             ));
         }
         Ok(Json(output))
@@ -3339,6 +3714,102 @@ impl WalletMcpServer {
                 Some(ArtifactSource::InlineDataUri) | None => None,
             },
         )
+    }
+
+    /// The same refusal split [`Self::withdrawal_refusal`] makes, for the two
+    /// signature queues.
+    ///
+    /// `current` is `(already withdrawn, owner-facing status label)` for the
+    /// row as it stands, or `None` when it cannot be read at all. A row still
+    /// awaiting approval was refused for whose request it is, and core already
+    /// said exactly that; anything else moved, and the agent has to hear which
+    /// way rather than reading a failed withdrawal as a request still
+    /// harmlessly waiting.
+    fn signature_withdrawal_refusal<T>(
+        error: &anyhow::Error,
+        current: Option<(T, bool, &'static str)>,
+    ) -> Result<T, ErrorData> {
+        match current {
+            // A retry of a call that already worked asked for a state the row
+            // is in, so it succeeds — the same reading the transaction
+            // withdrawal makes, and what `idempotent_hint` on these two tools
+            // promises an agent that lost track of whether its first call
+            // landed.
+            Some((record, true, _)) => Ok(record),
+            Some((_, false, label)) => Err(tool_error(&anyhow::anyhow!(
+                "this request is no longer awaiting approval and cannot be withdrawn; it is now \
+                 {label}. If it was signed, the signature is already with whoever asked."
+            ))),
+            // Unreadable: core's own message is the one that says why, and
+            // there is nothing this can add.
+            None => Err(tool_error(error)),
+        }
+    }
+
+    /// Announce that a signature request left the queue. Called only on the
+    /// pass that moved the row, for the reason the transaction withdrawal
+    /// gives: a retry that changed nothing has nothing to tell the owner.
+    fn publish_signature_stage(
+        &self,
+        request_id: uuid::Uuid,
+        kind: SignatureKind,
+        stage: SignatureStage,
+    ) {
+        self.events.publish(DomainEventKind::Signature {
+            request_id,
+            kind,
+            stage,
+        });
+    }
+
+    /// Explain a refused withdrawal, distinguishing the one case that already
+    /// got what it asked for from the one the caller must not misread.
+    ///
+    /// The guard is a compare-and-set on `awaiting_approval`, and the owner's
+    /// approval is the same guard, so exactly one of them wins. Losing it does
+    /// not mean nothing happened — it means the opposite of what the agent
+    /// wanted happened, and the exact bytes may by now be signed and in
+    /// flight. An agent that reads "withdraw failed" as "the request is still
+    /// harmlessly waiting" is the recovery bug this tool exists to remove, so
+    /// a lost race is an error naming the live status rather than an `Ok` with
+    /// an advisory field somebody may not read.
+    ///
+    /// A row already out of the queue with no envelope is the exception and
+    /// returns success: the agent asked for a state the row is in, whether it
+    /// got there through this tool or through a policy replacement dropping
+    /// it. The envelope is what makes that reading safe — a `Cancelled` row
+    /// carrying signed bytes was cancelled on chain, which is a different
+    /// event this tool did not cause and must not claim.
+    fn withdrawal_refusal(
+        &self,
+        request_id: uuid::Uuid,
+        error: &anyhow::Error,
+    ) -> Result<PendingTransaction, ErrorData> {
+        let Ok(current) = self.pending_record_by_id(request_id) else {
+            return Err(tool_error(error));
+        };
+        // Still queued means the refusal was about whose request it is, not
+        // about a race, and core already said so exactly. Re-describing it as
+        // a row that moved would send the agent to reconcile a transaction
+        // sitting untouched in the owner's inbox.
+        if current.status == PendingStatus::AwaitingApproval {
+            return Err(tool_error(error));
+        }
+        if current.status == PendingStatus::Cancelled
+            && current.serialized_transaction.is_none()
+            && matches!(
+                current.request_source,
+                crate::core::source::RequestSource::Agent { .. }
+            )
+        {
+            return Ok(current);
+        }
+        Err(tool_error(&anyhow::anyhow!(
+            "request {request_id} is no longer awaiting approval and cannot be withdrawn; it is \
+             now {}. Do not assume nothing was signed: reconcile with wallet_get_execution_status, \
+             and cancel an envelope that is already broadcast with wallet_attempt_cancel.",
+            current.status.label()
+        )))
     }
 
     fn pending_record_by_id(&self, request_id: uuid::Uuid) -> Result<PendingTransaction> {
@@ -4040,6 +4511,9 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
         TypedDataStatus::Rejected => Some(
             "The user rejected this typed-data request. Do not recreate it unless they explicitly ask to sign again.".into(),
         ),
+        TypedDataStatus::Withdrawn => Some(
+            "This typed-data request was withdrawn before the user decided it, so nothing was signed and their review is gone. Queue a fresh one only if the user still wants the signature.".into(),
+        ),
     };
     TypedDataOutput {
         request_id: record.request_id,
@@ -4066,6 +4540,9 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
         ),
         MessageStatus::Rejected => Some(
             "The user rejected this message request. Do not recreate it unless they explicitly ask to sign again.".into(),
+        ),
+        MessageStatus::Withdrawn => Some(
+            "This message request was withdrawn before the user decided it, so nothing was signed and their review is gone. Queue a fresh one only if the user still wants the signature.".into(),
         ),
     };
     let message = record.message_bytes()?;
@@ -4176,6 +4653,13 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ExecutionStatus::Cancelled if record.settlement_transaction_hash.is_some()
             && record.finalized_at.is_none() => Some(
             "A cancellation receipt was observed but is not final yet. The wallet is revalidating it and will not sign another transaction for this wallet and chain until finality.".into(),
+        ),
+        // A row that never held an envelope was never signed, so no nonce race
+        // and no policy-revision cancellation of signed bytes can describe it.
+        // It left the queue undecided: withdrawn by the agent that queued it,
+        // or dropped when the wallet's policy was replaced while it waited.
+        ExecutionStatus::Cancelled if record.serialized_transaction.is_none() => Some(
+            "This request left the queue without being signed, sent, or decided by the user, so nothing was executed. Queue a fresh plan only if the user still wants the action.".into(),
         ),
         ExecutionStatus::Cancelled => Some(if record.cancel_transaction_hashes.is_empty() {
             "The signed request was cancelled because its policy revision changed before initial submission.".into()

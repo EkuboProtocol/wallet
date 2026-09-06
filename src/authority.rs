@@ -7,6 +7,7 @@ use crate::{
 use alloy::primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
+use ekubo_wallet_core::core::source::RequestSource;
 use ekubo_wallet_core::{
     agent_authority::AgentExecutionAuthority,
     approval::{
@@ -714,6 +715,7 @@ impl DappApi {
         message: &[u8],
         encoding: ekubo_wallet_core::message::MessageEncoding,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingMessage> {
         let wallet = self.account(wallet_id)?;
         let queued = MessageStore::production(self.config.data_dir())?.create_for_wallet(
@@ -722,6 +724,7 @@ impl DappApi {
             message,
             encoding,
             Some(requester),
+            request_source,
         )?;
         publish_signature(
             &self.events,
@@ -738,6 +741,7 @@ impl DappApi {
         chain_id: u64,
         payload: &serde_json::Value,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
         let wallet = self.account(wallet_id)?;
         let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
@@ -751,6 +755,7 @@ impl DappApi {
             payload,
             digest,
             Some(requester),
+            request_source,
         )?;
         publish_signature(
             &self.events,
@@ -1929,6 +1934,12 @@ impl OwnerApi {
             {
                 Some(crate::events::TransactionStage::Broadcast)
             }
+            // A `cancelled` row with no envelope was never signed, so it left
+            // the queue undecided rather than losing a nonce to a replacement
+            // the owner sent.
+            PendingStatus::Cancelled if record.serialized_transaction.is_none() => {
+                Some(crate::events::TransactionStage::Withdrawn)
+            }
             PendingStatus::Cancelled => Some(crate::events::TransactionStage::Cancelled),
             PendingStatus::Replaced => Some(crate::events::TransactionStage::Replaced),
             PendingStatus::Rejected => None,
@@ -2167,6 +2178,7 @@ impl OwnerApi {
         message: &[u8],
         encoding: ekubo_wallet_core::message::MessageEncoding,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingMessage> {
         let wallet = self.account(wallet_id)?;
         let queued = MessageStore::production(self.config.data_dir())?.create_for_wallet(
@@ -2175,6 +2187,7 @@ impl OwnerApi {
             message,
             encoding,
             Some(requester),
+            request_source,
         )?;
         self.publish_signature(
             queued.request_id,
@@ -2225,6 +2238,7 @@ impl OwnerApi {
         chain_id: u64,
         payload: &serde_json::Value,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
         let wallet = self.account(wallet_id)?;
         let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
@@ -2238,6 +2252,7 @@ impl OwnerApi {
             payload,
             digest,
             Some(requester),
+            request_source,
         )?;
         self.publish_signature(
             queued.request_id,

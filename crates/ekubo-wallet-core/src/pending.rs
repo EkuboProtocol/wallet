@@ -681,6 +681,69 @@ impl PendingStore {
         self.read(request_id)
     }
 
+    /// Withdraw an agent's own queued request, freeing the plan digest and
+    /// the wallet's awaiting-approval capacity.
+    ///
+    /// The status this writes is `cancelled`, which is already how a queued
+    /// row that nobody decided leaves the queue: a replaced policy and a
+    /// retired wallet instance both drop `awaiting_approval` rows this way,
+    /// and the schema's decision check leaves `cancelled` open about whether a
+    /// person was involved precisely because it is reached both ways. There is
+    /// no `decided_at` here for the same reason there is none there — nobody
+    /// decided anything. It is emphatically not [`Self::reject`], which is the
+    /// owner saying no and is recorded as their verdict.
+    ///
+    /// Why an agent needs this at all: a queued plan stays approvable
+    /// indefinitely. An agent that gave up waiting and moved on leaves a quote
+    /// the owner can accept an hour later at a price that no longer exists,
+    /// and leaves the plan digest occupied, so re-sending the identical plan
+    /// deduplicates into the same stale row rather than making a fresh one.
+    /// Withdrawing is how the agent takes back an offer it is no longer
+    /// standing behind.
+    ///
+    /// Only an agent-originated row can be withdrawn. The variant of
+    /// [`RequestSource`] is chosen by whichever internal path created the row
+    /// rather than claimed by the caller — only the fields inside it are
+    /// self-asserted — so this genuinely keeps the MCP adapter from reaching
+    /// into a dapp's or an automation's queue and quietly deleting a request
+    /// the owner was about to approve.
+    ///
+    /// Nothing signed is reachable from here. `awaiting_approval` rows have no
+    /// envelope by schema check, so a withdrawal can never discard bytes the
+    /// chain might mine; anything further along is refused and belongs to the
+    /// owner's discard path or to an on-chain cancellation.
+    pub fn withdraw(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
+        let transaction = self.database.connection.transaction()?;
+        let (status, request_source): (String, Option<String>) = transaction
+            .query_row(
+                "SELECT status, request_source
+                 FROM pending_transactions WHERE request_id = ?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .with_context(|| format!("unknown pending request {request_id}"))?;
+        ensure!(
+            matches!(
+                parse_request_source(request_source.as_deref())?,
+                RequestSource::Agent { .. }
+            ),
+            "request {request_id} was not made by an agent, so an agent cannot withdraw it"
+        );
+        ensure!(
+            PendingStatus::parse(&status)? == PendingStatus::AwaitingApproval,
+            "pending request is not awaiting approval"
+        );
+        let changed = transaction.execute(
+            "UPDATE pending_transactions
+             SET status = 'cancelled', updated_at = ?2, generation = generation + 1
+             WHERE request_id = ?1 AND status = 'awaiting_approval'",
+            params![request_id, Millis(sql::now())],
+        )?;
+        ensure!(changed == 1, "pending request is not awaiting approval");
+        transaction.commit()?;
+        self.get(request_id)
+    }
+
     pub fn reject(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let transaction = self.database.connection.transaction()?;
         let (status, approval_required): (String, i64) = transaction
@@ -1410,17 +1473,7 @@ impl PendingRow {
             "stored pending chain ID mismatch"
         );
         validate_plan_source(self.plan_source.as_deref())?;
-        // A null column is a row from before it existed and reads as
-        // `Unknown`. Anything else has to be a `RequestSource` this build
-        // understands: the value decides what the policy matched, so a
-        // stored blob that does not parse is refused rather than quietly
-        // downgraded to `Unknown`, which is a different and more permissive
-        // answer.
-        let request_source = match self.request_source.as_deref() {
-            None => RequestSource::Unknown,
-            Some(stored) => serde_json::from_str(stored)
-                .context("stored request source is not a recognized plan source")?,
-        };
+        let request_source = parse_request_source(self.request_source.as_deref())?;
         ensure!(
             self.serialized_transaction.is_some() == self.signed_transaction_hash.is_some(),
             "stored signed transaction is incomplete"
@@ -1670,6 +1723,26 @@ pub const MAX_PLAN_SOURCE_BYTES: usize = 255;
 /// [`crate::sanitize::terminal_safe_line`], which is what rules out the
 /// control, bidirectional, and zero-width characters that let stored text draw
 /// the wallet's own chrome.
+/// Read the stored `request_source` column.
+///
+/// A null column is a row from before it existed and reads as `Unknown`.
+/// Anything else has to be a [`RequestSource`] this build understands: the
+/// value decides what the policy matched, so a stored blob that does not parse
+/// is refused rather than quietly downgraded to `Unknown`, which is a
+/// different and more permissive answer.
+///
+/// Shared by the row parser, by [`PendingStore::withdraw`], and by the two
+/// signature queues, all of which read the column on its own to decide whether
+/// a request is an agent's to take back. One reading, so no two of them can
+/// disagree about what a row's origin is.
+pub(crate) fn parse_request_source(stored: Option<&str>) -> Result<RequestSource> {
+    match stored {
+        None => Ok(RequestSource::Unknown),
+        Some(stored) => serde_json::from_str(stored)
+            .context("stored request source is not a recognized plan source"),
+    }
+}
+
 pub fn validate_plan_source(value: Option<&str>) -> Result<()> {
     let Some(value) = value else { return Ok(()) };
     ensure!(

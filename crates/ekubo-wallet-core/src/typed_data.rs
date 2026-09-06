@@ -9,6 +9,7 @@
 //! signs. The signature is persisted in the encrypted database and handed
 //! back to the waiting agent.
 
+use crate::core::source::RequestSource;
 use crate::{
     config::WalletMetadata,
     policy_store::PolicyStore,
@@ -50,6 +51,9 @@ pub enum TypedDataStatus {
     AwaitingApproval,
     Rejected,
     Signed,
+    /// The agent that asked took its request back before anyone decided it.
+    /// Distinct from `Rejected`, which is the owner's verdict.
+    Withdrawn,
 }
 
 impl TypedDataStatus {
@@ -60,6 +64,7 @@ impl TypedDataStatus {
             Self::AwaitingApproval => "Waiting for you",
             Self::Rejected => "Rejected",
             Self::Signed => "Signed",
+            Self::Withdrawn => "Withdrawn",
         }
     }
 
@@ -68,6 +73,7 @@ impl TypedDataStatus {
             "awaiting_approval" => Ok(Self::AwaitingApproval),
             "rejected" => Ok(Self::Rejected),
             "signed" => Ok(Self::Signed),
+            "withdrawn" => Ok(Self::Withdrawn),
             _ => anyhow::bail!("stored typed-data request has invalid status {value}"),
         }
     }
@@ -641,6 +647,7 @@ impl TypedDataStore {
             typed_data,
             digest,
             requester,
+            &RequestSource::Unknown,
         )
     }
 
@@ -651,6 +658,7 @@ impl TypedDataStore {
         typed_data: &serde_json::Value,
         digest: B256,
         requester: Option<&str>,
+        request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
         self.database
             .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
@@ -663,6 +671,7 @@ impl TypedDataStore {
             typed_data,
             digest,
             requester,
+            request_source,
         )
     }
 
@@ -675,6 +684,7 @@ impl TypedDataStore {
         typed_data: &serde_json::Value,
         digest: B256,
         requester: Option<&str>,
+        request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
         let stored_chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
         let requester = requester.unwrap_or_default();
@@ -689,8 +699,8 @@ impl TypedDataStore {
                 transaction.execute(
                     "INSERT INTO pending_typed_data(
                         request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest,
-                        requester, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'awaiting_approval', ?9, ?9)",
+                        requester, request_source, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'awaiting_approval', ?10, ?10)",
                     params![
                         request_id,
                         wallet_instance_id.to_string(),
@@ -700,6 +710,7 @@ impl TypedDataStore {
                         serde_json::to_string(typed_data)?,
                         Blob(digest),
                         requester,
+                        serde_json::to_string(request_source)?,
                         Millis(now),
                     ],
                 )?;
@@ -720,6 +731,13 @@ impl TypedDataStore {
             "typed-data request is not awaiting approval"
         );
         QUEUE.reject(&self.database.connection, request_id)?;
+        self.get(request_id)
+    }
+
+    /// Take back an agent's own queued typed-data request. See
+    /// [`SignatureQueue::withdraw`] for why this is not a rejection.
+    pub fn withdraw(&mut self, request_id: Uuid) -> Result<PendingTypedData> {
+        QUEUE.withdraw(&self.database.connection, request_id)?;
         self.get(request_id)
     }
 
