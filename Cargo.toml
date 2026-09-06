@@ -176,3 +176,17 @@ cognitive_complexity = "warn"
 # kernel's exemption.
 disallowed_methods = "deny"
 disallowed_types = "deny"
+
+# The published crate renders a `raw` signed integer through `BigUint`, so a
+# tick of -140 reads as 2^256 - 140 on an approval screen. ERC-7730 defines
+# `raw` as the natural representation of the underlying type and has no
+# signed-integer format at all, so descriptors cannot route around it.
+#
+# The branch is the published 0.1.0 tree with that one arm split, and nothing
+# else: it is cut from the commit whose source is byte-identical to the
+# release rather than from the fork's `main`, which carries a thousand lines
+# of unreleased renderer work this build has no reason to take.
+#
+# Remove this once the fix is upstream and released.
+[patch.crates-io]
+clear-signing = { git = "https://github.com/EkuboProtocol/clear-signing", branch = "fix-raw-signed-integers-0.1.0" }

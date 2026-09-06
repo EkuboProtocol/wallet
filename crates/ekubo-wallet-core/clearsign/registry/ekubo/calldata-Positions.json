@@ -36,8 +36,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Add liquidity"
@@ -60,8 +60,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Add liquidity"
@@ -85,8 +85,8 @@
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Add liquidity"
@@ -109,8 +109,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Collect fees {id}"
@@ -140,8 +140,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Collect fees {id}"
@@ -165,8 +165,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Withdraw position {id}"
@@ -198,8 +198,8 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tickLower", "label": "Lower tick", "format": "number", "visible": "always" },
-          { "path": "tickUpper", "label": "Upper tick", "format": "number", "visible": "always" },
+          { "path": "tickLower", "label": "Lower tick", "format": "raw", "visible": "always" },
+          { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Withdraw position {id}"
@@ -221,7 +221,7 @@
             "params": { "types": ["token"] },
             "visible": "always"
           },
-          { "path": "tick", "label": "Initial tick", "format": "number", "visible": "always" },
+          { "path": "tick", "label": "Initial tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Initialize pool if needed"
@@ -229,7 +229,7 @@
       "burn(uint256 id)": {
         "intent": "Burn position NFT",
         "fields": [{ "path": "id", "label": "Position ID", "format": "raw", "visible": "always" }],
-        "interpolatedIntent": "Action for {id}"
+        "interpolatedIntent": "Burn position NFT {id}"
       },
       "multicall(bytes[] data)": {
         "intent": "Batch position actions",
@@ -261,7 +261,7 @@
           },
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" }
         ],
-        "interpolatedIntent": "Action for {id}"
+        "interpolatedIntent": "Approve position NFT {id}"
       },
       "setApprovalForAll(address operator, bool isApproved)": {
         "intent": "Approve position operator",
@@ -296,7 +296,7 @@
           },
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" }
         ],
-        "interpolatedIntent": "Action for {id}"
+        "interpolatedIntent": "Transfer position NFT {id}"
       },
       "safeTransferFrom(address from, address to, uint256 id)": {
         "intent": "Transfer position NFT",
@@ -317,7 +317,7 @@
           },
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" }
         ],
-        "interpolatedIntent": "Action for {id}"
+        "interpolatedIntent": "Transfer position NFT {id}"
       },
       "safeTransferFrom(address from, address to, uint256 id, bytes data)": {
         "intent": "Transfer position NFT",
@@ -339,7 +339,7 @@
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" },
           { "path": "data", "label": "Transfer data", "format": "raw", "visible": "optional" }
         ],
-        "interpolatedIntent": "Action for {id}"
+        "interpolatedIntent": "Transfer position NFT {id}"
       },
       "mint()": { "intent": "Mint position NFT", "fields": [], "interpolatedIntent": "Mint position NFT" },
       "mint(bytes32 salt)": {
@@ -400,7 +400,7 @@
             "visible": "always"
           }
         ],
-        "interpolatedIntent": "Send to {recipient}"
+        "interpolatedIntent": "Withdraw fees to {recipient}"
       }
     }
   }
