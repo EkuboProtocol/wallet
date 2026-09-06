@@ -2785,3 +2785,32 @@ fn withdrawing_a_network_proposal_removes_the_question_and_not_a_network() {
             .is_err()
     );
 }
+
+#[test]
+fn withdrawing_a_message_twice_succeeds_and_only_tells_the_owner_once() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let Json(queued) = sign_message(&server, "gm").unwrap();
+    let mut events = server.events.subscribe();
+
+    let withdraw = || {
+        server.wallet_withdraw_message(Parameters(WithdrawInput {
+            request_id: queued.request_id,
+        }))
+    };
+    withdraw().unwrap();
+    // `idempotent_hint` on this tool is a promise to an agent that lost track
+    // of whether its first call landed, so the retry must not be an error.
+    let Json(again) = withdraw().unwrap();
+    assert_eq!(again.status, MessageStatus::Withdrawn);
+
+    // But it moved nothing, so it announces nothing: otherwise a caller could
+    // ring the owner's notifications as many times as it liked.
+    let stages = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event.kind {
+            DomainEventKind::Signature { stage, .. } => Some(stage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stages, vec![SignatureStage::Withdrawn]);
+}

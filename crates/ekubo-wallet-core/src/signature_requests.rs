@@ -267,6 +267,8 @@ impl SignatureQueue {
     /// "finished" is simply everything else. The awaiting ones are what the
     /// review screen is showing somebody right now, and deleting one would
     /// retract a question a caller is still waiting on the answer to.
+    /// Forget every request the owner is no longer being asked about: the ones
+    /// they decided, and the ones an agent withdrew before they could.
     pub fn clear_decided(&self, connection: &Connection, wallet_id: Option<&str>) -> Result<usize> {
         if let Some(wallet_id) = wallet_id {
             crate::config::validate_wallet_id(wallet_id)?;

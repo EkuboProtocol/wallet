@@ -2590,10 +2590,8 @@ impl WalletMcpServer {
                     .ok()
                     .and_then(|store| store.get(input.request_id).ok())
                     .map(|record| {
-                        (
-                            record.status == MessageStatus::Withdrawn,
-                            record.status.label(),
-                        )
+                        let status = record.status;
+                        (record, status == MessageStatus::Withdrawn, status.label())
                     }),
             )?,
         };
@@ -2637,10 +2635,8 @@ impl WalletMcpServer {
                     .ok()
                     .and_then(|store| store.get(input.request_id).ok())
                     .map(|record| {
-                        (
-                            record.status == TypedDataStatus::Withdrawn,
-                            record.status.label(),
-                        )
+                        let status = record.status;
+                        (record, status == TypedDataStatus::Withdrawn, status.label())
                     }),
             )?,
         };
@@ -2707,7 +2703,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_withdraw_network_proposal",
-        description = "Take back the pending network proposal for one chain, so the user is no longer being asked to decide on it. Use it when the endpoint you suggested is no longer the one you want them to trust, or the work that needed the chain is done: a proposal does not expire, and accepting a stale one points the wallet's reads and broadcasts at an endpoint chosen for a reason that has passed. Withdrawing removes the proposal and nothing else — it cannot enable, disable, or edit a configured network, which only the user can do. Reports that there was nothing pending if the user already decided.",
+        description = "Take back the pending network proposal for one chain, so the user is no longer being asked to decide on it. Use it when the endpoint you suggested is no longer the one you want them to trust, or the work that needed the chain is done: a proposal does not expire, and accepting a stale one points the wallet's reads and broadcasts at an endpoint chosen for a reason that has passed. Withdrawing removes the proposal and nothing else — it cannot enable, disable, or edit a configured network, which only the user can do. Reports that there was nothing pending if the user already decided. One proposal exists per chain and a later one replaces an earlier, so this withdraws whichever is currently pending, not specifically the one this agent wrote.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2794,6 +2790,17 @@ impl WalletMcpServer {
             .discard_proposals(&doomed)
             .map_err(|error| tool_error(&error))?;
         drop(tokens);
+        // Each row is deleted by its exact content, timestamp included, so a
+        // suggestion replaced between the read above and here is left alone
+        // and counted out. Every one of them being replaced leaves nothing
+        // removed, which is not the success the count would otherwise report
+        // — and publishing it would tell the owner their list changed when it
+        // did not.
+        ensure_tool(
+            withdrawn > 0,
+            "every token suggestion was replaced while it was being withdrawn; read them again \
+             and withdraw the current ones",
+        )?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(Json(WithdrawnProposalOutput {
             withdrawn,
@@ -3720,17 +3727,23 @@ impl WalletMcpServer {
     /// harmlessly waiting.
     fn signature_withdrawal_refusal<T>(
         error: &anyhow::Error,
-        current: Option<(bool, &'static str)>,
+        current: Option<(T, bool, &'static str)>,
     ) -> Result<T, ErrorData> {
-        Err(match current {
-            // Already withdrawn, or unreadable: core's own message is the one
-            // that says why, and there is nothing this can add.
-            Some((true, _)) | None => tool_error(error),
-            Some((false, label)) => tool_error(&anyhow::anyhow!(
+        match current {
+            // A retry of a call that already worked asked for a state the row
+            // is in, so it succeeds — the same reading the transaction
+            // withdrawal makes, and what `idempotent_hint` on these two tools
+            // promises an agent that lost track of whether its first call
+            // landed.
+            Some((record, true, _)) => Ok(record),
+            Some((_, false, label)) => Err(tool_error(&anyhow::anyhow!(
                 "this request is no longer awaiting approval and cannot be withdrawn; it is now \
                  {label}. If it was signed, the signature is already with whoever asked."
-            )),
-        })
+            ))),
+            // Unreadable: core's own message is the one that says why, and
+            // there is nothing this can add.
+            None => Err(tool_error(error)),
+        }
     }
 
     /// Announce that a signature request left the queue. Called only on the

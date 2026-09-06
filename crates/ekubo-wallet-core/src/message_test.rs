@@ -738,6 +738,24 @@ fn a_message_that_left_the_queue_cannot_be_withdrawn() {
     store.withdraw(withdrawn.request_id).unwrap();
     assert!(store.withdraw(withdrawn.request_id).is_err());
 
+    // A signature is the other way a row leaves, and the more important one to
+    // refuse: withdrawing a signed request would say nothing was produced
+    // while the 65 bytes are already with whoever asked.
+    let signed = create_agent_message(&mut store, b"sign me").unwrap();
+    store
+        .store_signature(
+            signed.request_id,
+            "primary",
+            message_digest(b"sign me"),
+            &format!("0x{}", "11".repeat(65)),
+        )
+        .unwrap();
+    assert!(store.withdraw(signed.request_id).is_err());
+    assert_eq!(
+        store.get(signed.request_id).unwrap().status,
+        MessageStatus::Signed
+    );
+
     // The owner's verdict wins the same compare-and-set, and stays theirs.
     let rejected = create_agent_message(&mut store, b"gn").unwrap();
     store.reject(rejected.request_id).unwrap();
