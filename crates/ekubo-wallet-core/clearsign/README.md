@@ -8,11 +8,17 @@ fetches descriptors from the network: updating the snapshot is a reviewed
 git commit, exactly like a code change, because descriptors shape what a
 human sees while approving a transaction.
 
-`registry/ekubo/` is the exception: those descriptors are written and
-maintained here for Ekubo's own contracts, so a defect in them is fixed in
-this tree. Everything else stays byte-identical to upstream, defects
-included — a known upstream defect is named in the test that would
-otherwise fail, never patched in place.
+`registry/ekubo/` covers Ekubo's own contracts and is authored on the
+`ekubo` branch of
+[EkuboProtocol/clear-signing-erc7730-registry](https://github.com/EkuboProtocol/clear-signing-erc7730-registry),
+where it is prepared for upstreaming, and copied here byte-for-byte from
+there. A defect in one of them is fixed on that branch and re-vendored, not
+patched here, so the two never say different things about what an Ekubo
+transaction does.
+
+Everything else stays byte-identical to upstream, defects included — a
+known upstream defect is named in the test that would otherwise fail, never
+patched in place.
 
 Descriptors are display metadata only. The approval digest binds the exact
 calldata, matching is by exact chain ID, contract address, and function
@@ -21,4 +27,8 @@ display — a wrong or missing descriptor can never alter what gets signed.
 
 Every file here is parsed, selector-checked, and path-validated by the
 test suite (`clear_signing` tests), so a malformed descriptor fails CI
-rather than degrading the approval review silently.
+rather than degrading the approval review silently. One of those tests reads
+every signed parameter in the corpus and refuses a formatter that would drop
+its sign, which is how a swap amount displayed as a token amount — unsigned by
+definition, on an `int128` where negative means exact-output — was caught
+before it shipped.

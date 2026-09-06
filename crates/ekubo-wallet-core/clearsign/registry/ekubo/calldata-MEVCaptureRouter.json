@@ -17,7 +17,6 @@
         { "chainId": 42431, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
         { "chainId": 46630, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
         { "chainId": 57073, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
-        { "chainId": 80002, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
         { "chainId": 84532, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
         { "chainId": 421614, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
         { "chainId": 763373, "address": "0xd26f20001a72a18C002b00e6710000d68700ce00" },
@@ -57,8 +56,8 @@
             "params": { "$ref": "$.metadata.enums.specifiedPoolToken" },
             "visible": "always"
           },
-          { "path": "amount", "label": "Specified amount", "format": "number", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "amount", "label": "Specified amount", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           { "path": "sqrtRatioLimit", "label": "Price limit", "format": "raw", "visible": "optional" },
           { "path": "skipAhead", "label": "Skip ahead", "format": "raw", "visible": "optional" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
@@ -96,8 +95,8 @@
             "params": { "$ref": "$.metadata.enums.specifiedPoolToken" },
             "visible": "always"
           },
-          { "path": "amount", "label": "Specified amount", "format": "number", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "amount", "label": "Specified amount", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           { "path": "sqrtRatioLimit", "label": "Price limit", "format": "raw", "visible": "optional" },
           { "path": "skipAhead", "label": "Skip ahead", "format": "raw", "visible": "optional" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
@@ -122,7 +121,7 @@
             "visible": "always"
           },
           { "path": "params", "label": "Packed swap params", "format": "raw", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Swap on Ekubo"
@@ -152,10 +151,10 @@
             "visible": "always"
           },
           { "path": "params", "label": "Packed swap params", "format": "raw", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
-        "interpolatedIntent": "Send to {recipient}"
+        "interpolatedIntent": "Swap, send to {recipient}"
       },
       "swap(((address token0, address token1, bytes32 config) poolKey, uint96 sqrtRatioLimit, uint256 skipAhead) node, (address token, int128 amount) tokenAmount, int256 calculatedAmountThreshold)": {
         "intent": "Swap route node on Ekubo",
@@ -170,10 +169,10 @@
           {
             "path": "tokenAmount.amount",
             "label": "Specified amount (base units)",
-            "format": "number",
+            "format": "raw",
             "visible": "always"
           },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           {
             "path": "node.poolKey.token0",
             "label": "Pool token 0",
@@ -218,7 +217,7 @@
             "params": { "$ref": "$.metadata.enums.specifiedPoolToken" },
             "visible": "always"
           },
-          { "path": "amount", "label": "Specified amount", "format": "number", "visible": "always" },
+          { "path": "amount", "label": "Specified amount", "format": "raw", "visible": "always" },
           { "path": "sqrtRatioLimit", "label": "Price limit", "format": "raw", "visible": "optional" },
           { "path": "skipAhead", "label": "Skip ahead", "format": "raw", "visible": "optional" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
@@ -256,7 +255,7 @@
             "params": { "$ref": "$.metadata.enums.specifiedPoolToken" },
             "visible": "always"
           },
-          { "path": "amount", "label": "Specified amount", "format": "number", "visible": "always" },
+          { "path": "amount", "label": "Specified amount", "format": "raw", "visible": "always" },
           { "path": "sqrtRatioLimit", "label": "Price limit", "format": "raw", "visible": "optional" },
           { "path": "skipAhead", "label": "Skip ahead", "format": "raw", "visible": "optional" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
@@ -312,7 +311,7 @@
           { "path": "params", "label": "Packed swap params", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
-        "interpolatedIntent": "Send to {recipient}"
+        "interpolatedIntent": "Partial swap to {recipient}"
       },
       "swapAllowPartialFill(((address token0, address token1, bytes32 config) poolKey, uint96 sqrtRatioLimit, uint256 skipAhead) node, (address token, int128 amount) tokenAmount)": {
         "intent": "Ekubo route partial swap",
@@ -327,7 +326,7 @@
           {
             "path": "tokenAmount.amount",
             "label": "Specified amount (base units)",
-            "format": "number",
+            "format": "raw",
             "visible": "always"
           },
           {
@@ -382,10 +381,10 @@
           {
             "path": "s.tokenAmount.amount",
             "label": "Specified amount (base units)",
-            "format": "number",
+            "format": "raw",
             "visible": "always"
           },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           {
             "path": "s.route.[].poolKey.token0",
             "label": "Route token 0",
@@ -420,10 +419,10 @@
           {
             "path": "swaps.[].tokenAmount.amount",
             "label": "Specified amounts (base units)",
-            "format": "number",
+            "format": "raw",
             "visible": "always"
           },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "number", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
           {
             "path": "swaps.[].route.[].poolKey.token0",
             "label": "Route token 0",
