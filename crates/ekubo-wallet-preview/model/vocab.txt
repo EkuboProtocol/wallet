@@ -69,6 +69,7 @@ balancer
 base
 basis
 batch
+batched
 batches
 before
 behalf
@@ -102,6 +103,7 @@ cast
 cctp
 celo
 chain
+change
 changedelegatedexecutorsconfig
 check
 chsb
@@ -515,6 +517,7 @@ router
 routes
 royalties
 rsw
+run
 s
 safe
 sale
@@ -537,6 +540,7 @@ set_block_status_with_sig
 set_profile_metadata_with_sign
 setprofilemetadatauri
 sets
+setting
 settle
 settles
 setup
@@ -595,6 +599,7 @@ then
 this
 three
 threshold
+through
 tick
 ticker
 ticket

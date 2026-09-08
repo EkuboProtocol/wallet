@@ -5,7 +5,7 @@ type TestBackend = burn::backend::NdArray;
 fn labeled(summary: &[&str], input: &[&str]) -> Labeled {
     Labeled {
         formats: vec!["registry/x/calldata-y.json::f()".to_owned()],
-        lines: Vec::new(),
+        document: crate::slots::PlanDocument::default(),
         input_pieces: input.iter().map(|piece| (*piece).to_string()).collect(),
         summary_pieces: summary.iter().map(|piece| (*piece).to_string()).collect(),
         class: "swap".to_owned(),

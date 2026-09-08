@@ -15,11 +15,17 @@
 use crate::model::PreviewModel;
 use burn::{
     module::Module,
-    record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
+    record::{BinBytesRecorder, HalfPrecisionSettings, Recorder},
     tensor::backend::Backend,
 };
 
 /// The trained weights, committed under `model/`.
+///
+/// Stored at half precision. This is a storage decision, not a compute one --
+/// the record is widened to the backend's float type on load, so nothing about
+/// the forward pass changes. It halves what every retrain writes into git
+/// history, which for a file that is rewritten whenever the taxonomy or the
+/// vocabulary moves is the cost worth minimizing.
 const WEIGHTS: &[u8] = include_bytes!("../model/preview.bin");
 
 /// Why a model could not be loaded.
@@ -71,7 +77,7 @@ pub fn load<B: Backend>(device: &B::Device) -> Result<PreviewModel<B>, LoadError
     if !present() {
         return Err(LoadError::Absent);
     }
-    let record = BinBytesRecorder::<FullPrecisionSettings>::default()
+    let record = BinBytesRecorder::<HalfPrecisionSettings>::default()
         .load(WEIGHTS.to_vec(), device)
         .map_err(|error| LoadError::Mismatched(error.to_string()))?;
     Ok(PreviewModel::new(device).load_record(record))

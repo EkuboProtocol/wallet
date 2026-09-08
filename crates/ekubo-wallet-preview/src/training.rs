@@ -29,10 +29,10 @@ use std::collections::BTreeMap;
 pub struct Labeled {
     pub formats: Vec<String>,
     pub input_pieces: Vec<String>,
-    /// The decoded lines the interpretation produced, kept so a sample can be
-    /// re-slotized and read the way the wallet reads it.
+    /// The plan exactly as the interpretation left it, so a sample can be run
+    /// through the engine the way the wallet runs it.
     #[serde(default)]
-    pub lines: Vec<String>,
+    pub document: crate::slots::PlanDocument,
     pub summary_pieces: Vec<String>,
     pub class: String,
     pub risk: String,
@@ -306,7 +306,9 @@ pub fn class_weights(examples: &[Encoded]) -> Vec<f32> {
 /// Five widths means five shapes. The counts fall as the widths rise so that
 /// `count * width` stays near constant, which is what keeps the longest one
 /// percent of the corpus from deciding how much memory the run needs.
-const BUCKETS: [(usize, usize); 5] = [(32, 64), (64, 32), (128, 16), (256, 8), (512, 4)];
+/// Widths come from [`crate::slots::WIDTHS`], which inference pads to as well.
+/// The counts fall as the widths rise so `count * width` stays near constant.
+const COUNTS: [usize; 5] = [64, 32, 16, 8, 4];
 
 /// Summaries are padded to one width for the same reason a plan is: the step
 /// count is another shape axis.
@@ -326,12 +328,14 @@ pub struct Shape {
 /// The bucket an example of this length belongs to.
 #[must_use]
 pub fn bucket_of(length: usize) -> Shape {
-    let (width, count) = BUCKETS
+    let index = crate::slots::WIDTHS
         .iter()
-        .copied()
-        .find(|(width, _)| length <= *width)
-        .unwrap_or(BUCKETS[BUCKETS.len() - 1]);
-    Shape { width, count }
+        .position(|width| length <= *width)
+        .unwrap_or(COUNTS.len() - 1);
+    Shape {
+        width: crate::slots::WIDTHS[index],
+        count: COUNTS[index],
+    }
 }
 
 /// Group examples into fixed-shape batches, then shuffle the batches.

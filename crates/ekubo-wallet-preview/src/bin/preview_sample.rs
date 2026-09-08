@@ -9,7 +9,6 @@
 //! which is the only sample worth judging it by.
 
 use ekubo_wallet_preview::{
-    slots::{CallSummary, PlanDocument},
     taxonomy::{RiskBand, TransactionClass},
     training::{self, Labeled},
     vocab,
@@ -55,8 +54,7 @@ fn main() -> Result<(), String> {
         if held.is_empty() {
             continue;
         }
-        let document = document_of(&labeled);
-        let preview = engine.preview(&document);
+        let preview = engine.preview(&labeled.document);
         let expected = TransactionClass::from_corpus_name(&labeled.class)
             .unwrap_or(TransactionClass::Unrecognized);
         if preview.class == expected {
@@ -74,7 +72,11 @@ fn main() -> Result<(), String> {
             risk_name(preview.risk),
             preview.summary
         );
-        println!("     decoded: {}", labeled.input_pieces.join(" "));
+        for call in &labeled.document.calls {
+            if let Some(description) = &call.description {
+                println!("     decoded: {description}");
+            }
+        }
         shown += 1;
     }
     println!("\n{right}/{shown} classes correct on held-out formats");
@@ -83,22 +85,4 @@ fn main() -> Result<(), String> {
 
 const fn risk_name(risk: RiskBand) -> &'static str {
     risk.corpus_name()
-}
-
-/// Rebuild a plan document from a corpus record's decoded lines.
-///
-/// The corpus stores the tokenized input, but the engine slotizes a
-/// `PlanDocument` itself, so this feeds it the lines the interpretation
-/// produced and lets it do exactly what it does in the wallet.
-fn document_of(labeled: &Labeled) -> PlanDocument {
-    PlanDocument {
-        calls: labeled
-            .lines
-            .iter()
-            .map(|line| CallSummary {
-                description: Some(line.clone()),
-                ..CallSummary::default()
-            })
-            .collect(),
-    }
 }

@@ -75,11 +75,17 @@ impl<B: Backend> PreviewEngine<B> {
 
     /// Encode, classify, and decode one batch.
     fn run(&self, pending: &[(usize, Slotized)]) -> Vec<(usize, TransactionPreview)> {
-        let length = pending
-            .iter()
-            .map(|(_, slotized)| slotized.tokens.len())
-            .max()
-            .unwrap_or(1);
+        // Rounded up to one of a handful of widths rather than padded to the
+        // longest member: a shape the backend has already compiled a kernel
+        // for costs nothing, and a new one costs a compile and a fresh
+        // allocation. See `slots::WIDTHS`.
+        let length = crate::slots::width_for(
+            pending
+                .iter()
+                .map(|(_, slotized)| slotized.tokens.len())
+                .max()
+                .unwrap_or(1),
+        );
         let (input, pad, copyable) = self.tensors(pending, length);
         let memory = self.model.encode(input, &pad);
         let prediction = self.model.classify(memory.clone(), &pad);

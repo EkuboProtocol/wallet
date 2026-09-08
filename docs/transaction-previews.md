@@ -88,7 +88,15 @@ Four steps. Only the first three need the `train` feature, which pulls in
 `ekubo-wallet-core` and the autodiff backend and is never enabled by a release
 build.
 
+A release build of anything in this workspace needs
+`EKUBO_UPDATER_PUBLIC_KEY` set to canonical base64 — `crates/ekubo-wallet-core/build.rs`
+asserts it — so either export the real key or drop `--release`. Corpus
+generation is fine in debug; training is roughly ten times slower without
+optimizations, so it is worth the key.
+
 ```sh
+export EKUBO_UPDATER_PUBLIC_KEY="$(gh variable get EKUBO_UPDATER_PUBLIC_KEY)"
+
 # 1. Enumerate every call the vendored registry can interpret.
 python3 scripts/preview-corpus-spec.py \
   --clearsign crates/ekubo-wallet-core/clearsign --out /tmp/corpus-spec.json
@@ -108,7 +116,15 @@ python3 scripts/build-preview-vocab.py \
   --out crates/ekubo-wallet-preview/model/vocab.txt
 cargo run --release -p ekubo-wallet-preview --features train --bin preview-train -- \
   --corpus /tmp/labeled.jsonl --out crates/ekubo-wallet-preview/model/preview.bin
+
+# 5. Read what it actually says, on descriptors it was never fitted on.
+cargo run --release -p ekubo-wallet-preview --features train --bin preview-sample -- \
+  --corpus /tmp/labeled.jsonl --count 40
 ```
+
+Step 5 loads the committed weights through `gpu::load`, exactly as the wallet
+does, so it is also the check that inference runs on this machine's GPU at
+all.
 
 Step 2 reports coverage — how many registry formats produced a reading. That
 number is the generator's own correctness check: signature canonicalization,

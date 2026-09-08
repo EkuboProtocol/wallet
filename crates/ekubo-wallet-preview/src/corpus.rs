@@ -459,6 +459,15 @@ pub struct Example {
     /// The decoded lines, kept so a human labeling a format can see what a
     /// reviewer would see.
     pub lines: Vec<String>,
+    /// The plan exactly as the interpretation left it.
+    ///
+    /// Stored rather than reconstructed from `lines`, because a plan's call
+    /// structure is part of what the model reads: which call a value belongs
+    /// to decides which slot a summary may name. Rebuilding a two-call plan by
+    /// making every decoded line its own call produces a different document
+    /// with different slot ownership -- and a sample tool fed that would be
+    /// measuring something the model was never asked to do.
+    pub document: PlanDocument,
     /// The one-line reading of each call, in order.
     ///
     /// A call with no descriptor behind it -- a standard token call, an
@@ -506,6 +515,7 @@ pub fn record(document: &PlanDocument, formats: Vec<String>, protocols: Vec<Stri
             .map(|slot| slot.text.clone())
             .collect(),
         lines,
+        document: document.clone(),
         call_descriptions: document
             .calls
             .iter()

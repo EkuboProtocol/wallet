@@ -10,7 +10,7 @@ use burn::{
     backend::{Autodiff, NdArray},
     module::{AutodiffModule as _, Module as _},
     optim::{AdamWConfig, GradientsParams, Optimizer},
-    record::{BinFileRecorder, FullPrecisionSettings},
+    record::{BinFileRecorder, HalfPrecisionSettings},
     tensor::backend::{AutodiffBackend, Backend},
 };
 use ekubo_wallet_preview::{
@@ -148,7 +148,9 @@ fn main() -> Result<(), String> {
 
     // Saved from the inference view of the model, so the weights file carries
     // no autodiff state and loads under the plain backend the wallet runs.
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+    // Half precision, matching `weights::load`. See its doc comment: this is
+    // about what goes into git, not about what the model computes in.
+    let recorder = BinFileRecorder::<HalfPrecisionSettings>::new();
     model
         .valid()
         .save_file(arguments.out.clone(), &recorder)

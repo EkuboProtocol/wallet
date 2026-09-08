@@ -275,3 +275,25 @@ fn a_role_the_call_does_not_have_resolves_to_nothing() {
     assert_eq!(slotized.role(0, SlotKind::Amount, 0), None);
     assert_eq!(slotized.role(9, SlotKind::Address, 0), None);
 }
+
+/// Inference and training pad to the same handful of widths, so the shapes the
+/// model is fitted on are the shapes it later runs on -- and so a GPU backend
+/// compiles a bounded number of kernels rather than one per distinct plan
+/// length.
+#[test]
+fn a_plan_is_padded_to_one_of_a_few_fixed_widths() {
+    for (length, expected) in [(1, 32), (32, 32), (33, 64), (200, 256), (512, 512)] {
+        assert_eq!(width_for(length), expected, "length {length}");
+    }
+    assert!(
+        WIDTHS.windows(2).all(|pair| pair[0] < pair[1]),
+        "widths ascend"
+    );
+}
+
+/// A plan longer than the widest bucket still gets a width, and it is the
+/// input cap rather than something unbounded.
+#[test]
+fn a_plan_past_the_widest_bucket_pads_to_the_input_cap() {
+    assert_eq!(width_for(MAX_INPUT_TOKENS + 1), MAX_INPUT_TOKENS);
+}

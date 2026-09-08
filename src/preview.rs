@@ -34,11 +34,23 @@ use uuid::Uuid;
 /// adapter costs one attempt rather than one per refresh.
 static DISABLED: AtomicBool = AtomicBool::new(false);
 
-static ENGINE: LazyLock<Option<gpu::GpuEngine>> = LazyLock::new(|| match gpu::load() {
-    Ok(engine) => Some(engine),
-    Err(error) => {
-        tracing::info!("transaction previews are unavailable: {error}");
-        None
+static ENGINE: LazyLock<Option<gpu::GpuEngine>> = LazyLock::new(|| {
+    // The guard has to cover loading, not only the forward pass. Loading
+    // builds tensors, building tensors resolves a `wgpu` adapter, and a
+    // machine without a usable one panics there -- inside this closure, which
+    // would poison the `LazyLock` and escape into the snapshot task that
+    // called it. The wallet would then fail to list a waiting request because
+    // it could not write a sentence about it.
+    match std::panic::catch_unwind(gpu::load) {
+        Ok(Ok(engine)) => Some(engine),
+        Ok(Err(error)) => {
+            tracing::info!("transaction previews are unavailable: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::info!("no usable GPU adapter; transaction previews are off");
+            None
+        }
     }
 });
 

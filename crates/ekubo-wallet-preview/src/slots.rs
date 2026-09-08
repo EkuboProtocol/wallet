@@ -33,6 +33,26 @@ pub const MAX_SLOTS: usize = 48;
 /// consequential calls are.
 pub const MAX_INPUT_TOKENS: usize = 512;
 
+/// The padded widths a batch of plans may have.
+///
+/// Every distinct tensor shape makes the GPU backend compile a fresh kernel
+/// and reserve fresh buffers for it. Padding to whatever the longest plan in a
+/// batch happened to be gives almost every batch its own shape, which on an
+/// integrated GPU with a small carve-out is how a run runs out of memory
+/// rather than merely how it runs slowly. Training pads to these same widths,
+/// so the shapes the model is fitted on are the shapes it later runs on.
+pub const WIDTHS: [usize; 5] = [32, 64, 128, 256, 512];
+
+/// The width a plan of this length is padded to.
+#[must_use]
+pub fn width_for(length: usize) -> usize {
+    WIDTHS
+        .iter()
+        .copied()
+        .find(|width| length <= *width)
+        .unwrap_or(MAX_INPUT_TOKENS)
+}
+
 /// The longest summary the decoder may produce, in tokens, and the width every
 /// training summary is padded to.
 ///
@@ -110,6 +130,7 @@ pub struct Slotized {
 /// carries, restated here so the model crate stays a leaf: it depends on no
 /// wallet code, and the desktop binary does the one small conversion.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "train", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallSummary {
     /// The descriptor or standard-call reading, absent when nothing decoded.
     pub description: Option<String>,
@@ -125,6 +146,7 @@ pub struct CallSummary {
 
 /// A whole plan: every call, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "train", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlanDocument {
     pub calls: Vec<CallSummary>,
 }
