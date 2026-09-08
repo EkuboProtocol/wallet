@@ -31,10 +31,15 @@
 
 #[cfg(feature = "train")]
 pub mod corpus;
+pub mod gpu;
+pub mod infer;
 pub mod model;
 pub mod slots;
 pub mod taxonomy;
+#[cfg(feature = "train")]
+pub mod training;
 pub mod vocab;
+pub mod weights;
 
 pub use slots::{CallSummary, PlanDocument};
 pub use taxonomy::{RiskBand, TransactionClass};

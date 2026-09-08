@@ -2984,6 +2984,15 @@ struct DesktopSnapshot {
     /// Absent for a plan nothing recognized, which is what leaves such a row
     /// titled by its kind alone.
     transaction_headlines: BTreeMap<uuid::Uuid, SharedString>,
+    /// What the embedded preview model made of each *waiting* transaction: a
+    /// category, a risk band, and one sentence.
+    ///
+    /// Only waiting requests, because a preview exists to help somebody decide
+    /// and a history row's outcome is already known. Absent for every request
+    /// when no model is loaded, which the rows render as no preview rather
+    /// than as any particular verdict -- and absent is the ordinary state on a
+    /// machine with no usable GPU.
+    transaction_previews: BTreeMap<uuid::Uuid, ekubo_wallet_preview::TransactionPreview>,
     accounts: std::result::Result<Vec<WalletMetadata>, SharedString>,
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
     legal_status: std::result::Result<LegalStatus, SharedString>,
@@ -3067,11 +3076,13 @@ impl DesktopSnapshot {
             }
         }
         let transaction_headlines = capture_transaction_headlines(owner, &reviews, &activity);
+        let transaction_previews = capture_transaction_previews(owner, &reviews);
         Self {
             reviews,
             activity,
             activity_sources,
             transaction_headlines,
+            transaction_previews,
             accounts,
             policies,
             legal_status,
@@ -3123,6 +3134,25 @@ fn capture_transaction_headlines(
         .into_iter()
         .map(|(request_id, headline)| (request_id, SharedString::from(headline)))
         .collect()
+}
+
+/// The preview for each waiting transaction.
+///
+/// Waiting requests only. `capture_transaction_headlines` also covers history
+/// because a history row still wants naming; a preview is there to help
+/// somebody decide, and nothing about a settled request is still a decision.
+fn capture_transaction_previews(
+    owner: &OwnerApi,
+    reviews: &std::result::Result<OwnerReviewQueues, SharedString>,
+) -> BTreeMap<uuid::Uuid, ekubo_wallet_preview::TransactionPreview> {
+    let Ok(queues) = reviews else {
+        return BTreeMap::new();
+    };
+    let waiting: Vec<&PendingTransaction> = queues.transactions.iter().collect();
+    if waiting.is_empty() {
+        return BTreeMap::new();
+    }
+    owner.transaction_previews(&waiting).unwrap_or_default()
 }
 
 enum ReleaseDisplayState {
@@ -3220,6 +3250,9 @@ struct InboxWaitingCard {
     subtitle: String,
     action_label: &'static str,
     action: InboxWaitingAction,
+    /// The model's reading of this request, when there is one. Never present
+    /// for anything but a waiting transaction.
+    preview: Option<ekubo_wallet_preview::TransactionPreview>,
 }
 
 /// What the single button on a waiting card does.
@@ -4553,10 +4586,69 @@ fn render_inbox_waiting_card(
             &card.id,
             &card.title,
             &card.subtitle,
+            card.preview.as_ref(),
             button,
             cx,
         ))
         .into_any_element()
+}
+
+/// The model's reading of a waiting request: a category chip, and the sentence
+/// it wrote.
+///
+/// Marked as machine-written, and deliberately placed *below* the headline
+/// rather than in place of it. The headline is decoded deterministically and
+/// the fields inside the review are authoritative; this is a second opinion
+/// that helps somebody triage a queue, and the wording has to say so or a
+/// reader will reasonably take it for a fact the wallet checked.
+fn render_preview_line(
+    id: &SharedString,
+    preview: &ekubo_wallet_preview::TransactionPreview,
+    cx: &App,
+) -> AnyElement {
+    let colour = match preview.risk {
+        ekubo_wallet_preview::RiskBand::Critical => cx.theme().danger,
+        ekubo_wallet_preview::RiskBand::Caution => cx.theme().warning,
+        ekubo_wallet_preview::RiskBand::Routine => cx.theme().muted_foreground,
+    };
+    let mut line = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .child(
+            div()
+                .px_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(colour)
+                .text_color(colour)
+                .text_xs()
+                .child(preview.class.label()),
+        );
+    if !preview.summary.is_empty() {
+        line = line.child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_color(cx.theme().foreground)
+                .child(
+                    selectable_text(
+                        SharedString::from(format!("{id}-preview")),
+                        &preview.summary,
+                    )
+                    .whitespace_normal(),
+                ),
+        );
+    }
+    line.child(
+        div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("AI summary"),
+    )
+    .into_any_element()
 }
 
 /// One changed rule: which way it moves authority, and what it now says.
@@ -11975,6 +12067,7 @@ impl WalletWindow {
         id: &SharedString,
         title: &str,
         subtitle: &str,
+        preview: Option<&ekubo_wallet_preview::TransactionPreview>,
         button: Button,
         cx: &App,
     ) -> gpui::Div {
@@ -12004,6 +12097,7 @@ impl WalletWindow {
                             .font_medium()
                             .whitespace_normal(),
                     )
+                    .children(preview.map(|preview| render_preview_line(id, preview, cx)))
                     .child(
                         div()
                             .text_sm()
@@ -12025,6 +12119,7 @@ impl WalletWindow {
     fn inbox_waiting_cards(&self) -> Result<Vec<InboxWaitingCard>> {
         let queues = self.cached_reviews()?;
         let headlines = &self.snapshot()?.transaction_headlines;
+        let previews = &self.snapshot()?.transaction_previews;
         let networks = self.network_display_names();
         let now = chrono::Utc::now();
         let mut cards = Vec::new();
@@ -12046,6 +12141,7 @@ impl WalletWindow {
                 ]),
                 action_label: "Review",
                 action: InboxWaitingAction::ReviewTransaction(request_id),
+                preview: previews.get(&request_id).cloned(),
             });
         }
         for request in queues
@@ -12065,6 +12161,7 @@ impl WalletWindow {
                 ]),
                 action_label: "Review",
                 action: InboxWaitingAction::ReviewTypedData(request_id),
+                preview: None,
             });
         }
         for request in queues.messages.iter().filter(|request| {
@@ -12087,6 +12184,7 @@ impl WalletWindow {
                 ]),
                 action_label: "Review",
                 action: InboxWaitingAction::ReviewMessage(request_id),
+                preview: None,
             });
         }
         for proposal in &queues.policy_proposals {
@@ -12100,6 +12198,7 @@ impl WalletWindow {
                 ),
                 action_label: "Review changes",
                 action: InboxWaitingAction::OpenPolicyProposal(wallet_id),
+                preview: None,
             });
         }
         for proposal in queues
@@ -12116,6 +12215,7 @@ impl WalletWindow {
                 ),
                 action_label: "Open Networks",
                 action: InboxWaitingAction::OpenNetworks,
+                preview: None,
             });
         }
         let mut token_groups = std::collections::BTreeMap::<String, usize>::new();
@@ -12128,12 +12228,13 @@ impl WalletWindow {
         }
         for (index, (source, count)) in token_groups.into_iter().enumerate() {
             cards.push(InboxWaitingCard {
-                        id: SharedString::from(format!("review-token-{index}")),
-                        title: format!("{} proposed by {source}", pluralize(count, "token name")),
-                        subtitle: "Accepting these only changes how amounts are described to you. It grants nothing.".to_owned(),
-                        action_label: "Open Tokens",
-                        action: InboxWaitingAction::OpenTokens,
-                    });
+                id: SharedString::from(format!("review-token-{index}")),
+                title: format!("{} proposed by {source}", pluralize(count, "token name")),
+                subtitle: "Accepting these only changes how amounts are described to you. It grants nothing.".to_owned(),
+                action_label: "Open Tokens",
+                action: InboxWaitingAction::OpenTokens,
+                preview: None,
+            });
         }
         Ok(cards)
     }

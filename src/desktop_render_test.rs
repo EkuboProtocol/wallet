@@ -162,6 +162,7 @@ fn quiet_snapshot() -> DesktopSnapshot {
         superseded_digest: None,
     };
     DesktopSnapshot {
+        transaction_previews: BTreeMap::new(),
         reviews: Ok(crate::authority::OwnerReviewQueues {
             transactions: Vec::new(),
             typed_data: Vec::new(),

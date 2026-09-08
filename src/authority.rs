@@ -245,6 +245,33 @@ fn native_amount(value: U256, network: &NetworkConfig) -> String {
     )
 }
 
+/// A step's native value as the review renders it, for the chain it is on.
+///
+/// A chain this build has no configuration for still gets a rendering, in wei,
+/// because a preview for a request on an unconfigured chain is worth more than
+/// no preview at all.
+fn native_value_label(
+    value: &ekubo_wallet_core::core::execution_plan::DecimalU256,
+    network: Option<&NetworkConfig>,
+) -> String {
+    let parsed = value.as_str().parse::<U256>().unwrap_or_default();
+    network.map_or_else(
+        || format!("{parsed} wei"),
+        |network| native_amount(parsed, network),
+    )
+}
+
+/// A target labeled by symbol when the token database names it.
+fn trusted_token_label_from(
+    address: Address,
+    metadata: &ekubo_wallet_core::approval_summary::TokenMetadata,
+) -> String {
+    metadata.symbol.as_deref().map_or_else(
+        || address.to_checksum(None),
+        |symbol| format!("{symbol} ({})", address.to_checksum(None)),
+    )
+}
+
 fn calldata_summary(data: &[u8]) -> String {
     if data.is_empty() {
         "none".to_owned()
@@ -2171,6 +2198,75 @@ impl OwnerApi {
             }
         }
         Ok(headlines)
+    }
+
+    /// A machine-written preview per waiting transaction: a category, a risk
+    /// band, and one sentence.
+    ///
+    /// Built from the same `interpret_steps` reading the review itself
+    /// displays, so nothing is decoded twice and nothing new is fetched.
+    /// Grouped by chain for the same reason [`Self::transaction_headlines`]
+    /// is: the token database answers once per chain rather than once per row.
+    ///
+    /// Only ever called for *waiting* requests. A history list is hundreds of
+    /// rows whose outcome is already known, and a preview is there to help
+    /// somebody decide.
+    ///
+    /// An unavailable model answers an empty map. Callers render that as no
+    /// preview, never as a verdict.
+    pub fn transaction_previews(
+        &self,
+        transactions: &[&PendingTransaction],
+    ) -> Result<BTreeMap<Uuid, ekubo_wallet_preview::TransactionPreview>> {
+        let own_accounts = self
+            .config
+            .load()?
+            .wallets
+            .into_iter()
+            .map(|account| (account.address, account.id))
+            .collect::<OwnAccounts>();
+        let networks = self.networks().unwrap_or_default();
+        let store = TokenStore::production(self.config.data_dir())?;
+        let mut by_chain: BTreeMap<u64, Vec<&PendingTransaction>> = BTreeMap::new();
+        for pending in transactions {
+            if let Ok(chain_id) = pending.chain_id.parse::<u64>() {
+                by_chain.entry(chain_id).or_default().push(pending);
+            }
+        }
+
+        let mut plans = Vec::new();
+        for (chain_id, records) in by_chain {
+            let network = networks.iter().find(|network| network.chain_id == chain_id);
+            for pending in records {
+                let steps = &pending.execution_plan.ordered_steps;
+                let addresses = futures::executor::block_on(plan_token_targets(steps));
+                let metadata = store
+                    .display_metadata(chain_id, &addresses)
+                    .unwrap_or_default();
+                let interpretations =
+                    futures::executor::block_on(interpret_steps(steps, &metadata, &own_accounts));
+                let calls = steps
+                    .iter()
+                    .zip(&interpretations)
+                    .map(|(step, interpretation)| {
+                        let target = metadata.get(&step.transaction.to).map_or_else(
+                            || address_label(step.transaction.to, &own_accounts),
+                            |entry| trusted_token_label_from(step.transaction.to, entry),
+                        );
+                        crate::preview::call_summary(
+                            interpretation,
+                            target,
+                            native_value_label(&step.transaction.value, network),
+                        )
+                    })
+                    .collect();
+                plans.push((
+                    pending.request_id,
+                    ekubo_wallet_preview::PlanDocument { calls },
+                ));
+            }
+        }
+        Ok(crate::preview::previews(plans))
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {

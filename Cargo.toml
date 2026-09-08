@@ -36,6 +36,7 @@ test = false
 
 [dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }
+ekubo-wallet-preview = { path = "crates/ekubo-wallet-preview" }
 walletconnect-session = { path = "crates/walletconnect-session" }
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"
