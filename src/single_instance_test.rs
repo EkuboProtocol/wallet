@@ -19,14 +19,23 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 #[test]
 fn a_second_instance_activates_the_first() {
     let directory = tempfile::tempdir().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let first = SingleInstance::acquire(directory.path(), sender.clone()).unwrap();
     assert!(matches!(first, InstanceOutcome::Primary(_)));
     let second = SingleInstance::acquire(directory.path(), sender).unwrap();
     assert!(matches!(second, InstanceOutcome::ActivatedExisting));
-    receiver
-        .recv_timeout(ACTIVATION_TIMEOUT)
-        .expect("the primary instance must be told a second one tried to start");
+    // The channel is a cancellable future now, so the bounded wait is a
+    // `timeout` on a runtime the test owns rather than `recv_timeout`.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a Tokio runtime")
+        .block_on(async {
+            tokio::time::timeout(ACTIVATION_TIMEOUT, receiver.recv())
+                .await
+                .expect("the primary instance must be told a second one tried to start")
+        })
+        .expect("the activation channel must stay open while the primary holds the lock");
     // Dropped explicitly, before the temporary directory goes: the primary owns
     // a listener thread and a lock file inside it, and tearing the directory
     // out from under them first is its own source of noise.
