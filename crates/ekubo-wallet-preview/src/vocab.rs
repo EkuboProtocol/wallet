@@ -134,6 +134,16 @@ pub fn text_of(token: Token) -> Option<&'static str> {
         .filter(|piece| *piece != "<unk>")
 }
 
+/// The piece a token stands for, structural tags included.
+///
+/// [`text_of`] is the renderer's view and hides everything a reader must never
+/// see; this is the corpus writer's view, which needs the structural tags
+/// because they are most of what the model reads.
+#[must_use]
+pub fn piece_of(token: Token) -> Option<&'static str> {
+    VOCABULARY.pieces.get(token as usize).map(String::as_str)
+}
+
 /// The written form of a slot reference.
 #[must_use]
 pub fn slot_piece(index: usize) -> String {

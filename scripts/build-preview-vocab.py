@@ -27,7 +27,13 @@ import pathlib
 import re
 import sys
 
-WORD = re.compile(r"[a-z0-9_]+")
+# A learned piece must begin with a letter or an underscore. This is the rule
+# that keeps a digit out of the vocabulary: the Rust tokenizer lifts anything
+# starting with a digit into a slot, so a digit-leading entry is one the model
+# could emit but the tokenizer could never have taught it -- which is exactly
+# the path from the weights to a fabricated value that slotization exists to
+# close. `vocab_test.rs` asserts the same rule over the committed file.
+WORD = re.compile(r"[a-z_][a-z0-9_]*")
 LABEL_KEYS = ("label", "intent", "title", "description")
 
 # Punctuation the renderer knows how to place. Everything else a decoded line
@@ -59,7 +65,17 @@ withdraws wrap wraps yield your
 
 def shaped(word: str) -> bool:
     """Whether the tokenizer could ever emit this piece as a word."""
-    return bool(word) and WORD.fullmatch(word) is not None and not word.startswith("<")
+    if not word or word.startswith("<") or WORD.fullmatch(word) is None:
+        return False
+    # Belt and braces against a hex blob arriving as a word: the address
+    # scanner already lifts these, and an entry like `a0b86991` in the
+    # vocabulary would be a value the decoder could emit.
+    return "0x" not in word and not is_long_hex(word)
+
+
+def is_long_hex(word: str) -> bool:
+    """Whether a word is a bare run of hex digits long enough to be a value."""
+    return len(word) >= 8 and all(character in "0123456789abcdef" for character in word)
 
 
 def registry_words(registry: pathlib.Path) -> set[str]:
@@ -94,7 +110,15 @@ def text_words(value: object) -> set[str]:
 
 
 def corpus_words(corpus: pathlib.Path) -> set[str]:
-    """Every word the generated corpus contains, on both sides of an example."""
+    """The words of a corpus, read from the two fields that hold pieces.
+
+    Deliberately not a sweep of the whole record. An example also carries its
+    slot *texts* -- the verbatim amounts and addresses lifted out of the
+    decoded reading -- and harvesting words from those would put the digits of
+    a real value back into the vocabulary as something the decoder can emit.
+    The two fields read here are already-tokenized pieces, so anything numeric
+    was lifted before it got this far.
+    """
     found: set[str] = set()
     with corpus.open(encoding="utf-8") as lines:
         for line in lines:
@@ -105,7 +129,12 @@ def corpus_words(corpus: pathlib.Path) -> set[str]:
                 example = json.loads(line)
             except ValueError:
                 continue
-            found.update(WORD.findall(json.dumps(example).lower()))
+            for field in ("input_pieces", "summary_pieces"):
+                found.update(
+                    piece.lower()
+                    for piece in example.get(field, [])
+                    if isinstance(piece, str)
+                )
     return found
 
 

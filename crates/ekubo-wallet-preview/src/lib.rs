@@ -29,6 +29,8 @@
 //! The authoritative reading remains the deterministic field list the review
 //! already renders. This sits beside it, labeled as machine-generated.
 
+#[cfg(feature = "train")]
+pub mod corpus;
 pub mod slots;
 pub mod taxonomy;
 pub mod vocab;

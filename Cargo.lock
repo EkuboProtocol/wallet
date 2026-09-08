@@ -1994,6 +1994,7 @@ version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39474be398d30e08681f1f6a8ff446b1e4f1403b5cf7749649a8871fd5945f3a"
 dependencies = [
+ "burn-autodiff",
  "burn-core",
  "burn-dispatch",
  "burn-ndarray",
@@ -2016,10 +2017,8 @@ dependencies = [
  "hashbrown 0.16.1",
  "log",
  "num-traits",
- "parking_lot",
  "portable-atomic",
  "spin 0.10.1",
- "tracing",
 ]
 
 [[package]]
@@ -2125,6 +2124,7 @@ version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2087b9e12323e0d25cc0ebdccfee40427dfdec4a23fa6d3f49ba2aa1f94ac17"
 dependencies = [
+ "burn-autodiff",
  "burn-backend",
  "burn-ndarray",
  "burn-wgpu",
@@ -4368,9 +4368,12 @@ dependencies = [
 name = "ekubo-wallet-preview"
 version = "1.7.1"
 dependencies = [
+ "alloy",
  "burn",
- "burn-autodiff",
+ "ekubo-wallet-core",
+ "futures",
  "rand 0.10.2",
+ "serde",
  "serde_json",
 ]
 

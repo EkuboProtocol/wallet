@@ -78,6 +78,14 @@ pub struct Slot {
     /// Verbatim, exactly as the deterministic interpretation rendered it.
     /// Nothing rewrites this between lifting and rendering.
     pub text: String,
+    /// Which call of the plan this value came from.
+    ///
+    /// Slot numbering is plan-global, but a summary template is written per
+    /// call -- "the first amount" means the first amount *of this step*, not
+    /// of everything before it. Without this, a template for the second call
+    /// of an approve-then-swap plan would resolve its roles against the
+    /// approval's values.
+    pub call: usize,
 }
 
 /// A decoded reading with its values lifted out.
@@ -135,7 +143,8 @@ pub fn slotize(document: &PlanDocument) -> Slotized {
     let count = document.calls.len();
     builder.push_literal("<calls>");
     builder.push_count(count);
-    for call in &document.calls {
+    for (index, call) in document.calls.iter().enumerate() {
+        builder.call = index;
         builder.push_literal("<call>");
         match &call.description {
             Some(description) => builder.push_text(description),
@@ -175,6 +184,27 @@ fn is_zero_value(value: &str) -> bool {
 }
 
 impl Slotized {
+    /// The slots one call contributed, in the order they were lifted.
+    ///
+    /// This is what resolves a template's roles: `{amount1}` is the first
+    /// [`SlotKind::Amount`] this call produced.
+    pub fn call_slots(&self, call: usize) -> impl Iterator<Item = (usize, &Slot)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(move |(_, slot)| slot.call == call)
+    }
+
+    /// The plan-global index of the `nth` slot of `kind` within one call,
+    /// counting from zero -- the resolution a template role needs.
+    #[must_use]
+    pub fn role(&self, call: usize, kind: SlotKind, nth: usize) -> Option<usize> {
+        self.call_slots(call)
+            .filter(|(_, slot)| slot.kind == kind)
+            .nth(nth)
+            .map(|(index, _)| index)
+    }
+
     /// Render a decoded summary by substituting each slot reference with its
     /// verbatim text.
     ///
@@ -214,6 +244,7 @@ impl Slotized {
 struct Builder {
     tokens: Vec<Token>,
     slots: Vec<Slot>,
+    call: usize,
 }
 
 impl Builder {
@@ -251,7 +282,11 @@ impl Builder {
             return;
         }
         let index = self.slots.len();
-        self.slots.push(Slot { kind, text });
+        self.slots.push(Slot {
+            kind,
+            text,
+            call: self.call,
+        });
         self.push_literal(&vocab::slot_piece(index));
     }
 

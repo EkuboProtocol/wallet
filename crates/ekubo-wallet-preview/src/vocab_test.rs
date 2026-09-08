@@ -74,3 +74,54 @@ fn every_slot_kind_has_a_distinct_tag_in_the_vocabulary() {
     assert_eq!(tokens.len(), kinds.len());
     assert!(!tokens.contains(&UNK));
 }
+
+/// The property the whole design rests on, asserted over the committed file
+/// rather than trusted to the generator that wrote it.
+///
+/// The Rust tokenizer lifts anything beginning with a digit into a slot, so it
+/// can never *teach* the model a digit-leading word. A vocabulary entry the
+/// tokenizer could not have produced is one the decoder can emit but nothing
+/// trained it to place -- and for a value, that is precisely the fabrication
+/// slotization exists to make impossible. A regenerated `vocab.txt` that
+/// harvests words from slot texts instead of tokenized pieces fails here.
+#[test]
+fn no_learned_piece_can_stand_for_a_value() {
+    for piece in learned_pieces() {
+        let first = piece.chars().next().expect("no empty piece is loaded");
+        assert!(
+            !first.is_ascii_digit(),
+            "{piece:?} begins with a digit, so the decoder could emit it as a value"
+        );
+        assert!(
+            !piece.contains("0x"),
+            "{piece:?} looks like an address or a data blob"
+        );
+        let hexish = piece.len() >= 8 && piece.chars().all(|c| c.is_ascii_hexdigit());
+        assert!(!hexish, "{piece:?} is a bare run of hex digits");
+    }
+}
+
+/// Every learned piece is either punctuation the renderer knows how to place,
+/// or a word the scanner would fold to this exact form.
+#[test]
+fn every_learned_piece_is_one_the_scanner_could_have_emitted() {
+    for piece in learned_pieces() {
+        if piece.chars().all(|c| !c.is_alphanumeric()) {
+            assert_eq!(
+                piece.chars().count(),
+                1,
+                "{piece:?} is multi-character punctuation"
+            );
+            continue;
+        }
+        assert_eq!(
+            piece,
+            piece.to_lowercase(),
+            "{piece:?} is not folded to lowercase, so the scanner would never match it"
+        );
+        assert!(
+            piece.chars().all(|c| c.is_alphanumeric() || c == '_'),
+            "{piece:?} contains a character the word scanner stops at"
+        );
+    }
+}

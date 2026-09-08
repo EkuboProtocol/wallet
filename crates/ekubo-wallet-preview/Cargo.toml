@@ -9,19 +9,43 @@ license = "FSL-1.1-MIT"
 publish = false
 
 [features]
-# The training pipeline: corpus synthesis, the autodiff backend, and the
-# optimizer. Never enabled by a release build of the wallet, which only ever
-# runs the forward pass over the weights committed under `model/`.
-train = ["dep:burn-autodiff", "dep:serde_json", "dep:rand"]
+# The training pipeline: corpus synthesis from the vendored ERC-7730 registry,
+# the autodiff backend, and the optimizer loop.
+#
+# Never enabled by a release build of the wallet, which only ever runs the
+# forward pass over the weights committed under `model/`. It is what pulls in
+# `ekubo-wallet-core` -- the dependency runs one way, and only here, so the
+# shipped preview crate stays a leaf that no kernel code can reach into.
+train = [
+    "burn/autodiff",
+    "dep:alloy",
+    "dep:ekubo-wallet-core",
+    "dep:futures",
+    "dep:rand",
+    "dep:serde",
+    "dep:serde_json",
+]
 
 [dependencies]
+# `default-features = false` keeps the dataset/TUI training stack out; the
+# forward pass needs the tensor library and the two backends and nothing else.
 burn = { version = "0.21.0", default-features = false, features = ["ndarray", "wgpu"] }
-burn-autodiff = { version = "0.21.0", optional = true }
+
+alloy = { version = "=2.4.1", features = ["dyn-abi", "json-abi"], optional = true }
+ekubo-wallet-core = { path = "../ekubo-wallet-core", optional = true }
+futures = { version = "0.3.31", optional = true }
 rand = { version = "0.10.0", optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0.145"
+
+[[bin]]
+name = "preview-corpus"
+path = "src/bin/preview_corpus.rs"
+required-features = ["train"]
+test = false
 
 [lints]
 workspace = true

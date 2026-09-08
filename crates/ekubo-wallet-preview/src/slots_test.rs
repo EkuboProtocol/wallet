@@ -234,3 +234,44 @@ fn the_target_is_lifted_too() {
     assert_eq!(kinds(&slotized), [SlotKind::Token]);
     assert_eq!(texts(&slotized)[0], format!("USDC ({USDC})"));
 }
+
+/// Slot numbering is plan-global but a template is written per call, so each
+/// slot has to say which call it came from. Without this, the template for the
+/// swap below would resolve "the first amount" against the approval's.
+#[test]
+fn a_slot_remembers_which_call_produced_it() {
+    let document = PlanDocument {
+        calls: vec![
+            call(&format!("approve spender {SPENDER} for 500 USDC ({USDC})")),
+            call(&format!(
+                "swap 250.5 USDC ({USDC}) for 0.1 WETH ({SPENDER})"
+            )),
+        ],
+    };
+    let slotized = slotize(&document);
+    assert!(slotized.slots.iter().any(|slot| slot.call == 0));
+    assert!(slotized.slots.iter().any(|slot| slot.call == 1));
+
+    let first_amount_of_swap = slotized
+        .role(1, SlotKind::Amount, 0)
+        .expect("the swap lifted an amount");
+    assert_eq!(
+        slotized.slots[first_amount_of_swap].text,
+        format!("250.5 USDC ({USDC})")
+    );
+
+    let first_amount_of_approval = slotized
+        .role(0, SlotKind::Amount, 0)
+        .expect("the approval lifted an amount");
+    assert_eq!(
+        slotized.slots[first_amount_of_approval].text,
+        format!("500 USDC ({USDC})")
+    );
+}
+
+#[test]
+fn a_role_the_call_does_not_have_resolves_to_nothing() {
+    let slotized = slotize(&plan("wrap ether"));
+    assert_eq!(slotized.role(0, SlotKind::Amount, 0), None);
+    assert_eq!(slotized.role(9, SlotKind::Address, 0), None);
+}
