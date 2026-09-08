@@ -71,11 +71,17 @@ can produce a category the review surface was not written to display.
 
 ## Shape
 
-Roughly 1.2M parameters at `d_model` 128: a four-layer encoder, two
+1,214,750 parameters at `d_model` 128: a four-layer encoder, two
 classification heads pooled over it, and a two-layer decoder with cross
-attention and a copy head. The decoder is deliberately shallow — a
-one-sentence summary has no long-range structure worth the compute, and this
-runs while somebody waits.
+attention and a copy head. That is **2.43 MB** committed, at half precision.
+The decoder is deliberately shallow — a one-sentence summary has no
+long-range structure worth the compute, and this runs while somebody waits.
+
+Where the parameters go, for anyone considering making it smaller: the encoder
+is 44%, the decoder 33%, the token embedding and the output head 8% each, and
+the input positional table 5%. The obvious remaining economy is tying the
+embedding to the output head, which would remove another 8% and often helps a
+model this size rather than hurting it.
 
 Inference runs on the GPU through `burn`'s `wgpu` backend, which is the same
 interface GPUI already draws through, so one source tree covers Metal,
