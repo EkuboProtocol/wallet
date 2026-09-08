@@ -308,10 +308,13 @@ pub fn class_weights(examples: &[Encoded]) -> Vec<f32> {
 /// percent of the corpus from deciding how much memory the run needs.
 const BUCKETS: [(usize, usize); 5] = [(32, 64), (64, 32), (128, 16), (256, 8), (512, 4)];
 
-/// Summaries are padded to one width for the same reason: the step count is
-/// another shape axis. The longest summary the label table produces is
-/// seventeen tokens, so this fits every one of them with room over.
-pub const SUMMARY_WIDTH: usize = 20;
+/// Summaries are padded to one width for the same reason a plan is: the step
+/// count is another shape axis.
+///
+/// This is [`MAX_SUMMARY_TOKENS`] rather than a number of its own, because the
+/// width the corpus pads to is exactly the range of positional embeddings the
+/// decoder is allowed to decode into later.
+pub const SUMMARY_WIDTH: usize = MAX_SUMMARY_TOKENS;
 
 /// One batch's fixed shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

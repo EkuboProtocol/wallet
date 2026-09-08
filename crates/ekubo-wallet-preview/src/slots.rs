@@ -33,8 +33,15 @@ pub const MAX_SLOTS: usize = 48;
 /// consequential calls are.
 pub const MAX_INPUT_TOKENS: usize = 512;
 
-/// The longest summary the decoder may produce, in tokens.
-pub const MAX_SUMMARY_TOKENS: usize = 40;
+/// The longest summary the decoder may produce, in tokens, and the width every
+/// training summary is padded to.
+///
+/// One constant for both on purpose. The decoder learns a positional embedding
+/// per step, so a step beyond the width the corpus padded to is a position
+/// nothing ever trained -- decoding into that range would produce whatever an
+/// untouched embedding row happens to encode. The longest summary the label
+/// table produces is seventeen tokens, so this fits every one with room over.
+pub const MAX_SUMMARY_TOKENS: usize = 20;
 
 /// What kind of value a slot holds. The kind is what the model reasons over;
 /// the text is what a reader ends up seeing.

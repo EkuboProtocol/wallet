@@ -170,7 +170,10 @@ impl<B: Backend> PreviewEngine<B> {
         let mut prefixes = vec![vec![vocab::BOS]; size];
         let mut summaries = vec![Vec::new(); size];
         let mut finished = vec![false; size];
-        for _ in 0..MAX_SUMMARY_TOKENS {
+        // One fewer than the width the corpus padded to, because the prefix
+        // starts at BOS. Decoding further would index positional embeddings
+        // no training example ever reached.
+        for _ in 0..MAX_SUMMARY_TOKENS - 1 {
             if finished.iter().all(|done| *done) {
                 break;
             }
@@ -215,9 +218,11 @@ impl<B: Backend> PreviewEngine<B> {
 /// The slot reference sitting at an input position.
 ///
 /// Every non-slot position was masked to negative infinity before the argmax,
-/// so landing on one means the mask and the logits disagree. That answers
-/// [`vocab::PAD`], which the caller drops -- the sentence loses a word rather
-/// than gaining a value nothing lifted.
+/// so landing on one means the mask and the logits disagree about what this
+/// plan even contains. That answers [`vocab::PAD`], which ends the summary
+/// where it stands: a truncated sentence is a defect a reader can see, and
+/// continuing past a disagreement about which values exist is how one would
+/// end up naming a value that does not.
 fn slot_at(slotized: &Slotized, position: usize) -> Token {
     slotized
         .tokens
