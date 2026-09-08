@@ -50,7 +50,8 @@ borrows bridge bridges by cancel cancels claim claims collateral collect
 collects contract control convert converts delegate delegates deposit deposits
 each every exchange exchanges extend extends for from gives grant grants in
 increase increases into it its lend lends limit lock locks merge merges mint
-mints more move moves native no none now of on onto open opens operator or
+mints more move moves native no none now of on one onto open opens operator or
+six several three two four five
 other over pay pays per plus pool
 position positions provide provides receive receives redeem redeems remove
 removes repay repays request requests revoke revokes reward rewards sell sells

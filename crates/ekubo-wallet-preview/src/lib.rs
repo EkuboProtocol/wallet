@@ -31,6 +31,7 @@
 
 #[cfg(feature = "train")]
 pub mod corpus;
+pub mod model;
 pub mod slots;
 pub mod taxonomy;
 pub mod vocab;

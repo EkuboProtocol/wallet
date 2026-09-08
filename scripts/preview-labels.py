@@ -209,6 +209,9 @@ TEMPLATES: dict[str, list[str]] = {
     "unrecognized": ["call {address1}", "call an unrecognized contract"],
 }
 
+# How the tail of a long plan counts its unnamed calls.
+COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+
 ROLE = re.compile(r"\{(amount|token|address|number|data|flag)(\d+)\}")
 
 KIND_TAGS = {
@@ -313,7 +316,11 @@ def join_summaries(summaries: list[list[str]]) -> list[str]:
     if len(summaries) == 2:
         return summaries[0] + [","] + ["then"] + summaries[1]
     remaining = len(summaries) - 2
-    tail = ["and", str(remaining), "more", "calls"] if remaining > 1 else ["and", "1", "more", "call"]
+    # Spelled, not written as digits. A digit here would either enter the
+    # vocabulary as a word the decoder can emit -- the one thing slotization
+    # exists to prevent -- or be stripped afterwards, leaving "and more calls".
+    tail = ["and", COUNT_WORDS.get(remaining, "several"), "more"]
+    tail.append("call" if remaining == 1 else "calls")
     return summaries[0] + [","] + ["then"] + summaries[1] + tail
 
 
@@ -353,10 +360,14 @@ def label(example: dict[str, Any], intents: dict[str, str | None]) -> dict[str, 
                     f"call {call} referenced {piece}, which belongs to call {owner}"
                 )
     summary = join_summaries(per_call)
-    # A tail count is prose, not a value the model may invent, so the digits
-    # written above must not reach the summary. Anything numeric is dropped
-    # here rather than entering the vocabulary through the back door.
-    summary = [piece for piece in summary if not piece[:1].isdigit()]
+    # Nothing in a summary may begin with a digit: it would enter the
+    # vocabulary as a word the decoder can emit, which is exactly the path
+    # slotization closes. The counts above are spelled for this reason, so
+    # this is an assertion rather than a filter -- silently dropping a piece
+    # here is what turned "and one more call" into "and more call".
+    for piece in summary:
+        if piece[:1].isdigit():
+            raise ValueError(f"summary piece {piece!r} begins with a digit")
     name = plan_class(names)
     labeled = dict(example)
     labeled["class"] = name
