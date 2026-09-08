@@ -42,6 +42,12 @@ serde_json = { version = "1.0.145", optional = true }
 serde_json = "1.0.145"
 
 [[bin]]
+name = "preview-sample"
+path = "src/bin/preview_sample.rs"
+required-features = ["train"]
+test = false
+
+[[bin]]
 name = "preview-train"
 path = "src/bin/preview_train.rs"
 required-features = ["train"]

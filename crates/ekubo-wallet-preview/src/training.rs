@@ -29,6 +29,10 @@ use std::collections::BTreeMap;
 pub struct Labeled {
     pub formats: Vec<String>,
     pub input_pieces: Vec<String>,
+    /// The decoded lines the interpretation produced, kept so a sample can be
+    /// re-slotized and read the way the wallet reads it.
+    #[serde(default)]
+    pub lines: Vec<String>,
     pub summary_pieces: Vec<String>,
     pub class: String,
     pub risk: String,
