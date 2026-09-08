@@ -2039,7 +2039,24 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
     assert!(SERVER_INSTRUCTIONS.contains("yield"));
     // ...and the same sentence has to deny it any privileged standing,
     // because nothing in this process treats a plan's origin as special.
-    assert!(SERVER_INSTRUCTIONS.contains("grants that server no extra trust"));
+    assert!(SERVER_INSTRUCTIONS.contains("grant those servers no extra trust"));
+    // One endpoint per protocol, and the all-protocol one beside them: an
+    // agent told only about `/mcp` would have no way to name the server that
+    // actually carries the tool it needs.
+    for slug in [
+        "ekubo",
+        "aave",
+        "aerodrome",
+        "lido",
+        "merkl",
+        "morpho",
+        "sky",
+    ] {
+        assert!(
+            SERVER_INSTRUCTIONS.contains(&format!("`{slug}`")),
+            "the plan-producer hint does not name the {slug} endpoint"
+        );
+    }
     assert!(SERVER_INSTRUCTIONS.contains("Legacy limit-order workflows are deprecated"));
     assert!(SERVER_INSTRUCTIONS.contains("can be un-executed"));
     assert!(SERVER_INSTRUCTIONS.contains("src/extensions/SignedExclusiveSwap.sol"));
@@ -2056,8 +2073,14 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
             tool.name
         );
     }
-    assert!(SECURITY_MODEL.contains("account-level custom connector"));
+    assert!(SECURITY_MODEL.contains("account-level\ncustom connectors"));
     assert!(SECURITY_MODEL.contains("creates no credential"));
+    // The selection is the thing an owner acts on, so the security model has
+    // to describe both what a deselected server means for the file and that
+    // Claude Desktop is the one place the wallet cannot apply the choice.
+    assert!(SECURITY_MODEL.contains("Every server is selected by default"));
+    assert!(SECURITY_MODEL.contains("removed from the file"));
+    assert!(SECURITY_MODEL.contains("the wallet cannot apply\nthe selection there"));
     assert!(!SECURITY_MODEL.contains("trusted plan producer"));
 }
 

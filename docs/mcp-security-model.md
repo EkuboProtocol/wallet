@@ -72,12 +72,18 @@ reconnects without a harness restart. A version mismatch is terminal.
 
 Managed agent configuration contains the absolute installed helper path and
 exact fixed harness argument under `ekubo_wallet`. Harnesses that support
-remote MCP in the same file also receive the credential-free companion
-`https://mcp.ekubo.org/mcp` under `ekubo`. Claude Desktop is different: its
-JSON file contains only local stdio servers, so the user adds the companion as
-an account-level custom connector through Customize → Connectors. Installing
-or repairing managed file entries creates no credential and requires no owner
-authentication. Grok Build uses its native `~/.grok/config.toml`
+remote MCP in the same file also receive one credential-free companion entry
+per hosted Ekubo server the owner has selected — `https://mcp.ekubo.org/mcp/ekubo`
+under `ekubo`, and `https://mcp.ekubo.org/mcp/<protocol>` under
+`ekubo_<protocol>` for the rest. Every server is selected by default; the
+owner changes the selection in Settings, and doing so rewrites every agent
+that already has this wallet. A deselected companion is removed from the file
+rather than left behind, and validation refuses both a missing selected entry
+and a present deselected one. Claude Desktop is different: its JSON file
+contains only local stdio servers, so the user adds companions as account-level
+custom connectors through Customize → Connectors and the wallet cannot apply
+the selection there. Installing or repairing managed file entries
+creates no credential and requires no owner authentication. Grok Build uses its native `~/.grok/config.toml`
 `[mcp_servers]` table with the same exact two managed entries.
 Settings derives each larger check or X from those exact managed entries and
 offers a typed install or removal for that agent alone.

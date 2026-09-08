@@ -34,6 +34,7 @@ use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, GuidedSetupState};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
+use ekubo_wallet_core::mcp_companions::{COMPANION_SERVERS, CompanionSelection};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
@@ -2337,19 +2338,51 @@ fn pluralize(count: usize, singular: &str) -> String {
     }
 }
 
-fn set_agent_installed(kind: AgentKind, installed: bool) -> Result<()> {
+/// Write this wallet's managed entries — the local bridge, plus exactly the
+/// hosted servers in `selection` — into one agent's configuration.
+///
+/// There is no opposite. The screen offers Sync and nothing else: the entries
+/// are the wallet's own, an owner who no longer wants an agent connected
+/// removes the agent, and a button that silently rewrote somebody's harness
+/// config to take a working connection away was never the thing anyone
+/// reached for. `preview_remove` stays as the wallet's own ability to
+/// withdraw what it wrote, exercised by the tests that pin the removal shape.
+fn sync_agent(kind: AgentKind, selection: &CompanionSelection) -> Result<()> {
     let adapter = AgentAdapter::supported()?
         .into_iter()
         .find(|adapter| adapter.kind == kind)
         .with_context(|| format!("{} is not a supported agent", kind.label()))?;
-    let preview = if installed {
-        adapter.preview_install()?
-    } else {
-        adapter.preview_remove()?
-    };
-    let batch = crate::agent_config::ConfigBatchInstall::install(vec![preview])?;
+    let batch = crate::agent_config::ConfigBatchInstall::install(vec![
+        adapter.preview_install(selection)?,
+    ])?;
     batch.commit();
     Ok(())
+}
+
+/// Bring every agent that already has this wallet up to the current selection,
+/// in one atomic batch.
+///
+/// This is what makes the selection a setting rather than a form: choosing a
+/// protocol reaches every harness the owner has already connected, without
+/// their having to visit each one. It adds the wallet to nothing — an agent
+/// with no `ekubo_wallet` entry is one the owner never connected, and this is
+/// not the place to decide for them that they want to.
+///
+/// One batch rather than seven writes, so a failure part-way through restores
+/// every file it had already replaced instead of leaving half the machine on
+/// the old selection.
+fn sync_installed_agents(selection: &CompanionSelection) -> Result<usize> {
+    let mut previews = Vec::new();
+    for adapter in AgentAdapter::supported()? {
+        if !adapter.detected() || !adapter.has_wallet_entry().unwrap_or(false) {
+            continue;
+        }
+        previews.push(adapter.preview_install(selection)?);
+    }
+    let count = previews.len();
+    let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
+    batch.commit();
+    Ok(count)
 }
 
 /// Put this build's bridge at the path every managed config names.
@@ -2377,8 +2410,11 @@ fn repair_bridge_helper() -> Result<()> {
     Ok(())
 }
 
-fn detect_agents() -> Result<Vec<DetectedAgent>> {
+fn detect_agents(selection: &CompanionSelection) -> Result<Vec<DetectedAgent>> {
     let helper = repair_bridge_helper().map_err(|error| SharedString::from(format!("{error:#}")));
+    if helper.is_ok() {
+        converge_installed_agents(selection);
+    }
     Ok(AgentAdapter::supported()?
         .into_iter()
         .filter(AgentAdapter::detected)
@@ -2388,11 +2424,77 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
             config_path: adapter.config_path.display().to_string(),
             installed: helper.clone().and_then(|()| {
                 adapter
-                    .installed()
+                    .in_sync(selection)
                     .map_err(|error| format!("{error:#}").into())
             }),
         })
         .collect())
+}
+
+/// Bring already-connected agents up to the current selection whenever this
+/// list is read.
+///
+/// An update is the case this exists for. Every configuration written before
+/// the per-protocol split names the single `ekubo` server at `/mcp`, which is
+/// not what this build writes; without this the owner would open Settings
+/// after updating and find every agent reporting itself out of date, with the
+/// fix being a button they should never have had to find. It converges once
+/// and then does nothing, and — like the bridge repair above — only ever
+/// rewrites the wallet's own managed entries in a file the owner already
+/// pointed at this wallet.
+///
+/// Failure is logged, not surfaced. The list this precedes is still correct
+/// about what it finds, and an agent that could not be brought up to date
+/// shows as out of sync with its own Sync button, which is the state the owner
+/// can act on.
+fn converge_installed_agents(selection: &CompanionSelection) {
+    // Windows built outside the wallet that won the single-instance lock —
+    // the desktop render tests build one — must not write to the agent
+    // configurations every harness on the machine reads.
+    if !crate::agent_config::holds_helper_write_authority() {
+        return;
+    }
+    let stale = match agents_needing_sync(selection) {
+        Ok(stale) => stale,
+        Err(error) => {
+            tracing::warn!(%error, "could not check agent configurations against the selection");
+            return;
+        }
+    };
+    if stale.is_empty() {
+        return;
+    }
+    match crate::agent_config::ConfigBatchInstall::install(stale) {
+        Ok(batch) => {
+            batch.commit();
+            tracing::info!("updated agent configurations to the current MCP server selection");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not update agent configurations to the current MCP server selection");
+        }
+    }
+}
+
+/// Previews for every connected agent whose managed entries differ from what
+/// the current selection would write. An agent already in sync produces
+/// nothing, so the common case does no work and touches no file.
+fn agents_needing_sync(
+    selection: &CompanionSelection,
+) -> Result<Vec<crate::agent_config::ConfigPreview>> {
+    let mut stale = Vec::new();
+    for adapter in AgentAdapter::supported()? {
+        if !adapter.detected()
+            || !adapter.has_wallet_entry().unwrap_or(false)
+            || adapter.in_sync(selection).unwrap_or(false)
+        {
+            continue;
+        }
+        let preview = adapter.preview_install(selection)?;
+        if preview.has_changes() {
+            stale.push(preview);
+        }
+    }
+    Ok(stale)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2641,6 +2743,8 @@ pub struct WalletWindow {
     notification_navigation: NotificationNavigation,
     agent_reinstall: AgentReinstallState,
     detected_agents: AgentDetectionState,
+    /// Which hosted Ekubo MCP servers the wallet writes into agent configs.
+    companion_servers: CompanionSelection,
     detected_agents_generation: u64,
     #[cfg(target_os = "linux")]
     owner_auth: OwnerAuthState,
@@ -6591,6 +6695,8 @@ impl WalletWindow {
         let sidebar_logo_dark =
             render_embedded_png(include_bytes!("../assets/tray/dark_mode_tray_icon.png"))
                 .expect("embedded dark tray icon must be valid");
+        // Read before `owner` moves into the struct.
+        let companion_servers = owner.companion_servers().unwrap_or_default();
         let mut window = Self {
             owner,
             desktop_snapshot: None,
@@ -6650,6 +6756,10 @@ impl WalletWindow {
             notification_navigation: NotificationNavigation::default(),
             agent_reinstall: AgentReinstallState::Idle,
             detected_agents: AgentDetectionState::Loading,
+            // Every server, for an owner who has never opened the screen.
+            // A read failure is not a reason to write fewer servers than the
+            // default promises; the screen reports the failure when they save.
+            companion_servers,
             detected_agents_generation: 0,
             #[cfg(target_os = "linux")]
             owner_auth: OwnerAuthState::Unknown,
@@ -7173,8 +7283,9 @@ impl WalletWindow {
         if matches!(self.detected_agents, AgentDetectionState::Failed(_)) {
             self.detected_agents = AgentDetectionState::Loading;
         }
+        let selection = self.companion_servers.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(detect_agents)
+            tokio::task::spawn_blocking(move || detect_agents(&selection))
                 .await
                 .context("agent detection task failed")?
         });
@@ -9446,10 +9557,65 @@ impl WalletWindow {
         }
     }
 
-    fn set_detected_agent_installed(
+    /// Write the current selection into one agent's configuration.
+    ///
+    /// The only agent-configuration action the screen offers. It adds the
+    /// wallet where it is absent and brings it up to date where it is stale,
+    /// which is the same write either way.
+    fn sync_detected_agent(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        let selection = self.companion_servers.clone();
+        self.run_agent_configuration(
+            move || sync_agent(kind, &selection),
+            move |error| format!("Could not sync {}: {error:#}", kind.label()),
+            cx,
+        );
+    }
+
+    /// Switch one hosted server on or off, then carry the change to every
+    /// agent that already has this wallet.
+    ///
+    /// Saving and propagating are one action deliberately. A selection that
+    /// only took effect the next time somebody pressed Sync on each agent in
+    /// turn would be a setting that silently disagreed with every harness on
+    /// the machine.
+    fn set_companion_server_enabled(
         &mut self,
-        kind: AgentKind,
-        installed: bool,
+        slug: &'static str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_reinstall == AgentReinstallState::Running
+            || self.companion_servers.is_enabled(slug) == enabled
+        {
+            return;
+        }
+        let mut selection = self.companion_servers.clone();
+        selection.set_enabled(slug, enabled);
+        if let Err(error) = self.owner.set_companion_servers(&selection) {
+            self.set_route_error(
+                Route::Settings,
+                format!("Could not save the MCP server selection: {error:#}"),
+            );
+            cx.notify();
+            return;
+        }
+        self.companion_servers = selection.clone();
+        self.run_agent_configuration(
+            move || sync_installed_agents(&selection).map(|_| ()),
+            |error| format!("The selection was saved, but agents could not be updated: {error:#}"),
+            cx,
+        );
+    }
+
+    /// Run one blocking agent-configuration write, then re-read the list.
+    ///
+    /// Both callers need the same four things: refuse to start while another
+    /// write is in flight, run it off the UI thread, report a failure against
+    /// the settings route, and refresh what the screen says afterwards.
+    fn run_agent_configuration(
+        &mut self,
+        work: impl FnOnce() -> Result<()> + Send + 'static,
+        describe: impl FnOnce(anyhow::Error) -> String + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.agent_reinstall == AgentReinstallState::Running {
@@ -9458,7 +9624,7 @@ impl WalletWindow {
         self.clear_route_error(Route::Settings);
         self.agent_reinstall = AgentReinstallState::Running;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || set_agent_installed(kind, installed))
+            tokio::task::spawn_blocking(work)
                 .await
                 .context("agent configuration task failed")?
         });
@@ -9467,18 +9633,7 @@ impl WalletWindow {
             let _ = view.update(cx, |view, cx| {
                 view.agent_reinstall = AgentReinstallState::Idle;
                 if let Err(error) = result {
-                    view.set_route_error(
-                        Route::Settings,
-                        format!(
-                            "Could not {} {}: {error:#}",
-                            if installed {
-                                "install for"
-                            } else {
-                                "remove from"
-                            },
-                            kind.label()
-                        ),
-                    );
+                    view.set_route_error(Route::Settings, describe(error));
                 }
                 view.reload_detected_agents(cx);
                 cx.notify();
@@ -13176,6 +13331,121 @@ impl WalletWindow {
             })
     }
 
+    /// The hosted servers this wallet offers to write into agent
+    /// configurations, one switch each.
+    ///
+    /// Every one is on until the owner turns it off. They are all
+    /// credential-free public endpoints, and an owner who has not thought
+    /// about the question is better served by an agent that can reach the
+    /// protocols they hold positions in than by one that can reach none of
+    /// them. Turning one off is for keeping a narrower set of tools in an
+    /// agent's context, which is a preference nobody has before they have
+    /// used it.
+    fn render_companion_servers(
+        &self,
+        claude_desktop_detected: bool,
+        cx: &mut Context<Self>,
+    ) -> GroupBox {
+        let busy = self.legal_gate || self.agent_reinstall == AgentReinstallState::Running;
+        let mut group = GroupBox::new()
+            .id("companion-server-settings")
+            .child(
+                div()
+                    .debug_selector(|| "settings-prose".to_owned())
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .max_w(PROSE_MEASURE)
+                    .child(selectable_label(
+                        "Ekubo runs one MCP server per protocol. Each is public, needs no credential, and can only prepare unsigned transactions for this wallet to simulate and for you to authorize. Everything here is on by default; turn one off to keep its tools out of your agent's context. Your choice is written to every agent already connected below.",
+                    )),
+            );
+        for (index, server) in COMPANION_SERVERS.into_iter().enumerate() {
+            let enabled = self.companion_servers.is_enabled(server.slug);
+            group = group.child(
+                h_flex()
+                    .debug_selector(move || format!("companion-server-{}", server.slug))
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().font_medium().child(server.title))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .max_w(PROSE_MEASURE)
+                                    .child(selectable_label(server.description)),
+                            )
+                            // The URL, because an owner configuring a harness
+                            // this wallet cannot write to has nothing else to
+                            // copy, and because a setting that adds a network
+                            // endpoint should say which one.
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(selectable_text(
+                                        ("companion-server-url", index),
+                                        server.url,
+                                    )),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_2()
+                            .when(claude_desktop_detected, |row| {
+                                row.child(copy_button(
+                                    ("copy-companion-server-url", index),
+                                    server.url.to_owned(),
+                                    SharedString::from(format!(
+                                        "Copy the {} server URL",
+                                        server.title
+                                    )),
+                                ))
+                            })
+                            .child(
+                                // Same reason the testnet switch carries one:
+                                // the row's name lives in the left column, so
+                                // the switch has no rendered label to derive
+                                // an accessible name from.
+                                Switch::new(("companion-server", index))
+                                    .checked(enabled)
+                                    .disabled(busy)
+                                    .tooltip(SharedString::from(server.title))
+                                    .on_click(cx.listener(move |view, enabled, _, cx| {
+                                        view.set_companion_server_enabled(
+                                            server.slug,
+                                            *enabled,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        group.when(claude_desktop_detected, |group| {
+            group.child(
+                div()
+                    .debug_selector(|| "claude-desktop-hosted-connector".to_owned())
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .max_w(PROSE_MEASURE)
+                    .child(selectable_label(
+                        "Claude Desktop is the exception: its remote connectors belong to your Claude account and cannot be written to claude_desktop_config.json, so this wallet cannot apply your selection there. Copy a URL above, then in Claude Desktop open Customize → Connectors and add it as a custom connector.",
+                    )),
+            )
+        })
+    }
+
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let claude_desktop_detected = matches!(
             &self.detected_agents,
@@ -13209,9 +13479,9 @@ impl WalletWindow {
             }
             AgentDetectionState::Ready(detected) => {
                 for (index, agent) in detected.iter().enumerate() {
-                    let installed = agent.installed.as_ref().copied().unwrap_or(false);
+                    let in_sync = agent.installed.as_ref().copied().unwrap_or(false);
                     let config_error = agent.installed.as_ref().err().cloned();
-                    let (icon, icon_color) = if installed {
+                    let (icon, icon_color) = if in_sync {
                         (IconName::CircleCheck, cx.theme().success)
                     } else if config_error.is_some() {
                         (IconName::CircleX, cx.theme().danger)
@@ -13255,17 +13525,52 @@ impl WalletWindow {
                                                             ("detected-agent-path", index),
                                                             &agent.config_path,
                                                         )),
+                                                )
+                                                // The icon alone said this,
+                                                // and a tick against a file
+                                                // path does not tell an owner
+                                                // what pressing Sync would do.
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(if in_sync {
+                                                            cx.theme().muted_foreground
+                                                        } else {
+                                                            cx.theme().foreground
+                                                        })
+                                                        .child(selectable_text(
+                                                            ("detected-agent-state", index),
+                                                            if in_sync {
+                                                                "Up to date with your selected servers"
+                                                            } else {
+                                                                "Not up to date with your selected servers"
+                                                            },
+                                                        )),
                                                 ),
                                         )
                                         .child(
                                             app_button(action_selector.clone())
                                                 .debug_selector(move || action_selector.clone())
-                                                // Both plain Buttons. One
-                                                // primary per detected agent
-                                                // put three of them down the
-                                                // same list, none of which is
-                                                // the page's default commit.
-                                                .label(if installed { "Remove" } else { "Install" })
+                                                // A plain Button. One primary
+                                                // per detected agent put three
+                                                // of them down the same list,
+                                                // none of which is the page's
+                                                // default commit.
+                                                //
+                                                // One label in every state.
+                                                // The wallet writes its own
+                                                // entries and keeps them
+                                                // current on its own, so the
+                                                // button is a re-assert rather
+                                                // than a choice between two
+                                                // outcomes — and there is no
+                                                // opposite of it, because
+                                                // taking a working agent's
+                                                // connection away is not
+                                                // something a settings list
+                                                // should offer next to the
+                                                // thing that grants it.
+                                                .label("Sync")
                                                 .disabled(
                                                     self.legal_gate
                                                         || self.agent_reinstall
@@ -13274,9 +13579,7 @@ impl WalletWindow {
                                                 .on_click(cx.listener({
                                                     let kind = agent.kind;
                                                     move |view, _, _, cx| {
-                                                        view.set_detected_agent_installed(
-                                                            kind, !installed, cx,
-                                                        );
+                                                        view.sync_detected_agent(kind, cx);
                                                     }
                                                 })),
                                         ),
@@ -13397,6 +13700,10 @@ impl WalletWindow {
                     ),
             ))
             .child(settings_section(
+                "Ekubo MCP servers",
+                self.render_companion_servers(claude_desktop_detected, cx),
+            ))
+            .child(settings_section(
                 "Detected agents",
                 GroupBox::new()
                     .id("detected-agent-settings")
@@ -13420,51 +13727,10 @@ impl WalletWindow {
                             .text_color(cx.theme().muted_foreground)
 .max_w(PROSE_MEASURE)
                             .child(selectable_label(
-                                "Installing adds a credential-free stdio entry to an agent's configuration. That agent starts the bridge when it uses the wallet; the bridge reaches this app through same-user operating-system IPC.",
+                                "Sync writes a credential-free stdio entry plus your selected Ekubo servers into an agent's configuration. That agent starts the bridge when it uses the wallet; the bridge reaches this app through same-user operating-system IPC. Changing your selection above syncs every agent already connected, so this button is only needed for one that is not yet.",
                             )),
                     )
-                    .child(agents)
-                    .when(claude_desktop_detected, |group| {
-                        group.child(
-                            h_flex()
-                                .debug_selector(|| {
-                                    "claude-desktop-hosted-connector".to_owned()
-                                })
-                                .w_full()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_medium()
-                                                .child("Claude Desktop hosted connector"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .max_w(PROSE_MEASURE)
-                                                .child(selectable_label(
-                                                    "In Claude Desktop, open Customize → Connectors, add a custom connector named Ekubo, then paste this URL. Remote connectors belong to your Claude account and cannot be installed through claude_desktop_config.json.",
-                                                )),
-                                        ),
-                                )
-                                .child(copy_button(
-                                    "copy-claude-desktop-connector-url",
-                                    crate::agent_config::COMPANION_SERVER_URL.to_owned(),
-                                    "Copy Claude Desktop connector URL",
-                                )),
-                        )
-                    }),
+                    .child(agents),
             ))
             .child(self.render_updates(cx))
             // Last of the settings proper, under updates, because it is the

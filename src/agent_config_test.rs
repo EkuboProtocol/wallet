@@ -158,7 +158,7 @@ auth = "oauth"
 bearer_token_env_var = "SECRET"
 http_headers = { Authorization = "Bearer secret" }
 "#;
-    let output = merge_codex(before, HELPER, "codex").unwrap();
+    let output = merge_codex(before, HELPER, "codex", &CompanionSelection::all()).unwrap();
     let parsed = output.parse::<DocumentMut>().unwrap();
     assert_eq!(parsed["unrelated"]["keep"].as_bool(), Some(true));
     let local = parsed["mcp_servers"][LOCAL_SERVER_NAME].as_table().unwrap();
@@ -171,10 +171,7 @@ http_headers = { Authorization = "Bearer secret" }
             .collect::<Vec<_>>(),
         ["--client", "codex"]
     );
-    assert_eq!(
-        parsed["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str(),
-        Some(COMPANION_SERVER_URL)
-    );
+    assert_companion_tables(&parsed, &CompanionSelection::all());
 }
 
 #[test]
@@ -186,7 +183,7 @@ default = "grok-4.5"
 url = "http://127.0.0.1:61744/mcp"
 headers = { Authorization = "secret" }
 "#;
-    let output = merge_codex(before, HELPER, "grok-build").unwrap();
+    let output = merge_codex(before, HELPER, "grok-build", &CompanionSelection::all()).unwrap();
     let parsed = output.parse::<DocumentMut>().unwrap();
     assert_eq!(parsed["models"]["default"].as_str(), Some("grok-4.5"));
     let local = parsed["mcp_servers"][LOCAL_SERVER_NAME].as_table().unwrap();
@@ -201,10 +198,7 @@ headers = { Authorization = "secret" }
             .collect::<Vec<_>>(),
         ["--client", "grok-build"]
     );
-    assert_eq!(
-        parsed["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str(),
-        Some(COMPANION_SERVER_URL)
-    );
+    assert_companion_tables(&parsed, &CompanionSelection::all());
 }
 
 #[test]
@@ -240,20 +234,25 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
         ),
     ];
     for (_kind, root, shape, client, include_companion) in cases {
+        let companions = include_companion.then(CompanionSelection::all);
         let before = format!(
             r#"{{"keep":7,"{root}":{{"ekubo_wallet":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
         );
-        let output = merge_json(&before, root, shape, HELPER, client, include_companion).unwrap();
+        let output = merge_json(&before, root, shape, HELPER, client, companions.as_ref()).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["keep"], 7);
         assert_eq!(
             parsed[root][LOCAL_SERVER_NAME],
             json_server(shape, HELPER, client)
         );
-        assert_eq!(
-            parsed[root][COMPANION_SERVER_NAME],
-            remote_json_server(shape, COMPANION_SERVER_URL)
-        );
+        for server in COMPANION_SERVERS {
+            assert_eq!(
+                parsed[root][server.config_key],
+                remote_json_server(shape, server.url),
+                "{client} did not write {}",
+                server.title
+            );
+        }
         let rendered = parsed[root][LOCAL_SERVER_NAME].to_string();
         for forbidden in [
             "61744",
@@ -281,7 +280,7 @@ fn claude_desktop_keeps_only_local_stdio_in_its_config() {
         JsonShape::Stdio,
         HELPER,
         "claude-desktop",
-        false,
+        None,
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -290,7 +289,9 @@ fn claude_desktop_keeps_only_local_stdio_in_its_config() {
         parsed["mcpServers"][LOCAL_SERVER_NAME],
         json_server(JsonShape::Stdio, HELPER, "claude-desktop")
     );
-    assert!(parsed["mcpServers"].get(COMPANION_SERVER_NAME).is_none());
+    for server in COMPANION_SERVERS {
+        assert!(parsed["mcpServers"].get(server.config_key).is_none());
+    }
 }
 
 /// Whether an agent is installed is a question about the two managed entries,
@@ -313,11 +314,11 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
 
     // Nothing there at all, a file with nothing in it, and a file holding no
     // entries of ours. None of the three is an error to report.
-    assert!(!adapter.installed().unwrap());
+    assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
     fs::write(&config, "  \n\t\n").unwrap();
-    assert!(!adapter.installed().unwrap());
+    assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
     fs::write(&config, r#"{"numStartups":507}"#).unwrap();
-    assert!(!adapter.installed().unwrap());
+    assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
 
     let installed = merge_json(
         r#"{"numStartups":507}"#,
@@ -325,11 +326,11 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
         JsonShape::Stdio,
         &helper.to_string_lossy(),
         "claude-code",
-        true,
+        Some(&CompanionSelection::all()),
     )
     .unwrap();
     fs::write(&config, &installed).unwrap();
-    assert!(adapter.installed().unwrap());
+    assert!(adapter.in_sync(&CompanionSelection::all()).unwrap());
 
     // What the harness leaves behind the next time it saves: our exact
     // entries, its own bytes. The trailing newline alone was the whole of the
@@ -337,29 +338,40 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
     let without_newline = installed.trim_end().to_owned();
     assert_ne!(without_newline, installed);
     fs::write(&config, &without_newline).unwrap();
-    assert!(adapter.installed().unwrap());
+    assert!(adapter.in_sync(&CompanionSelection::all()).unwrap());
 
     let reformatted =
         serde_json::to_string(&serde_json::from_str::<Value>(&installed).unwrap()).unwrap();
     assert_ne!(reformatted, installed);
     fs::write(&config, &reformatted).unwrap();
-    assert!(adapter.installed().unwrap());
+    assert!(adapter.in_sync(&CompanionSelection::all()).unwrap());
 
     // A harness that dropped the entries is genuinely not installed.
     let removed = remove_json(&installed, "mcpServers").unwrap();
     fs::write(&config, &removed).unwrap();
-    assert!(!adapter.installed().unwrap());
+    assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
 
     // A configuration that does not parse is something the owner can act on,
     // so it must not read as a quiet "not installed".
     fs::write(&config, "{not json").unwrap();
-    assert!(adapter.installed().is_err());
+    assert!(adapter.in_sync(&CompanionSelection::all()).is_err());
 }
 
 #[test]
 fn malformed_or_wrong_root_documents_are_rejected() {
-    assert!(merge_codex("not = [toml", HELPER, "codex").is_err());
-    assert!(merge_json("[]", "mcpServers", JsonShape::Stdio, HELPER, "cursor", true).is_err());
+    let all = CompanionSelection::all();
+    assert!(merge_codex("not = [toml", HELPER, "codex", &all).is_err());
+    assert!(
+        merge_json(
+            "[]",
+            "mcpServers",
+            JsonShape::Stdio,
+            HELPER,
+            "cursor",
+            Some(&all)
+        )
+        .is_err()
+    );
     assert!(
         merge_json(
             r#"{"mcpServers":[]}"#,
@@ -367,7 +379,7 @@ fn malformed_or_wrong_root_documents_are_rejected() {
             JsonShape::Stdio,
             HELPER,
             "cursor",
-            true,
+            Some(&all),
         )
         .is_err()
     );
@@ -382,7 +394,7 @@ fn managed_diff_never_discloses_unrelated_credentials() {
         JsonShape::Stdio,
         HELPER,
         "cursor",
-        true,
+        Some(&CompanionSelection::all()),
     )
     .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
@@ -393,8 +405,27 @@ fn managed_diff_never_discloses_unrelated_credentials() {
 #[test]
 fn local_and_companion_names_are_stable() {
     assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet");
-    assert_eq!(COMPANION_SERVER_NAME, "ekubo");
-    assert_eq!(COMPANION_SERVER_URL, "https://mcp.ekubo.org/mcp");
+    // Ekubo's own server keeps the pre-split key, which is what retargets an
+    // existing entry at the per-protocol endpoint instead of leaving it
+    // beside a differently named one.
+    assert_eq!(
+        COMPANION_SERVERS[0].config_key,
+        ekubo_wallet_core::mcp_companions::LEGACY_COMPANION_KEY
+    );
+    assert_eq!(COMPANION_SERVERS[0].url, "https://mcp.ekubo.org/mcp/ekubo");
+    assert_eq!(
+        managed_keys().collect::<Vec<_>>(),
+        [
+            "ekubo_wallet",
+            "ekubo",
+            "ekubo_aave",
+            "ekubo_aerodrome",
+            "ekubo_lido",
+            "ekubo_merkl",
+            "ekubo_morpho",
+            "ekubo_sky",
+        ]
+    );
     assert_eq!(
         json_server(JsonShape::Stdio, HELPER, "claude-desktop"),
         json!({
@@ -418,8 +449,9 @@ url = "https://mcp.ekubo.org/mcp"
     let parsed = parse_codex_document(&removed).unwrap();
     let servers = parsed["mcp_servers"].as_table().unwrap();
     assert!(servers.contains_key("keep"));
-    assert!(!servers.contains_key(LOCAL_SERVER_NAME));
-    assert!(!servers.contains_key(COMPANION_SERVER_NAME));
+    for key in managed_keys() {
+        assert!(!servers.contains_key(key));
+    }
 
     for root in ["mcpServers", "mcp"] {
         let before = format!(
@@ -429,8 +461,9 @@ url = "https://mcp.ekubo.org/mcp"
         let parsed: Value = serde_json::from_str(&removed).unwrap();
         assert_eq!(parsed["keep"], 7);
         assert_eq!(parsed[root]["keep"]["command"], "keep");
-        assert!(parsed[root].get(LOCAL_SERVER_NAME).is_none());
-        assert!(parsed[root].get(COMPANION_SERVER_NAME).is_none());
+        for key in managed_keys() {
+            assert!(parsed[root].get(key).is_none());
+        }
     }
 }
 
@@ -474,4 +507,303 @@ fn batch_rollback_does_not_overwrite_a_later_external_edit() {
 
     drop(batch);
     assert!(std::fs::read_to_string(path).unwrap().contains("external"));
+}
+
+/// The bridge path validation compares against.
+///
+/// The older tests write a fixture path and never re-validate, but every test
+/// below asserts that the wallet's own write satisfies the wallet's own
+/// validation — and validation requires the exact installed helper path,
+/// because that is the whole point of it.
+fn installed_helper() -> String {
+    installed_bridge_path()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The helper the TOML tests share: every selected server present with only
+/// its URL, and nothing unselected left behind.
+fn assert_companion_tables(parsed: &DocumentMut, selection: &CompanionSelection) {
+    let servers = parsed["mcp_servers"].as_table().unwrap();
+    for server in selection.enabled() {
+        let table = servers[server.config_key].as_table().unwrap();
+        assert_eq!(table.len(), 1, "{} carries unmanaged fields", server.title);
+        assert_eq!(table["url"].as_str(), Some(server.url));
+    }
+    for server in selection.disabled() {
+        assert!(
+            !servers.contains_key(server.config_key),
+            "{} was not removed",
+            server.title
+        );
+    }
+}
+
+/// The default is every Ekubo-provided server, so a fresh install writes all
+/// seven — not the single pre-split entry, and not none of them.
+#[test]
+fn a_default_selection_writes_every_hosted_server() {
+    let selection = CompanionSelection::all();
+    let output = merge_json(
+        "{}",
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&selection),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    let servers = parsed["mcpServers"].as_object().unwrap();
+    assert_eq!(servers.len(), COMPANION_SERVERS.len() + 1);
+    for server in COMPANION_SERVERS {
+        assert_eq!(
+            servers[server.config_key],
+            json!({"type": "http", "url": server.url})
+        );
+    }
+    assert!(
+        validate_json_shape(&output, AgentKind::Cursor, &selection).is_ok(),
+        "the wallet's own write must satisfy its own validation"
+    );
+}
+
+/// Switching a server off has to take its entry out of an agent that already
+/// holds it. Insert-only would leave the harness carrying a URL the owner just
+/// declined, and would report the write as successful.
+#[test]
+fn deselecting_a_server_removes_it_from_an_existing_config() {
+    let mut selection = CompanionSelection::all();
+    let installed = merge_json(
+        "{}",
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&selection),
+    )
+    .unwrap();
+    selection.set_enabled("aave", false);
+    selection.set_enabled("sky", false);
+    let after = merge_json(
+        &installed,
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&selection),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&after).unwrap();
+    assert!(parsed["mcpServers"].get("ekubo_aave").is_none());
+    assert!(parsed["mcpServers"].get("ekubo_sky").is_none());
+    assert_eq!(
+        parsed["mcpServers"]["ekubo_morpho"],
+        json!({"type": "http", "url": "https://mcp.ekubo.org/mcp/morpho"})
+    );
+    assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
+}
+
+/// The same for Codex's TOML, where the entries are tables rather than
+/// objects and the removal path is a different one.
+#[test]
+fn deselecting_a_server_removes_it_from_an_existing_codex_config() {
+    let mut selection = CompanionSelection::all();
+    let installed = merge_codex("", &installed_helper(), "codex", &selection).unwrap();
+    selection.set_enabled("lido", false);
+    let after = merge_codex(&installed, &installed_helper(), "codex", &selection).unwrap();
+    assert_companion_tables(&after.parse::<DocumentMut>().unwrap(), &selection);
+}
+
+/// Validation has to fail in both directions, or "the write succeeded" would
+/// stop meaning "the file says what the owner chose".
+#[test]
+fn validation_rejects_a_config_that_disagrees_with_the_selection() {
+    let all = CompanionSelection::all();
+    let mut without_aave = all.clone();
+    without_aave.set_enabled("aave", false);
+
+    let full = merge_json(
+        "{}",
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&all),
+    )
+    .unwrap();
+    // Every server present, but the owner asked for one fewer.
+    let error = validate_json_shape(&full, AgentKind::Cursor, &without_aave).unwrap_err();
+    assert!(format!("{error:#}").contains("was not removed"));
+
+    let trimmed = merge_json(
+        "{}",
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&without_aave),
+    )
+    .unwrap();
+    // One server missing, and the owner asked for it.
+    let error = validate_json_shape(&trimmed, AgentKind::Cursor, &all).unwrap_err();
+    assert!(format!("{error:#}").contains("is missing"));
+
+    // A credential riding alongside the URL is still refused.
+    let smuggled = trimmed.replace(
+        r#""url": "https://mcp.ekubo.org/mcp/ekubo""#,
+        r#""url": "https://mcp.ekubo.org/mcp/ekubo", "headers": {"Authorization": "secret"}"#,
+    );
+    assert_ne!(smuggled, trimmed);
+    assert!(validate_json_shape(&smuggled, AgentKind::Cursor, &without_aave).is_err());
+}
+
+/// The upgrade case. Every configuration written before the split names the
+/// single `ekubo` server at `/mcp`; installing over it must retarget that same
+/// key at `/mcp/ekubo` and add the rest, leaving the harness's own entries
+/// alone.
+#[test]
+fn a_pre_split_config_is_retargeted_rather_than_duplicated() {
+    let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo_wallet":{"command":"bridge"},"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
+    let selection = CompanionSelection::all();
+    let after = merge_json(
+        before,
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&selection),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(parsed["mcpServers"]["keep"]["command"], "keep");
+    assert_eq!(
+        parsed["mcpServers"]["ekubo"]["url"],
+        "https://mcp.ekubo.org/mcp/ekubo"
+    );
+    // The all-protocol endpoint is nowhere in the result: an agent given it
+    // alongside the per-protocol servers would carry every tool twice.
+    assert!(!after.contains(r#""https://mcp.ekubo.org/mcp""#));
+    assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
+}
+
+/// A pre-split config is a wallet the owner installed, so it reads as
+/// present-but-stale rather than as absent. That distinction is what lets the
+/// wallet bring it up to date on its own instead of showing the owner a button
+/// they should never have needed.
+#[test]
+fn a_pre_split_config_reads_as_present_but_out_of_sync() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("mcp.json");
+    let helper = installed_bridge_path().unwrap();
+    let adapter = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: config.clone(),
+    };
+    let selection = CompanionSelection::all();
+    assert!(!adapter.has_wallet_entry().unwrap());
+
+    let legacy = format!(
+        r#"{{"mcpServers":{{"ekubo_wallet":{{"command":"{}","args":["--client","cursor"]}},"ekubo":{{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}}}}"#,
+        helper.to_string_lossy()
+    );
+    fs::write(&config, &legacy).unwrap();
+    assert!(adapter.has_wallet_entry().unwrap());
+    assert!(!adapter.in_sync(&selection).unwrap());
+
+    let preview = adapter.preview_install(&selection).unwrap();
+    assert!(preview.has_changes());
+    ConfigBatchInstall::install(vec![preview]).unwrap().commit();
+    assert!(adapter.has_wallet_entry().unwrap());
+    assert!(adapter.in_sync(&selection).unwrap());
+}
+
+/// An agent the owner never connected is left alone. Propagating a selection
+/// must reach every harness that already has this wallet and no others.
+#[test]
+fn an_unconnected_config_has_no_wallet_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("mcp.json");
+    let adapter = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: config.clone(),
+    };
+    for contents in [
+        "",
+        "  \n\t\n",
+        r#"{"mcpServers":{"somebody-else":{"command":"other"}}}"#,
+        // Even a config holding one of our hosted servers, but not our bridge,
+        // is not a wallet the owner installed.
+        r#"{"mcpServers":{"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp/ekubo"}}}"#,
+        "{not json",
+    ] {
+        fs::write(&config, contents).unwrap();
+        assert!(
+            !adapter.has_wallet_entry().unwrap(),
+            "{contents} reported a wallet entry"
+        );
+    }
+}
+
+/// Selecting nothing is a coherent choice: the wallet's own bridge entry is
+/// still written, because an owner who prepares plans some other way still
+/// wants their agent able to reach the wallet.
+#[test]
+fn selecting_no_servers_still_writes_the_local_bridge() {
+    let mut selection = CompanionSelection::all();
+    for server in COMPANION_SERVERS {
+        selection.set_enabled(server.slug, false);
+    }
+    let output = merge_json(
+        "{}",
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&selection),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    let servers = parsed["mcpServers"].as_object().unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(
+        servers[LOCAL_SERVER_NAME],
+        json_server(JsonShape::Stdio, &installed_helper(), "cursor")
+    );
+    assert!(validate_json_shape(&output, AgentKind::Cursor, &selection).is_ok());
+}
+
+/// The diff an owner reviews names every managed key that changed, including
+/// the ones being taken away.
+#[test]
+fn the_managed_diff_names_a_server_being_removed() {
+    let all = CompanionSelection::all();
+    let before = merge_json(
+        "{}",
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&all),
+    )
+    .unwrap();
+    let mut without_merkl = all.clone();
+    without_merkl.set_enabled("merkl", false);
+    let after = merge_json(
+        &before,
+        "mcpServers",
+        JsonShape::Stdio,
+        &installed_helper(),
+        "cursor",
+        Some(&without_merkl),
+    )
+    .unwrap();
+    let diff = managed_config_diff(AgentKind::Cursor, &before, &after).unwrap();
+    assert!(diff.contains("mcpServers.ekubo_merkl"));
+    assert!(diff.contains("<not configured>"));
+    // Nothing else moved.
+    assert!(!diff.contains("mcpServers.ekubo_morpho"));
 }

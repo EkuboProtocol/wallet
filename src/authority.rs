@@ -29,6 +29,7 @@ use ekubo_wallet_core::{
         authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
+    mcp_companions::CompanionSelection,
     message::{MessageStore, PendingMessage},
     orchestrator::{
         ApprovalOutcome, SendDisposition, approve_transaction, sign_reviewed_message,
@@ -1081,6 +1082,16 @@ impl OwnerApi {
 
     pub fn set_appearance_preference(&self, preference: AppearancePreference) -> Result<()> {
         self.desktop()?.set_appearance_preference(preference)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
+    pub fn companion_servers(&self) -> Result<CompanionSelection> {
+        self.desktop()?.companion_servers()
+    }
+
+    pub fn set_companion_servers(&self, selection: &CompanionSelection) -> Result<()> {
+        self.desktop()?.set_companion_servers(selection)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }

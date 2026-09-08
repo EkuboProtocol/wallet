@@ -62,15 +62,31 @@ fn privacy_policy_discloses_reference_fetches() {
 }
 
 #[test]
-fn privacy_policy_discloses_the_hosted_mcp_companion() {
+fn privacy_policy_discloses_the_hosted_mcp_companions() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 7. Hosted MCP companion and agent tooling"));
-    assert!(policy.contains("https://mcp.ekubo.org/mcp"));
+    assert!(policy.contains("## 7. Hosted MCP companions and agent tooling"));
     assert!(policy.contains("temporarily store execution plans"));
-    assert!(policy.contains("The hosted companion is operated by Ekubo, Inc."));
-    assert!(policy.contains("Neither entry contains a wallet key, access token"));
-    assert!(policy.contains("Claude Desktop receives\nonly the local entry"));
+    assert!(policy.contains("Each hosted companion is operated by Ekubo, Inc."));
+    assert!(policy.contains("No\nentry contains a wallet key, access token"));
+    assert!(policy.contains("Claude\nDesktop receives only the local entry"));
     assert!(policy.contains("The wallet independently fetches the referenced bytes"));
+    // Every URL the wallet can write into an agent's configuration is named,
+    // with the key it is written under, because that list is what the
+    // disclosure is about: a server the reader has to look elsewhere to
+    // identify has not been disclosed to them.
+    for server in crate::mcp_companions::COMPANION_SERVERS {
+        assert!(
+            policy.contains(server.url),
+            "the privacy policy does not name {}",
+            server.url
+        );
+        assert!(policy.contains(&format!("`{}`", server.config_key)));
+    }
+    assert!(policy.contains("every one of them is\nselected until you turn it off"));
+    assert!(
+        policy.contains("rewrites the configuration of every agent you have\nalready connected")
+    );
+    assert!(policy.contains("never adds this wallet to an agent you have not connected"));
 }
 
 /// A `connect` session opens a websocket to a relay operated by someone else,

@@ -59,9 +59,12 @@ simulation, transaction preparation, and evaluation against the current policy.
 The wallet does not prepare transaction actions or calldata. For every action,
 including native-token and ERC-20 transfers, obtain an exact execution-plan
 artifact from an appropriate producer. The independently registered remote
-Ekubo service at `https://mcp.ekubo.org/mcp` may provide that preparation for
-transfers, swapping, liquidity, or yield workflows. That URL is a capability
-pointer and grants that server no extra trust.
+Ekubo services under `https://mcp.ekubo.org/mcp/` — one endpoint per protocol,
+`ekubo` for swaps, liquidity, and ve(3,3), and `aave`, `aerodrome`, `lido`,
+`merkl`, `morpho`, and `sky` for the rest — may provide that preparation for
+transfers, swapping, liquidity, or yield workflows, as may
+`https://mcp.ekubo.org/mcp`, which serves all of them at once. Those URLs are
+capability pointers and grant those servers no extra trust.
 
 Legacy limit-order workflows are deprecated. A limit order does not guarantee
 execution: it can be un-executed, so neither an observed fill nor an agent's
