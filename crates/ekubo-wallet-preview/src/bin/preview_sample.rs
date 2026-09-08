@@ -37,10 +37,11 @@ fn main() -> Result<(), String> {
     let text = std::fs::read_to_string(&corpus)
         .map_err(|error| format!("reading {}: {error}", corpus.display()))?;
 
-    let mut shown = 0_usize;
-    let mut right = 0_usize;
+    // Collected first, then run in one batch, because that is how the review
+    // list uses this: every waiting request at once.
+    let mut held_out = Vec::new();
     for line in text.lines() {
-        if shown >= count || line.trim().is_empty() {
+        if held_out.len() >= count || line.trim().is_empty() {
             continue;
         }
         let labeled: Labeled =
@@ -50,11 +51,32 @@ fn main() -> Result<(), String> {
         let Some(encoded) = training::encode(&labeled, vocab::size()) else {
             continue;
         };
-        let (_, held) = training::split(vec![encoded], 10);
-        if held.is_empty() {
+        if training::split(vec![encoded], 10).1.is_empty() {
             continue;
         }
-        let preview = engine.preview(&labeled.document);
+        held_out.push(labeled);
+    }
+
+    // One plan first, so the timing below excludes kernel compilation: the
+    // first dispatch of every shape pays for a compile, and reporting that as
+    // the cost of a preview would be measuring the wrong thing.
+    if let Some(first) = held_out.first() {
+        let warm = std::time::Instant::now();
+        let _ = engine.preview(&first.document);
+        println!(
+            "first plan (includes kernel compilation): {:?}\n",
+            warm.elapsed()
+        );
+    }
+
+    let documents: Vec<_> = held_out.iter().map(|l| l.document.clone()).collect();
+    let started = std::time::Instant::now();
+    let previews = engine.preview_all(&documents);
+    let elapsed = started.elapsed();
+
+    let mut shown = 0_usize;
+    let mut right = 0_usize;
+    for (labeled, preview) in held_out.iter().zip(&previews) {
         let expected = TransactionClass::from_corpus_name(&labeled.class)
             .unwrap_or(TransactionClass::Unrecognized);
         if preview.class == expected {
@@ -80,6 +102,10 @@ fn main() -> Result<(), String> {
         shown += 1;
     }
     println!("\n{right}/{shown} classes correct on held-out formats");
+    println!(
+        "{shown} plans previewed in {elapsed:?} ({:?} each, batched)",
+        elapsed / u32::try_from(shown.max(1)).unwrap_or(1)
+    );
     Ok(())
 }
 
