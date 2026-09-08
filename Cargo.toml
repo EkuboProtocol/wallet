@@ -13,6 +13,7 @@ categories = ["cryptography::cryptocurrencies", "gui"]
 [workspace]
 members = [
     "crates/ekubo-wallet-core",
+    "crates/ekubo-wallet-preview",
     "crates/mcp-bridge",
     "crates/walletconnect-session",
     "crates/ztracing-compat",
