@@ -26,10 +26,216 @@ fn shutdown_timeout_is_created_inside_the_tokio_runtime() {
     assert_eq!(value, 42);
 }
 
+/// A blocking task models the thing that actually crashed the wallet: a worker
+/// part-way through dropping a `rusqlite::Connection`, which is where `SQLCipher`
+/// frees the encryption context. If shutdown returns while that is still in
+/// flight, `exit` frees the cipher provider underneath it.
+#[test]
+fn tokio_shutdown_waits_for_a_database_close_already_in_flight() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn_blocking({
+        let closed = Arc::clone(&closed);
+        let entered = Arc::clone(&entered);
+        move || {
+            entered.wait();
+            std::thread::sleep(Duration::from_millis(50));
+            closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    // Joining only means something once the work is genuinely running.
+    entered.wait();
+
+    assert!(
+        shutdown_tokio_runtime(runtime, Duration::from_secs(5)),
+        "a runtime whose work finishes must report a clean shutdown"
+    );
+    assert!(
+        closed.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown must not return while a database is still being closed"
+    );
+}
+
+/// Closer to the real crash than the blocking case above. The automation
+/// supervisor is an *async* task that owns its stores across every await, so
+/// the connections close when the runtime cancels the task and drops its
+/// future. Shutdown must not return until that drop has run.
+#[test]
+fn tokio_shutdown_waits_for_a_cancelled_task_to_drop_its_stores() {
+    struct StoreGuard(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for StoreGuard {
+        fn drop(&mut self) {
+            // Stands in for `rusqlite::Connection`'s drop, which is where
+            // SQLCipher frees the encryption context.
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn({
+        let guard = StoreGuard(Arc::clone(&dropped));
+        let entered = Arc::clone(&entered);
+        async move {
+            entered.wait();
+            // Never completes: only cancellation ends this task, exactly as
+            // the supervisor is ended at quit.
+            std::future::pending::<()>().await;
+            drop(guard);
+        }
+    });
+    entered.wait();
+
+    assert!(shutdown_tokio_runtime(runtime, Duration::from_secs(5)));
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown must not return before a cancelled task has dropped its connections"
+    );
+}
+
+/// The activation listener is the one receive that never completes on its own,
+/// so it decides whether an ordinary quit is instant or waits out the whole
+/// deadline. As a `spawn_blocking` it was the latter: `shutdown_timeout` cannot
+/// cancel a blocking closure that has already begun, and nothing drops the
+/// sender on a quit that is not an update. Awaited as a future it is simply
+/// cancelled, which is what this pins.
+#[test]
+fn an_activation_receive_never_holds_the_shutdown_open() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    // Deliberately kept alive for the whole test, exactly as the listener
+    // thread keeps it alive across an ordinary quit.
+    let (_activations, mut receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn({
+        let entered = Arc::clone(&entered);
+        async move {
+            entered.wait();
+            while receiver.recv().await.is_some() {}
+        }
+    });
+    entered.wait();
+
+    let started = Instant::now();
+    assert!(
+        shutdown_tokio_runtime(runtime, Duration::from_secs(5)),
+        "a pending activation receive must be cancelled, not waited out"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "quitting must not stall on the activation channel; took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn tokio_shutdown_reports_threads_it_could_not_join() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn_blocking({
+        let release = Arc::clone(&release);
+        let entered = Arc::clone(&entered);
+        move || {
+            entered.wait();
+            while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    });
+    entered.wait();
+
+    assert!(
+        !shutdown_tokio_runtime(runtime, Duration::from_millis(200)),
+        "a task that outlasts the deadline must be reported, not silently abandoned"
+    );
+    // Let the stranded thread end so it does not outlive the test binary.
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `gpui_tokio::init` builds a runtime that `GlobalTokio::drop` tears down with
+/// `Runtime::shutdown_background`, which abandons the worker threads instead of
+/// joining them — they then race `SQLCipher`'s `exit` teardown. The wallet must
+/// own its runtime and hand `gpui_tokio` a handle, so this guards the wiring
+/// rather than the helper.
+#[test]
+fn the_desktop_never_lets_gpui_tokio_own_the_runtime() {
+    let source = include_str!("desktop.rs");
+
+    assert!(
+        !source.contains("gpui_tokio::init(cx)"),
+        "gpui_tokio::init abandons its threads at drop; build the runtime here \
+         and pass a handle to gpui_tokio::init_from_handle instead"
+    );
+    assert!(
+        source.contains("gpui_tokio::init_from_handle("),
+        "the desktop must install the runtime it owns"
+    );
+    // Two joins, because neither site runs everywhere: macOS ends the process
+    // inside `[NSApp terminate:]` and never returns from `Platform::run`.
+    assert!(
+        source.contains("join_tokio_runtime(&quit_tokio_slot, &update_data_dir)"),
+        "the quit handler must join the runtime — it is the path that runs on every platform"
+    );
+    assert!(
+        source.contains("join_tokio_runtime(&tokio_slot, &shutdown_data_dir)"),
+        "an exit that never reached a quit handler must still join the runtime"
+    );
+    // Nothing on the quit path may park a blocking thread, because the join
+    // cannot cancel one. The activation receive is the case that bit.
+    assert!(
+        source.contains("while receiver.recv().await.is_some()"),
+        "the activation receive must stay a cancellable future; a blocking \
+         receive makes every quit wait out the whole shutdown deadline"
+    );
+}
+
+#[test]
+fn joining_the_runtime_empties_its_slot_and_is_idempotent() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let slot = Mutex::new(Some(runtime));
+
+    join_tokio_runtime(&slot, directory.path());
+    assert!(
+        slot.lock().expect("the slot is not poisoned").is_none(),
+        "the join must take the runtime so the second caller cannot join it twice"
+    );
+
+    // The other shutdown path always runs; on an ordinary quit it arrives
+    // second and must do nothing at all.
+    join_tokio_runtime(&slot, directory.path());
+    assert!(
+        !crate::release_check::update_diagnostics_path(directory.path()).exists(),
+        "a runtime that shut down cleanly must not write a timeout diagnostic"
+    );
+}
+
 #[test]
 fn update_handoff_releases_the_instance_before_relaunch() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let (sender, _receiver) = std::sync::mpsc::channel();
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let InstanceOutcome::Primary(instance) =
         SingleInstance::acquire(directory.path(), sender.clone()).unwrap()
     else {

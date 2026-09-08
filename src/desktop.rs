@@ -132,6 +132,18 @@ const DESKTOP_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// that has gone away must not hold the quit open, and a dapp whose goodbye
 /// misses it sees the session lapse on its own deadline instead.
 const DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long the wallet waits for its Tokio threads to stop before it exits.
+///
+/// This is not a politeness budget. Exceeding it is the one case the join
+/// cannot make safe: `exit` still runs `SQLCipher`'s teardown afterwards, so a
+/// task that outlasts this deadline is back in the original race. The number is
+/// therefore a bound on a *hung* task holding the quit open forever, not a
+/// budget for ordinary work — nothing on the quit path should approach it, and
+/// the recorded diagnostic is how a build that does becomes visible. Longer
+/// than the other two shutdown timeouts because it is the last one and it
+/// subsumes them: by the time it runs, the dapp farewells and the MCP server
+/// have already been given their own deadlines.
+const DESKTOP_TOKIO_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const COPY_BUTTON_HEIGHT: gpui::Rems = rems(2.0);
 // These two stay in pixels because that is what they are assigned to:
 // `Theme::radius` and `Theme::radius_lg` are `Pixels` upstream, and the theme
@@ -19994,6 +20006,64 @@ pub fn run_desktop_hidden() -> Result<()> {
     run_desktop_with_visibility(true)
 }
 
+/// Stops the Tokio runtime and waits for its threads, reporting whether they
+/// all finished inside `timeout`.
+///
+/// The waiting is the entire point. Returning from `main` hands control to
+/// `exit`, which runs `SQLCipher`'s teardown: it frees the global cipher
+/// provider and the private heap those connections were allocated from. A
+/// worker thread still closing a database then reaches
+/// `codec_ctx->provider->ctx_free(...)` through a pointer that was freed a
+/// moment earlier, and calling through a freed vtable is a general protection
+/// fault, not something the process gets to survive. Every Tokio thread has to
+/// be joined while `main` is still on the stack.
+///
+/// `gpui_tokio::init` cannot give us that: the runtime it owns is dropped via
+/// `Runtime::shutdown_background`, which abandons the threads rather than
+/// joining them. So the wallet builds the runtime, hands `gpui_tokio` only a
+/// handle, and joins it here.
+fn shutdown_tokio_runtime(runtime: tokio::runtime::Runtime, timeout: Duration) -> bool {
+    let started = Instant::now();
+    // Consumes the runtime: it cancels the tasks, then blocks until the worker
+    // and blocking threads have finished unwinding — which is where the last
+    // `rusqlite::Connection` values are dropped and their databases closed.
+    runtime.shutdown_timeout(timeout);
+    // A duration, because `shutdown_timeout` reports nothing. Only the wait on
+    // the blocking pool is bounded by `timeout`; cancelling the tasks first is
+    // not, so this reads "did not finish promptly" rather than "threads are
+    // certainly still running". It is a diagnostic signal, not a guarantee, and
+    // the deadline is loose enough that a clean shutdown never approaches it.
+    started.elapsed() < timeout
+}
+
+/// Takes the runtime out of `slot`, if it is still there, and joins it.
+///
+/// Called from two places because no single one of them runs everywhere. The
+/// quit handler is the one that runs on every platform: macOS ends the process
+/// inside `[NSApp terminate:]`, so nothing after `Platform::run` executes
+/// there. The tail of `run_desktop_with_visibility` then covers the exits that
+/// never reach a quit handler at all. Whichever arrives first empties the slot
+/// and the other becomes a no-op.
+fn join_tokio_runtime(slot: &Mutex<Option<tokio::runtime::Runtime>>, data_dir: &Path) {
+    // The guard is released here, before the join: nothing else may block on
+    // this lock while a shutdown is in progress.
+    let Some(runtime) = slot.lock().ok().and_then(|mut slot| slot.take()) else {
+        return;
+    };
+    if !shutdown_tokio_runtime(runtime, DESKTOP_TOKIO_SHUTDOWN_TIMEOUT) {
+        // Recorded rather than raised: the window is gone and an updated wallet
+        // may already be starting, so there is nobody left to tell. A run of
+        // these lines is what a still-crashing quit looks like.
+        let _ = crate::release_check::record_update_diagnostic(
+            data_dir,
+            &format!(
+                "Tokio shutdown exceeded {} seconds; background work may still be running",
+                DESKTOP_TOKIO_SHUTDOWN_TIMEOUT.as_secs()
+            ),
+        );
+    }
+}
+
 fn release_single_instance(instance_slot: &Arc<Mutex<Option<SingleInstance>>>) -> Result<()> {
     let instance = instance_slot
         .lock()
@@ -20108,7 +20178,7 @@ fn close_active_window(_: &CloseWindow, cx: &mut App) {
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
     let config = crate::config::ConfigStore::production()?;
-    let (activation_tx, activation_rx) = std::sync::mpsc::channel();
+    let (activation_tx, activation_rx) = tokio::sync::mpsc::unbounded_channel();
     let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
         InstanceOutcome::Primary(instance) => instance,
         InstanceOutcome::ActivatedExisting => return Ok(()),
@@ -20136,6 +20206,22 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
 
+    // Built here rather than by `gpui_tokio::init` so that the runtime outlives
+    // the GPUI application and can be *joined* on the way out; see
+    // `shutdown_tokio_runtime` for what happens to a wallet that skips that.
+    // Two worker threads matches what `gpui_tokio::init` would have created.
+    let tokio = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("could not start the Tokio runtime")?;
+    let tokio_handle = tokio.handle().clone();
+    // In a slot because the quit handler and the tail of this function both
+    // have to be able to claim it; see `join_tokio_runtime`.
+    let tokio_slot = Arc::new(Mutex::new(Some(tokio)));
+    let shutdown_tokio_slot = Arc::clone(&tokio_slot);
+    let shutdown_data_dir = data_dir.clone();
+
     let application = gpui_platform::application();
     #[cfg(target_os = "macos")]
     let dock_reopen_target: DockReopenTarget = Rc::new(RefCell::new(None));
@@ -20161,7 +20247,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 cx,
             );
             load_application_fonts(cx).expect("embedded Suisse fonts must be valid");
-            gpui_tokio::init(cx);
+            gpui_tokio::init_from_handle(cx, tokio_handle);
             cx.set_quit_mode(QuitMode::Explicit);
             let tray = Rc::new(RefCell::new(
                 PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
@@ -20280,9 +20366,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let shutdown_instance = instance_slot.clone();
             let update_data_dir = data_dir.clone();
             let tokio = gpui_tokio::Tokio::handle(cx);
+            let quit_tokio_slot = shutdown_tokio_slot;
             cx.on_app_quit(move |_| {
                 let update_data_dir = update_data_dir.clone();
                 let shutdown_instance = shutdown_instance.clone();
+                let quit_tokio_slot = Arc::clone(&quit_tokio_slot);
                 let farewells = shutdown_walletconnect
                     .lock()
                     .map(|mut sessions| sessions.disconnect_all())
@@ -20326,6 +20414,16 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         }),
                         Err(error) => Err(error.into()),
                     };
+                    // Here rather than inside the worker, because this is the
+                    // latest point that still runs on every platform. GPUI's
+                    // `App::shutdown` calls every quit observer, *then* clears
+                    // the windows and flushes effects, and only then polls the
+                    // futures they returned — so a join in the worker's own
+                    // body would race window teardown for the runtime. By this
+                    // line the windows are gone, the shutdown thread is joined,
+                    // and the update handoff has already started a replacement
+                    // wallet that should not be made to wait on this.
+                    join_tokio_runtime(&quit_tokio_slot, &update_data_dir);
                     match result {
                         Ok(true) => {
                             let _ = crate::release_check::record_update_diagnostic(
@@ -20646,19 +20744,15 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let activation_view = wallet_view.clone();
             cx.spawn(async move |cx| {
                 let mut receiver = activation_rx;
-                loop {
-                    let receive_task = gpui_tokio::Tokio::spawn(cx, async move {
-                        tokio::task::spawn_blocking(move || {
-                            let result = receiver.recv();
-                            (receiver, result)
-                        })
-                        .await
-                    })
-                    .await;
-                    let Ok(Ok((next, Ok(())))) = receive_task else {
-                        break;
-                    };
-                    receiver = next;
+                // Awaited directly rather than through `spawn_blocking`. A
+                // blocking receive occupies a Tokio blocking thread for the
+                // life of the process, and `Runtime::shutdown_timeout` cannot
+                // cancel a blocking closure that has already begun — so the
+                // join at quit would wait out its whole deadline, every time,
+                // and then report a timeout that had nothing to do with the
+                // database. `tokio::sync` needs no runtime of its own, so this
+                // polls on GPUI's executor and simply stops being polled.
+                while receiver.recv().await.is_some() {
                     let _ = cx
                         .update(|cx| show_wallet_window(cx, &activation_view, &activation_window));
                 }
@@ -20691,6 +20785,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             })
             .detach();
         });
+    // Ordinarily a no-op: the quit handler has already claimed the runtime by
+    // the time control gets here. This covers an exit that never ran one, and
+    // it is the last thing between here and `main` returning into `exit`.
+    join_tokio_runtime(&tokio_slot, &shutdown_data_dir);
     Ok(())
 }
 
