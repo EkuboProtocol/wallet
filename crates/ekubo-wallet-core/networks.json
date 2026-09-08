@@ -1368,7 +1368,7 @@
    "aliases": [
     "monad-mainnet"
    ],
-   "default": true,
+   "default": false,
    "testnet": false,
    "native_currency": {
     "name": "Monad",

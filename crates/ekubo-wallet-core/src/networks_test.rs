@@ -214,7 +214,6 @@ fn established_networks_keep_their_names_and_aliases() {
         (1, "ethereum", &["mainnet", "eth"]),
         (10, "optimism", &["op", "op-mainnet"]),
         (100, "gnosis", &["gnosis-mainnet", "xdai"]),
-        (143, "monad", &["monad-mainnet"]),
         (4326, "megaeth", &["megaeth-mainnet", "mega"]),
         (4663, "robinhood", &["robinhood-chain", "hood"]),
         (8453, "base", &["base-mainnet"]),
@@ -232,6 +231,35 @@ fn established_networks_keep_their_names_and_aliases() {
         );
         assert!(profile.is_default, "{name} stopped being a default network");
     }
+}
+
+/// Monad keeps its established name and stays configurable, but no longer
+/// ships as a default profile.
+///
+/// No Monad endpoint implements `eth_simulateV1` the way the wallet calls it.
+/// The node answers `"validation": false is not supported yet` and rejects the
+/// request, and that is the spec's default for the parameter. Alchemy's Monad
+/// endpoint proxies the same error, so adding a paid provider does not help.
+///
+/// Simulation is what produces the transaction envelope, so on Monad the
+/// wallet cannot sign, and it cannot sign at approval time either: a queued
+/// request fails its fresh simulation and never reaches a prepared envelope.
+/// A default profile whose every action dead-ends is worse than one the owner
+/// has to add deliberately, so this chain is registry-only until an endpoint
+/// implements the method.
+#[test]
+fn monad_is_registry_only_because_nothing_there_can_simulate() {
+    let profile = known_network(143).expect("monad is still in the registry");
+    assert_eq!(profile.config.name, "monad");
+    assert_eq!(profile.config.aliases, ["monad-mainnet"]);
+    assert!(
+        !profile.is_default,
+        "monad ships as a default again; the wallet cannot sign on it"
+    );
+    assert_eq!(
+        profile.simulate_endpoints, 0,
+        "an endpoint now answers eth_simulateV1 on monad; reconsider the default"
+    );
 }
 
 /// Simulation is what gates signing, so the chains people are most likely to
