@@ -7,7 +7,7 @@
 //! every format that *is* in the corpus.
 
 use burn::{
-    backend::{Autodiff, NdArray},
+    backend::{Autodiff, NdArray, Wgpu},
     module::{AutodiffModule as _, Module as _},
     optim::{AdamWConfig, GradientsParams, Optimizer},
     record::{BinFileRecorder, HalfPrecisionSettings},
@@ -22,19 +22,27 @@ use ekubo_wallet_preview::{
 use rand::{SeedableRng as _, rngs::StdRng};
 use std::path::PathBuf;
 
-/// Training runs on the CPU.
+/// Where the fitting runs.
 ///
-/// Not a limitation of the model, which is small enough either way, but of the
-/// machine this was fitted on: `cubecl` sizes its `wgpu` memory pool from the
-/// adapter's reported memory, and on an integrated GPU with a 2 GB carve-out
-/// that is a single ~3 GB allocation which simply fails. A 1.2M-parameter
-/// model over twenty thousand short sequences is minutes of CPU work, so
-/// there was nothing to buy by fighting it.
+/// The CPU is the default because it works everywhere and a 1.2M-parameter
+/// model over twenty thousand short sequences is minutes of work. It is also
+/// the only thing that worked on the machine this was first fitted on:
+/// `cubecl` sizes its `wgpu` memory pool from the adapter's reported memory,
+/// and on an integrated GPU with a 2 GB carve-out that is one ~3 GB allocation
+/// that simply fails.
 ///
-/// Inference is a different question and does run on the GPU -- see
-/// `ekubo_wallet_preview::gpu`. The weights are backend-agnostic, so what is
-/// fitted here loads there unchanged.
-type Train = Autodiff<NdArray>;
+/// A machine with real video memory has no such problem, and the same `wgpu`
+/// backend inference uses will fit this in a fraction of the time. The weights
+/// are backend-agnostic either way: what is fitted on one loads on the other
+/// unchanged, which is what makes this a flag rather than a fork.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Device {
+    Cpu,
+    Gpu,
+}
+
+type Cpu = Autodiff<NdArray>;
+type Gpu = Autodiff<Wgpu>;
 
 struct Arguments {
     corpus: PathBuf,
@@ -42,6 +50,7 @@ struct Arguments {
     epochs: usize,
     learning_rate: f64,
     seed: u64,
+    device: Device,
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
@@ -50,6 +59,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut epochs = 12_usize;
     let mut learning_rate = 3e-4_f64;
     let mut seed = 20_260_908_u64;
+    let mut device = Device::Cpu;
     let mut arguments = std::env::args().skip(1);
     while let Some(flag) = arguments.next() {
         let mut value = || {
@@ -63,6 +73,13 @@ fn parse_arguments() -> Result<Arguments, String> {
             "--epochs" => epochs = value()?.parse().map_err(|_| "--epochs must be a number")?,
             "--lr" => learning_rate = value()?.parse().map_err(|_| "--lr must be a number")?,
             "--seed" => seed = value()?.parse().map_err(|_| "--seed must be a number")?,
+            "--device" => {
+                device = match value()?.as_str() {
+                    "cpu" => Device::Cpu,
+                    "gpu" => Device::Gpu,
+                    other => return Err(format!("--device must be cpu or gpu, not {other}")),
+                }
+            }
             other => return Err(format!("unrecognized flag {other}")),
         }
     }
@@ -72,6 +89,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         epochs,
         learning_rate,
         seed,
+        device,
     })
 }
 
@@ -112,17 +130,47 @@ fn main() -> Result<(), String> {
     // built once and reused every epoch rather than recompiled each time.
     let held_out_batches = training::batches(&evaluate, &mut StdRng::seed_from_u64(0));
 
-    let device = burn::backend::ndarray::NdArrayDevice::default();
-    let mut model = PreviewModel::<Train>::new(&device);
+    match arguments.device {
+        Device::Cpu => fit::<Cpu>(
+            &burn::backend::ndarray::NdArrayDevice::default(),
+            &arguments,
+            &train,
+            &held_out_batches,
+            &weights,
+        ),
+        Device::Gpu => fit::<Gpu>(
+            &burn::backend::wgpu::WgpuDevice::default(),
+            &arguments,
+            &train,
+            &held_out_batches,
+            &weights,
+        ),
+    }
+}
+
+/// Fit the model and write it, on whichever backend was asked for.
+///
+/// Generic rather than duplicated because the weights are backend-agnostic:
+/// what is fitted here loads anywhere, and the only thing the choice changes
+/// is how long it takes.
+fn fit<B: AutodiffBackend>(
+    device: &B::Device,
+    arguments: &Arguments,
+    train: &[Encoded],
+    held_out_batches: &[(training::Shape, Vec<Encoded>)],
+    weights: &[f32],
+) -> Result<(), String> {
+    let mut model = PreviewModel::<B>::new(device);
     let mut optimizer = AdamWConfig::new().init();
     let mut rng = StdRng::seed_from_u64(arguments.seed);
 
     for epoch in 1..=arguments.epochs {
+        let started = std::time::Instant::now();
         let mut total = 0.0_f64;
         let mut steps = 0_usize;
-        for (shape, chunk) in training::batches(&train, &mut rng) {
-            let batch = training::batch::<Train>(&chunk, shape, &device);
-            let loss = training::loss(&model, &batch, &weights, &device);
+        for (shape, chunk) in training::batches(train, &mut rng) {
+            let batch = training::batch::<B>(&chunk, shape, device);
+            let loss = training::loss(&model, &batch, weights, device);
             let value = loss
                 .clone()
                 .into_data()
@@ -136,15 +184,16 @@ fn main() -> Result<(), String> {
             model = optimizer.step(arguments.learning_rate, model, gradients);
         }
         let mean = total / f64::from(u32::try_from(steps.max(1)).unwrap_or(u32::MAX));
-        let accuracy = evaluate_accuracy(&model, &held_out_batches, &device);
+        let accuracy = evaluate_accuracy(&model, held_out_batches, device);
         eprintln!(
-            "epoch {epoch:>3}  loss {mean:.4}  held-out class {:.1}%  risk {:.1}%",
+            "epoch {epoch:>3}  loss {mean:.4}  held-out class {:.1}%  risk {:.1}%  ({:?})",
             100.0 * accuracy.class,
-            100.0 * accuracy.risk
+            100.0 * accuracy.risk,
+            started.elapsed()
         );
     }
 
-    report_per_class(&model, &held_out_batches, &device);
+    report_per_class(&model, held_out_batches, device);
 
     // Saved from the inference view of the model, so the weights file carries
     // no autodiff state and loads under the plain backend the wallet runs.

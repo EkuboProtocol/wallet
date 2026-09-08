@@ -172,12 +172,32 @@ inserting a fixed vocabulary piece invalidates the committed weights:
 Weights are committed to git, so every retrain writes a new copy into history;
 `weights_test.rs` fails if the file grows past 12 MB.
 
-### Training runs on the CPU
+### Where training runs
 
-Not a property of the model, which is small either way, but of the machine this
-was fitted on: `cubecl` sizes its `wgpu` memory pool from the adapter's
-reported memory, and on an integrated GPU with a 2 GB carve-out that is a
-single ~3 GB allocation which simply fails. Fitting 1.2M parameters over
-twenty thousand short sequences is minutes of CPU work, so there was nothing to
-buy by fighting it. The weights are backend-agnostic; what is fitted on
-`NdArray` loads onto `Wgpu` unchanged.
+`preview-train --device cpu` is the default and works anywhere. Fitting 1.2M
+parameters over twenty thousand short sequences is roughly ten minutes an epoch
+on a laptop CPU, which is slow but not prohibitive.
+
+`--device gpu` uses the same `wgpu` backend inference does, and needs a machine
+with real video memory. It will not work on a small integrated GPU: `cubecl`
+sizes its memory pool from the adapter's reported memory, and on a 2 GB
+carve-out that is a single ~3 GB allocation that fails outright — which is what
+sent the first fitting of this model to the CPU.
+
+`scripts/train-preview-remote.sh` does the GPU path on a DigitalOcean droplet:
+
+```sh
+scripts/train-preview-remote.sh /tmp/labeled.jsonl 12
+```
+
+It creates a throwaway SSH key and a GPU droplet, syncs this checkout and the
+corpus, builds, fits, copies the weights back over
+`crates/ekubo-wallet-preview/model/preview.bin`, and destroys both the droplet
+and the key. The teardown is a shell trap on `EXIT INT TERM`, because the
+droplet bills by the hour and leaving one running is the expensive mistake.
+Size, region and image are overridable through `PREVIEW_DROPLET_SIZE`,
+`PREVIEW_DROPLET_REGION` and `PREVIEW_DROPLET_IMAGE`.
+
+The weights are backend-agnostic, so which device fitted them changes nothing
+about what loads in the wallet — it is a flag rather than a fork, and the
+numbers below were reproduced on both.
