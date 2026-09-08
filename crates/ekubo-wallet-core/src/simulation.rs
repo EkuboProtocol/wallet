@@ -407,6 +407,22 @@ async fn finalize_policy(
         && result.simulation.block_gas_limit.is_some()
     {
         Some(crate::execution::prepare_execution_for_policy(wallet, network, plan, &result).await?)
+    } else if fork.is_none() && !result.simulation.success {
+        // A simulation that did not run leaves no gas, and with no envelope
+        // the owner is never shown the request -- so it can be neither
+        // approved nor rejected, and whatever queued it waits forever. Try to
+        // size it from `estimate_gas` instead so the decision still reaches a
+        // human.
+        //
+        // Failure here stays `None` rather than propagating: a plan that
+        // genuinely reverts fails estimation too, and that is an ordinary
+        // failed simulation to report, not an error that should replace it.
+        // Nothing downstream is loosened -- `allowed` is already false because
+        // the simulation did not succeed, so this can only ever queue for
+        // review, never sign on its own.
+        crate::execution::prepare_execution_for_policy(wallet, network, plan, &result)
+            .await
+            .ok()
     } else {
         None
     };

@@ -314,7 +314,29 @@ pub(crate) async fn prepare_execution_for_policy(
 ) -> Result<PreparedExecution> {
     validate_preparation_binding(wallet, network, plan, simulation)?;
     let planned = planned_call(plan, wallet.address);
-    let gas_limit = signing_gas_limit(simulation)?;
+    // A simulation that never ran leaves no gas to size the envelope with, and
+    // without an envelope the request cannot be shown to the owner at all --
+    // not to approve, and not to reject. That is the state a chain whose RPC
+    // cannot answer `eth_simulateV1` puts every request into, and it strands
+    // anything already queued there.
+    //
+    // Falling back to `estimate_gas` is the same trade the cancellation path
+    // already makes for the same reason, bounded the same way, so a request
+    // stays reviewable when the endpoint cannot simulate it. Only for a direct
+    // call: a Calibur batch is estimated against a delegation the account does
+    // not have yet, which simulation installs with a state override and
+    // `estimate_gas` cannot.
+    let gas_limit = match signing_gas_limit(simulation) {
+        Ok(limit) => limit,
+        Err(error) if matches!(planned.mode, ExecutionMode::Direct) => {
+            estimated_signing_gas_limit(wallet, network, &planned)
+                .await
+                .with_context(|| {
+                    format!("simulation produced no gas limit ({error}) and estimating one failed")
+                })?
+        }
+        Err(error) => return Err(error),
+    };
     let prepared = crate::rpc::try_clients(network, |client| async move {
         let prepared = tokio::time::timeout(RPC_TIMEOUT, async {
             tokio::try_join!(
@@ -634,6 +656,63 @@ fn usable_gas_ceiling(block_maximum: u64) -> Result<u64> {
          every transaction costs before it does anything"
     );
     Ok(block_maximum)
+}
+
+/// The signing gas limit for a plan whose simulation produced none.
+///
+/// Mirrors [`signing_gas_limit`] -- same multiplier, same ceiling, same
+/// intrinsic floor -- but sources the baseline from `estimate_gas` instead of
+/// simulated usage. The estimate and the block limit that bounds it are read
+/// from one endpoint in one breath, so an endpoint cannot supply the number
+/// and have its bound come from somewhere it does not control, and the ceiling
+/// is checked inside the closure so an endpoint whose numbers do not survive
+/// it is simply the endpoint that failed.
+///
+/// This is strictly worse information than a simulation: it proves the call
+/// does not revert at head, and nothing about what it will do. It exists so a
+/// request on a chain that cannot simulate is still a decision the owner gets
+/// to make rather than a row nobody can answer.
+async fn estimated_signing_gas_limit(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    planned: &PlannedCall,
+) -> Result<u64> {
+    ensure!(
+        matches!(planned.mode, ExecutionMode::Direct),
+        "only a direct call can be sized without a simulation"
+    );
+    crate::rpc::try_clients(network, |client| {
+        let planned = planned.clone();
+        async move {
+            let estimate_request = alloy::rpc::types::TransactionRequest::default()
+                .from(wallet.address)
+                .to(planned.to)
+                .value(planned.value)
+                .input(alloy::rpc::types::TransactionInput::new(planned.data));
+            let (estimated_gas, head) = tokio::time::timeout(RPC_TIMEOUT, async {
+                tokio::try_join!(
+                    client.estimate_gas(estimate_request),
+                    client.block_by_number(alloy::eips::BlockNumberOrTag::Latest),
+                )
+            })
+            .await
+            .context("gas estimation RPC timed out")??;
+            let block_maximum = head
+                .context("gas estimation could not read the chain head")?
+                .header
+                .gas_limit;
+            let maximum = usable_gas_ceiling(block_maximum)?;
+            ensure!(
+                estimated_gas <= maximum,
+                "estimated gas {estimated_gas} exceeds the maximum usable gas limit {maximum}"
+            );
+            Ok(estimated_gas
+                .saturating_mul(SIMULATION_GAS_MULTIPLIER)
+                .min(maximum)
+                .max(INTRINSIC_TRANSACTION_GAS))
+        }
+    })
+    .await
 }
 
 fn signing_gas_limit(simulation: &SimulationResult) -> Result<u64> {
