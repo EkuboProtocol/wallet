@@ -22,7 +22,10 @@ use alloy::{
     json_abi::Function,
     primitives::{Address, Bytes, I256, U256},
 };
-use ekubo_wallet_core::approval_summary::{OwnAccounts, TokenMetadata, TokenMetadataMap};
+use ekubo_wallet_core::{
+    approval_summary::{OwnAccounts, TokenMetadata, TokenMetadataMap, interpret_steps},
+    core::execution_plan::{DecimalU256, ExecutionStep, ExecutionStepKind, PlannedTransaction},
+};
 use rand::{Rng, RngExt as _, seq::IndexedRandom as _};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -256,8 +259,15 @@ fn synth_uint(bits: usize, rng: &mut impl Rng) -> U256 {
     U256::from(rng.random::<u64>()) % ceiling.max(U256::from(1))
 }
 
-/// Build one interpreted call for a spec entry, or `None` when the descriptor
-/// engine declined to read the synthesized calldata.
+/// Build one interpreted call for a spec entry, or `None` when nothing
+/// decoded it.
+///
+/// Interpretation goes through `approval_summary::interpret_steps`, which is
+/// the entry point the orchestrator itself calls -- not the descriptor engine
+/// directly. That matters for more than tidiness: `interpret_steps` is what
+/// attaches the warnings a review depends on, and an unlimited allowance is
+/// recognized there and nowhere else. A corpus built straight off the
+/// descriptor engine would have contained no unlimited approval that said so.
 pub fn synthesize(spec: &CallSpec, fixtures: &Fixtures, rng: &mut impl Rng) -> Option<CallSummary> {
     let function = Function::parse(&spec.canonical).ok()?;
     let kinds: Vec<DynSolType> = function
@@ -271,16 +281,6 @@ pub fn synthesize(spec: &CallSpec, fixtures: &Fixtures, rng: &mut impl Rng) -> O
         .collect();
     let calldata = Bytes::from(function.abi_encode_input(&values).ok()?);
     let to = spec.address.parse::<Address>().ok()?;
-    let envelope = || ekubo_wallet_core::clear_signing::CallEnvelope {
-        from: fixtures.sender,
-        to,
-    };
-    // The same two-pass resolution the orchestrator performs: ask the
-    // descriptor which tokens it names, resolve those, then render.
-    let referenced = futures::executor::block_on(
-        ekubo_wallet_core::clear_signing::token_references(spec.chain_id, envelope(), &calldata),
-    );
-    let metadata = fixtures.metadata(&referenced, rng);
     let value = if matches!(
         function.state_mutability,
         alloy::json_abi::StateMutability::Payable
@@ -290,18 +290,130 @@ pub fn synthesize(spec: &CallSpec, fixtures: &Fixtures, rng: &mut impl Rng) -> O
     } else {
         U256::ZERO
     };
-    let reading = futures::executor::block_on(ekubo_wallet_core::clear_signing::interpret(
-        spec.chain_id,
-        envelope(),
-        &calldata,
+    interpret_one(spec.chain_id, to, calldata, value, fixtures, rng)
+        .filter(|summary| summary.description.is_some())
+}
+
+/// The standard token and batching calls, which no descriptor covers.
+///
+/// These are most of what a wallet actually signs and all of what its worst
+/// day looks like, so leaving them to the registry would have trained the
+/// model on the long tail and not the head. `interpret_steps` decodes them
+/// through its own path, and the unlimited-allowance and operator-grant
+/// warnings it attaches are exactly the cases the risk band exists to raise.
+pub fn synthesize_standard(fixtures: &Fixtures, rng: &mut impl Rng) -> Option<CallSummary> {
+    let kind = rng.random_range(0..7);
+    synthesize_standard_kind(fixtures, rng, kind)
+}
+
+/// An approval specifically, for the approve-then-act plan shape.
+pub fn synthesize_approval(fixtures: &Fixtures, rng: &mut impl Rng) -> Option<CallSummary> {
+    synthesize_standard_kind(fixtures, rng, 0)
+}
+
+fn synthesize_standard_kind(
+    fixtures: &Fixtures,
+    rng: &mut impl Rng,
+    kind: u8,
+) -> Option<CallSummary> {
+    let spender = fixtures.address(rng);
+    let token = fixtures.address(rng);
+    let amount = synth_uint(256, rng);
+    let mut calldata = Vec::new();
+    match kind {
+        0 | 1 => {
+            calldata.extend_from_slice(&[0x09, 0x5e, 0xa7, 0xb3]);
+            calldata.extend_from_slice(&DynSolValue::Address(spender).abi_encode());
+            calldata.extend_from_slice(&DynSolValue::Uint(amount, 256).abi_encode());
+        }
+        2 => {
+            // A revocation: the same selector with a zero ceiling.
+            calldata.extend_from_slice(&[0x09, 0x5e, 0xa7, 0xb3]);
+            calldata.extend_from_slice(&DynSolValue::Address(spender).abi_encode());
+            calldata.extend_from_slice(&DynSolValue::Uint(U256::ZERO, 256).abi_encode());
+        }
+        3 | 4 => {
+            calldata.extend_from_slice(&[0xa9, 0x05, 0x9c, 0xbb]);
+            calldata.extend_from_slice(&DynSolValue::Address(spender).abi_encode());
+            calldata.extend_from_slice(&DynSolValue::Uint(amount, 256).abi_encode());
+        }
+        5 => {
+            calldata.extend_from_slice(&[0x23, 0xb8, 0x72, 0xdd]);
+            calldata.extend_from_slice(&DynSolValue::Address(fixtures.sender).abi_encode());
+            calldata.extend_from_slice(&DynSolValue::Address(spender).abi_encode());
+            calldata.extend_from_slice(&DynSolValue::Uint(amount, 256).abi_encode());
+        }
+        _ => {
+            calldata.extend_from_slice(&[0xa2, 0x2c, 0xb4, 0x65]);
+            calldata.extend_from_slice(&DynSolValue::Address(spender).abi_encode());
+            calldata.extend_from_slice(&DynSolValue::Bool(rng.random_range(0..4) > 0).abi_encode());
+        }
+    }
+    interpret_one(1, token, Bytes::from(calldata), U256::ZERO, fixtures, rng)
+}
+
+/// A call nothing decodes: an unknown selector at an unknown contract.
+///
+/// The model has to be willing to answer "unrecognized", and it will only
+/// learn that from examples where that is the right answer. Some carry native
+/// value, which is the combination the risk band treats as Critical.
+pub fn synthesize_opaque(fixtures: &Fixtures, rng: &mut impl Rng) -> Option<CallSummary> {
+    let mut calldata = vec![0_u8; rng.random_range(4..68)];
+    rng.fill_bytes(&mut calldata);
+    let value = if rng.random_range(0..2) == 0 {
+        synth_uint(64, rng)
+    } else {
+        U256::ZERO
+    };
+    interpret_one(
+        1,
+        fixtures.address(rng),
+        Bytes::from(calldata),
         value,
+        fixtures,
+        rng,
+    )
+}
+
+/// Run one synthesized call through the orchestrator's interpretation path.
+fn interpret_one(
+    chain_id: u64,
+    to: Address,
+    calldata: Bytes,
+    value: U256,
+    fixtures: &Fixtures,
+    rng: &mut impl Rng,
+) -> Option<CallSummary> {
+    let step = ExecutionStep {
+        step: 1,
+        kind: ExecutionStepKind::Execution,
+        transaction: PlannedTransaction {
+            chain_id: DecimalU256::new(chain_id.to_string()).ok()?,
+            from: fixtures.sender,
+            to,
+            data: calldata,
+            value: DecimalU256::new(value.to_string()).ok()?,
+            gas: None,
+        },
+        revert_decode: None,
+    };
+    // The same two-pass token resolution the orchestrator performs: ask what
+    // the plan names, resolve exactly those, then interpret.
+    let referenced = futures::executor::block_on(
+        ekubo_wallet_core::approval_summary::plan_token_targets(std::slice::from_ref(&step)),
+    );
+    let metadata = fixtures.metadata(&referenced, rng);
+    let interpretation = futures::executor::block_on(interpret_steps(
+        std::slice::from_ref(&step),
         &metadata,
         &fixtures.own,
-    ))?;
+    ))
+    .into_iter()
+    .next()?;
     Some(CallSummary {
-        description: Some(reading.intent),
-        details: reading.fields,
-        warnings: reading.warnings,
+        description: interpretation.description,
+        details: interpretation.details,
+        warnings: interpretation.warnings,
         target: target_label(to, &metadata),
         native_value: native_value(value),
     })
@@ -347,6 +459,19 @@ pub struct Example {
     /// The decoded lines, kept so a human labeling a format can see what a
     /// reviewer would see.
     pub lines: Vec<String>,
+    /// The one-line reading of each call, in order.
+    ///
+    /// A call with no descriptor behind it -- a standard token call, an
+    /// opaque one -- has no intent for the label table to read, so this is
+    /// what it classifies from instead.
+    pub call_descriptions: Vec<String>,
+    /// Every warning the deterministic interpretation attached, across all
+    /// calls. The risk band is derived from these, so they have to travel with
+    /// the example rather than being recomputed from its text.
+    pub warnings: Vec<String>,
+    /// Whether any call sends native value. An opaque call that also sends
+    /// value is a different proposition from one that does not.
+    pub has_value: bool,
 }
 
 /// Turn a synthesized plan into the record the corpus stores.
@@ -381,6 +506,22 @@ pub fn record(document: &PlanDocument, formats: Vec<String>, protocols: Vec<Stri
             .map(|slot| slot.text.clone())
             .collect(),
         lines,
+        call_descriptions: document
+            .calls
+            .iter()
+            .map(|call| call.description.clone().unwrap_or_default())
+            .collect(),
+        warnings: document
+            .calls
+            .iter()
+            .flat_map(|call| call.warnings.iter().cloned())
+            .collect(),
+        has_value: document.calls.iter().any(|call| {
+            !call
+                .native_value
+                .trim_start_matches(['0', '.', ' '])
+                .is_empty()
+        }),
     }
 }
 
