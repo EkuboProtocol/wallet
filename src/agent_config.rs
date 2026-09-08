@@ -626,7 +626,8 @@ impl AgentAdapter {
     /// in: the entries are what a harness executes, and the bytes around them
     /// belong to the harness, which rewrites them on its own schedule.
     /// `a_harness_that_rewrote_its_own_config_still_reads_as_installed` holds
-    /// the case that taught us the difference.
+    /// the case that taught us the difference — a reformatted file whose
+    /// managed entries are intact is still in sync.
     ///
     /// A file that does not parse is an error rather than a `false`: the
     /// owner can act on "your configuration is malformed" and cannot act on
