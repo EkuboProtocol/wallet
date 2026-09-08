@@ -719,4 +719,59 @@ mod automatic_gas_floor_tests {
     fn a_ceiling_below_the_floor_is_refused() {
         assert!(signing_gas_limit(&simulation("0", "21000", true)).is_err());
     }
+
+    /// The condition the `estimate_gas` fallback exists for.
+    ///
+    /// A chain whose RPC refuses `eth_simulateV1` returns no gas at all, which
+    /// is a different thing from returning a small number: there is nothing to
+    /// multiply. Without a limit there is no envelope, and without an envelope
+    /// the owner is never shown the request -- so it can be neither approved
+    /// nor rejected and whatever queued it waits on a decision nobody can give.
+    #[test]
+    fn a_simulation_that_never_ran_yields_no_limit_at_all() {
+        let mut result = simulation("0", "30000000", false);
+        result.simulation.success = false;
+        result.simulation.gas_used = None;
+        result.simulation.block_gas_limit = None;
+        assert!(
+            signing_gas_limit(&result).is_err(),
+            "a simulation with no gas cannot size an envelope; the fallback is what covers it"
+        );
+    }
+}
+
+mod unsimulated_sizing_tests {
+    //! Sizing an envelope when the endpoint could not simulate it.
+
+    use super::*;
+
+    fn planned(mode: crate::simulation::ExecutionMode) -> crate::simulation::PlannedCall {
+        crate::simulation::PlannedCall {
+            mode,
+            to: Address::repeat_byte(0x11),
+            data: alloy::primitives::Bytes::new(),
+            value: U256::ZERO,
+        }
+    }
+
+    /// A batch is estimated against a delegation the account does not have
+    /// yet. Simulation installs it with a state override; `estimate_gas` has
+    /// no such thing, so it would price a call the wallet is not going to
+    /// make. Refused before any endpoint is asked, so the guard cannot be
+    /// reached past by a permissive RPC.
+    #[tokio::test]
+    async fn a_batch_is_never_sized_without_a_simulation() {
+        let signer = PrivateKeySigner::random();
+        let error = estimated_signing_gas_limit(
+            &wallet(&signer),
+            &network(),
+            &planned(crate::simulation::ExecutionMode::CaliburBatch),
+        )
+        .await
+        .expect_err("a batch has no honest estimate without its delegation");
+        assert!(
+            error.to_string().contains("only a direct call"),
+            "unexpected error: {error}"
+        );
+    }
 }
