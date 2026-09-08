@@ -887,6 +887,16 @@ fn waiting_card_bounds(
     view: &Entity<WalletWindow>,
     headline: &str,
 ) -> gpui::Bounds<gpui::Pixels> {
+    waiting_card_bounds_with_preview(cx, window, view, headline, None)
+}
+
+fn waiting_card_bounds_with_preview(
+    cx: &mut gpui::TestAppContext,
+    window: gpui::AnyWindowHandle,
+    view: &Entity<WalletWindow>,
+    headline: &str,
+    preview: Option<ekubo_wallet_preview::TransactionPreview>,
+) -> gpui::Bounds<gpui::Pixels> {
     let headline = SharedString::from(headline.to_owned());
     cx.update_entity(view, |wallet, cx| {
         let mut snapshot = quiet_snapshot();
@@ -900,11 +910,66 @@ fn waiting_card_bounds(
         snapshot
             .transaction_headlines
             .insert(HEADLINE_ROW, headline);
+        if let Some(preview) = preview {
+            snapshot.transaction_previews.insert(HEADLINE_ROW, preview);
+        }
         wallet.desktop_snapshot = Some(Arc::new(snapshot));
         wallet.set_route(Route::Activity);
         wallet.set_inbox_tab(InboxTab::Waiting, cx);
     });
     measure(cx, window, view, &["inbox-waiting-card"])[0].expect("the waiting card must draw")
+}
+
+/// A preview is drawn, and it is drawn *in addition to* the deterministic
+/// headline rather than in place of it.
+///
+/// The card growing taller is what says the second line landed. If a future
+/// change ever renders the model's sentence instead of the decoded one, the
+/// card stops growing and this fails -- which is the point, because the
+/// decoded headline is the part that was checked.
+#[gpui::test]
+fn a_preview_draws_below_the_headline_rather_than_replacing_it(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+
+    let without = waiting_card_bounds(cx, window, &view, TWO_LINE_HEADLINE);
+    let with = waiting_card_bounds_with_preview(
+        cx,
+        window,
+        &view,
+        TWO_LINE_HEADLINE,
+        Some(ekubo_wallet_preview::TransactionPreview {
+            class: ekubo_wallet_preview::TransactionClass::Approval,
+            risk: ekubo_wallet_preview::RiskBand::Critical,
+            summary: "approve 0x1111111254EEB25477B68fb85Ed929f73A960582 to spend \
+                      1000.5 USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)"
+                .to_owned(),
+        }),
+    );
+    assert!(
+        with.size.height > without.size.height,
+        "the preview must take its own line beside the headline, not replace it: \
+         {} against {}",
+        with.size.height,
+        without.size.height
+    );
+    assert!(
+        with.size.width <= without.size.width,
+        "a long summary must wrap inside the card rather than widen it: {} against {}",
+        with.size.width,
+        without.size.width
+    );
+}
+
+/// A machine with no model is the ordinary case, not an error, so the card
+/// must draw exactly as it did before previews existed.
+#[gpui::test]
+fn a_card_with_no_preview_draws_unchanged(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let bounds = waiting_card_bounds_with_preview(cx, window, &view, TWO_LINE_HEADLINE, None);
+    assert!(bounds.size.height > gpui::px(0.0));
+    assert!(bounds.size.width > gpui::px(0.0));
 }
 
 /// A title that says what a plan does is a sentence, not a category, so it is
