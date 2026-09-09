@@ -66,17 +66,17 @@ fn main() -> Result<(), String> {
         evaluate(
             &ekubo_wallet_preview::cpu::load().map_err(|e| e.to_string())?,
             &examples,
-        );
+        )?;
     } else {
         evaluate(
             &ekubo_wallet_preview::gpu::load().map_err(|e| e.to_string())?,
             &examples,
-        );
+        )?;
     }
     Ok(())
 }
 
-fn evaluate<B: Backend>(engine: &PreviewEngine<B>, examples: &[Labeled]) {
+fn evaluate<B: Backend>(engine: &PreviewEngine<B>, examples: &[Labeled]) -> Result<(), String> {
     let mut class_right = 0;
     let mut risk_right = 0;
     let mut critical_missed = 0;
@@ -89,7 +89,9 @@ fn evaluate<B: Backend>(engine: &PreviewEngine<B>, examples: &[Labeled]) {
     let started = std::time::Instant::now();
     for chunk in examples.chunks(8) {
         let documents: Vec<_> = chunk.iter().map(|e| e.document.clone()).collect();
-        for (example, preview) in chunk.iter().zip(engine.preview_all(&documents)) {
+        for (example, preview) in chunk.iter().zip(futures::executor::block_on(
+            engine.legacy_all_async(&documents),
+        )?) {
             let expected = TransactionClass::from_corpus_name(&example.class)
                 .unwrap_or(TransactionClass::Unrecognized);
             seen[expected.index()] += 1;
@@ -158,4 +160,5 @@ fn evaluate<B: Backend>(engine: &PreviewEngine<B>, examples: &[Labeled]) {
             seen[i]
         );
     }
+    Ok(())
 }

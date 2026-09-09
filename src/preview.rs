@@ -49,7 +49,7 @@ static ENGINE: LazyLock<Option<cpu::CpuEngine>> =
 /// One call as the model reads it, from the interpretation the review already
 /// holds.
 ///
-/// Nothing is decoded twice and nothing new is fetched: this is a restatement
+/// This conversion does not decode or fetch anything: it is a restatement
 /// of `StepInterpretation`, which the caller computed for the review itself.
 #[must_use]
 pub fn call_summary(
@@ -63,14 +63,14 @@ pub fn call_summary(
         warnings: interpretation.warnings.clone(),
         target,
         native_value,
+        evidence: None,
     }
 }
 
 /// Previews for a batch of waiting requests.
 ///
-/// Batched on purpose. The review list asks about every waiting request in one
-/// go, and the decode loop is sequential in summary tokens but not in plans --
-/// dispatches contain at most eight requests to bound tensor memory.
+/// The review list submits waiting requests together so identical call readings
+/// can share encoder work. Each plan has an independent neural-work budget.
 ///
 /// Answers an empty map when the model is unavailable, which callers should
 /// render as "no preview" rather than as any particular verdict.
@@ -94,7 +94,7 @@ pub fn previews(plans: Vec<(Uuid, PlanDocument)>) -> BTreeMap<Uuid, TransactionP
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cached_previews(plans, &mut cache, |documents| {
-            futures::executor::block_on(engine.preview_all_async(documents))
+            futures::executor::block_on(engine.card_all_async(documents))
         })
     }));
     match computed {

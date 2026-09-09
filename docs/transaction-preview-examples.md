@@ -1,118 +1,188 @@
-# Transaction preview examples
+# Generated transaction card examples
 
-Actual outputs from the committed revision-4 weights, run through the browser CPU backend on 2026-09-09. These are illustrative synthetic decoded inputs; no transactions were sent. Standard calls and opaque-call warnings can use deterministic fallbacks. Summaries select fields rather than freely paraphrasing them.
+Actual native CPU outputs from the committed weights and card path; the same 22 cases passed in browser CPU builds and WebGPU. Inputs are synthetic fixtures, and no transactions were sent. These examples demonstrate regression coverage, not independent semantic accuracy. All summaries fit the 100-character hard cap.
 
-The omissions are intentional evidence of remaining limitations: cooldown omits its amount, and liquidity removal selects a minimum output instead of the liquidity quantity. The full decoded reading remains visible in the wallet.
+## 1. Exact approval then swap
 
-## Token approval
+- approve spender 0x1111111111111111111111111111111111111111 for 250 USDC
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Minimum output: 0.1 ETH
 
-Decoded input:
+**Generated:** Approve and swap 250 USDC for ETH
 
-- approve spender 0x2222222222222222222222222222222222222222 for 100 USDC
+Category: `swap`. Advisory risk: `caution`.
 
-> approve spender 0x2222222222222222222222222222222222222222 for 100 USDC
+## 2. Unlimited approval then swap
 
-Category: `approval`. Advisory risk: `caution`.
+- approve spender 0x1111111111111111111111111111111111111111 for unlimited USDC; warnings: Unlimited allowance
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Minimum output: 0.1 ETH
 
-## Third-party transfer
+**Generated:** Unlimited approve USDC and swap 250 USDC for ETH
 
-Decoded input:
+Category: `swap`. Advisory risk: `critical`.
 
-- transferFrom 25 USDC from 0x1111111111111111111111111111111111111111 to 0x2222222222222222222222222222222222222222
+## 3. Swap then revoke
 
-> transferFrom 25 USDC from 0x1111111111111111111111111111111111111111 to 0x2222222222222222222222222222222222222222
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Minimum output: 0.1 ETH
+- revoke USDC allowance for spender 0x1111111111111111111111111111111111111111
 
-Category: `transfer`. Advisory risk: `caution`.
+**Generated:** Swap 250 USDC for ETH, then revoke approval
 
-## Cooldown
+Category: `swap`. Advisory risk: `routine`.
 
-Decoded input:
+## 4. Larger finite allowance
 
-- Ethena — Cooldown shares; Amount: 12 sUSDe
+- approve spender 0x1111111111111111111111111111111111111111 for 1000 USDC
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Minimum output: 0.1 ETH
 
-> Ethena: Cooldown shares
+**Generated:** Approve 1000 USDC and swap 250 USDC for ETH
 
-Category: `unstake`. Advisory risk: `routine`.
+Category: `swap`. Advisory risk: `caution`.
 
-## Deposit
+## 5. Unrelated unlimited approval
 
-Decoded input:
+- approve spender 0x2222222222222222222222222222222222222222 for unlimited USDC; warnings: Unlimited allowance
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Minimum output: 0.1 ETH
 
+**Generated:** Unlimited approve USDC to 0x222222…222222 and swap 250 USDC for ETH
+
+Category: `swap`. Advisory risk: `critical`.
+
+## 6. Claim, swap, deposit
+
+- Sei — Claim rewards
+- Uniswap — Swap; Token in: rewards; Token out: USDC
 - Aave — Supply; Amount: 250 USDC
 
-> Aave: Supply — Amount: 250 USDC
+**Generated:** Claim rewards on Sei, swap rewards for USDC, and deposit 250 USDC
 
 Category: `supply`. Advisory risk: `routine`.
 
-## Claim rewards
+## 7. Deposit
 
-Decoded input:
+- Aave — Supply; Amount: 250 USDC
 
-- Sei — Claim rewards
+**Generated:** Deposit 250 USDC
 
-> Sei: Claim rewards
+Category: `supply`. Advisory risk: `routine`.
 
-Category: `claim`. Advisory risk: `routine`.
+## 8. Cooldown
 
-## Stake
+- Ethena — Cooldown shares; Amount: 12 sUSDe
 
-Decoded input:
+**Generated:** Start cooldown 12 sUSDe
 
-- Lido — Stake ETH; Amount: 0.5 ETH; native value 0.5 ETH
+Category: `unstake`. Advisory risk: `routine`.
 
-> Lido: Stake ETH — Amount: 0.5 ETH
+## 9. Stake
+
+- Lido — Stake ETH; Amount: 0.5 ETH; native value: 0.5 ETH
+
+**Generated:** Stake 0.5 ETH
 
 Category: `stake`. Advisory risk: `routine`.
 
-## Remove liquidity
-
-Decoded input:
+## 10. Liquidity minimum
 
 - Uniswap — Remove liquidity; Liquidity: 50; Minimum token 0: 10 USDC; Minimum token 1: 0.01 ETH
 
-> Uniswap: Remove liquidity — Minimum token 1: 0.01 ETH
+**Generated:** Remove liquidity on Uniswap
 
 Category: `liquidity_remove`. Advisory risk: `routine`.
 
-## Undecoded call
+## 11. Minimum is not expected output
 
-Decoded input:
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Minimum output: 0.1 ETH
 
-- Undecoded call to 0x1111111111111111111111111111111111111111; native value 0.25 ETH
+**Generated:** Swap 250 USDC for ETH
 
-> Undecoded call to 0x1111111111111111111111111111111111111111 sending 0.25 ETH
+Category: `swap`. Advisory risk: `routine`.
+
+## 12. Unknown tail
+
+- Aave — Supply; Amount: 250 USDC
+- Unknown call
+
+**Generated:** Deposit 250 USDC and unknown call
+
+Category: `supply`. Advisory risk: `critical`.
+
+## 13. Unknown head
+
+- Unknown call
+- Aave — Supply; Amount: 250 USDC
+
+**Generated:** Unknown call and deposit 250 USDC
+
+Category: `supply`. Advisory risk: `critical`.
+
+## 14. Unknown value transfer
+
+- Unknown call; native value: 0.25 ETH
+
+**Generated:** Unknown call sending 0.25 ETH
 
 Category: `unrecognized`. Advisory risk: `critical`.
 
-## Late opaque call
+## 15. Distinct recipient
 
-Decoded input:
+- Uniswap — Swap; Amount in: 250 USDC; Token out: ETH; Recipient: 0x2222222222222222222222222222222222222222
 
-- Sei — Claim rewards
-- Ethena — Cooldown shares; Amount: 12 sUSDe
-- Undecoded call to 0x1111111111111111111111111111111111111111
+**Generated:** Swap 250 USDC for ETH to 0x222222…222222
 
-> 3 calls; call 3: Unrecognized. Review all calls.
+Category: `swap`. Advisory risk: `routine`.
 
-Category: `batch`. Advisory risk: `critical`.
+## 16. Operator grant
 
-## Operator approval
+- setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved true; warnings: Operator can transfer all tokens
 
-Decoded input:
-
-- setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved true
-- Warning: Operator can transfer all tokens
-
-> setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved true
+**Generated:** Approve all tokens
 
 Category: `approval`. Advisory risk: `critical`.
 
-## Operator revocation
-
-Decoded input:
+## 17. Operator revocation
 
 - setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved false
 
-> setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved false
+**Generated:** Revoke approval
 
 Category: `revocation`. Advisory risk: `routine`.
+
+## 18. Preserve signer change
+
+- Safe — Swap signer; Old signer: 0x1111111111111111111111111111111111111111; New signer: 0x2222222222222222222222222222222222222222
+
+**Generated:** Swap signer on Safe
+
+Category: `governance`. Advisory risk: `routine`.
+
+## 19. Preserve compound action
+
+- Protocol — Claim rewards and restake
+
+**Generated:** Claim rewards and restake on Protocol
+
+Category: `claim`. Advisory risk: `routine`.
+
+## 20. Do not promise instant withdrawal
+
+- Lido — Request withdrawal; Amount: 2 ETH
+
+**Generated:** Request withdrawal on Lido
+
+Category: `withdraw`. Advisory risk: `routine`.
+
+## 21. Preserve transfer roles
+
+- transferFrom 0x1111111111111111111111111111111111111111 to 0x2222222222222222222222222222222222222222 for 25 USDC
+
+**Generated:** TransferFrom 0x111111…111111 to 0x222222…222222 for 25 USDC
+
+Category: `transfer`. Advisory risk: `caution`.
+
+## 22. Conflicting fields
+
+- Aave — Supply; Amount: 250 USDC; Amount: 500 USDC
+
+**Generated:** Deposit on Aave
+
+Category: `supply`. Advisory risk: `routine`.

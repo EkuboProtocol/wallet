@@ -33,7 +33,6 @@ train = [
     "dep:alloy",
     "dep:ekubo-wallet-core",
     "dep:rand",
-    "dep:serde",
     "dep:serde_json",
 ]
 
@@ -48,7 +47,7 @@ alloy = { version = "=2.4.1", features = ["dyn-abi", "json-abi"], optional = tru
 ekubo-wallet-core = { path = "../ekubo-wallet-core", optional = true }
 futures = "0.3.31"
 rand = { version = "0.10.0", optional = true }
-serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", optional = true }
 
 # On `wasm32-unknown-unknown` there is no ambient entropy source, so
@@ -92,5 +91,11 @@ workspace = true
 [[bin]]
 name = "preview-bench"
 path = "src/bin/preview_bench.rs"
+required-features = ["train"]
+test = false
+
+[[bin]]
+name = "preview-card-eval"
+path = "src/bin/preview_card_eval.rs"
 required-features = ["train"]
 test = false

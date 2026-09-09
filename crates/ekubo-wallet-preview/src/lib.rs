@@ -1,11 +1,15 @@
-//! An embedded encoder-decoder over deterministic clear-signing interpretations.
-//! Produces advisory categories, risk bands, and summaries. Copied values preserve
-//! their spelling, not their semantic role: a summary can still be wrong.
+//! Embedded neural classification and plan-focus ranking over execution evidence.
+//! Produces advisory categories, risk bands, and length-constrained card summaries.
+//! Values come from labeled interpretations; incomplete or incorrect evidence can
+//! still produce a wrong summary. The legacy decoder supports training evaluation.
 //! Nothing here grants signing authority. See docs/transaction-previews.md.
 
+pub mod card;
 #[cfg(feature = "train")]
 pub mod corpus;
 pub mod cpu;
+pub mod evidence;
+pub mod focus;
 #[cfg(any(feature = "gpu", feature = "webgpu"))]
 pub mod gpu;
 pub mod infer;
@@ -27,9 +31,8 @@ pub struct TransactionPreview {
     pub class: TransactionClass,
     /// How much attention the plan warrants. Advisory ordering only.
     pub risk: RiskBand,
-    /// One sentence, with every value substituted verbatim from the
-    /// deterministic interpretation. Empty when the decode produced nothing
-    /// renderable, which callers should treat as "show the class alone".
+    /// A complete card summary of at most 100 Unicode scalar values, grounded
+    /// in the interpretation. The legacy diagnostic decoder may return empty.
     pub summary: String,
 }
 

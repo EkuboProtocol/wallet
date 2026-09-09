@@ -44,7 +44,7 @@ impl<B: Backend> PreviewEngine<B> {
     /// Browser-safe inference: GPU readbacks must yield to the event loop.
     /// Batches are bounded and grouped by width so one long request cannot
     /// inflate every other request's attention tensors.
-    pub async fn preview_all_async(
+    pub async fn legacy_all_async(
         &self,
         documents: &[PlanDocument],
     ) -> Result<Vec<TransactionPreview>, String> {
@@ -75,6 +75,150 @@ impl<B: Backend> PreviewEngine<B> {
             .iter()
             .map(|group| aggregate(&prepared.previews[group.clone()]))
             .collect())
+    }
+
+    /// Card summaries are the public default on every backend.
+    pub async fn preview_all_async(
+        &self,
+        documents: &[PlanDocument],
+    ) -> Result<Vec<TransactionPreview>, String> {
+        self.card_all_async(documents).await
+    }
+
+    #[cfg(test)]
+    fn legacy_preview_all(&self, documents: &[PlanDocument]) -> Vec<TransactionPreview> {
+        futures::executor::block_on(self.legacy_all_async(documents)).expect("legacy inference")
+    }
+
+    #[cfg(test)]
+    fn legacy_preview(&self, document: &PlanDocument) -> TransactionPreview {
+        self.legacy_preview_all(std::slice::from_ref(document))
+            .remove(0)
+    }
+
+    /// Fast card summaries: encode distinct call readings once, then realize
+    /// the complete ordered plan under a character budget. Concrete values do
+    /// not enter the neural vocabulary, so repeated readings can share a
+    /// prediction even when their amounts or addresses differ.
+    pub async fn card_all_async(
+        &self,
+        documents: &[PlanDocument],
+    ) -> Result<Vec<TransactionPreview>, String> {
+        let mut outputs = Vec::with_capacity(documents.len());
+        let mut shared =
+            std::collections::BTreeMap::<Vec<Token>, (TransactionClass, RiskBand)>::new();
+        for document in documents {
+            let mut work = 0_usize;
+            let mut predictions: Vec<_> = document
+                .calls
+                .iter()
+                .map(|call| TransactionPreview {
+                    class: TransactionClass::Unrecognized,
+                    risk: if call.description.is_some() {
+                        RiskBand::Caution
+                    } else {
+                        RiskBand::Critical
+                    },
+                    summary: String::new(),
+                })
+                .collect();
+            let mut unique = std::collections::BTreeMap::<Vec<Token>, Vec<usize>>::new();
+            let mut pending = Vec::new();
+            for (index, call) in document.calls.iter().enumerate() {
+                let part = PlanDocument {
+                    calls: vec![crate::evidence::project(call)],
+                };
+                let slots = slotize(&part);
+                if part.calls[0].description.is_none() || slots.truncated {
+                    continue;
+                }
+                if let Some(indices) = unique.get_mut(&slots.tokens) {
+                    indices.push(index);
+                    continue;
+                }
+                let width = crate::slots::width_for(slots.tokens.len());
+                // Quadratic attention work, not just number of rows, bounds
+                // latency. Full-plan realization still examines EVERY call.
+                let cost = width * width;
+                if work + cost > 262_144 {
+                    continue;
+                }
+                work += cost;
+                unique.insert(slots.tokens.clone(), vec![index]);
+                if !shared.contains_key(&slots.tokens) {
+                    pending.push((index, slots));
+                }
+            }
+            pending.sort_by_key(|(_, slots)| crate::slots::width_for(slots.tokens.len()));
+            for rows in pending.chunk_by(|a, b| {
+                crate::slots::width_for(a.1.tokens.len())
+                    == crate::slots::width_for(b.1.tokens.len())
+            }) {
+                let width = crate::slots::width_for(rows[0].1.tokens.len());
+                for chunk in rows.chunks(batch_size_for(width)) {
+                    let (input, pad, _) = self.tensors(chunk, width);
+                    let prediction = self.model.classify(self.model.encode(input, &pad), &pad);
+                    let classes = indices_async(prediction.class.argmax(1)).await?;
+                    let risks = indices_async(prediction.risk.argmax(1)).await?;
+                    for ((_, slots), (class, risk)) in
+                        chunk.iter().zip(classes.into_iter().zip(risks))
+                    {
+                        shared.insert(
+                            slots.tokens.clone(),
+                            (
+                                TransactionClass::from_index(
+                                    usize::try_from(class).unwrap_or(usize::MAX),
+                                ),
+                                RiskBand::from_index(usize::try_from(risk).unwrap_or(usize::MAX)),
+                            ),
+                        );
+                    }
+                }
+            }
+            for (tokens, indices) in &unique {
+                if let Some((class, risk)) = shared.get(tokens) {
+                    for index in indices {
+                        predictions[*index].class = *class;
+                        predictions[*index].risk = *risk;
+                    }
+                }
+            }
+            for (call, prediction) in document.calls.iter().zip(&mut predictions) {
+                if let Some(class) = standard_class(call) {
+                    prediction.class = class;
+                    prediction.risk = match class {
+                        TransactionClass::Approval => RiskBand::Critical,
+                        TransactionClass::Transfer => RiskBand::Caution,
+                        _ => RiskBand::Routine,
+                    };
+                }
+                prediction.risk =
+                    RiskBand::from_index(prediction.risk.index().max(call_risk_floor(call)));
+            }
+            let mut result = aggregate(&predictions);
+            let focus = crate::focus::scores(
+                &predictions
+                    .iter()
+                    .zip(&document.calls)
+                    .map(|(p, call)| {
+                        if call.description.is_some() {
+                            p.class
+                        } else {
+                            TransactionClass::Unrecognized
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if let Some(index) = (0..focus.len()).max_by(|a, b| focus[*a].total_cmp(&focus[*b])) {
+                result.class = predictions[index].class;
+            }
+            if document.nothing_decoded() {
+                result.class = TransactionClass::Unrecognized;
+            }
+            result.summary = crate::card::summarize(document, &predictions);
+            outputs.push(result);
+        }
+        Ok(outputs)
     }
 
     /// Encode, classify, and decode one batch.
@@ -470,6 +614,13 @@ impl Prepared {
 }
 
 fn call_risk_floor(call: &crate::slots::CallSummary) -> usize {
+    if call
+        .evidence
+        .as_ref()
+        .is_some_and(crate::evidence::unlimited_approval)
+    {
+        return RiskBand::Critical.index();
+    }
     if call.description.is_none() && call.details.is_empty() {
         return RiskBand::Critical.index();
     }

@@ -1,8 +1,8 @@
 # @ekubo/tx-preview
 
-A 5.20 MB transaction-preview model that runs entirely in the browser. Give it
+A 5.21 MB transaction-preview model that runs entirely in the browser. Give it
 the decoded reading of a transaction — the same clear-signing interpretation a
-wallet already shows — and it answers a category, a risk band, and one sentence.
+wallet already shows — and it answers a category, a risk band, and a whole-plan summary of at most 100 characters.
 
 No server, no API key, no network call. The weights ship inside the `.wasm`.
 
@@ -19,28 +19,26 @@ import init, { Previewer } from "@ekubo/tx-preview";
 
 await init();
 
-// WebGPU when the browser has it, CPU when it does not. A missing adapter is
-// an ordinary state, not an error.
-const previewer = typeof Previewer.initWebGpu === "function" && navigator.gpu
-  ? await Previewer.initWebGpu().catch(() => Previewer.initCpu())
-  : Previewer.initCpu();
+// CPU gives fast startup for the small card model. Run this in a Worker
+// when integrating with a UI. WebGPU remains available explicitly.
+const previewer = Previewer.initCpu();
 
 const preview = await previewer.preview([
   {
-    description: "approve spender 0x1111…0582 for 1000.5 USDC (0xA0b8…eB48)",
-    details: ["Spender: 0x1111…0582", "Amount: 1000.5 USDC"],
+    description: "approve spender 0x1111111254EEB25477B68fb85Ed929f73A960582 for 1000.5 USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)",
+    details: ["Spender: 0x1111111254EEB25477B68fb85Ed929f73A960582", "Amount: 1000.5 USDC"],
     warnings: [],
-    target: "USDC (0xA0b8…eB48)",
+    target: "USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)",
     nativeValue: "0 ETH",
   },
 ]);
 
 // { class: "approval", risk: "caution",
-//   summary: "approve spender 0x1111…0582 for 1000.5 USDC (0xA0b8…eB48)" }
+//   summary: "Approve 1000.5 USDC to 0x111111…960582" }
 ```
 
 For a queue of waiting requests, use `previewAll` and hand it every plan at
-once. Decoding is sequential in summary tokens but not in plans, with at most eight rows per dispatch. Long inputs use smaller batches; width-512 inputs run one at a time to bound attention memory.
+once. Card generation uses call encoding and a whole-plan salience model, with no autoregressive text loop and at most eight rows per dispatch. Long inputs use smaller batches; width-512 inputs run one at a time to bound attention memory.
 
 ```js
 const previews = await previewer.previewAll([planA, planB, planC]);
@@ -61,11 +59,13 @@ It is **not** a security control and must not be used as one:
 
 ## Value provenance and limits
 
-The preview copies decoded actions and up to two model-selected labeled fields per call. Field labels keep a minimum output distinct from an amount being removed; contract addresses are not turned into recipients. The model can still misclassify a request or omit important fields. Show the authoritative decoded fields beside the machine-written summary.
+The preview summarizes ordered actions under a 100-character cap. A learned whole-plan ranker allocates detail to the main intent. Field roles, exact versus unlimited permissions, distinct recipients and call order constrain the wording. The model can still misclassify a request or omit useful detail; keep the full decoded review beside it.
+
+An optional `evidence` object adds `{ chainId, from, to, calldata, abi }`; each ABI candidate is `{ signature, contractMatch, arguments }`, with `arguments` as name/value string pairs. Distinguish a contract-bound ABI from a selector-only guess. Raw data is retained while compact typed evidence feeds the encoder. Unknown calls stay explicit even when a selector suggests a possible action.
 
 `preview` and `previewAll` return Promises on both backends. GPU tensor readbacks are asynchronous; await them. Prefer running inference in a Worker so CPU computation does not block the page.
 
-Inputs are bounded to 512 tokens and 48 slots per model invocation. A longer plan is processed call by call and the result identifies one call needing attention; review all calls. A single oversized call receives an explicit fallback. Warnings and undecoded calls cannot be downgraded to routine by the model.
+Each neural input is bounded to 512 tokens and 48 slots. A per-plan attention-work budget bounds classification cost; all calls still participate in ordered source-based rendering and warning checks. Oversized inputs retain their decoded action, with category abstention and conservative risk. Warnings and undecoded calls cannot be downgraded to routine by the model.
 
 ## Input
 
@@ -79,8 +79,7 @@ Inputs are bounded to 512 tokens and 48 slots per model invocation. A longer pla
 | `target`      | `string`   | the contract, already labeled                     |
 | `nativeValue` | `string`   | native value, already rendered with its currency  |
 
-The model reads interpretations, never raw calldata. That is deliberate: it
-bounds the values it can name to the ones your wallet already decided to show.
+The model reads a compact projection of the decoded interpretation and optional execution evidence. Concrete displayed values remain bound to the supplied fields.
 
 ## Output
 
@@ -94,17 +93,16 @@ bounds the values it can name to the ones your wallet already decided to show.
 `delegation`, `batch`, `unrecognized`.
 
 Both are closed sets, so a forward pass cannot invent a category your UI has no
-rendering for. `summary` is empty when nothing renderable came out; show the
-class alone.
+rendering for. `summary` is capped at 100 characters, including incomplete-plan fallbacks. Handle initialization or inference errors by retaining the decoded review.
 
 ## Size
 
 | build                    | `.wasm` |
 | ------------------------ | ------- |
-| CPU only       | 6.65 MB |
-| WebGPU                   | 10.15 MB |
+| CPU only       | 6.61 MB |
+| WebGPU                   | 9.95 MB |
 
-About 5.20 MB of either is the weights. Build with `--no-default-features` for
+About 5.21 MB of either is the weights. Build with `--no-default-features` for
 CPU-only browser compatibility and a smaller download. The default Cargo build
 includes WebGPU and the CPU fallback. Latency depends on the device,
 input length, and batch size; see the repository review measurements.

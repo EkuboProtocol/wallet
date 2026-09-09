@@ -402,6 +402,7 @@ fn zero_native_value_uses_the_amount_not_the_currency_suffix() {
 fn boolean_values_remain_distinguishable_to_the_classifier() {
     let plan = |flag| PlanDocument {
         calls: vec![CallSummary {
+            evidence: None,
             description: Some(format!("setApprovalForAll operator 0x1111 enabled {flag}")),
             details: vec![],
             warnings: vec![],

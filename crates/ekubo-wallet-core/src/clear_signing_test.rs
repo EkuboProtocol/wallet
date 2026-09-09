@@ -534,3 +534,27 @@ mod token_reference_recording_tests {
         assert!(recorder.0.lock().unwrap().is_empty());
     }
 }
+
+#[test]
+fn summary_abi_context_distinguishes_contract_matches_from_selector_candidates() {
+    let (chain, target, calldata) = stake_fixture();
+    let matched = calldata_candidates(chain, target, &calldata);
+    assert!(matched.iter().any(|candidate| candidate.contract_match));
+    assert!(
+        matched
+            .iter()
+            .all(|candidate| !candidate.signature.is_empty())
+    );
+    let hints = calldata_candidates(chain, Address::ZERO, &calldata);
+    assert!(!hints.is_empty());
+    assert!(hints.iter().all(|candidate| !candidate.contract_match));
+    let mut malformed = calldata;
+    malformed.push(0);
+    assert!(calldata_candidates(chain, target, &malformed).is_empty());
+}
+
+#[test]
+fn summary_abi_context_has_a_decode_budget() {
+    assert!(calldata_candidates(1, Address::ZERO, &[0; 3]).is_empty());
+    assert!(calldata_candidates(1, Address::ZERO, &vec![0; 65_541]).is_empty());
+}

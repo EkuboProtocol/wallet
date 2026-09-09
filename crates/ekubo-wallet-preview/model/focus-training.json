@@ -1,0 +1,23 @@
+{
+  "teacher_examples": 120,
+  "train": 96,
+  "train_correct": 96,
+  "held_out": 24,
+  "held_out_correct": 24,
+  "held_out_patterns": [
+    "0,1",
+    "1,0,2",
+    "1,7",
+    "11,9",
+    "16,0",
+    "6,0"
+  ],
+  "seed": 20260909,
+  "features": 82,
+  "hidden": 16,
+  "numpy": "2.5.3",
+  "teacher": "Qwen2.5-Coder-7B-Instruct Q4_K_M, followed by agent review and correction of principal-outcome labels",
+  "teacher_data_sha256": "528de7413a0d0b04503df8a600921bd878f411af88e37bbda27d864ca47e636e",
+  "purpose": "principal-call salience only; never signing authority or factual generation",
+  "weights_sha256": "3d7151c07b505ad032d3574f00cadf0f749e944c1eda08c6a6d1e507281cb02e"
+}

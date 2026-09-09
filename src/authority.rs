@@ -2253,11 +2253,30 @@ impl OwnerApi {
                             || address_label(step.transaction.to, &own_accounts),
                             |entry| trusted_token_label_from(step.transaction.to, entry),
                         );
-                        crate::preview::call_summary(
+                        let mut summary = crate::preview::call_summary(
                             interpretation,
                             target,
                             native_value_label(&step.transaction.value, network),
-                        )
+                        );
+                        summary.evidence = Some(ekubo_wallet_preview::slots::CallEvidence {
+                            chain_id: step.transaction.chain_id.to_string(),
+                            from: step.transaction.from.to_checksum(None),
+                            to: step.transaction.to.to_checksum(None),
+                            calldata: format!("{:#x}", step.transaction.data),
+                            abi: ekubo_wallet_core::clear_signing::calldata_candidates(
+                                chain_id,
+                                step.transaction.to,
+                                &step.transaction.data,
+                            )
+                            .into_iter()
+                            .map(|candidate| ekubo_wallet_preview::slots::AbiCandidate {
+                                signature: candidate.signature,
+                                contract_match: candidate.contract_match,
+                                arguments: candidate.arguments,
+                            })
+                            .collect(),
+                        });
+                        summary
                     })
                     .collect();
                 plans.push((

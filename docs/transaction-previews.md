@@ -1,66 +1,65 @@
 # Transaction previews
 
-The wallet embeds a small encoder-decoder model that reads deterministic clear-signing interpretations and proposes a transaction category, an advisory risk band, and a short summary. The review list displays it below the deterministic headline, labeled as machine-written. Inference is local; there is no model API or runtime download.
+The wallet produces a short summary of an entire waiting execution plan. The card targets 60–80 characters and never exceeds 100 Unicode scalar values. Shorter complete summaries stay short. Call order is preserved, while a learned plan-focus model decides which action gets more detail.
 
-## Trust and limitations
+For example: `Approve and swap 250 USDC for ETH`, `Unlimited approve USDC and swap 250 USDC for ETH`, or `Swap 250 USDC for ETH, then revoke approval`.
 
-The model is outside `ekubo-wallet-core`. Policy decisions and `ReviewDocument.identity` do not depend on it. The decoded fields remain authoritative. The model can misclassify a request or select incomplete/unhelpful supporting fields. The descriptor itself can also be wrong. A faithful extractive summary does **not** establish that the underlying transaction is correct.
+## Evidence and context
 
-Amounts, addresses, token labels, protocol names, and complete decoded action phrases are lifted into slots. The decoder copies action phrases instead of paraphrasing them; protocol and action copies must remain in call order. A missing or reordered action triggers a fallback showing the decoded actions directly. Supporting values retain their original field labels: the model selects up to two labeled fields per call, and the renderer copies each complete label/value line. Unlabeled or over-160-character fields are omitted; contract targets are never reinterpreted as recipients. Native value has its own explicit label. Free generated connecting words are not displayed. The word head is masked so it can emit only learned words or EOS; slot references must come from the copy head, whose scores are masked to input positions that contain slots. A final check rejects number/address fragments that are not complete value tokens in the input. This is a provenance check, not a check of the sentence's meaning.
+`PlanDocument` retains every ordered call. Each `CallSummary` carries the clear-signing description, labeled fields, warnings, target and native value. Optional execution evidence adds the chain, sender, target, raw calldata and ABI candidates. The desktop supplies this evidence from the actual execution steps; browser callers can supply the same structure through `evidence`.
 
-An entirely undecoded call is always `Unrecognized / Needs care`. If it sends native value, its factual fallback names that value and target without asking the model to infer an action. Any decoded warning or undecoded component prevents the model from marking a plan routine. These display rules do not change signing authority.
+The offline four-byte index uses signatures from the vendored clear-signing registry. Candidates must decode canonically and re-encode to the original bytes. Exact chain/address matches are distinguished from selector-only guesses. This is a local, bounded index, not the full 4byte.directory database and not proof of a contract's implementation. The lookup considers at most eight signatures and declines ABI decoding for bodies larger than 65,536 bytes. Raw calldata remains available even when this supplementary decoder declines it. Named ABI parameters are retained where Alloy's parser supports the signature.
 
-## Bounded inference
+The neural input is a compact projection of this evidence: clear-signing text, selector, candidate signatures with their provenance, and bounded typed argument readings. The model does not spend thousands of language tokens regenerating hex. Raw canonical approval bytes are also inspected directly to preserve an unlimited grant independently of prose or optional warnings. The full evidence stays in the document and in cache identity.
 
-The model has four encoder layers, two decoder layers, width 192, and six attention heads. Half-precision weights are stored in the binary; computation uses the backend's float type. See the review report for measured size and latency.
+Nested bytes and selector candidates do not establish an execution trace. A model-supported candidate can appear as `Unknown call (possible swap)`; it remains explicitly unknown and cannot lower the risk floor. Large or unfamiliar router payloads may still receive a general or incomplete summary. Simulation effects are not currently fed into this model.
 
-Each input has at most 512 tokens and 48 slots, including action phrases. Exceeding either limit is recorded explicitly. Plans with more than two calls, incomplete inputs, or a standard transfer/operator-approval or undecoded component are processed call by call; its aggregate uses the highest advisory risk and identifies one call needing attention, with an explicit instruction to review all calls. A single call that exceeds the limits receives an unavailable-summary message instead of a summary of its prefix. Long plans therefore do not silently discard their final calls. This is bounded per-call inference, not unlimited transformer context.
+## Fast, hierarchical inference
 
-Inference groups requests by width and runs at most eight rows per dispatch. Width-256 inputs use at most two rows and width-512 inputs one, bounding quadratic attention memory. Encoder padding is masked in every attention layer as well as during pooling and decoder cross-attention. Thus adding a longer neighboring request cannot change the meaning of a short request's padding. Greedy decoding ends at EOS; a sequence that exhausts the output limit without terminating is withheld rather than displayed as a finished sentence.
+The card path uses the existing four-layer, width-192 encoder for call classification and advisory risk. It then runs a separate 16-unit contextual ranker over the complete sequence of call categories. Its features include the current, previous and next categories, the plan-wide category frequencies, relative position and whether a call is last. The ranker selects emphasis; it cannot reorder calls or invent facts.
 
-The desktop publishes the decoded snapshot first and computes previews in a separate background stage. Generation checks discard stale results. Desktop inference uses CPU by default: measured single-request latency and cold startup beat GPU dispatch for this small workload. The preview crate and browser bindings retain explicit GPU support. An in-memory cache keys each result by request ID **and the complete interpreted input**, so changing metadata or warnings invalidates it. Settled requests leave the cache. No preview cache is written to disk. Initialization and inference failures disable previews; Rust panic guards cannot recover from process-level faults such as SIGSEGV or a driver killing the process.
+There is no autoregressive text-generation loop in the card path. Constrained realization turns the interpreted actions, named field roles and learned salience into the final sentence. The encoder's old autoregressive decoder is retained in the weights and through `legacy_all_async` for reproducible evaluation of the earlier model. Public `preview`, `preview_all` and `preview_all_async`, desktop cards, and browser `preview`/`previewAll` use the new card path.
 
-The Rust engine provides synchronous native entry points and `preview_all_async`. Browser bindings return Promises from `preview` and `previewAll`: GPU readbacks must yield to the browser event loop. CPU-only browser builds use the same asynchronous API.
+Each neural call reading has at most 512 tokens and 48 slots. Identical tokenized readings share a classification even if their copied amounts or addresses differ. Results are also reused across requests in the same invocation. Logical work selection remains per plan, so another queued request cannot change a plan's result. Attention dispatches remain grouped by padded width, with smaller batches for longer readings.
 
-## Training
+A per-plan budget limits the sum of squared padded widths to 262,144. Calls beyond this neural-work budget, or exceeding the model window, retain their decoded action in the card; they do not disappear. Their learned classification abstains and their advisory risk is at least caution, or critical for opaque calls. The renderer and warning checks still examine all calls. This bounds expensive model work while allowing the execution-plan limits of 4,096 steps and 8 MiB of calldata. It is not an assertion that the neural encoder fully read every byte or every field.
 
-The teacher is `scripts/preview-labels.py`, a keyword classifier and per-class summary templates populated from decoded values and descriptor intents. The current weights are supervised by these rules. Boolean polarity is retained as input-only true/false markers. Decoded actions outside the category taxonomy keep their reading and receive caution, rather than being labeled like opaque calls. Action phrases and standard-call readings are copied from the interpreter; the model still learns which additional value slots to mention. The training decoder still learns the template token sequence, but display renders its selected fields through the label-preserving renderer. It has not been distilled from an independently reasoning larger LLM. Agreement with that teacher measures consistency with its labels; it does not demonstrate that the teacher assigned amounts or verbs correctly.
+CPU is the desktop default. The decoded snapshot appears first; previews run in a separate background stage, and generation checks discard stale results. The in-memory cache keys on the request ID and complete document, including raw evidence. Settled requests leave the cache. Initialization or inference failures disable previews without delaying review controls. Browser APIs are asynchronous on both CPU and WebGPU; use a Worker for CPU inference to keep the page responsive.
 
-The corpus is generated through the actual wallet interpreter. Zero native value is determined from the amount, not from whether the rendered string still contains a currency suffix. Oversized input and summary targets are rejected, never silently shortened into incomplete training sentences. Standard `transferFrom` summaries retain both sender and recipient; an owned sender never makes an external recipient an owned account. Training uses a decaying learning rate and shuffles examples within width buckets each epoch, seeds the tensor backend as well as the data shuffle, and evaluates an inference-mode model with dropout disabled. Evaluation counts each example once even when a padded batch repeats it.
+## Card wording
 
-Formats are assigned deterministically to training or held-out partitions. A plan mixing formats from both sides is excluded from both populations. Otherwise a mixed example could put a training format in the held-out population. Format separation does not imply protocol separation: related formats from the same protocol can still be present on both sides.
+The renderer allocates detail to the principal action before supporting actions and never slices a finished sentence. Exact approvals can become `Approve and swap` when the displayed amount matches a later call to the spender and available chain/asset evidence does not conflict. A larger finite allowance retains its amount. An unrelated spender stays explicit. Unlimited and operator grants are distinct from ordinary approvals; revocations preserve their position after an action.
 
-The model fingerprint includes the ordered vocabulary's hash and the architecture revision and dimensions. Vocabulary length alone cannot detect reordered token meanings. Any tokenizer or taxonomy semantic change requires reviewing and bumping the revision, regenerating the corpus as needed, and retraining. The committed-weight test requires a matching, loadable model.
+Concrete amounts come from whole, recognized field labels. An input amount is not selected from a minimum-output field, conflicting amount labels are not arbitrarily resolved, and a cooldown is not rewritten as an immediate withdrawal. Distinct recipients stay visible. Full address annotations on token labels can be removed, and addresses can be abbreviated for display; the full decoded review retains their identity.
 
-## Reproduction
+Consecutive repetitions can be grouped with a count. If their values differ, the grouped phrase does not repeat one value as though it applied to all calls. If even the essential action sequence cannot fit, the summary explicitly says to review the full plan. Unknown calls and unlimited/operator grants remain visible in that overview.
 
-Use a scratch directory outside the repository for generated corpora and evaluation output. Release-derived profiles require `EKUBO_UPDATER_PUBLIC_KEY`; use the repository's configured public verification key.
+Unfamiliar actions keep their decoded wording rather than being freely paraphrased. Compound actions and changes to signers or other authority retain their specific wording. This favors faithful, compact summaries over an unrestricted language model's fluency.
+
+## Models, training and limits
+
+The existing approximately 2.6-million-parameter encoder/decoder weights occupy 5,202,927 bytes. The new plan-focus ranker adds 5,392 bytes, for about 5.21 MB total. Architecture and corpus provenance for the existing model remain in `model/training.json`; focus training and evaluation are recorded in `model/focus-training.json`.
+
+The base model was trained on the deterministic teacher in `scripts/preview-labels.py`. Its earlier category limitations remain; this change does not establish a universal classifier improvement. The new ranker uses 120 synthetic workflows proposed to a local Qwen2.5-Coder-7B teacher and reviewed by the coding agent. Twenty-eight proposed focus labels were corrected. Ninety-six examples train the ranker; 24 examples from six entirely held-out workflow families evaluate it. These are small, agent-reviewed synthetic sets, not an independent human audit or a broad transaction-correctness benchmark.
+
+The focus examples retain both the teacher's original index and the reviewed index in `model/focus-examples.jsonl`. Reproduce the exact focus weights and metadata with:
 
 ```sh
-python3 scripts/preview-corpus-spec.py \
-  --clearsign crates/ekubo-wallet-core/clearsign --out /tmp/corpus-spec.json
-cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-corpus -- \
-  --spec /tmp/corpus-spec.json --out /tmp/corpus.jsonl --samples 20
-python3 scripts/preview-labels.py \
-  --spec /tmp/corpus-spec.json --corpus /tmp/corpus.jsonl --out /tmp/labeled.jsonl
-cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-train -- \
-  --corpus /tmp/labeled.jsonl --out crates/ekubo-wallet-preview/model/preview.bin --epochs 14
-cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-sample -- \
-  --corpus /tmp/labeled.jsonl --count 0 --device gpu > /tmp/predictions.jsonl
+uv run scripts/preview-focus-train.py --out /tmp/focus-model
 ```
 
-`--count 0` evaluates every strictly held-out example, including examples rejected by training. A positive count selects a reproducibly shuffled sample. JSONL predictions include expected and actual class, risk, and summary. Standard error reports per-class support, critical-risk underestimates, agreement with the teacher's field selection rendered through the same label-preserving renderer, empty summaries, and slot-text-coverage agreement. Coverage uses substring matching on both rendered texts, includes values nested in action slots, and ignores ordering and roles; it is not a semantic or provenance metric. Timing includes initialization of dispatched shapes; it is not a warm per-plan latency claim.
+The base-model fingerprint includes the ordered vocabulary hash and architecture dimensions. Vocabulary or taxonomy changes require revisiting the fingerprint, training corpus and both models. Its corpus pipeline excludes plans mixing training and held-out formats, rejects truncation, seeds training, evaluates without dropout and deduplicates padded evaluation rows.
 
-When changing the vocabulary, first regenerate it with `scripts/build-preview-vocab.py` using the new corpus and registry, then rebuild the training binary. The fingerprint and weights must be retrieved together after training.
+The summary is advisory. The policy engine and review identity do not depend on it, and it does not authorize signing. Incorrect descriptors, unsupported field roles, mistaken categories and omitted details remain possible. Always show the decoded review alongside it.
 
-`scripts/train-preview-remote.sh /tmp/labeled.jsonl 14` can train on a temporary DigitalOcean GPU. It copies git-listed files, creates a temporary SSH key and droplet, and removes them on exit. Its `PREVIEW_DROPLET_SIZE` and `PREVIEW_DROPLET_REGION` overrides select a particular machine. The separate `preview-train` Cargo profile optimizes arithmetic without release LTO, reducing iteration time.
+## Validation and measurement
 
-## Before treating quality numbers as a release criterion
+Run the committed end-to-end card examples with the actual embedded weights:
 
-Keep the synthetic held-out score separate from an independently reviewed challenge set. That set should cover swapped sender/recipient roles, multiple amounts with different meanings, approvals and revocations, mixed decoded/opaque calls, unknown protocols, and dangerous calls at the end of long plans. Class accuracy alone cannot validate generated signing prose. See [the review report](transaction-preview-review.md) for this branch's measurements and remaining limitations.
+```sh
+cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-card-eval
+```
 
-## Low-spec benchmark
+`preview-bench cpu` measures the card path, including typical calls, repeated and distinct 4,096-call plans, 8 MiB calldata, and near-limit model inputs. Its optional second argument `legacy` measures the earlier autoregressive path. Run an optimized build on one pinned CPU core and report cold initialization, warm p50/p95 and process memory separately. The target is below 300 ms per summary; measurements on a constrained modern desktop do not guarantee that latency on every low-end device or for an arbitrarily large queue.
 
-`preview-bench cpu` isolates model loading and inference from corpus parsing. It reports cold startup and warm p50/p95 latency for one call, eight requests, a 64-call plan, and single/queued near-limit inputs. Run the optimized binary under `taskset -c <available-core>` and `/usr/bin/time -v` to measure one-core CPU performance and process peak RSS. This is a constrained desktop benchmark, not a measurement on an actual low-end phone.
-
-Training provenance and content hashes are recorded in `crates/ekubo-wallet-preview/model/training.json`; registry source revisions are recorded in `crates/ekubo-wallet-core/clearsign/snapshot.json`. See [the review measurements](transaction-preview-review.md) and [actual examples](transaction-preview-examples.md).
+`preview-sample --count 0` deliberately retains the legacy decoder evaluation so its earlier synthetic-teacher measurements remain reproducible. Those scores are not the new card-summary quality metric. See [the review](transaction-preview-review.md) and [actual card examples](transaction-preview-examples.md).

@@ -1,24 +1,26 @@
 # Transaction preview review
 
-Reviewed the existing `tx-preview-llm` branch starting at `a05cb51`. No open GitHub PR existed for it when this review began. The implementation below is prepared on that feature branch; it does not create a release.
+The `tx-preview-llm` branch now generates short, ordered execution-plan summaries with a 100-character hard cap and an 80-character preferred budget. No open PR existed when the review began. This work prepares the feature branch and refreshed registry for a subsequent release; it does not publish a release.
 
-## Changes
+## Current card path
 
-The original encoder attended to padding, the decoder could emit copy slots through its ordinary word head, and the format-held-out evaluation admitted mixed training/held-out formats. These are fixed and covered by regression tests. Training now seeds the backend, evaluates without dropout, counts padded rows once, shuffles examples in width buckets, decays the learning rate, and rejects truncated examples. Vocabulary ordering and architecture are fingerprinted together.
+The card uses a hybrid: the existing neural encoder classifies compact call evidence, a new learned focus ranker prioritizes the principal action, and a constrained renderer selects complete phrases and decoded values. The autoregressive decoder remains available for training diagnostics but is not run for cards. This removes token-by-token generation latency and prevents generated numbers or token names from entering the displayed summary.
 
-Boolean polarity is now visible to the model. Zero native value is recognized correctly. Transfer-from summaries preserve sender and recipient; ownership of the sender does not imply ownership of the recipient. Standard operator grants and revocations retain their exact decoded reading and explicit classification. Decoded but uncategorized actions remain distinguishable from opaque calls.
+Every call remains in the plan, in execution order. Raw calldata, chain and contract identity, clear-signing fields and warnings, and locally available ABI selector candidates accompany the input. The encoder sees compact typed evidence rather than all hexadecimal bytes. ABI candidates come from the vendored registry, not a complete public four-byte database; ambiguous selector matches do not establish contract identity. Nested executions still depend on what the decoder exposes: this is not a simulation of all downstream effects.
 
-Rendering preserves the decoded protocol/action sequence and up to two model-selected complete labeled fields per call. Generated connecting prose is not displayed. This prevents a minimum output from becoming a claimed withdrawal quantity or a contract target from becoming a recipient. Fields longer than 160 characters are omitted from the compact summary. Missing or reordered action predictions fall back to the decoded actions. Important fields can still be omitted; the summary supplements the full reading.
+Exact displayed approval amounts can be compressed into “Approve and swap …” when the later target matches the spender and available chain/asset evidence does not contradict the relationship. Larger finite amounts, unlimited grants, unrelated spenders, and operator permissions stay explicit. This matching is based on decoded input amounts, not proof of eventual allowance consumption. Revocations remain in call order. Unknown calls cannot disappear behind a recognized action. Recipient roles and minimum-output labels remain distinct.
 
-Long, overflowing, and mixed standard/opaque plans are processed call by call. Aggregation identifies a call needing attention and explicitly says to review all calls. Attention batches shrink as input width increases, bounding memory. Warning floors and opaque-call handling do not depend on a favorable model prediction.
+Neural work is capped per plan at a sum of squared padded sequence widths of 262,144, with at most 512 tokens per row. Identical token readings share classification work, including across queued requests, but cache reuse does not change the logical per-plan budget. Calls outside the budget still participate in source-based wording and warning checks, with category abstention and conservative risk. Thus large plans retain full source coverage without promising neural attention to every byte. Long summaries use complete overview phrases rather than cutting sentences at the character limit.
 
-Desktop inference defaults to CPU, runs after the decoded snapshot is published, caches by request ID and complete interpreted input, and discards stale generations. Failures disable previews. The desktop test fixture now joins its Tokio runtime before dropping its temporary database, and token reloads use a weak entity handle; this fixed a teardown crash found during the full test run.
+The focus ranker adds 1,344 float32 parameters (5,392 bytes) to the existing 5,202,927-byte weights. It was trained on 120 synthetic workflows labeled by local Qwen2.5-Coder-7B Q4_K_M, with 28 labels corrected during agent review. Training used 96 examples; 24 examples from held-out workflow families all matched the reviewed focus labels. This small synthetic result is not independent human validation. The committed script reproduces the weight and metadata files exactly.
 
-Browser methods return Promises and use asynchronous GPU readbacks. Adapter/device initialization failures now reject normally so CPU fallback works. CPU-only builds remain available.
+A local eight-prompt generative pilot took roughly 0.7–1.6 seconds warm and also invented actions in some mixed/opaque workflows. That pilot motivated keeping generation out of the card's critical path; it does not establish that every larger model or decoding architecture would fail. No new cloud training instance was needed for this update.
 
-## Model and data
+See [architecture and reproduction](transaction-previews.md) for input contracts, budgets and commands.
 
-The new model has approximately 2.6 million parameters: width 192, six attention heads, feed-forward width 384, four encoder layers and two decoder layers. Its weights occupy **5,202,927 bytes**. It trained for 14 epochs on an H100 with a seeded cosine learning-rate schedule. Retrieved weights and their fingerprint were verified; the training instance was deleted.
+## Retained base model and historical evaluation
+
+The base model has approximately 2.6 million parameters: width 192, six attention heads, feed-forward width 384, four encoder layers and two decoder layers. Its weights occupy **5,202,927 bytes**. It trained for 14 epochs on an H100 with a seeded cosine learning-rate schedule. Retrieved weights and their fingerprint were verified; the training instance was deleted.
 
 The refreshed corpus contains 30,714 examples: 30,691 encode successfully, with 27,129 training, 2,413 strict format-held-out and 1,149 mixed-partition examples excluded. It covers 1,402 of 1,435 interpretable formats. Architecture, corpus and weight hashes, seed and training configuration are recorded in [`training.json`](../crates/ekubo-wallet-preview/model/training.json).
 
@@ -26,7 +28,7 @@ The teacher is deterministic keyword/template code, **not an independent reasoni
 
 ## Quality measurements
 
-These measure agreement with the synthetic teacher, not independent semantic correctness. The final deployment path produces the same aggregate results on native CPU and GPU.
+These measure agreement with the synthetic teacher, not independent semantic correctness. These are historical results from the legacy decoder path, not semantic accuracy measurements of the new card renderer.
 
 | Same refreshed held-out documents (2,413) | Original model | Final model |
 | --- | ---: | ---: |
@@ -40,21 +42,24 @@ Final rendered field-selection agreement is 2,319 / 2,413 (96.10%), with no empt
 
 Remaining weak categories on the refreshed set include unstake (17/34), delegation (18/34), approval (132/161), governance (166/200), and unrecognized (137/161). Bridge, borrow and wrap/unwrap have no held-out support. Broader independently labeled evaluation is needed before treating these scores as general accuracy. The model remains advisory and does not authorize signing.
 
-## Performance
+## Current performance
 
-Native CPU measurements used one pinned logical core of an AMD Ryzen AI 9 HX 470, 20 iterations, optimized `preview-train` builds. This constrains concurrency on a modern desktop; it is not a measurement on an actual low-end phone or ARM device.
+Optimized native CPU measurements used one pinned logical core of an AMD Ryzen AI 9 HX 470, 20 iterations. These measure summary-engine work after input assembly, not network requests or all clear-signing decoding. They constrain concurrency on a modern desktop; they are not measurements on an older phone or ARM device.
 
-| Workload | CPU median | CPU p95 |
+| Workload | Median | p95 |
 | --- | ---: | ---: |
-| One call | 4.43 ms | 5.38 ms |
-| Eight requests | 26.87 ms | 27.09 ms |
-| 64-call plan | 216.71 ms | 248.26 ms |
-| One near-limit 512-token call | 71.06 ms | 71.45 ms |
-| Eight near-limit requests | 571.29 ms | 574.45 ms |
+| Typical call | 1.514 ms | 1.904 ms |
+| Eight requests with identical readings | 1.498 ms | 1.519 ms |
+| 64-call plan with repeated readings | 1.558 ms | 1.599 ms |
+| 4,096 calls with repeated readings | 6.965 ms | 7.033 ms |
+| 4,096 distinct token readings | 191.213 ms | 199.386 ms |
+| Call retaining 8 MiB calldata | 6.606 ms | 6.773 ms |
+| One 512-token call | 48.792 ms | 49.183 ms |
+| Eight identical 512-token requests | 49.030 ms | 49.424 ms |
 
-CPU cold load plus first result took 14 ms; peak process RSS across the benchmark was 40.9 MiB. GPU cold load plus first result took 248 ms and a typical single call took 18.93 ms median / 19.90 ms p95. GPU was faster for long inputs and large batches, but CPU wins the usual one-request interaction and avoids GPU initialization overhead, so it is the desktop default.
+Cold engine load plus first result took 9 ms. Peak process RSS was 62.07 MiB, including large input fixtures. The distinct-reading fixture varies context words across 4,096 calls; it is a performance stress test, not independently verified semantic coverage of 4,096 different operations. Repeated-request timings benefit from reuse; many unique long requests have cumulative costs. All measured per-plan cases meet the requested 300 ms target, but this is not a universal device guarantee.
 
-Final uncompressed browser artifacts including weights are 6,654,010 bytes CPU-only and 10,153,532 bytes with WebGPU plus CPU fallback. Browser CPU, real WebGPU, single/batch APIs, and CPU-only builds were exercised in Chromium. Missing WebGPU, a null adapter and a rejected device request all returned errors and successfully fell back to CPU. Browser timings were not isolated from other validation work and are not presented as device benchmarks.
+Chromium CPU-only Wasm measured 10.5 ms median / 10.8 ms p95 warm and 56.9 ms for engine initialization plus first result after module initialization. Download time is excluded; browser checks overlapped compilation, so these are observed responsiveness figures rather than isolated device benchmarks. Uncompressed Wasm artifacts including weights are approximately 6.61 MB CPU-only and 9.95 MB with WebGPU and CPU fallback. CPU is the desktop default. Both Wasm configurations, WebGPU single/batch calls, and fallback after absent GPU, null adapter and rejected device were exercised.
 
 ## Clear-signing snapshot for the next release
 
@@ -64,6 +69,6 @@ The interpreter dependency already points at the patched `fix-raw-signed-integer
 
 ## Validation and examples
 
-The full workspace gate passed: formatting, all-target/all-feature Clippy, **1,353 Rust tests passed with 6 ignored**, Ruff, third-party notice freshness, and OSV vulnerability/license policy scans using the repository configuration. Three Python teacher tests passed. The desktop CPU-default build and both Wasm feature configurations compile.
+The workspace gate passed: formatting, all-target/all-feature Clippy, 1,380 Rust tests passed with 6 ignored, Ruff, third-party notice freshness, and configured OSV vulnerability/license scans. Three Python teacher tests passed. Focus training reproduced the committed weights and metadata exactly. Both Wasm feature configurations compile. Native CPU, browser CPU, and WebGPU passed all 22 authored end-to-end summary examples; these are regressions, not a representative independent accuracy benchmark.
 
-See [11 actual generated examples](transaction-preview-examples.md), including retained sender/recipient roles, operator grant/revocation polarity, an omitted cooldown amount, labeled minimum output, and a late opaque call. Raw predictions, benchmarks and browser results are retained locally in `/home/sendmoodz/Documents/wallet-preview-review`.
+See [22 actual generated examples](transaction-preview-examples.md). Benchmark, evaluation and browser artifacts are retained locally in `/home/sendmoodz/Documents/wallet-plan-summary`; the preceding base-model review artifacts are in `/home/sendmoodz/Documents/wallet-preview-review`.

@@ -33,12 +33,9 @@ use wasm_bindgen::prelude::*;
 
 /// One call of a plan, as a wallet hands it over.
 ///
-/// This is the *decoded* reading, not raw calldata: a browser wallet is
-/// expected to have interpreted the transaction already -- through its own
-/// ERC-7730 support, a decoder service, or the `clear-signing` crate compiled
-/// alongside this one -- and to pass what it would otherwise display. The
-/// model reads interpretations, never calldata, which is what bounds the
-/// values it can name to the ones the wallet already decided to show.
+/// A browser wallet supplies its decoded reading and may attach raw execution
+/// evidence plus ABI candidates. The encoder reads a compact projection;
+/// displayed values are grounded in labeled interpretation fields.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Call {
@@ -57,6 +54,8 @@ pub struct Call {
     /// The call's native value, already rendered with its currency.
     #[serde(default)]
     pub native_value: String,
+    #[serde(default)]
+    pub evidence: Option<ekubo_wallet_preview::slots::CallEvidence>,
 }
 
 impl From<Call> for CallSummary {
@@ -67,6 +66,7 @@ impl From<Call> for CallSummary {
             warnings: call.warnings,
             target: call.target,
             native_value: call.native_value,
+            evidence: call.evidence,
         }
     }
 }
@@ -174,13 +174,13 @@ impl Previewer {
         let document = document_of(calls)?;
         let preview = match &self.engine {
             Backend::Cpu(engine) => engine
-                .preview_all_async(&[document])
+                .card_all_async(&[document])
                 .await
                 .map_err(|e| JsError::new(&e))?
                 .remove(0),
             #[cfg(feature = "webgpu")]
             Backend::WebGpu(engine) => engine
-                .preview_all_async(&[document])
+                .card_all_async(&[document])
                 .await
                 .map_err(|e| JsError::new(&e))?
                 .remove(0),
@@ -190,9 +190,8 @@ impl Previewer {
 
     /// Preview several plans in one pass.
     ///
-    /// Worth using whenever there is more than one waiting request. Decoding is
-    /// sequential in summary tokens but batched across plans, with at most
-    /// eight rows per dispatch to bound memory.
+    /// Identical call readings share encoder work across plans. Each plan keeps
+    /// an independent neural-work budget; card rendering is not autoregressive.
     ///
     /// # Errors
     ///
@@ -208,12 +207,12 @@ impl Previewer {
             .collect();
         let previews = match &self.engine {
             Backend::Cpu(engine) => engine
-                .preview_all_async(&documents)
+                .card_all_async(&documents)
                 .await
                 .map_err(|e| JsError::new(&e))?,
             #[cfg(feature = "webgpu")]
             Backend::WebGpu(engine) => engine
-                .preview_all_async(&documents)
+                .card_all_async(&documents)
                 .await
                 .map_err(|e| JsError::new(&e))?,
         };

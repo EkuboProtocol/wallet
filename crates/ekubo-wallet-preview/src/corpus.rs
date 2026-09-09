@@ -416,6 +416,7 @@ fn interpret_one(
         warnings: interpretation.warnings,
         target: target_label(to, &metadata),
         native_value: native_value(value),
+        evidence: None,
     })
 }
 

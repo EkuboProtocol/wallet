@@ -158,6 +158,31 @@ pub struct CallSummary {
     pub target: String,
     /// The call's native value, already rendered with its currency.
     pub native_value: String,
+    /// Raw execution evidence and explicitly sourced ABI candidates.
+    #[cfg_attr(feature = "train", serde(default))]
+    pub evidence: Option<CallEvidence>,
+}
+
+/// Context retained independently of the short language-model window. Raw
+/// calldata supports exact relationships and byte-level checks; ABI candidates
+/// remain explicitly distinct from a contract-bound interpretation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallEvidence {
+    pub chain_id: String,
+    pub from: String,
+    pub to: String,
+    pub calldata: String,
+    #[serde(default)]
+    pub abi: Vec<AbiCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbiCandidate {
+    pub signature: String,
+    pub contract_match: bool,
+    pub arguments: Vec<(String, String)>,
 }
 
 /// A whole plan: every call, in order.

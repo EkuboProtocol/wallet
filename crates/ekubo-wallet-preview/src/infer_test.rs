@@ -31,7 +31,7 @@ fn an_opaque_plan_is_unrecognized_without_a_forward_pass() {
             ..CallSummary::default()
         }],
     };
-    let preview = engine().preview(&opaque);
+    let preview = engine().legacy_preview(&opaque);
     assert_eq!(preview.class, TransactionClass::Unrecognized);
     assert_eq!(preview.risk, RiskBand::Critical);
     assert!(preview.summary.is_empty());
@@ -41,7 +41,7 @@ fn an_opaque_plan_is_unrecognized_without_a_forward_pass() {
 /// answer must be *inside the enums*, never an index the UI cannot render.
 #[test]
 fn an_answer_is_always_a_member_of_the_closed_enums() {
-    let preview = engine().preview(&plan(&format!(
+    let preview = engine().legacy_preview(&plan(&format!(
         "approve spender {SPENDER} for 5.5 USDC ({USDC})"
     )));
     assert!(crate::taxonomy::CLASSES.contains(&preview.class));
@@ -57,7 +57,7 @@ fn a_batch_answers_one_preview_per_plan_in_order() {
         },
         plan(&format!("transfer 1.5 USDC ({USDC}) to {SPENDER}")),
     ];
-    let previews = engine().preview_all(&documents);
+    let previews = engine().legacy_preview_all(&documents);
     assert_eq!(previews.len(), 3);
     // The middle plan decoded to nothing, so it keeps the honest answer even
     // though its neighbours went through the model.
@@ -67,7 +67,7 @@ fn a_batch_answers_one_preview_per_plan_in_order() {
 
 #[test]
 fn an_empty_batch_is_not_a_forward_pass() {
-    assert!(engine().preview_all(&[]).is_empty());
+    assert!(engine().legacy_preview_all(&[]).is_empty());
 }
 
 /// The last line of defense. Slotization already makes this unreachable, but
@@ -101,8 +101,8 @@ fn a_summary_of_words_alone_is_always_accepted() {
 fn the_same_plan_produces_the_same_summary_every_time() {
     let engine = engine();
     let document = plan(&format!("swap 2.5 USDC ({USDC}) for 1.0 WETH ({SPENDER})"));
-    let first = engine.preview(&document);
-    let second = engine.preview(&document);
+    let first = engine.legacy_preview(&document);
+    let second = engine.legacy_preview(&document);
     assert_eq!(first.summary, second.summary);
     assert_eq!(first.class, second.class);
 }
@@ -189,7 +189,7 @@ fn an_undecoded_call_that_sends_value_is_still_unrecognized() {
     };
     assert!(sending.nothing_decoded());
     assert!(!sending.is_opaque());
-    let preview = engine().preview(&sending);
+    let preview = engine().legacy_preview(&sending);
     assert_eq!(preview.class, TransactionClass::Unrecognized);
     assert_eq!(preview.risk, RiskBand::Critical);
 }
@@ -210,7 +210,7 @@ fn a_suffix_or_prefix_of_a_value_is_not_the_value() {
 fn an_overlong_single_call_is_not_summarized_from_its_prefix() {
     let mut document = plan(&"swap ".repeat(600));
     document.calls[0].warnings.push("unlimited approval".into());
-    let preview = engine().preview(&document);
+    let preview = engine().legacy_preview(&document);
     assert_eq!(preview.class, TransactionClass::Unrecognized);
     assert_eq!(preview.risk, RiskBand::Critical);
     assert!(preview.summary.contains("exceeds preview limits"));
@@ -251,7 +251,7 @@ fn a_decoded_warning_cannot_be_downgraded_by_the_model() {
     document.calls[0]
         .warnings
         .push("unlimited spending allowance".into());
-    assert_eq!(engine().preview(&document).risk, RiskBand::Critical);
+    assert_eq!(engine().legacy_preview(&document).risk, RiskBand::Critical);
 }
 
 #[test]
@@ -275,7 +275,7 @@ fn generation_cannot_substitute_an_unsupported_action_or_asset_word() {
 #[test]
 fn action_phrases_are_preserved_even_with_untrained_weights() {
     let description = "Ethena — Cooldown shares";
-    let preview = engine().preview(&plan(description));
+    let preview = engine().legacy_preview(&plan(description));
     assert!(
         preview.summary.contains("Ethena: Cooldown shares"),
         "{}",
@@ -286,7 +286,7 @@ fn action_phrases_are_preserved_even_with_untrained_weights() {
 #[test]
 fn a_transfer_from_never_names_the_sender_as_the_destination() {
     let description = format!("transferFrom {SPENDER} to {USDC} for 5 ETH");
-    let preview = engine().preview(&plan(&description));
+    let preview = engine().legacy_preview(&plan(&description));
     assert_eq!(preview.class, TransactionClass::Transfer);
     assert_eq!(preview.risk, RiskBand::Caution);
     assert_eq!(preview.summary, description);
@@ -336,6 +336,7 @@ fn long_inputs_reduce_the_dispatch_size() {
 fn selected_values_keep_their_field_roles_and_ignore_contract_targets() {
     let slots = slotize(&PlanDocument {
         calls: vec![crate::CallSummary {
+            evidence: None,
             description: Some("Uniswap — Remove liquidity".into()),
             details: vec!["Liquidity: 50".into(), "Minimum output: 0.01 ETH".into()],
             target: "0x1111111111111111111111111111111111111111".into(),
@@ -360,6 +361,7 @@ fn selected_values_keep_their_field_roles_and_ignore_contract_targets() {
 fn equal_values_in_different_fields_do_not_lose_their_roles() {
     let slots = slotize(&PlanDocument {
         calls: vec![crate::CallSummary {
+            evidence: None,
             description: Some("Protocol — Swap".into()),
             details: vec![
                 "Maximum input: 10 ETH".into(),
@@ -385,6 +387,7 @@ fn equal_values_in_different_fields_do_not_lose_their_roles() {
 fn a_selected_native_value_is_labeled_as_native_value() {
     let slots = slotize(&PlanDocument {
         calls: vec![crate::CallSummary {
+            evidence: None,
             description: Some("Lido — Stake ETH".into()),
             details: vec![],
             target: "contract".into(),
@@ -434,4 +437,31 @@ fn explicit_operator_grants_and_revocations_do_not_need_a_prediction() {
         assert_eq!(prepared.previews[0].risk, risk);
         assert_eq!(prepared.previews[0].summary, description);
     }
+}
+
+#[test]
+fn card_results_do_not_depend_on_other_queued_requests() {
+    let engine = crate::cpu::load().unwrap();
+    let mut long = plan("Ethena — Cooldown shares");
+    long.calls[0].details.push("additional ".repeat(440));
+    let ordinary = plan("Aave — Supply");
+    let expected = engine.preview_all(&[long.clone(), ordinary.clone()]);
+    let mut queue = vec![long; 8];
+    queue.push(ordinary);
+    let actual = engine.preview_all(&queue);
+    assert_eq!(actual[0], expected[0]);
+    assert_eq!(actual[8], expected[1]);
+}
+
+#[test]
+fn card_operator_risk_does_not_depend_on_model_output_or_optional_warnings() {
+    let engine = engine();
+    let grant = engine.preview(&plan(
+        "setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved true",
+    ));
+    assert_eq!(grant.risk, RiskBand::Critical);
+    let revoke = engine.preview(&plan(
+        "setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved false",
+    ));
+    assert_eq!(revoke.risk, RiskBand::Routine);
 }
