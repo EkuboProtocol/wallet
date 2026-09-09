@@ -1387,3 +1387,60 @@ async fn a_descriptor_that_reads_the_same_both_ways_still_says_which_way_it_went
         "{revoked}"
     );
 }
+
+#[tokio::test]
+async fn fourbyte_hints_only_fill_an_undecoded_reading() {
+    use alloy::{
+        dyn_abi::{DynSolValue, JsonAbiExt},
+        json_abi::Function,
+    };
+    let function = Function::parse("balanceOf(address)").unwrap();
+    let data = function
+        .abi_encode_input(&[DynSolValue::Address(Address::repeat_byte(0x22))])
+        .unwrap();
+    let target = Address::repeat_byte(0x99);
+    let reading = interpret_one(&step(1, target, data.clone()), &TokenMetadataMap::new()).await;
+    assert!(reading.description.is_none());
+    assert!(
+        reading
+            .candidates
+            .iter()
+            .any(|c| c.signature == "balanceOf(address)")
+    );
+    assert!(
+        reading
+            .details
+            .iter()
+            .any(|line| line == "Possible function: balanceOf(address)")
+    );
+    let mut bad = data;
+    bad.extend_from_slice(&[0; 32]);
+    let reading = interpret_one(&step(1, target, bad), &TokenMetadataMap::new()).await;
+    assert!(reading.candidates.is_empty());
+    assert!(reading.details.is_empty());
+
+    let (chain, target, calldata) = crate::clear_signing::stake_fixture();
+    let mut described = step(1, target, calldata);
+    described.transaction.chain_id = DecimalU256::new(chain.to_string()).unwrap();
+    let reading = interpret_one(&described, &TokenMetadataMap::new()).await;
+    assert!(reading.description.is_some());
+    assert!(reading.candidates.is_empty());
+    assert!(
+        !reading
+            .details
+            .iter()
+            .any(|line| line.starts_with("Possible function:"))
+    );
+
+    let standard = step(
+        1,
+        Address::repeat_byte(0x99),
+        approve_calldata(Address::ZERO, U256::from(10)),
+    );
+    assert!(
+        interpret_one(&standard, &TokenMetadataMap::new())
+            .await
+            .candidates
+            .is_empty()
+    );
+}

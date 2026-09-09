@@ -1,0 +1,1 @@
+revision=4 vocab_hash=6b186d48b5962662 heads=6 ff=384 encoder=4 decoder=2 vocab=977 classes=20 risks=3 d_model=192 slots=48 input=512 summary=20

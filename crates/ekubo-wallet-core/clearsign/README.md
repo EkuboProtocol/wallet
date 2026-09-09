@@ -9,7 +9,7 @@ git commit, exactly like a code change, because descriptors shape what a
 human sees while approving a transaction.
 
 `registry/ekubo/` covers Ekubo's own contracts and is authored on the
-`ekubo` branch of
+`fix-ekubo-signed-formats` branch of
 [EkuboProtocol/clear-signing-erc7730-registry](https://github.com/EkuboProtocol/clear-signing-erc7730-registry),
 where it is prepared for upstreaming, and copied here byte-for-byte from
 there. A defect in one of them is fixed on that branch and re-vendored, not
@@ -32,3 +32,8 @@ every signed parameter in the corpus and refuses a formatter that would drop
 its sign, which is how a swap amount displayed as a token amount — unsigned by
 definition, on an `int128` where negative means exact-output — was caught
 before it shipped.
+
+The 2026-09-09 snapshot revisions and copied paths are recorded in
+[snapshot.json](snapshot.json). Upstream test fixtures and signature attestations
+are not runtime descriptors and are excluded. The Ekubo source branch preserves
+the signed-amount fixes that have not landed on its older `ekubo` branch.

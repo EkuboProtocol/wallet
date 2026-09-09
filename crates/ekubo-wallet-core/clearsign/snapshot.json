@@ -1,0 +1,21 @@
+{
+  "upstream": {
+    "repository": "https://github.com/ethereum/clear-signing-erc7730-registry",
+    "revision": "0a240f6e457d693cc953ed8204fe4bcf0b8a4faf"
+  },
+  "ekubo": {
+    "repository": "https://github.com/EkuboProtocol/clear-signing-erc7730-registry",
+    "revision": "f25bc1a0cdd7d931271565463cea5228476795cd",
+    "branch": "fix-ekubo-signed-formats"
+  },
+  "paths": [
+    "ercs/*.json",
+    "registry/*/*.json"
+  ],
+  "excluded": [
+    "registry/*/tests/",
+    "registry/*/testsv2/",
+    "registry/*/sigs/"
+  ],
+  "updated": "2026-09-09"
+}

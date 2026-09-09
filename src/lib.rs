@@ -20,6 +20,7 @@ pub mod gui_review;
 pub mod ipc_server;
 pub mod mcp;
 pub mod notifications;
+pub mod preview;
 pub mod release_check;
 pub mod review;
 pub mod single_instance;

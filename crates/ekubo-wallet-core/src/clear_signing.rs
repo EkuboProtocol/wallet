@@ -152,7 +152,8 @@ fn parse_calldata_formats(contents: &str) -> Result<Vec<Function>, String> {
         .keys()
         .map(|signature| {
             let canonical = canonical_human_signature(signature)?;
-            Function::parse(&canonical)
+            Function::parse(signature)
+                .or_else(|_| Function::parse(&canonical))
                 .map_err(|error| format!("invalid calldata format {signature:?}: {error}"))
         })
         .collect()
@@ -409,6 +410,15 @@ impl DataProvider for RecordingProvider {
     }
 }
 
+/// An ABI reading used as supporting context for an advisory plan summary.
+/// A selector-only candidate is not a claim about the target contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalldataCandidate {
+    pub signature: String,
+    pub contract_match: bool,
+    pub arguments: Vec<(String, String)>,
+}
+
 fn is_canonical_descriptor_calldata(chain_id: u64, to: Address, calldata: &[u8]) -> bool {
     let Some((selector, body)) = calldata.split_at_checked(4) else {
         return false;
@@ -432,7 +442,7 @@ fn is_canonical_descriptor_calldata(chain_id: u64, to: Address, calldata: &[u8])
     })
 }
 
-fn within_declared_width(value: &DynSolValue) -> bool {
+pub(crate) fn within_declared_width(value: &DynSolValue) -> bool {
     match value {
         DynSolValue::Uint(word, bits) => *bits >= 256 || *word < (U256::from(1) << *bits),
         DynSolValue::Int(word, bits) => {

@@ -15,6 +15,8 @@ members = [
     "crates/erc8410",
     "crates/erc8410-wasm",
     "crates/ekubo-wallet-core",
+    "crates/ekubo-wallet-preview",
+    "crates/ekubo-wallet-preview-wasm",
     "crates/mcp-bridge",
     "crates/walletconnect-session",
     "crates/ztracing-compat",
@@ -37,6 +39,7 @@ test = false
 
 [dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }
+ekubo-wallet-preview = { path = "crates/ekubo-wallet-preview", default-features = false }
 walletconnect-session = { path = "crates/walletconnect-session" }
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"
@@ -135,6 +138,21 @@ gpui-component = "26cc9366abb27ccedce386ac99a615a8fa7018da"
 [profile.dev]
 opt-level = 1
 
+# Browser builds only. Separate from `release` because the desktop wallet needs
+# unwinding -- it catches a panic from inside the graphics driver so a failed
+# preview cannot take the window down -- while a `.wasm` has no such guard to
+# preserve and pays for unwinding tables in bytes a wallet has to download.
+#
+# Size is the whole point here. A browser wallet that ships this is asking a
+# person to fetch it before they can review a transaction.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -192,3 +210,11 @@ disallowed_types = "deny"
 # Remove this once the fix is upstream and released.
 [patch.crates-io]
 clear-signing = { git = "https://github.com/EkuboProtocol/clear-signing", branch = "fix-raw-signed-integers-0.1.0" }
+
+# Training/evaluation binaries need optimized arithmetic, but whole-program
+# LTO makes iterating on the model unnecessarily slow. Desktop release settings
+# remain independent.
+[profile.preview-train]
+inherits = "release"
+lto = false
+codegen-units = 16

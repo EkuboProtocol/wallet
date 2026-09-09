@@ -29,6 +29,7 @@ pub mod desktop_store;
 pub mod ephemeral;
 pub mod execution;
 pub mod fork;
+pub mod fourbyte;
 pub mod human_presence;
 pub mod input_validation;
 pub mod legal;

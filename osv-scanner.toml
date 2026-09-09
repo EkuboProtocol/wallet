@@ -24,6 +24,11 @@ ignoreUntil = 2027-02-15
 reason = "Informational unmaintained notice for transitive rustybuzz; migrate the font stack before this exception expires."
 
 [[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+ignoreUntil = 2027-02-15
+reason = "Informational unmaintained notice for transitive bincode, which burn uses to serialize the transaction-preview weights; migrate through its upstream dependency before this exception expires."
+
+[[IgnoredVulns]]
 id = "RUSTSEC-2026-0192"
 ignoreUntil = 2027-02-15
 reason = "Informational unmaintained notice for transitive ttf-parser; migrate the font stack before this exception expires."

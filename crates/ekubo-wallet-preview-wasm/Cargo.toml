@@ -1,0 +1,29 @@
+[package]
+name = "ekubo-wallet-preview-wasm"
+version.workspace = true
+edition = "2024"
+rust-version = "1.94.1"
+description = "Browser bindings for the embedded transaction-preview model"
+repository = "https://github.com/EkuboProtocol/wallet"
+license = "FSL-1.1-MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["webgpu"]
+# WebGPU through wasm-bindgen. The browser equivalent of what the desktop
+# wallet runs, and the default: a browser wallet reviewing a queue of requests
+# wants the same batched forward pass the desktop one gets.
+webgpu = ["ekubo-wallet-preview/webgpu"]
+
+[dependencies]
+ekubo-wallet-preview = { path = "../ekubo-wallet-preview", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde-wasm-bindgen = "0.6.5"
+wasm-bindgen = "0.2.106"
+wasm-bindgen-futures = "0.4.56"
+
+[lints]
+workspace = true

@@ -1,0 +1,441 @@
+use super::*;
+
+const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+const SPENDER: &str = "0x1111111254EEB25477B68fb85Ed929f73A960582";
+
+/// A call whose target lifts no slot of its own, so a test naming slot
+/// indices is reading only what its description put there.
+fn call(description: &str) -> CallSummary {
+    CallSummary {
+        description: Some(description.to_owned()),
+        native_value: "0".to_owned(),
+        ..CallSummary::default()
+    }
+}
+
+fn plan(description: &str) -> PlanDocument {
+    PlanDocument {
+        calls: vec![call(description)],
+    }
+}
+
+fn kinds(slotized: &Slotized) -> Vec<SlotKind> {
+    slotized
+        .slots
+        .iter()
+        .filter(|slot| slot.kind != SlotKind::Action)
+        .map(|slot| slot.kind)
+        .collect()
+}
+
+fn texts(slotized: &Slotized) -> Vec<&str> {
+    slotized
+        .slots
+        .iter()
+        .filter(|slot| slot.kind != SlotKind::Action)
+        .map(|slot| slot.text.as_str())
+        .collect()
+}
+
+#[test]
+fn an_amount_with_a_bound_symbol_lifts_whole() {
+    let slotized = slotize(&plan(&format!(
+        "approve spender {SPENDER} for 1000.5 USDC ({USDC})"
+    )));
+    assert_eq!(kinds(&slotized), [SlotKind::Address, SlotKind::Amount]);
+    assert_eq!(texts(&slotized)[1], format!("1000.5 USDC ({USDC})"));
+}
+
+#[test]
+fn a_bare_uppercase_ticker_is_a_unit_but_an_ordinary_word_is_not() {
+    let slotized = slotize(&plan("wrap 2.5 ETH and 1 more call"));
+    let lifted = texts(&slotized);
+    assert!(lifted.contains(&"2.5 ETH"), "{lifted:?}");
+    assert!(
+        !lifted.iter().any(|text| text.contains("more")),
+        "a count must not swallow the word after it: {lifted:?}"
+    );
+}
+
+#[test]
+fn an_own_account_annotation_stays_bound_to_its_address() {
+    let slotized = slotize(&plan(&format!(
+        "transfer to {SPENDER} (your account savings)"
+    )));
+    assert_eq!(
+        texts(&slotized)[0],
+        format!("{SPENDER} (your account savings)"),
+        "splitting these would let a summary name the address without the fact that it is the owner's"
+    );
+}
+
+#[test]
+fn a_hex_blob_that_is_not_twenty_bytes_is_data_not_an_address() {
+    let slotized = slotize(&plan("permit 0xdeadbeef then 0x00"));
+    assert_eq!(kinds(&slotized), [SlotKind::Data, SlotKind::Data]);
+}
+
+#[test]
+fn a_bare_integer_is_a_number_and_a_fraction_is_an_amount() {
+    let slotized = slotize(&plan("tick 887272 ratio 0.3"));
+    assert_eq!(kinds(&slotized), [SlotKind::Number, SlotKind::Amount]);
+}
+
+#[test]
+fn base_unit_rendering_lifts_as_one_amount() {
+    let slotized = slotize(&plan(&format!("transfer 12345 base units of {USDC}")));
+    assert_eq!(kinds(&slotized), [SlotKind::Amount]);
+    assert_eq!(texts(&slotized)[0], format!("12345 base units of {USDC}"));
+}
+
+/// The property the whole design rests on: no digit of a value ever reaches
+/// the model, so no forward pass can alter one.
+#[test]
+fn no_input_token_carries_a_digit_from_a_lifted_value() {
+    let slotized = slotize(&plan(&format!(
+        "swap 1000.5 USDC ({USDC}) for 0.318 WETH ({SPENDER}) before 1893456000"
+    )));
+    for token in &slotized.tokens {
+        let piece = vocab::text_of(*token).unwrap_or("");
+        assert!(
+            !piece.contains("1000") && !piece.contains("318") && !piece.contains("1893456000"),
+            "the value {piece:?} reached the model's input"
+        );
+    }
+}
+
+#[test]
+fn rendering_substitutes_slot_references_verbatim() {
+    let slotized = slotize(&plan(&format!(
+        "approve spender {SPENDER} for 1000.5 USDC ({USDC})"
+    )));
+    let summary = [
+        vocab::token_of("approve"),
+        vocab::slot_token(slotized.role(0, SlotKind::Amount, 0).unwrap()).unwrap(),
+        vocab::token_of("for"),
+        vocab::slot_token(slotized.role(0, SlotKind::Address, 0).unwrap()).unwrap(),
+    ];
+    assert_eq!(
+        slotized.render(&summary),
+        format!("approve 1000.5 USDC ({USDC}) for {SPENDER}")
+    );
+}
+
+/// A reference the plan has no slot for is dropped. Printing it would put
+/// `<s7>` in front of a human, which reads as a value.
+#[test]
+fn a_reference_past_the_slot_table_is_dropped_not_printed() {
+    let slotized = slotize(&plan("wrap"));
+    let summary = [
+        vocab::token_of("wrap"),
+        vocab::slot_token(40).unwrap(),
+        vocab::token_of("now"),
+    ];
+    let rendered = slotized.render(&summary);
+    assert_eq!(rendered, "wrap now");
+    assert!(!rendered.contains('<'));
+}
+
+#[test]
+fn punctuation_joins_the_word_before_it() {
+    let slotized = slotize(&plan("wrap"));
+    let summary = [
+        vocab::token_of("wrap"),
+        vocab::token_of("ether"),
+        vocab::token_of(","),
+        vocab::token_of("then"),
+        vocab::token_of("stake"),
+        vocab::token_of("."),
+    ];
+    assert_eq!(slotized.render(&summary), "wrap ether, then stake.");
+}
+
+/// Past the cap a value is still announced by kind, so the model knows one was
+/// there, but it gets no reference -- and a value it cannot name is a value it
+/// cannot misrender.
+#[test]
+fn values_past_the_cap_lose_their_reference_not_their_kind() {
+    let details: Vec<String> = (0..MAX_SLOTS + 10)
+        .map(|index| format!("n {index}"))
+        .collect();
+    let document = PlanDocument {
+        calls: vec![CallSummary {
+            description: Some("batch".to_owned()),
+            details,
+            ..CallSummary::default()
+        }],
+    };
+    let slotized = slotize(&document);
+    assert_eq!(slotized.slots.len(), MAX_SLOTS);
+    assert!(
+        slotized
+            .tokens
+            .iter()
+            .filter_map(|t| vocab::slot_index(*t))
+            .all(|i| i < MAX_SLOTS)
+    );
+}
+
+#[test]
+fn a_long_plan_is_truncated_rather_than_growing_without_bound() {
+    let calls = (0..400).map(|_| call("swap tokens for tokens")).collect();
+    let slotized = slotize(&PlanDocument { calls });
+    assert!(slotized.tokens.len() <= MAX_INPUT_TOKENS);
+}
+
+#[test]
+fn a_plan_that_decoded_to_nothing_is_opaque() {
+    let opaque = PlanDocument {
+        calls: vec![CallSummary {
+            target: SPENDER.to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(opaque.is_opaque());
+    assert!(!plan("swap").is_opaque());
+}
+
+#[test]
+fn a_zero_native_value_is_left_out_of_the_input() {
+    for zero in ["0", "0 ETH", "0.0 ETH", " "] {
+        let document = PlanDocument {
+            calls: vec![CallSummary {
+                description: Some("call".to_owned()),
+                native_value: zero.to_owned(),
+                ..CallSummary::default()
+            }],
+        };
+        let slotized = slotize(&document);
+        assert!(
+            !slotized.tokens.contains(&vocab::token_of("<value>")),
+            "{zero:?} should not be announced as a value"
+        );
+    }
+    let document = PlanDocument {
+        calls: vec![CallSummary {
+            description: Some("call".to_owned()),
+            native_value: "1.5 ETH".to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(
+        slotize(&document)
+            .tokens
+            .contains(&vocab::token_of("<value>"))
+    );
+}
+
+/// A call's target is lifted like any other value, so a summary can name the
+/// contract it is talking to.
+#[test]
+fn the_target_is_lifted_too() {
+    let document = PlanDocument {
+        calls: vec![CallSummary {
+            description: Some("swap".to_owned()),
+            target: format!("USDC ({USDC})"),
+            ..CallSummary::default()
+        }],
+    };
+    let slotized = slotize(&document);
+    assert_eq!(kinds(&slotized), [SlotKind::Token]);
+    assert_eq!(texts(&slotized)[0], format!("USDC ({USDC})"));
+}
+
+/// Slot numbering is plan-global but a template is written per call, so each
+/// slot has to say which call it came from. Without this, the template for the
+/// swap below would resolve "the first amount" against the approval's.
+#[test]
+fn a_slot_remembers_which_call_produced_it() {
+    let document = PlanDocument {
+        calls: vec![
+            call(&format!("approve spender {SPENDER} for 500 USDC ({USDC})")),
+            call(&format!(
+                "swap 250.5 USDC ({USDC}) for 0.1 WETH ({SPENDER})"
+            )),
+        ],
+    };
+    let slotized = slotize(&document);
+    assert!(slotized.slots.iter().any(|slot| slot.call == 0));
+    assert!(slotized.slots.iter().any(|slot| slot.call == 1));
+
+    let first_amount_of_swap = slotized
+        .role(1, SlotKind::Amount, 0)
+        .expect("the swap lifted an amount");
+    assert_eq!(
+        slotized.slots[first_amount_of_swap].text,
+        format!("250.5 USDC ({USDC})")
+    );
+
+    let first_amount_of_approval = slotized
+        .role(0, SlotKind::Amount, 0)
+        .expect("the approval lifted an amount");
+    assert_eq!(
+        slotized.slots[first_amount_of_approval].text,
+        format!("500 USDC ({USDC})")
+    );
+}
+
+#[test]
+fn a_role_the_call_does_not_have_resolves_to_nothing() {
+    let slotized = slotize(&plan("wrap ether"));
+    assert_eq!(slotized.role(0, SlotKind::Amount, 0), None);
+    assert_eq!(slotized.role(9, SlotKind::Address, 0), None);
+}
+
+/// Inference and training pad to the same handful of widths, so the shapes the
+/// model is fitted on are the shapes it later runs on -- and so a GPU backend
+/// compiles a bounded number of kernels rather than one per distinct plan
+/// length.
+#[test]
+fn a_plan_is_padded_to_one_of_a_few_fixed_widths() {
+    for (length, expected) in [(1, 32), (32, 32), (33, 64), (200, 256), (512, 512)] {
+        assert_eq!(width_for(length), expected, "length {length}");
+    }
+    assert!(
+        WIDTHS.windows(2).all(|pair| pair[0] < pair[1]),
+        "widths ascend"
+    );
+}
+
+/// A plan longer than the widest bucket still gets a width, and it is the
+/// input cap rather than something unbounded.
+#[test]
+fn a_plan_past_the_widest_bucket_pads_to_the_input_cap() {
+    assert_eq!(width_for(MAX_INPUT_TOKENS + 1), MAX_INPUT_TOKENS);
+}
+
+/// The protocol a descriptor declares is lifted verbatim, not folded through
+/// the word scanner.
+///
+/// Two things depend on that. A reviewer recognizes "Aave DAO" and would not
+/// recognize "aave dao", and `1inch Network` begins with a digit -- the amount
+/// scanner would take the `1` for a quantity and leave `inch` behind, and no
+/// vocabulary may contain a digit-leading word. Lifting sidesteps both, and
+/// means the model can only ever name the protocol the descriptor declared.
+#[test]
+fn a_protocol_name_is_lifted_verbatim_including_a_leading_digit() {
+    for (reading, expected) in [
+        ("1inch Network \u{2014} Swap", "1inch Network"),
+        ("Aave DAO \u{2014} Repay loan", "Aave DAO"),
+        ("Lido DAO \u{2014} Wrap stETH", "Lido DAO"),
+    ] {
+        let slotized = slotize(&plan(reading));
+        let lifted = slotized
+            .slots
+            .iter()
+            .find(|slot| slot.kind == SlotKind::Protocol)
+            .unwrap_or_else(|| panic!("{reading} lifted no protocol"));
+        assert_eq!(lifted.text, expected);
+    }
+}
+
+/// A reading with no owner prefix lifts no protocol, rather than lifting the
+/// first few words of the sentence.
+#[test]
+fn a_reading_without_an_owner_prefix_lifts_no_protocol() {
+    let slotized = slotize(&plan(
+        "approve spender 0x1111111254EEB25477B68fb85Ed929f73A960582 for 5 USDC",
+    ));
+    assert!(
+        !slotized
+            .slots
+            .iter()
+            .any(|slot| slot.kind == SlotKind::Protocol)
+    );
+}
+
+/// An em dash inside a long sentence is not an owner prefix.
+#[test]
+fn a_long_prefix_is_not_mistaken_for_a_protocol() {
+    let long = "this whole clause is far too long to be anybody's protocol name \u{2014} swap";
+    let slotized = slotize(&plan(long));
+    assert!(
+        !slotized
+            .slots
+            .iter()
+            .any(|slot| slot.kind == SlotKind::Protocol)
+    );
+}
+
+/// A call nobody decoded which is also sending ether is not a plan with
+/// nothing to say about it: the amount is the whole story.
+#[test]
+fn an_undecoded_call_that_sends_value_is_not_opaque() {
+    let silent = PlanDocument {
+        calls: vec![CallSummary {
+            target: SPENDER.to_owned(),
+            native_value: "0 ETH".to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(silent.is_opaque());
+
+    let sending = PlanDocument {
+        calls: vec![CallSummary {
+            target: SPENDER.to_owned(),
+            native_value: "2.5 ETH".to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(
+        !sending.is_opaque(),
+        "the most alarming call in a list must not be the only one with no words beside it"
+    );
+    let slotized = slotize(&sending);
+    assert!(
+        slotized.slots.iter().any(|slot| slot.text == "2.5 ETH"),
+        "the amount must be lifted so a summary can name it"
+    );
+}
+
+#[test]
+fn zero_native_value_uses_the_amount_not_the_currency_suffix() {
+    for value in ["0 ETH", "0.000 ETH", "0", ""] {
+        assert!(is_zero_value(value));
+    }
+    for value in ["0.01 ETH", "1 wei", "2.5 ETH"] {
+        assert!(!is_zero_value(value));
+    }
+}
+
+#[test]
+fn boolean_values_remain_distinguishable_to_the_classifier() {
+    let plan = |flag| PlanDocument {
+        calls: vec![CallSummary {
+            evidence: None,
+            description: Some(format!("setApprovalForAll operator 0x1111 enabled {flag}")),
+            details: vec![],
+            warnings: vec![],
+            target: "collection".into(),
+            native_value: "0 ETH".into(),
+        }],
+    };
+    let grant = slotize(&plan("true"));
+    let revoke = slotize(&plan("false"));
+    assert_ne!(grant.tokens, revoke.tokens);
+    assert!(grant.tokens.contains(&vocab::token_of("<true>")));
+    assert!(revoke.tokens.contains(&vocab::token_of("<false>")));
+    assert!(!vocab::is_output_word(vocab::token_of("<true>")));
+    assert!(!vocab::is_output_word(vocab::token_of("<false>")));
+}
+
+#[test]
+fn field_metadata_stays_bounded_when_details_are_large() {
+    let mut details = vec![format!("Data: 0x{}", "ab".repeat(2000))];
+    details.extend(std::iter::repeat_n("Amount: 1 ETH".into(), 1000));
+    let slots = slotize(&PlanDocument {
+        calls: vec![CallSummary {
+            description: Some("Protocol — Action".into()),
+            details,
+            ..Default::default()
+        }],
+    });
+    assert!(slots.truncated);
+    assert!(slots.fields.len() < 1000);
+    assert!(
+        slots
+            .fields
+            .iter()
+            .all(|field| field.text.chars().count() <= 160)
+    );
+}

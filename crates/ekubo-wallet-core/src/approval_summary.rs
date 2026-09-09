@@ -77,6 +77,9 @@ enum StandardCall {
 /// One decoded step rendered for a human reviewer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepInterpretation {
+    /// Byte-exact signature hints, present only when neither clear signing nor
+    /// standard decoding supplied a reading. Never authoritative.
+    pub candidates: Vec<crate::clear_signing::CalldataCandidate>,
     pub step: u32,
     /// Present when the calldata matched a vendored ERC-7730 descriptor or a
     /// recognized standard call.
@@ -193,6 +196,7 @@ async fn interpret_step(
     {
         warnings.extend(reading.warnings);
         return StepInterpretation {
+            candidates: Vec::new(),
             step: step.step,
             description: Some(reading.intent),
             details: reading.fields,
@@ -261,10 +265,17 @@ async fn interpret_step(
         }
         None => None,
     };
+    let candidates = if description.is_none() {
+        crate::fourbyte::calldata_candidates(&step.transaction.data)
+    } else {
+        Vec::new()
+    };
+    let details = crate::fourbyte::details(&candidates);
     StepInterpretation {
+        candidates,
         step: step.step,
         description,
-        details: Vec::new(),
+        details,
         warnings,
     }
 }
