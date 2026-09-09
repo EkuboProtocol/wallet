@@ -186,11 +186,28 @@ impl PlanDocument {
     /// it.
     #[must_use]
     pub fn is_opaque(&self) -> bool {
-        self.calls.iter().all(|call| {
-            call.description.is_none()
-                && call.details.is_empty()
-                && is_zero_value(&call.native_value)
-        })
+        self.nothing_decoded()
+            && self
+                .calls
+                .iter()
+                .all(|call| is_zero_value(&call.native_value))
+    }
+
+    /// True when no call in the plan decoded to anything nameable.
+    ///
+    /// Separate from [`Self::is_opaque`] because these two facts want
+    /// different answers. A plan nobody decoded that also sends nothing has
+    /// no signal at all and skips the model entirely. One that sends *value*
+    /// still has something worth saying -- the amount -- so the model writes
+    /// the sentence, but the class is not up for prediction: nothing decoded
+    /// is something we know rather than something to guess at, and letting the
+    /// model answer "claim" for an unreadable call that is moving ether is
+    /// exactly the confident noise this surface must not produce.
+    #[must_use]
+    pub fn nothing_decoded(&self) -> bool {
+        self.calls
+            .iter()
+            .all(|call| call.description.is_none() && call.details.is_empty())
     }
 }
 

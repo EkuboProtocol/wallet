@@ -581,6 +581,7 @@ file follows in the appendix. Regenerate this document with
 - schemars 1.2.2 — Graham Esau <gesau@hotmail.co.uk> — https://github.com/GREsau/schemars
 - schemars_derive 1.2.2 — Graham Esau <gesau@hotmail.co.uk> — https://github.com/GREsau/schemars
 - seahash 4.1.0 — ticki <ticki@users.noreply.github.com>, Tom Almeida <tom@tommoa.me> — https://gitlab.redox-os.org/redox-os/seahash
+- serde-wasm-bindgen 0.6.5 — Ingvar Stepanyan <me@rreverser.com> — https://github.com/RReverser/serde-wasm-bindgen
 - sharded-slab 0.1.7 — Eliza Weisman <eliza@buoyant.io> — https://github.com/hawkw/sharded-slab
 - simd-adler32 0.3.10 — Marvin Countryman <me@maar.vin> — https://github.com/mcountryman/simd-adler32
 - simd_helpers 0.1.0 — Luca Barbato <lu_zero@gentoo.org> — https://github.com/lu-zero/simd_helpers
@@ -15176,6 +15177,32 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: serde-wasm-bindgen 0.6.5
+
+```text
+MIT License
+
+Copyright (c) 2019 Cloudflare, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## License text for: serde_fmt 1.1.0

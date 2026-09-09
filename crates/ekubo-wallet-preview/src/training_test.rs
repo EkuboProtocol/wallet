@@ -123,7 +123,7 @@ fn a_batch_pads_every_row_to_the_shape_it_was_given() {
         width: 32,
         count: 2,
     };
-    let batch = batch::<TestBackend>(&[short, long], shape, &device);
+    let batch = batch::<TestBackend>(&[&short, &long], shape, &device);
     assert_eq!(batch.input.dims(), [2, 32]);
     let pad: Vec<bool> = batch.pad.into_data().to_vec().unwrap();
     assert_eq!(&pad[..2], &[false, false]);
@@ -209,7 +209,8 @@ fn every_batch_has_one_of_the_fixed_shapes() {
             encode(&example, vocab::size())
         })
         .collect();
-    let batched = batches(&examples, &mut rng);
+    let mut batched = plan_batches(&examples);
+    shuffle_batches(&mut batched, &mut rng);
     assert!(!batched.is_empty());
     let mut shapes = std::collections::BTreeSet::new();
     for (shape, chunk) in &batched {
@@ -218,7 +219,7 @@ fn every_batch_has_one_of_the_fixed_shapes() {
             shape.count,
             "a batch must be exactly its shape"
         );
-        for example in chunk {
+        for example in gather(&examples, chunk) {
             assert!(
                 example.input.len() <= shape.width || shape.width == 512,
                 "an example of {} was put in a width-{} bucket",
@@ -247,10 +248,15 @@ fn no_example_is_dropped_to_keep_a_shape_fixed() {
             encode(&example, vocab::size())
         })
         .collect();
-    let batched = batches(&examples, &mut rng);
+    let mut batched = plan_batches(&examples);
+    shuffle_batches(&mut batched, &mut rng);
     let seen: std::collections::BTreeSet<String> = batched
         .iter()
-        .flat_map(|(_, chunk)| chunk.iter().flat_map(|e| e.formats.iter().cloned()))
+        .flat_map(|(_, indices)| {
+            gather(&examples, indices)
+                .into_iter()
+                .flat_map(|e| e.formats.iter().cloned())
+        })
         .collect();
     for example in &examples {
         for format in &example.formats {
@@ -269,7 +275,7 @@ fn summaries_are_padded_to_one_fixed_width() {
         width: 32,
         count: 2,
     };
-    let batch = batch::<TestBackend>(&[short.clone(), short], shape, &device);
+    let batch = batch::<TestBackend>(&[&short, &short], shape, &device);
     assert_eq!(batch.prefix.dims(), [2, SUMMARY_WIDTH - 1]);
     assert_eq!(batch.target.dims(), [2, SUMMARY_WIDTH - 1]);
     assert_eq!(batch.input.dims(), [2, 32]);

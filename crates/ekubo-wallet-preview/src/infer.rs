@@ -56,16 +56,28 @@ impl<B: Backend> PreviewEngine<B> {
     pub fn preview_all(&self, documents: &[PlanDocument]) -> Vec<TransactionPreview> {
         let mut previews = Vec::with_capacity(documents.len());
         let mut pending = Vec::new();
+        let mut undecoded = Vec::new();
         for (index, document) in documents.iter().enumerate() {
             previews.push(TransactionPreview::unrecognized());
-            if !document.is_opaque() {
-                pending.push((index, slotize(document)));
+            if document.is_opaque() {
+                continue;
             }
+            if document.nothing_decoded() {
+                undecoded.push(index);
+            }
+            pending.push((index, slotize(document)));
         }
         if pending.is_empty() {
             return previews;
         }
-        for (index, preview) in self.run(&pending) {
+        for (index, mut preview) in self.run(&pending) {
+            // A plan nothing decoded keeps the answer we know rather than the
+            // one the model guessed. It still gets the sentence, because the
+            // value it is moving is worth naming.
+            if undecoded.contains(&index) {
+                preview.class = TransactionClass::Unrecognized;
+                preview.risk = RiskBand::Critical;
+            }
             if let Some(slot) = previews.get_mut(index) {
                 *slot = preview;
             }

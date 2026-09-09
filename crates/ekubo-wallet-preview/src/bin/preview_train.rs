@@ -129,13 +129,14 @@ fn main() -> Result<(), String> {
     let weights = training::class_weights(&train);
     // Fixed once: the held-out batches never change, so their shapes are
     // built once and reused every epoch rather than recompiled each time.
-    let held_out_batches = training::batches(&evaluate, &mut StdRng::seed_from_u64(0));
+    let held_out_batches = training::plan_batches(&evaluate);
 
     match arguments.device {
         Device::Cpu => fit::<Cpu>(
             &burn::backend::ndarray::NdArrayDevice::default(),
             &arguments,
             &train,
+            &evaluate,
             &held_out_batches,
             &weights,
         ),
@@ -143,6 +144,7 @@ fn main() -> Result<(), String> {
             &burn::backend::wgpu::WgpuDevice::default(),
             &arguments,
             &train,
+            &evaluate,
             &held_out_batches,
             &weights,
         ),
@@ -158,19 +160,24 @@ fn fit<B: AutodiffBackend>(
     device: &B::Device,
     arguments: &Arguments,
     train: &[Encoded],
-    held_out_batches: &[(training::Shape, Vec<Encoded>)],
+    evaluate: &[Encoded],
+    held_out_batches: &[(training::Shape, Vec<usize>)],
     weights: &[f32],
 ) -> Result<(), String> {
     let mut model = PreviewModel::<B>::new(device);
     let mut optimizer = AdamWConfig::new().init();
     let mut rng = StdRng::seed_from_u64(arguments.seed);
+    // Planned once. Only the order changes between epochs.
+    let mut planned = training::plan_batches(train);
 
     for epoch in 1..=arguments.epochs {
         let started = std::time::Instant::now();
         let mut total = 0.0_f64;
         let mut steps = 0_usize;
-        for (shape, chunk) in training::batches(train, &mut rng) {
-            let batch = training::batch::<B>(&chunk, shape, device);
+        training::shuffle_batches(&mut planned, &mut rng);
+        for (shape, indices) in &planned {
+            let members = training::gather(train, indices);
+            let batch = training::batch::<B>(&members, *shape, device);
             let loss = training::loss(&model, &batch, weights, device);
             let value = loss
                 .clone()
@@ -185,16 +192,16 @@ fn fit<B: AutodiffBackend>(
             model = optimizer.step(arguments.learning_rate, model, gradients);
         }
         let mean = total / f64::from(u32::try_from(steps.max(1)).unwrap_or(u32::MAX));
-        let accuracy = evaluate_accuracy(&model, held_out_batches, device);
+        let accuracy = tally(&model, evaluate, held_out_batches, device);
         eprintln!(
             "epoch {epoch:>3}  loss {mean:.4}  held-out class {:.1}%  risk {:.1}%  ({:?})",
-            100.0 * accuracy.class,
-            100.0 * accuracy.risk,
+            100.0 * accuracy.class_accuracy(),
+            100.0 * accuracy.risk_accuracy(),
             started.elapsed()
         );
     }
 
-    report_per_class(&model, held_out_batches, device);
+    tally(&model, evaluate, held_out_batches, device).report();
 
     // Saved from the inference view of the model, so the weights file carries
     // no autodiff state and loads under the plain backend the wallet runs.
@@ -223,83 +230,93 @@ fn fit<B: AutodiffBackend>(
     Ok(())
 }
 
-/// Fractions of the held-out set the model gets right.
-struct Accuracy {
-    class: f64,
-    risk: f64,
+/// What the model got right on the held-out set, in total and per class.
+///
+/// One tally, formatted two ways. There used to be two functions walking the
+/// same batches with the same comparison, and they disagreed: the headline
+/// said 97.3% while the per-class table averaged about 44%. An independent
+/// measurement through the inference path agreed with the headline, so the
+/// table was wrong -- and a diagnostic that is wrong about which classes are
+/// weak is worse than no diagnostic, because it is what you would act on.
+///
+/// Having one function makes that particular disagreement impossible rather
+/// than merely unlikely.
+struct Tally {
+    class_right: usize,
+    risk_right: usize,
+    total: usize,
+    right_by_class: [usize; CLASS_COUNT],
+    seen_by_class: [usize; CLASS_COUNT],
 }
 
-fn evaluate_accuracy<B: AutodiffBackend>(
-    model: &PreviewModel<B>,
-    batches: &[(training::Shape, Vec<Encoded>)],
-    device: &B::Device,
-) -> Accuracy {
-    let (class, risk, total) = tally(model, batches, device);
-    let total = f64::from(u32::try_from(total.max(1)).unwrap_or(u32::MAX));
-    Accuracy {
-        class: f64::from(u32::try_from(class).unwrap_or(u32::MAX)) / total,
-        risk: f64::from(u32::try_from(risk).unwrap_or(u32::MAX)) / total,
+impl Tally {
+    fn class_accuracy(&self) -> f64 {
+        ratio(self.class_right, self.total)
     }
+
+    fn risk_accuracy(&self) -> f64 {
+        ratio(self.risk_right, self.total)
+    }
+
+    /// Per class, for the classes the held-out set actually contains.
+    fn report(&self) {
+        eprintln!("held-out accuracy by class:");
+        for index in 0..CLASS_COUNT {
+            if self.seen_by_class[index] == 0 {
+                continue;
+            }
+            eprintln!(
+                "  {:18} {:>5.1}%  ({} held out)",
+                TransactionClass::from_index(index).corpus_name(),
+                100.0 * ratio(self.right_by_class[index], self.seen_by_class[index]),
+                self.seen_by_class[index]
+            );
+        }
+    }
+}
+
+fn ratio(part: usize, whole: usize) -> f64 {
+    let whole = f64::from(u32::try_from(whole.max(1)).unwrap_or(u32::MAX));
+    f64::from(u32::try_from(part).unwrap_or(u32::MAX)) / whole
 }
 
 fn tally<B: Backend>(
     model: &PreviewModel<B>,
-    batches: &[(training::Shape, Vec<Encoded>)],
+    examples: &[Encoded],
+    batches: &[(training::Shape, Vec<usize>)],
     device: &B::Device,
-) -> (usize, usize, usize) {
-    let mut class_right = 0;
-    let mut risk_right = 0;
-    let mut total = 0;
-    for (shape, chunk) in batches {
-        let batch = training::batch::<B>(chunk, *shape, device);
+) -> Tally {
+    let mut tally = Tally {
+        class_right: 0,
+        risk_right: 0,
+        total: 0,
+        right_by_class: [0; CLASS_COUNT],
+        seen_by_class: [0; CLASS_COUNT],
+    };
+    for (shape, indices) in batches {
+        let chunk = training::gather(examples, indices);
+        let batch = training::batch::<B>(&chunk, *shape, device);
         let memory = model.encode(batch.input.clone(), &batch.pad);
         let prediction = model.classify(memory, &batch.pad);
         let classes = infer::indices(prediction.class.argmax(1));
         let risks = infer::indices(prediction.risk.argmax(1));
         for (index, example) in chunk.iter().enumerate() {
-            if classes.get(index).copied() == i64::try_from(example.class).ok() {
-                class_right += 1;
+            let predicted_class = classes.get(index).copied();
+            let correct = predicted_class == i64::try_from(example.class).ok();
+            tally.total += 1;
+            if let Some(seen) = tally.seen_by_class.get_mut(example.class) {
+                *seen += 1;
+            }
+            if correct {
+                tally.class_right += 1;
+                if let Some(right) = tally.right_by_class.get_mut(example.class) {
+                    *right += 1;
+                }
             }
             if risks.get(index).copied() == i64::try_from(example.risk).ok() {
-                risk_right += 1;
-            }
-            total += 1;
-        }
-    }
-    (class_right, risk_right, total)
-}
-
-/// Per-class held-out accuracy, because one number over an imbalanced set
-/// hides exactly the classes worth checking.
-fn report_per_class<B: Backend>(
-    model: &PreviewModel<B>,
-    batches: &[(training::Shape, Vec<Encoded>)],
-    device: &B::Device,
-) {
-    let mut right = [0_usize; CLASS_COUNT];
-    let mut seen = [0_usize; CLASS_COUNT];
-    for (shape, chunk) in batches {
-        let batch = training::batch::<B>(chunk, *shape, device);
-        let memory = model.encode(batch.input.clone(), &batch.pad);
-        let classes = infer::indices(model.classify(memory, &batch.pad).class.argmax(1));
-        for (index, example) in chunk.iter().enumerate() {
-            seen[example.class] += 1;
-            if classes.get(index).copied() == i64::try_from(example.class).ok() {
-                right[example.class] += 1;
+                tally.risk_right += 1;
             }
         }
     }
-    eprintln!("held-out accuracy by class:");
-    for index in 0..CLASS_COUNT {
-        if seen[index] == 0 {
-            continue;
-        }
-        eprintln!(
-            "  {:18} {:>5.1}%  ({} held out)",
-            TransactionClass::from_index(index).corpus_name(),
-            100.0 * f64::from(u32::try_from(right[index]).unwrap_or(u32::MAX))
-                / f64::from(u32::try_from(seen[index]).unwrap_or(u32::MAX)),
-            seen[index]
-        );
-    }
+    tally
 }

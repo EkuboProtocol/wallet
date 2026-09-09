@@ -148,6 +148,15 @@ pub struct Batch<B: Backend> {
     pub length: usize,
 }
 
+/// Gather the examples one planned batch names.
+#[must_use]
+pub fn gather<'a>(examples: &'a [Encoded], indices: &[usize]) -> Vec<&'a Encoded> {
+    indices
+        .iter()
+        .filter_map(|index| examples.get(*index))
+        .collect()
+}
+
 /// Pad a slice of examples into one batch of a fixed shape.
 ///
 /// The shape comes from the caller rather than from the members, because a
@@ -155,7 +164,7 @@ pub struct Batch<B: Backend> {
 /// for. An example longer than the bucket's width is truncated, which only
 /// reaches examples past the widest bucket.
 #[must_use]
-pub fn batch<B: Backend>(examples: &[Encoded], shape: Shape, device: &B::Device) -> Batch<B> {
+pub fn batch<B: Backend>(examples: &[&Encoded], shape: Shape, device: &B::Device) -> Batch<B> {
     let size = examples.len();
     let length = shape.width;
     let steps = SUMMARY_WIDTH - 1;
@@ -338,48 +347,55 @@ pub fn bucket_of(length: usize) -> Shape {
     }
 }
 
-/// Group examples into fixed-shape batches, then shuffle the batches.
+/// Assign every example to a fixed-shape batch, once.
 ///
-/// A trailing partial batch is filled by cycling that bucket's own examples
-/// rather than being padded with nothing or dropped: keeping the shape fixed
-/// is the whole point, and repeating a handful of examples once per epoch
-/// weighs less than losing them.
+/// Returns *indices*, not examples. An earlier version cloned every `Encoded`
+/// into its batch on each epoch, which for twenty-two thousand examples is
+/// twenty-two thousand vector allocations per pass -- and it showed: the
+/// per-epoch timer read twenty seconds while wall clock between epochs was
+/// minutes, all of it spent copying data that had not changed since the epoch
+/// before.
 ///
-/// Shuffling the batches rather than the examples keeps the gradient noise
-/// shuffling is for -- a batch's composition is fixed, but the order it
-/// arrives in is not.
+/// A trailing partial batch is filled by repeating that bucket's own members
+/// rather than dropped: keeping the shape fixed is the point, and repeating a
+/// handful of examples once per epoch weighs less than losing them.
 #[must_use]
-pub fn batches(examples: &[Encoded], rng: &mut impl rand::RngExt) -> Vec<(Shape, Vec<Encoded>)> {
-    let mut by_bucket: BTreeMap<usize, Vec<Encoded>> = BTreeMap::new();
-    for example in examples {
-        let shape = bucket_of(example.input.len());
+pub fn plan_batches(examples: &[Encoded]) -> Vec<(Shape, Vec<usize>)> {
+    let mut by_bucket: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, example) in examples.iter().enumerate() {
         by_bucket
-            .entry(shape.width)
+            .entry(bucket_of(example.input.len()).width)
             .or_default()
-            .push(example.clone());
+            .push(index);
     }
-    let mut batched = Vec::new();
-    for (width, mut members) in by_bucket {
+    let mut planned = Vec::new();
+    for (width, members) in by_bucket {
         let shape = Shape {
             width,
             count: bucket_of(width).count,
         };
-        rand::seq::SliceRandom::shuffle(&mut members[..], rng);
         let mut at = 0;
         while at < members.len() {
-            let mut chunk: Vec<Encoded> =
-                members.iter().skip(at).take(shape.count).cloned().collect();
+            let mut chunk: Vec<usize> =
+                members.iter().skip(at).take(shape.count).copied().collect();
             let original = chunk.len();
             while chunk.len() < shape.count && original > 0 {
-                let filler = chunk[chunk.len() % original].clone();
-                chunk.push(filler);
+                chunk.push(chunk[chunk.len() % original]);
             }
-            batched.push((shape, chunk));
+            planned.push((shape, chunk));
             at += shape.count;
         }
     }
-    rand::seq::SliceRandom::shuffle(&mut batched[..], rng);
-    batched
+    planned
+}
+
+/// Shuffle the order the planned batches arrive in.
+///
+/// The batches themselves are fixed -- their shapes have to be, or the GPU
+/// backend compiles a kernel per shape -- so this is where the gradient noise
+/// that shuffling exists for comes from.
+pub fn shuffle_batches(planned: &mut [(Shape, Vec<usize>)], rng: &mut impl rand::RngExt) {
+    rand::seq::SliceRandom::shuffle(planned, rng);
 }
 
 /// A count as a float. Corpus counts are far below `f32`'s exact-integer

@@ -170,3 +170,26 @@ fn punctuation_does_not_let_an_invented_value_through() {
         );
     }
 }
+
+/// A plan nobody decoded keeps the class we know, even when it is worth
+/// writing a sentence about.
+///
+/// Letting the value through the model so it can name the amount is right;
+/// letting the model also pick the *class* is not. "Nothing decoded this" is a
+/// fact, and an unreadable call moving ether previewing as "Claim" is the
+/// confident noise this surface exists to avoid.
+#[test]
+fn an_undecoded_call_that_sends_value_is_still_unrecognized() {
+    let sending = PlanDocument {
+        calls: vec![CallSummary {
+            target: SPENDER.to_owned(),
+            native_value: "2.5 ETH".to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(sending.nothing_decoded());
+    assert!(!sending.is_opaque());
+    let preview = engine().preview(&sending);
+    assert_eq!(preview.class, TransactionClass::Unrecognized);
+    assert_eq!(preview.risk, RiskBand::Critical);
+}

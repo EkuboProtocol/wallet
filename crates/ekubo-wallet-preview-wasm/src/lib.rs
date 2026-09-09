@@ -106,10 +106,13 @@ pub struct Previewer {
     engine: Backend,
 }
 
+// Boxed because the two engines differ by kilobytes and this enum is stored,
+// not passed: an unboxed variant would make every `Previewer` as large as the
+// biggest backend whichever one it holds.
 enum Backend {
-    Cpu(cpu::CpuEngine),
+    Cpu(Box<cpu::CpuEngine>),
     #[cfg(feature = "webgpu")]
-    WebGpu(ekubo_wallet_preview::gpu::GpuEngine),
+    WebGpu(Box<ekubo_wallet_preview::gpu::GpuEngine>),
 }
 
 #[wasm_bindgen]
@@ -126,7 +129,7 @@ impl Previewer {
     #[wasm_bindgen(js_name = initCpu)]
     pub fn init_cpu() -> Result<Self, JsError> {
         Ok(Self {
-            engine: Backend::Cpu(cpu::load().map_err(describe)?),
+            engine: Backend::Cpu(Box::new(cpu::load().map_err(|error| describe(&error))?)),
         })
     }
 
@@ -149,14 +152,15 @@ impl Previewer {
         // it does not work out.
         let engine = ekubo_wallet_preview::gpu::load_async()
             .await
-            .map_err(describe)?;
+            .map_err(|error| describe(&error))?;
         Ok(Self {
-            engine: Backend::WebGpu(engine),
+            engine: Backend::WebGpu(Box::new(engine)),
         })
     }
 
     /// Whether this instance is running on the GPU.
     #[wasm_bindgen(getter, js_name = usingWebGpu)]
+    #[must_use]
     pub fn using_web_gpu(&self) -> bool {
         match &self.engine {
             Backend::Cpu(_) => false,
@@ -216,7 +220,7 @@ fn document_of(calls: JsValue) -> Result<PlanDocument, JsError> {
     })
 }
 
-fn describe(error: LoadError) -> JsError {
+fn describe(error: &LoadError) -> JsError {
     JsError::new(&error.to_string())
 }
 
