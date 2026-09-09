@@ -755,6 +755,85 @@ fn inbox_tabs_render_one_queue_at_a_time(cx: &mut gpui::TestAppContext) {
     release(cx, &view);
 }
 
+fn history_testnet() -> NetworkConfig {
+    ekubo_wallet_core::networks::known_networks()
+        .iter()
+        .find(|profile| profile.config.chain_id == 11_155_111)
+        .expect("Sepolia profile")
+        .config
+        .clone()
+}
+
+/// An empty filtered list must offer a way to reveal its records, while a
+/// fresh/cleared history and requests still awaiting review must not.
+#[gpui::test]
+fn history_empty_state_distinguishes_hidden_testnet_records(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let mut record = cleared_transaction_fixture(uuid::Uuid::new_v4());
+    record.chain_id = "11155111".to_owned();
+    record.network_name = "sepolia".to_owned();
+
+    for (has_record, awaiting, testnet_mode, empty, recovery) in [
+        (false, false, false, true, false),
+        (true, true, false, true, false),
+        (true, false, false, true, true),
+        (true, false, true, false, false),
+    ] {
+        cx.update_entity(&view, |wallet, cx| {
+            let mut snapshot = quiet_snapshot();
+            snapshot
+                .networks
+                .as_mut()
+                .expect("networks")
+                .push(history_testnet());
+            let mut record = record.clone();
+            if awaiting {
+                record.status = PendingStatus::AwaitingApproval;
+            }
+            snapshot.activity = Ok(Arc::from(if has_record {
+                vec![OwnerActivityRecord::Transaction(Box::new(record))]
+            } else {
+                Vec::new()
+            }));
+            wallet.desktop_snapshot = Some(Arc::new(snapshot));
+            wallet.testnet_mode = testnet_mode;
+            wallet.set_route(Route::Activity);
+            wallet.set_inbox_tab(InboxTab::Decided, cx);
+        });
+        let bounds = measure_at(
+            cx,
+            window,
+            &view,
+            size(px(660.0), px(500.0)),
+            &[
+                "activity-history-empty",
+                "activity-history-settings",
+                "activity-records",
+            ],
+        );
+        assert_eq!(
+            bounds[0].is_some(),
+            empty,
+            "record={has_record}, awaiting={awaiting}, testnet_mode={testnet_mode}"
+        );
+        assert_eq!(bounds[1].is_some(), recovery);
+        assert_eq!(bounds[2].is_some(), !empty);
+        if recovery {
+            let panel = bounds[0].expect("empty state");
+            let button = bounds[1].expect("settings button");
+            assert!(button.bottom() <= panel.bottom());
+            assert!(button.right() <= panel.right());
+            click(cx, window, &view, "activity-history-settings");
+            cx.read_entity(&view, |wallet, _| {
+                assert_eq!(wallet.route, Route::Settings);
+                assert!(!wallet.testnet_mode, "navigation must not change settings");
+            });
+        }
+    }
+    release(cx, &view);
+}
+
 /// Opening the inbox asks what needs you now, and pressing its rail button
 /// while it is already open asks again. Both used to land on whichever tab was
 /// read last, so a person who had once looked at history kept arriving in it.
@@ -3468,7 +3547,10 @@ fn screenshots() {
                 Theme::global_mut(cx).font_size = rem;
                 let _ = cx.update_window(window.into(), |_, window, _| window.set_rem_size(rem));
             });
-            for route in Route::ALL {
+            for (route, history) in Route::ALL.into_iter().map(|route| (route, None)).chain([
+                (Route::Activity, Some(false)),
+                (Route::Activity, Some(true)),
+            ]) {
                 cx.update(|cx| {
                     view.update(cx, |wallet, _| {
                         // Re-applied each frame: the first render opens the legal gate,
@@ -3547,6 +3629,26 @@ fn screenshots() {
                             });
                             wallet.policy_action_error = None;
                         }
+                        if history == Some(true) {
+                            snapshot
+                                .networks
+                                .as_mut()
+                                .expect("networks")
+                                .push(history_testnet());
+                            let mut record = cleared_transaction_fixture(uuid::Uuid::new_v4());
+                            record.chain_id = "11155111".to_owned();
+                            record.network_name = "sepolia".to_owned();
+                            snapshot.activity =
+                                Ok(Arc::from(vec![OwnerActivityRecord::Transaction(Box::new(
+                                    record,
+                                ))]));
+                        }
+                        wallet.testnet_mode = false;
+                        wallet.inbox_tab = if history.is_some() {
+                            InboxTab::Decided
+                        } else {
+                            InboxTab::Waiting
+                        };
                         wallet.desktop_snapshot = Some(Arc::new(snapshot));
                         wallet.desktop_snapshot_error = None;
                         wallet.legal_gate = false;
@@ -3577,10 +3679,12 @@ fn screenshots() {
                 let image = cx
                     .capture_screenshot(window.into())
                     .expect("offscreen render");
-                let path = directory.join(format!(
-                    "{}-{mode_name}-{base}.png",
-                    route.label().to_lowercase()
-                ));
+                let label = match history {
+                    Some(true) => "history-filtered".to_owned(),
+                    Some(false) => "history-empty".to_owned(),
+                    None => route.label().to_lowercase(),
+                };
+                let path = directory.join(format!("{label}-{mode_name}-{base}.png"));
                 image.save(&path).expect("write png");
                 println!("wrote {}", path.display());
             }

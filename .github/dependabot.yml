@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # The preview hands wgpu types to Burn/CubeCL; major upgrades must move
+    # together. The browser compile check in CI verifies this boundary.
+    ignore:
+      - dependency-name: wgpu
+        update-types: ["version-update:semver-major"]
     groups:
       rust-dependencies:
         patterns: ["*"]

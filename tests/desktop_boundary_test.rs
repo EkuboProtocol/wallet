@@ -185,9 +185,35 @@ fn repository_links_a_current_system_wide_threat_model() {
 
 #[test]
 fn gpui_revisions_and_desktop_database_identity_are_pinned() {
-    let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
-    assert!(manifest.contains("cc053a4a6fa2fd0e8793201ed9099466af1be0b1"));
-    assert!(manifest.contains("26cc9366abb27ccedce386ac99a615a8fa7018da"));
+    let manifest = fs::read_to_string(root().join("Cargo.toml"))
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    let lock = fs::read_to_string(root().join("Cargo.lock"))
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    let packages = lock["package"].as_array_of_tables().unwrap();
+    for (name, metadata_key) in [
+        ("gpui", "zed"),
+        ("gpui_platform", "zed"),
+        ("gpui_tokio", "zed"),
+        ("gpui_macos", "zed"),
+        ("gpui-component", "gpui-component"),
+    ] {
+        let revision = manifest["package"]["metadata"]["gpui-revisions"][metadata_key]
+            .as_str()
+            .unwrap();
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let package = packages
+            .iter()
+            .find(|package| package["name"].as_str() == Some(name))
+            .unwrap();
+        let source = package["source"].as_str().unwrap();
+        assert!(source.starts_with("git+https://"));
+        assert_eq!(source.rsplit_once('#').unwrap().1, revision, "{name}");
+    }
     let store =
         fs::read_to_string(root().join("crates/ekubo-wallet-core/src/policy_store.rs")).unwrap();
     assert!(store.contains("org.ekubo.wallet.db"));
