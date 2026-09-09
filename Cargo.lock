@@ -1593,13 +1593,14 @@ dependencies = [
 
 [[package]]
 name = "backhand"
-version = "0.25.1"
+version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72e7812fe72262dd26c2b4309c8e8f2c028db1ffbeb21054f009f847f09ca92c"
+checksum = "aa93b86c39982ee2cbd5071a7328ae5fe43e9ae1b84a437451f816c693fca462"
 dependencies = [
  "deku",
  "flate2",
  "liblzma",
+ "liblzma-sys",
  "no_std_io2",
  "solana-nohash-hasher",
  "thiserror 2.0.20",
