@@ -162,7 +162,11 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           version='${{ inputs.tag }}'; version="${version#v}"
           tar -C work -czf "dist/Ekubo.Wallet_${version}_aarch64.app.tar.gz" 'Ekubo Wallet.app'
-          hdiutil create -volname 'Ekubo Wallet' -srcfolder "$app" -ov -format UDZO "dist/Ekubo.Wallet_${version}_aarch64.dmg"
+          # Automatic sizing can leave too little space while copying the app.
+          # Count logical file bytes and reserve room for filesystem overhead.
+          app_bytes="$(python3 -c 'import pathlib, sys; print(sum(p.stat().st_size for p in pathlib.Path(sys.argv[1]).rglob("*") if p.is_file()))' "$app")"
+          image_mib=$(( (app_bytes + 1048575) / 1048576 + 64 ))
+          hdiutil create -size "${image_mib}m" -volname 'Ekubo Wallet' -srcfolder "$app" -ov -format UDZO "dist/Ekubo.Wallet_${version}_aarch64.dmg"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "dist/Ekubo.Wallet_${version}_aarch64.dmg"
           printf '%s' "$APPLE_NOTARY_KEY" | base64 -D > "$RUNNER_TEMP/AuthKey.p8"
           xcrun notarytool submit "dist/Ekubo.Wallet_${version}_aarch64.dmg" --wait \
