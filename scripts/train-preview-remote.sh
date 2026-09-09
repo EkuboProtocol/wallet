@@ -87,7 +87,20 @@ if [ -z "$DROPLET_ID" ]; then
   echo "no GPU droplet could be created; every candidate size was unavailable" >&2
   exit 1
 fi
-IP="$(doctl compute droplet get "$DROPLET_ID" --format PublicIPv4 --no-header)"
+# Polled, because `--wait` returns when the droplet is active and its network
+# is assigned a moment later. Reading the address once gave an empty string,
+# and every ssh after that quietly addressed `root@` and failed -- five
+# minutes of retry loop before anything said so.
+IP=""
+for _ in $(seq 1 30); do
+  IP="$(doctl compute droplet get "$DROPLET_ID" --format PublicIPv4 --no-header 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$IP" ] && break
+  sleep 5
+done
+if [ -z "$IP" ]; then
+  echo "droplet $DROPLET_ID never reported a public address" >&2
+  exit 1
+fi
 echo "droplet $DROPLET_ID ($SIZE, $REGION) at $IP" >&2
 
 SSH=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$KEY" "root@$IP")
