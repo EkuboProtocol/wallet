@@ -127,3 +127,46 @@ fn reading_indices_back_yields_one_per_row() {
     assert_eq!(read.len(), 2, "one index per row, never an empty vector");
     assert_eq!(read, [1, 0]);
 }
+
+/// The value check must not refuse a summary over the punctuation the
+/// renderer attached.
+///
+/// It did. Stripping only `,` and `.` meant a trailing colon stayed on the
+/// word, so "0xabc…:" was compared against a slot text that has no colon and
+/// never matched. Every summary naming a protocol reads "Aave DAO: …", so the
+/// effect was that protocol-led summaries were silently refused and rendered
+/// as nothing -- which looked like the model failing to produce one.
+#[test]
+fn punctuation_does_not_make_a_real_value_look_invented() {
+    let slotized =
+        crate::slots::slotize(&plan(&format!("transfer 1.5 USDC ({USDC}) to {SPENDER}")));
+    for rendered in [
+        format!("send 1.5 USDC to {SPENDER}"),
+        format!("send to {SPENDER}, then wait"),
+        format!("{SPENDER}: send 1.5 USDC"),
+        format!("send to {SPENDER}."),
+        format!("send to ({SPENDER})"),
+    ] {
+        assert!(
+            values_are_all_from(&rendered, &slotized),
+            "refused a summary whose values are all in the plan: {rendered}"
+        );
+    }
+}
+
+/// And it must still refuse a value the plan does not contain, punctuation or
+/// not.
+#[test]
+fn punctuation_does_not_let_an_invented_value_through() {
+    let slotized = crate::slots::slotize(&plan(&format!("transfer 1.5 USDC ({USDC})")));
+    for rendered in [
+        "send 9999.75 USDC".to_owned(),
+        format!("send to {SPENDER}:"),
+        format!("{SPENDER}: send"),
+    ] {
+        assert!(
+            !values_are_all_from(&rendered, &slotized),
+            "accepted a value nothing lifted: {rendered}"
+        );
+    }
+}

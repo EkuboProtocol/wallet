@@ -260,16 +260,22 @@ fn slot_at(slotized: &Slotized, position: usize) -> Token {
 #[must_use]
 pub fn values_are_all_from(summary: &str, slotized: &Slotized) -> bool {
     summary.split_whitespace().all(|word| {
+        // Punctuation the renderer attached, not part of the value. Stripping
+        // only `,` and `.` here silently refused every summary that used a
+        // colon -- which is every summary naming a protocol, since those read
+        // "Aave DAO: repay loan". A refusal renders as no summary at all, so
+        // the bug looked like the model failing to write one rather than like
+        // this check being wrong about punctuation.
+        let word = word.trim_matches(|character: char| character.is_ascii_punctuation());
+        if word.is_empty() {
+            return true;
+        }
         let looks_like_a_value = word.starts_with("0x")
             || word
                 .chars()
                 .next()
                 .is_some_and(|first| first.is_ascii_digit());
-        !looks_like_a_value
-            || slotized.slots.iter().any(|slot| {
-                slot.text
-                    .contains(word.trim_matches(|c: char| c == ',' || c == '.'))
-            })
+        !looks_like_a_value || slotized.slots.iter().any(|slot| slot.text.contains(word))
     })
 }
 

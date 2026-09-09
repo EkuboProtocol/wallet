@@ -83,6 +83,11 @@ rsync -az -e "ssh -o StrictHostKeyChecking=no -i $KEY" "$CORPUS" "root@$IP:/root
 "${SSH[@]}" "cd /root/wallet && ./target/release/preview-train \
   --corpus /root/labeled.jsonl --out /root/preview.bin --epochs $EPOCHS --device gpu"
 
+# Both files, always together. The fingerprint is what `weights::load` checks
+# to refuse weights fitted against a different build, so retrieving the weights
+# without it leaves a checkout that refuses its own model -- which is how this
+# script failed the first time it was used for real.
+MODEL="$REPO/crates/ekubo-wallet-preview/model"
 rsync -az -e "ssh -o StrictHostKeyChecking=no -i $KEY" \
-  "root@$IP:/root/preview.bin" "$REPO/crates/ekubo-wallet-preview/model/preview.bin"
-echo "wrote $REPO/crates/ekubo-wallet-preview/model/preview.bin" >&2
+  "root@$IP:/root/preview.bin" "root@$IP:/root/preview.fingerprint" "$MODEL/"
+echo "wrote $MODEL/preview.bin and $MODEL/preview.fingerprint" >&2
