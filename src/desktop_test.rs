@@ -3370,3 +3370,106 @@ fn a_request_withdrawn_before_signing_is_not_called_a_won_nonce_race() {
     );
     assert!(!explanation.contains("mined first"), "{explanation}");
 }
+
+/// The confirmation exists because reporting only failure left success
+/// saying nothing. Each case below is a thing an owner would otherwise have
+/// to infer from a button that stopped being disabled.
+#[test]
+fn a_sync_confirmation_names_what_was_written() {
+    let report = AgentSyncReport {
+        updated: vec!["Claude Code"],
+        connector_only: Vec::new(),
+        servers: 7,
+        tools: 84,
+    };
+    let message = report.message().unwrap();
+    assert_eq!(
+        message,
+        "Claude Code now has this wallet and 7 Ekubo servers, about 84 tools in all."
+    );
+}
+
+#[test]
+fn a_sync_confirmation_lists_several_agents_readably() {
+    let report = AgentSyncReport {
+        updated: vec!["Claude Code", "Codex", "Cursor"],
+        connector_only: Vec::new(),
+        servers: 1,
+        tools: 51,
+    };
+    assert_eq!(
+        report.message().unwrap(),
+        "Claude Code, Codex, and Cursor now have this wallet and 1 Ekubo server, about 51 tools in all."
+    );
+    assert_eq!(join_names(&["a", "b"]), "a and b");
+    assert_eq!(join_names(&["a"]), "a");
+    assert_eq!(join_names(&[]), "");
+}
+
+/// Claude Desktop's file cannot carry hosted servers, which is not a failure
+/// and so never reached the error line. The confirmation is the one place an
+/// owner is looking when that fact matters.
+#[test]
+fn a_sync_confirmation_says_claude_desktop_needs_its_connectors_added() {
+    let report = AgentSyncReport {
+        updated: vec!["Cursor"],
+        connector_only: vec!["Claude Desktop"],
+        servers: 7,
+        tools: 84,
+    };
+    let message = report.message().unwrap();
+    assert!(message.starts_with("Cursor now has this wallet and 7 Ekubo servers"));
+    assert!(message.contains("Claude Desktop now has this wallet."));
+    assert!(message.contains("belong to your Claude account"));
+    assert!(message.contains("Customize → Connectors"));
+    // It must not claim seven servers were written to a file that carries none.
+    assert!(!message.contains("Claude Desktop now has this wallet and"));
+}
+
+/// Selecting nothing still writes the bridge, so the confirmation has to say
+/// so without claiming "0 Ekubo servers".
+#[test]
+fn a_sync_confirmation_reads_naturally_with_no_servers_selected() {
+    let report = AgentSyncReport {
+        updated: vec!["Codex"],
+        connector_only: Vec::new(),
+        servers: 0,
+        tools: 0,
+    };
+    assert_eq!(
+        report.message().unwrap(),
+        "Codex now has this wallet and no Ekubo servers."
+    );
+}
+
+/// A selection change that reached no agent looks exactly like one that
+/// reached every agent unless the screen says which happened.
+#[test]
+fn a_sync_that_touched_nothing_has_nothing_to_confirm() {
+    let report = AgentSyncReport::default();
+    assert!(report.touched_nothing());
+    assert!(report.message().is_none());
+}
+
+/// The report is derived from the adapters actually written, so Claude
+/// Desktop lands in the connector-only column by kind rather than by anyone
+/// remembering to special-case it at the call site.
+#[test]
+fn the_report_separates_agents_by_what_their_file_can_hold() {
+    let adapters: Vec<_> = AgentAdapter::supported()
+        .unwrap()
+        .into_iter()
+        .filter(|adapter| {
+            matches!(
+                adapter.kind,
+                AgentKind::ClaudeDesktop | AgentKind::Cursor | AgentKind::Codex
+            )
+        })
+        .collect();
+    let selection = CompanionSelection::all();
+    let report = AgentSyncReport::of(&adapters, &selection);
+    assert_eq!(report.connector_only, ["Claude Desktop"]);
+    assert_eq!(report.updated, ["Codex", "Cursor"]);
+    assert_eq!(report.servers, COMPANION_SERVERS.len());
+    assert_eq!(report.tools, selection.enabled_tool_count());
+}

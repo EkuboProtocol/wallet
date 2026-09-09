@@ -31,6 +31,20 @@ pub struct CompanionServer {
     /// One line saying what an agent can do with this server added.
     pub description: &'static str,
     pub url: &'static str,
+    /// How many tools this server puts in an agent's context.
+    ///
+    /// The only reason to switch a server off is what its tools cost an
+    /// agent's context, and a row that says what the protocol does without
+    /// saying what it costs leaves the switch decoration: every reader's
+    /// rational move is to leave all of them on.
+    ///
+    /// It is a shipped number, so it is pinned to this release and can drift
+    /// from the deployed server between releases. That is why it is presented
+    /// as approximate: it exists to make "51 against 6" a comparison the
+    /// reader can act on, not as a contract about the catalog. Nothing but
+    /// the label reads it. `tool_counts_cover_the_catalog` pins the total
+    /// against the partition it came from.
+    pub tool_count: usize,
 }
 
 /// Every server the wallet can add, in the order the settings screen lists
@@ -46,6 +60,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Ekubo",
         description: "Swaps and bridges, pools, LP positions, TWAMM, auctions, incentives, and ve(3,3) STONX voting.",
         url: "https://mcp.ekubo.org/mcp/ekubo",
+        tool_count: 51,
     },
     CompanionServer {
         slug: "aave",
@@ -53,6 +68,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Aave V3",
         description: "Aave V3 market discovery and supply, withdraw, borrow, repay, collateral, and eMode preparation.",
         url: "https://mcp.ekubo.org/mcp/aave",
+        tool_count: 7,
     },
     CompanionServer {
         slug: "aerodrome",
@@ -60,6 +76,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Aerodrome",
         description: "Aerodrome Sugar lens reads and liquidity, gauge, lock, vote, and incentive-claim preparation on Base.",
         url: "https://mcp.ekubo.org/mcp/aerodrome",
+        tool_count: 10,
     },
     CompanionServer {
         slug: "lido",
@@ -67,6 +84,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Lido",
         description: "Lido staking, wrapping, and unstETH withdrawal preparation.",
         url: "https://mcp.ekubo.org/mcp/lido",
+        tool_count: 6,
     },
     CompanionServer {
         slug: "merkl",
@@ -74,6 +92,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Merkl",
         description: "Merkl reward discovery and proof-verified claim preparation.",
         url: "https://mcp.ekubo.org/mcp/merkl",
+        tool_count: 2,
     },
     CompanionServer {
         slug: "morpho",
@@ -81,6 +100,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Morpho",
         description: "Morpho Vault V2 discovery and deposit, withdraw, and redeem preparation.",
         url: "https://mcp.ekubo.org/mcp/morpho",
+        tool_count: 4,
     },
     CompanionServer {
         slug: "sky",
@@ -88,8 +108,18 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
         title: "Sky",
         description: "Sky savings discovery and sUSDS deposit, withdraw, and redeem preparation.",
         url: "https://mcp.ekubo.org/mcp/sky",
+        tool_count: 4,
     },
 ];
+
+/// Every tool the operator serves, across all seven endpoints.
+///
+/// The partition is exhaustive and disjoint on the server side, so the
+/// per-server counts have to add up to it. A count edited without its
+/// neighbours fails `tool_counts_cover_the_catalog` rather than quietly
+/// telling an owner that turning one server off saves more or less than it
+/// does.
+pub const TOTAL_TOOL_COUNT: usize = 84;
 
 /// The endpoint that serves every protocol at once.
 ///
@@ -178,6 +208,17 @@ impl CompanionSelection {
     #[must_use]
     pub fn enabled_count(&self) -> usize {
         self.enabled().count()
+    }
+
+    /// Roughly how many tools the selection puts in an agent's context.
+    ///
+    /// Approximate for the same reason the per-server counts are: it is
+    /// shipped rather than read from the server. It answers the question the
+    /// switches are actually about — what this selection costs — which no
+    /// single row can.
+    #[must_use]
+    pub fn enabled_tool_count(&self) -> usize {
+        self.enabled().map(|server| server.tool_count).sum()
     }
 
     /// Whether nothing is selected.

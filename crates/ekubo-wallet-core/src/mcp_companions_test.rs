@@ -143,3 +143,43 @@ fn an_unknown_disabled_slug_survives_a_round_trip() {
     assert!(!round_tripped.is_enabled("not-a-protocol"));
     assert_eq!(round_tripped.enabled_count(), COMPANION_SERVERS.len() - 1);
 }
+
+/// The counts are a shipped approximation of a partition that lives in
+/// another repository, so the one thing this side can check is that they are
+/// internally consistent: every tool the operator serves is on exactly one
+/// endpoint, so the per-server counts must add up to the catalog.
+#[test]
+fn tool_counts_cover_the_catalog() {
+    let summed: usize = COMPANION_SERVERS
+        .iter()
+        .map(|server| server.tool_count)
+        .sum();
+    assert_eq!(summed, TOTAL_TOOL_COUNT);
+    assert_eq!(CompanionSelection::all().enabled_tool_count(), summed);
+    for server in COMPANION_SERVERS {
+        assert!(server.tool_count > 0, "{} serves no tools", server.title);
+    }
+    // Ekubo's own protocol carries most of the catalog, which is the fact
+    // that makes the other six worth switching off individually.
+    assert!(companion_by_slug("ekubo").unwrap().tool_count > summed / 2);
+}
+
+#[test]
+fn a_narrowed_selection_costs_an_agent_fewer_tools() {
+    let all = CompanionSelection::all();
+    let mut ekubo_only = all.clone();
+    for server in COMPANION_SERVERS {
+        if server.slug != "ekubo" {
+            ekubo_only.set_enabled(server.slug, false);
+        }
+    }
+    assert_eq!(
+        ekubo_only.enabled_tool_count(),
+        companion_by_slug("ekubo").unwrap().tool_count
+    );
+    assert!(ekubo_only.enabled_tool_count() < all.enabled_tool_count());
+
+    let mut nothing = ekubo_only.clone();
+    nothing.set_enabled("ekubo", false);
+    assert_eq!(nothing.enabled_tool_count(), 0);
+}
