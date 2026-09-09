@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use directories::BaseDirs;
 use ekubo_wallet_core::desktop_store::AgentKind;
+use ekubo_wallet_core::mcp_companions::{COMPANION_SERVERS, CompanionSelection, CompanionServer};
 use fs2::FileExt as _;
 use serde_json::{Map, Value, json};
 use std::{
@@ -31,9 +32,17 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// skill and security-model resources unreachable by name. An underscore
 /// key survives the rewrite unchanged, so both spellings agree.
 pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
-/// The credential-free hosted companion installed beside the wallet server.
-pub const COMPANION_SERVER_NAME: &str = "ekubo";
-pub const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
+/// Every key this wallet manages in an agent's MCP configuration: its own
+/// local bridge entry, plus one entry per hosted Ekubo server.
+///
+/// It is the removal and diff list, not the write list — a companion the owner
+/// has switched off is still ours to take back out, and the pre-split `ekubo`
+/// key is in here because Ekubo's own server kept it. Everything outside this
+/// list belongs to the harness and is never touched.
+fn managed_keys() -> impl Iterator<Item = &'static str> {
+    std::iter::once(LOCAL_SERVER_NAME)
+        .chain(COMPANION_SERVERS.iter().map(|server| server.config_key))
+}
 
 /// Every helper image this wallet has ever installed starts with this, so a
 /// single prefix identifies both the file to keep and the debris to collect.
@@ -442,10 +451,22 @@ impl Drop for ConfigBatchInstall {
     }
 }
 
-#[derive(Clone, Copy)]
+/// A written file is re-read and checked against the shape that produced it.
+///
+/// `Installed` carries the selection because the check is not "a companion is
+/// present" but "exactly the selected companions are present, each with only
+/// its URL". Without the selection a file still holding a server the owner
+/// switched off would validate, and switching one off would be a no-op that
+/// reported success.
+#[derive(Clone)]
 enum ConfigValidation {
-    Installed { kind: AgentKind },
-    Removed { kind: AgentKind },
+    Installed {
+        kind: AgentKind,
+        selection: CompanionSelection,
+    },
+    Removed {
+        kind: AgentKind,
+    },
 }
 
 impl ConfigPreview {
@@ -464,7 +485,7 @@ impl ConfigPreview {
             "installed agent configuration changed before validation"
         );
         validate_document(&self.path, &installed)?;
-        validate_server_shape(&installed, self.validation)
+        validate_server_shape(&installed, &self.validation)
     }
 
     fn install(mut self) -> Result<Option<InstalledConfig>> {
@@ -504,7 +525,7 @@ impl ConfigPreview {
                     "installed agent configuration changed during validation"
                 );
                 validate_document(&self.path, &installed)?;
-                validate_server_shape(&installed, self.validation)
+                validate_server_shape(&installed, &self.validation)
             });
         if let Err(error) = validation {
             if existed {
@@ -597,37 +618,76 @@ impl AgentAdapter {
             }
     }
 
-    /// Whether this agent's configuration already names this wallet.
+    /// Whether this agent's configuration matches the wallet's managed
+    /// entries exactly: this build's bridge, and precisely the hosted servers
+    /// the owner has selected.
     ///
-    /// The question is about the two managed entries, not about the file they
-    /// sit in: the entries are what a harness executes, and the bytes around
-    /// them belong to the harness, which rewrites them on its own schedule.
+    /// The question is about the managed entries, not about the file they sit
+    /// in: the entries are what a harness executes, and the bytes around them
+    /// belong to the harness, which rewrites them on its own schedule.
     /// `a_harness_that_rewrote_its_own_config_still_reads_as_installed` holds
-    /// the case that taught us the difference.
+    /// the case that taught us the difference — a reformatted file whose
+    /// managed entries are intact is still in sync.
     ///
     /// A file that does not parse is an error rather than a `false`: the
     /// owner can act on "your configuration is malformed" and cannot act on
-    /// an agent that silently claims to be uninstalled. A file with nothing
+    /// an agent that silently claims to be unconfigured. A file with nothing
     /// in it is not malformed — it is a harness that has never been
     /// configured.
-    pub fn installed(&self) -> Result<bool> {
+    pub fn in_sync(&self, selection: &CompanionSelection) -> Result<bool> {
+        let Some(contents) = self.readable_config()? else {
+            return Ok(false);
+        };
+        validate_document(&self.config_path, &contents)
+            .with_context(|| format!("{} is not a valid configuration file", self.display_name))?;
+        Ok(validate_server_shape(
+            &contents,
+            &ConfigValidation::Installed {
+                kind: self.kind,
+                selection: selection.clone(),
+            },
+        )
+        .is_ok())
+    }
+
+    /// Whether this agent has been pointed at this wallet at all, whatever
+    /// state its hosted-server entries are in.
+    ///
+    /// This is the question "is the wallet installed here", separate from "is
+    /// it up to date here". It is what decides whether a selection change
+    /// propagates to this agent: changing which servers are offered must
+    /// update every harness the owner already connected, and must never add
+    /// the wallet to one they did not.
+    ///
+    /// It deliberately does not check the bridge path's bytes or the
+    /// companion shape. A config left by an older release names the same fixed
+    /// helper path and the pre-split `ekubo` URL; that is a wallet the owner
+    /// installed, and answering `false` would strand it.
+    pub fn has_wallet_entry(&self) -> Result<bool> {
+        let Some(contents) = self.readable_config()? else {
+            return Ok(false);
+        };
+        if validate_document(&self.config_path, &contents).is_err() {
+            return Ok(false);
+        }
+        Ok(local_entry_present(&contents, self.kind))
+    }
+
+    /// The config file's text, or `None` when there is nothing configured:
+    /// no file, or a file with nothing in it.
+    fn readable_config(&self) -> Result<Option<String>> {
         let contents = match fs::read_to_string(&self.config_path) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         if contents.trim().is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
-        validate_document(&self.config_path, &contents)
-            .with_context(|| format!("{} is not a valid configuration file", self.display_name))?;
-        Ok(
-            validate_server_shape(&contents, ConfigValidation::Installed { kind: self.kind })
-                .is_ok(),
-        )
+        Ok(Some(contents))
     }
 
-    pub fn preview_install(&self) -> Result<ConfigPreview> {
+    pub fn preview_install(&self, selection: &CompanionSelection) -> Result<ConfigPreview> {
         let before = match fs::read_to_string(&self.config_path) {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -636,23 +696,24 @@ impl AgentAdapter {
         let command = installed_bridge_path()?;
         let command = command.to_string_lossy();
         let client = harness_argument(self.kind)?;
+        // Claude Desktop reserves this file for local stdio servers; its
+        // remote MCP services are account-level connectors added in Claude's
+        // own UI, so no hosted server is written here whatever is selected.
+        let companions = match self.kind {
+            AgentKind::ClaudeDesktop => None,
+            _ => Some(selection),
+        };
         let after = match self.kind {
-            AgentKind::Codex | AgentKind::GrokBuild => merge_codex(&before, &command, client)?,
-            AgentKind::ClaudeCode | AgentKind::Cursor => merge_json(
+            AgentKind::Codex | AgentKind::GrokBuild => {
+                merge_codex(&before, &command, client, selection)?
+            }
+            AgentKind::ClaudeCode | AgentKind::ClaudeDesktop | AgentKind::Cursor => merge_json(
                 &before,
                 "mcpServers",
                 JsonShape::Stdio,
                 &command,
                 client,
-                true,
-            )?,
-            AgentKind::ClaudeDesktop => merge_json(
-                &before,
-                "mcpServers",
-                JsonShape::Stdio,
-                &command,
-                client,
-                false,
+                companions,
             )?,
             AgentKind::GeminiCli => merge_json(
                 &before,
@@ -660,11 +721,16 @@ impl AgentAdapter {
                 JsonShape::Gemini,
                 &command,
                 client,
-                true,
+                companions,
             )?,
-            AgentKind::Opencode => {
-                merge_json(&before, "mcp", JsonShape::Local, &command, client, true)?
-            }
+            AgentKind::Opencode => merge_json(
+                &before,
+                "mcp",
+                JsonShape::Local,
+                &command,
+                client,
+                companions,
+            )?,
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         };
         let diff = managed_config_diff(self.kind, &before, &after)?;
@@ -673,7 +739,10 @@ impl AgentAdapter {
             before,
             after,
             diff,
-            validation: ConfigValidation::Installed { kind: self.kind },
+            validation: ConfigValidation::Installed {
+                kind: self.kind,
+                selection: selection.clone(),
+            },
         })
     }
 
@@ -709,7 +778,12 @@ fn binary_on_path(name: &str) -> bool {
     })
 }
 
-fn merge_codex(before: &str, command: &str, client: &str) -> Result<String> {
+fn merge_codex(
+    before: &str,
+    command: &str,
+    client: &str,
+    selection: &CompanionSelection,
+) -> Result<String> {
     let mut document = if before.trim().is_empty() {
         DocumentMut::new()
     } else {
@@ -723,8 +797,8 @@ fn merge_codex(before: &str, command: &str, client: &str) -> Result<String> {
         .or_insert_with(|| Item::Table(Table::new()))
         .as_table_mut()
         .context("Codex mcp_servers configuration must be a table")?;
-    // Replace both wallet-managed entries with their exact credential-free
-    // shapes instead of trying to enumerate fields which must not survive;
+    // Replace every wallet-managed entry with its exact credential-free
+    // shape instead of trying to enumerate fields which must not survive;
     // future harness credential fields are thereby removed without granting
     // the wallet authority over any sibling or global key.
     let mut local = Table::new();
@@ -734,17 +808,26 @@ fn merge_codex(before: &str, command: &str, client: &str) -> Result<String> {
     args.push(client);
     local["args"] = toml_edit::value(args);
     servers.insert(LOCAL_SERVER_NAME, Item::Table(local));
-    let mut companion = Table::new();
-    companion["url"] = value(COMPANION_SERVER_URL);
-    servers.insert(COMPANION_SERVER_NAME, Item::Table(companion));
+    for server in selection.enabled() {
+        let mut companion = Table::new();
+        companion["url"] = value(server.url);
+        servers.insert(server.config_key, Item::Table(companion));
+    }
+    // Switching a server off has to take its entry back out. Insert-only
+    // would leave the agent holding a URL the owner has just declined, and
+    // report success for doing so.
+    for server in selection.disabled() {
+        servers.remove(server.config_key);
+    }
     Ok(document.to_string())
 }
 
 fn remove_codex(before: &str) -> Result<String> {
     let mut document = parse_codex_document(before)?;
     if let Some(servers) = document.get_mut("mcp_servers").and_then(Item::as_table_mut) {
-        servers.remove(LOCAL_SERVER_NAME);
-        servers.remove(COMPANION_SERVER_NAME);
+        for key in managed_keys() {
+            servers.remove(key);
+        }
     }
     Ok(document.to_string())
 }
@@ -762,7 +845,7 @@ fn merge_json(
     shape: JsonShape,
     command: &str,
     client: &str,
-    include_companion: bool,
+    companions: Option<&CompanionSelection>,
 ) -> Result<String> {
     let mut document: Value = if before.trim().is_empty() {
         json!({})
@@ -781,16 +864,19 @@ fn merge_json(
         LOCAL_SERVER_NAME.into(),
         json_server(shape, command, client),
     );
-    if include_companion {
+    for server in companion_writes(companions) {
         servers.insert(
-            COMPANION_SERVER_NAME.into(),
-            remote_json_server(shape, COMPANION_SERVER_URL),
+            server.config_key.into(),
+            remote_json_server(shape, server.url),
         );
-    } else {
-        // Claude Desktop reserves this file for local stdio servers. Its
-        // remote MCP services are account-level custom connectors managed in
-        // Claude's UI, so repair also removes our obsolete remote JSON entry.
-        servers.remove(COMPANION_SERVER_NAME);
+    }
+    // Everything the owner did not select comes out, including the pre-split
+    // `ekubo` entry when Ekubo's own server is off. `None` removes them all:
+    // that is Claude Desktop, whose remote MCP services are account-level
+    // custom connectors managed in Claude's UI rather than entries in this
+    // file, so an obsolete remote JSON entry here is cleaned up.
+    for server in companion_removals(companions) {
+        servers.remove(server.config_key);
     }
     Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
 }
@@ -798,10 +884,29 @@ fn merge_json(
 fn remove_json(before: &str, root: &str) -> Result<String> {
     let mut document = parse_json_document(before)?;
     if let Some(servers) = document.get_mut(root).and_then(Value::as_object_mut) {
-        servers.remove(LOCAL_SERVER_NAME);
-        servers.remove(COMPANION_SERVER_NAME);
+        for key in managed_keys() {
+            servers.remove(key);
+        }
     }
     Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
+}
+
+/// The hosted servers to write. `None` — Claude Desktop — writes none.
+fn companion_writes(
+    companions: Option<&CompanionSelection>,
+) -> impl Iterator<Item = &'static CompanionServer> + '_ {
+    companions.into_iter().flat_map(CompanionSelection::enabled)
+}
+
+/// The hosted servers to take out: those switched off, or all of them where
+/// this file never carries one.
+fn companion_removals(
+    companions: Option<&CompanionSelection>,
+) -> Box<dyn Iterator<Item = &'static CompanionServer> + '_> {
+    match companions {
+        Some(selection) => Box::new(selection.disabled()),
+        None => Box::new(COMPANION_SERVERS.iter()),
+    }
 }
 
 fn json_server(shape: JsonShape, command: &str, client: &str) -> Value {
@@ -827,7 +932,7 @@ fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<Str
         AgentKind::Codex | AgentKind::GrokBuild => {
             let before = parse_codex_document(before)?;
             let after = parse_codex_document(after)?;
-            for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
+            for server in managed_keys() {
                 push_managed_change(
                     &mut changes,
                     &format!("mcp_servers.{server}"),
@@ -848,7 +953,7 @@ fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<Str
             };
             let before = parse_json_document(before)?;
             let after = parse_json_document(after)?;
-            for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
+            for server in managed_keys() {
                 push_managed_change(
                     &mut changes,
                     &format!("{root}.{server}"),
@@ -993,18 +1098,63 @@ fn validate_document(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result<()> {
+fn validate_server_shape(contents: &str, validation: &ConfigValidation) -> Result<()> {
     match validation {
-        ConfigValidation::Installed { kind } => match kind {
-            AgentKind::Codex | AgentKind::GrokBuild => validate_toml_shape(contents, kind),
+        ConfigValidation::Installed { kind, selection } => match kind {
+            AgentKind::Codex | AgentKind::GrokBuild => {
+                validate_toml_shape(contents, *kind, selection)
+            }
             AgentKind::ClaudeCode
             | AgentKind::ClaudeDesktop
             | AgentKind::GeminiCli
             | AgentKind::Cursor
-            | AgentKind::Opencode => validate_json_shape(contents, kind),
+            | AgentKind::Opencode => validate_json_shape(contents, *kind, selection),
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         },
-        ConfigValidation::Removed { kind } => validate_removed_shape(contents, kind),
+        ConfigValidation::Removed { kind } => validate_removed_shape(contents, *kind),
+    }
+}
+
+/// Whether the wallet's own bridge entry is in this file at all.
+///
+/// Deliberately shallow: it asks whether the key is there, not whether its
+/// command, arguments, or companions are current. That is what makes it usable
+/// as "the owner installed the wallet here", which is a different question
+/// from "this file is up to date".
+fn local_entry_present(contents: &str, kind: AgentKind) -> bool {
+    match kind {
+        AgentKind::Codex | AgentKind::GrokBuild => parse_codex_document(contents)
+            .ok()
+            .and_then(|document| {
+                document
+                    .get("mcp_servers")
+                    .and_then(Item::as_table)
+                    .map(|servers| servers.contains_key(LOCAL_SERVER_NAME))
+            })
+            .unwrap_or(false),
+        AgentKind::ClaudeCode
+        | AgentKind::ClaudeDesktop
+        | AgentKind::GeminiCli
+        | AgentKind::Cursor
+        | AgentKind::Opencode => parse_json_document(contents)
+            .ok()
+            .and_then(|document| {
+                document
+                    .get(json_root(kind))
+                    .and_then(Value::as_object)
+                    .map(|servers| servers.contains_key(LOCAL_SERVER_NAME))
+            })
+            .unwrap_or(false),
+        AgentKind::Other => false,
+    }
+}
+
+/// The key an agent's MCP server map hangs under in its JSON config.
+fn json_root(kind: AgentKind) -> &'static str {
+    if kind == AgentKind::Opencode {
+        "mcp"
+    } else {
+        "mcpServers"
     }
 }
 
@@ -1014,10 +1164,8 @@ fn validate_removed_shape(contents: &str, kind: AgentKind) -> Result<()> {
             let document = parse_codex_document(contents)?;
             let servers = document.get("mcp_servers").and_then(Item::as_table);
             ensure!(
-                servers.is_none_or(|servers| {
-                    !servers.contains_key(LOCAL_SERVER_NAME)
-                        && !servers.contains_key(COMPANION_SERVER_NAME)
-                }),
+                servers
+                    .is_none_or(|servers| { managed_keys().all(|key| !servers.contains_key(key)) }),
                 "wallet-managed MCP servers remain in Codex configuration"
             );
         }
@@ -1027,17 +1175,10 @@ fn validate_removed_shape(contents: &str, kind: AgentKind) -> Result<()> {
         | AgentKind::Cursor
         | AgentKind::Opencode => {
             let document = parse_json_document(contents)?;
-            let root = if kind == AgentKind::Opencode {
-                "mcp"
-            } else {
-                "mcpServers"
-            };
-            let servers = document.get(root).and_then(Value::as_object);
+            let servers = document.get(json_root(kind)).and_then(Value::as_object);
             ensure!(
-                servers.is_none_or(|servers| {
-                    !servers.contains_key(LOCAL_SERVER_NAME)
-                        && !servers.contains_key(COMPANION_SERVER_NAME)
-                }),
+                servers
+                    .is_none_or(|servers| { managed_keys().all(|key| !servers.contains_key(key)) }),
                 "wallet-managed MCP servers remain in agent configuration"
             );
         }
@@ -1046,7 +1187,11 @@ fn validate_removed_shape(contents: &str, kind: AgentKind) -> Result<()> {
     Ok(())
 }
 
-fn validate_toml_shape(contents: &str, kind: AgentKind) -> Result<()> {
+fn validate_toml_shape(
+    contents: &str,
+    kind: AgentKind,
+    selection: &CompanionSelection,
+) -> Result<()> {
     let document = contents
         .parse::<DocumentMut>()
         .context("Codex config is not valid TOML")?;
@@ -1075,29 +1220,50 @@ fn validate_toml_shape(contents: &str, kind: AgentKind) -> Result<()> {
         local.as_table().is_some_and(|table| table.len() == 2),
         "Codex MCP server contains unmanaged fields"
     );
-    let companion = servers
-        .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
-        .context("companion MCP server is missing")?;
-    ensure!(
-        companion.get("url").and_then(Item::as_str) == Some(COMPANION_SERVER_URL),
-        "companion MCP server URL is incorrect"
-    );
-    ensure!(
-        companion.as_table().is_some_and(|table| table.len() == 1),
-        "companion MCP server contains unmanaged fields"
-    );
+    validate_toml_companions(servers, selection)
+}
+
+/// Exactly the selected hosted servers, each carrying only its URL, and none
+/// of the ones the owner switched off.
+///
+/// Both halves matter. Checking only that the selected ones are present would
+/// let a switched-off server stay in the file and still report the write as
+/// successful; checking only their shape would let a credential field ride
+/// along beside the URL.
+fn validate_toml_companions(servers: Option<&Table>, selection: &CompanionSelection) -> Result<()> {
+    for server in selection.enabled() {
+        let companion = servers
+            .and_then(|servers| servers.get(server.config_key))
+            .with_context(|| format!("{} MCP server is missing", server.title))?;
+        ensure!(
+            companion.get("url").and_then(Item::as_str) == Some(server.url),
+            "{} MCP server URL is incorrect",
+            server.title
+        );
+        ensure!(
+            companion.as_table().is_some_and(|table| table.len() == 1),
+            "{} MCP server contains unmanaged fields",
+            server.title
+        );
+    }
+    for server in selection.disabled() {
+        ensure!(
+            servers.is_none_or(|servers| !servers.contains_key(server.config_key)),
+            "{} MCP server was not removed",
+            server.title
+        );
+    }
     Ok(())
 }
 
-fn validate_json_shape(contents: &str, kind: AgentKind) -> Result<()> {
+fn validate_json_shape(
+    contents: &str,
+    kind: AgentKind,
+    selection: &CompanionSelection,
+) -> Result<()> {
     let document: Value =
         serde_json::from_str(contents).context("agent config is not valid JSON")?;
-    let root = if kind == AgentKind::Opencode {
-        "mcp"
-    } else {
-        "mcpServers"
-    };
-    let servers = document.get(root).and_then(Value::as_object);
+    let servers = document.get(json_root(kind)).and_then(Value::as_object);
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
     let local = local.context("local MCP server is missing")?;
     let shape = match kind {
@@ -1114,18 +1280,39 @@ fn validate_json_shape(contents: &str, kind: AgentKind) -> Result<()> {
         local == &json_server(shape, &command.to_string_lossy(), client),
         "local MCP server contains unmanaged fields"
     );
-    if kind == AgentKind::ClaudeDesktop {
-        ensure!(
-            servers.is_some_and(|servers| !servers.contains_key(COMPANION_SERVER_NAME)),
-            "Claude Desktop remote companion must be an account connector, not an mcpServer"
-        );
+    // Claude Desktop's hosted servers are account-level connectors, so this
+    // file carries none of them however the owner's selection reads.
+    let companions = if kind == AgentKind::ClaudeDesktop {
+        None
     } else {
+        Some(selection)
+    };
+    validate_json_companions(servers, shape, companions)
+}
+
+/// The JSON counterpart of [`validate_toml_companions`], with the same two
+/// halves: every selected server present in its exact credential-free shape,
+/// and every unselected one gone.
+fn validate_json_companions(
+    servers: Option<&Map<String, Value>>,
+    shape: JsonShape,
+    companions: Option<&CompanionSelection>,
+) -> Result<()> {
+    for server in companion_writes(companions) {
         let companion = servers
-            .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
-            .context("companion MCP server is missing")?;
+            .and_then(|servers| servers.get(server.config_key))
+            .with_context(|| format!("{} MCP server is missing", server.title))?;
         ensure!(
-            companion == &remote_json_server(shape, COMPANION_SERVER_URL),
-            "companion MCP server has an incorrect or credential-bearing shape"
+            companion == &remote_json_server(shape, server.url),
+            "{} MCP server has an incorrect or credential-bearing shape",
+            server.title
+        );
+    }
+    for server in companion_removals(companions) {
+        ensure!(
+            servers.is_none_or(|servers| !servers.contains_key(server.config_key)),
+            "{} MCP server was not removed",
+            server.title
         );
     }
     Ok(())

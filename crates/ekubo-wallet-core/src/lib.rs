@@ -32,6 +32,7 @@ pub mod fork;
 pub mod human_presence;
 pub mod input_validation;
 pub mod legal;
+pub mod mcp_companions;
 pub mod message;
 pub mod networks;
 pub mod orchestrator;

@@ -197,6 +197,13 @@ fn transaction_notification(
             format!("{where_from}. Your replacement was mined first."),
             false,
         ),
+        TransactionStage::Withdrawn => (
+            "Request withdrawn",
+            format!(
+                "{where_from}. The agent took back its request before you decided, so nothing was signed or sent."
+            ),
+            false,
+        ),
     };
     WalletNotification {
         title: title.to_owned(),
@@ -250,6 +257,20 @@ fn signature_notification(
         (SignatureKind::TypedData, SignatureStage::Rejected) => (
             "Typed-data signature declined",
             format!("{where_from}. Nothing was signed."),
+            false,
+        ),
+        (SignatureKind::Message, SignatureStage::Withdrawn) => (
+            "Message request withdrawn",
+            format!(
+                "{where_from}. The agent took its request back before you decided, so nothing was signed."
+            ),
+            false,
+        ),
+        (SignatureKind::TypedData, SignatureStage::Withdrawn) => (
+            "Typed-data request withdrawn",
+            format!(
+                "{where_from}. The agent took its request back before you decided, so nothing was signed."
+            ),
             false,
         ),
     };

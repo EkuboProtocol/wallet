@@ -269,6 +269,251 @@ async fn interpret_step(
     }
 }
 
+/// How many call phrases a headline names before the rest becomes a count.
+const MAX_HEADLINE_PHRASES: usize = 3;
+
+/// A headline is one line of a list row, so it is held to the same width as
+/// any other piece of interpretation text.
+const MAX_HEADLINE_LEN: usize = 120;
+
+/// One line naming what a plan does, for the list rows that have room for a
+/// title and not for a review.
+///
+/// Every word of it is decoded here, from these sources and no others: a
+/// vendored ERC-7730 descriptor's intent, the standard token calls
+/// [`decode_standard_call`] recognizes, symbols from the owner's token
+/// database, and the owner's own account names. Nothing the requester wrote
+/// reaches it — not `plan_source`, not the stored network name, not
+/// `ExecutionStepKind::reason`, which is the asker's account of its own
+/// request. A row that summarizes a request must not hand the requester's
+/// claim about it back to the reader dressed as something the wallet worked
+/// out.
+///
+/// `None` when no call was recognized, so the caller can fall back to naming
+/// the record rather than printing a headline that says nothing.
+///
+/// Unlike the review, the phrases decoded here name a token by symbol alone.
+/// There is no room for the address beside it, so a headline is a way to find
+/// a request and never a basis for approving one: the review it leads to
+/// carries every address in full. A token the owner's database does not name
+/// stays unnamed here too. A descriptor's own intent line is passed through as
+/// written, and may carry a full address where the descriptor interpolates one
+/// — that is the engine's rendering, already capped and sanitized, and a
+/// complete address is the one form that cannot be mistaken for another.
+///
+/// Awaits nothing but the descriptor engine's own lookups against the maps it
+/// is handed, so a caller with no async runtime may drive it to completion
+/// with a bare executor. `a_headline_needs_no_runtime` holds that.
+#[must_use]
+pub async fn plan_headline(
+    steps: &[ExecutionStep],
+    metadata: &TokenMetadataMap,
+    own: &OwnAccounts,
+) -> Option<String> {
+    let mut phrases = Vec::with_capacity(steps.len());
+    let mut recognized = 0_usize;
+    for step in steps {
+        match headline_phrase(step, metadata, own).await {
+            Some(phrase) => {
+                recognized += 1;
+                phrases.push(phrase);
+            }
+            None => phrases.push("call an unrecognized contract".to_owned()),
+        }
+    }
+    if recognized == 0 {
+        return None;
+    }
+    Some(assemble_headline(&phrases))
+}
+
+/// The tail that says how many calls the line did not name.
+fn headline_remainder(remaining: usize) -> String {
+    match remaining {
+        0 => String::new(),
+        1 => " and 1 more call".to_owned(),
+        remaining => format!(" and {remaining} more calls"),
+    }
+}
+
+/// How wide the line would be if it named this many of the phrases.
+fn headline_width(phrases: &[String], shown: usize) -> usize {
+    phrases[..shown]
+        .iter()
+        .map(|phrase| phrase.chars().count())
+        .sum::<usize>()
+        + 2 * shown.saturating_sub(1)
+        + headline_remainder(phrases.len() - shown).chars().count()
+}
+
+fn capitalized(value: &str) -> String {
+    let mut characters = value.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Name as many calls as the line can carry, and count the rest.
+///
+/// The count is reserved out of the budget before the phrases are joined, not
+/// appended after them. Appending it is what this did first, and the cap then
+/// cut the count straight back off: five calls of average length were titled
+/// as two, with nothing left on the line to say that three were missing.
+/// Understating a plan is the one thing a title must not do, so where the two
+/// compete for the last characters the count wins and the phrases are what get
+/// shortened -- including in the case of a single phrase that fills the line
+/// on its own, where the last few words of what one call does are worth less
+/// than knowing another call exists.
+fn assemble_headline(phrases: &[String]) -> String {
+    let mut shown = phrases.len().min(MAX_HEADLINE_PHRASES);
+    while shown > 1 && headline_width(phrases, shown) > MAX_HEADLINE_LEN {
+        shown -= 1;
+    }
+    let remainder = headline_remainder(phrases.len() - shown);
+    let budget = MAX_HEADLINE_LEN.saturating_sub(remainder.chars().count());
+    // Capitalized before the cap, so a first character that widens on
+    // uppercasing cannot push the finished line past it.
+    let named =
+        crate::sanitize::stripped_capped(&capitalized(&phrases[..shown].join(", ")), budget);
+    format!("{named}{remainder}")
+}
+
+/// The fact about a call that a descriptor's intent line is not required to
+/// carry, and that a row must not be missing.
+///
+/// This is [`standard_call_warnings`]'s rule at headline scale: a descriptor
+/// changes how a call reads, never what it does, so a token having one must
+/// not be the reason its allowance ceiling goes unmentioned -- and the tokens
+/// most likely to ship a descriptor are exactly the ones worth approving
+/// carefully. Without this, two rows reading `approve(spender, MAX)` disagree:
+/// the undescribed token says "Approve unlimited USDC" and the descriptor-
+/// covered one says whatever its intent says, so the more dangerous of the two
+/// is the one whose title looks tamer.
+///
+/// Direction is the sharper case. The Ekubo Positions descriptor renders
+/// `setApprovalForAll` as "Manage operator rights for" whether the grant is
+/// being made or revoked, so a row carrying the intent alone cannot tell the
+/// two apart at all. Zero-value `approve` is the same trap: it is a
+/// revocation, and a descriptor will still call it an approval.
+fn descriptor_qualifier(call: Option<&StandardCall>) -> Option<&'static str> {
+    match call {
+        Some(StandardCall::Approve { amount, .. }) if *amount == U256::ZERO => Some("revoking"),
+        Some(StandardCall::Approve { amount, .. }) if is_effectively_unlimited(*amount) => {
+            Some("unlimited")
+        }
+        Some(StandardCall::SetApprovalForAll { approved: true, .. }) => {
+            Some("granting operator control")
+        }
+        Some(StandardCall::SetApprovalForAll {
+            approved: false, ..
+        }) => Some("revoking operator control"),
+        _ => None,
+    }
+}
+
+/// What one call does, in the few words a row can carry.
+///
+/// The precedence is [`interpret_step`]'s: a descriptor matching the exact
+/// chain, address, and selector is the most specific reading available, and
+/// standard token decoding is the fallback for everything else. What the
+/// descriptor does not get to decide is whether the call's own outliving
+/// grant is mentioned; see [`descriptor_qualifier`].
+async fn headline_phrase(
+    step: &ExecutionStep,
+    metadata: &TokenMetadataMap,
+    own: &OwnAccounts,
+) -> Option<String> {
+    let token = step.transaction.to;
+    let standard = decode_standard_call(&step.transaction.data);
+    if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>()
+        && let Some(reading) = crate::clear_signing::interpret(
+            chain_id,
+            crate::clear_signing::CallEnvelope {
+                from: step.transaction.from,
+                to: step.transaction.to,
+            },
+            &step.transaction.data,
+            step_value(step),
+            metadata,
+            own,
+        )
+        .await
+    {
+        return Some(match descriptor_qualifier(standard.as_ref()) {
+            Some(qualifier) => format!("{} ({qualifier})", reading.intent),
+            None => reading.intent,
+        });
+    }
+    let display = metadata.get(&token).cloned().unwrap_or_default();
+    match standard? {
+        StandardCall::Approve { amount, .. } if amount == U256::ZERO => Some(format!(
+            "revoke approval for {}",
+            headline_token(&display).unwrap_or_else(|| "an unlisted token".to_owned())
+        )),
+        StandardCall::Approve { amount, .. } => {
+            Some(format!("approve {}", headline_amount(amount, &display)))
+        }
+        StandardCall::Transfer { to, amount } | StandardCall::TransferFrom { to, amount, .. } => {
+            Some(match own_account_name(to, own) {
+                Some(name) => format!(
+                    "transfer {} to your account {name}",
+                    headline_amount(amount, &display)
+                ),
+                None => format!("transfer {}", headline_amount(amount, &display)),
+            })
+        }
+        StandardCall::SetApprovalForAll { approved, .. } => Some(format!(
+            "{} operator control of every {} token",
+            if approved { "grant" } else { "revoke" },
+            headline_token(&display).unwrap_or_else(|| "unlisted".to_owned())
+        )),
+        StandardCall::Multicall { calls } => Some(format!(
+            "bundle {} nested call{}",
+            calls.len(),
+            if calls.len() == 1 { "" } else { "s" }
+        )),
+    }
+}
+
+/// The symbol the owner's token database holds for a token, held to the same
+/// rule the review's labels are held to: nothing that survives can be mistaken
+/// for an address. `None` when the database does not name it.
+fn headline_token(display: &TokenMetadata) -> Option<String> {
+    display.symbol.as_deref().and_then(display_symbol)
+}
+
+/// The account name the owner gave an address of their own, when the address
+/// is one of theirs. A stranger's address is left out of a headline entirely:
+/// forty characters would crowd out everything else on the line, and an
+/// abbreviated one is the shape address poisoning is built to exploit.
+fn own_account_name(address: Address, own: &OwnAccounts) -> Option<String> {
+    own.get(&address)
+        .map(String::as_str)
+        .and_then(display_account_name)
+}
+
+/// An amount as a headline states it: a quantity when the database knows both
+/// the symbol and the decimals, the symbol alone when it knows only the
+/// symbol, and no name at all when it knows neither.
+fn headline_amount(amount: U256, display: &TokenMetadata) -> String {
+    let Some(symbol) = headline_token(display) else {
+        return "an unlisted token".to_owned();
+    };
+    if is_effectively_unlimited(amount) {
+        return format!("unlimited {symbol}");
+    }
+    display.decimals.map_or_else(
+        || symbol.clone(),
+        |decimals| {
+            format!(
+                "{} {symbol}",
+                format_fixed_point(&amount.to_string(), decimals)
+            )
+        },
+    )
+}
+
 /// Token balance changes listed at approval time.
 ///
 /// Entries come from Transfer logs the simulation observed, so a plan controls

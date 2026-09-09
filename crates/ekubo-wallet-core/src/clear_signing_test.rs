@@ -190,26 +190,31 @@ async fn a_negative_tick_reads_as_a_negative_number() {
     );
 }
 
-/// The one formatter that renders a two's-complement word with its sign.
-/// Every other numeric format in the pinned engine — `raw`, `amount`,
-/// `tokenAmount`, and an absent format, which falls back to `raw` — prints
-/// the unsigned word, so `-140` becomes 2^256 - 140.
-const SIGNED_SAFE_FORMAT: &str = "number";
+/// Formats that render a two's-complement word with its sign.
+///
+/// `raw` is the one a descriptor should use: ERC-7730 defines it as the
+/// natural representation of the underlying type, and the v2 schema has no
+/// signed-integer format at all, so there is nothing else to ask for. It only
+/// became correct once the patched engine stopped sharing an arm between
+/// `Uint` and `Int`; before that it printed -140 as 2^256 - 140, and these
+/// descriptors carried `number` to route around it.
+///
+/// `number` stays listed because upstream files use it and ship verbatim. It
+/// reads correctly, but it is not in the v2 schema, so it is not something to
+/// write here. `amount` and `tokenAmount` are absent on purpose: both are
+/// unsigned by definition and still print the raw word.
+const SIGNED_SAFE_FORMATS: &[&str] = &["raw", "number"];
 
 /// Upstream descriptors ship verbatim, defects included, so that what was
 /// reviewed is what runs. These fields display a signed staking reward
-/// through an unsigned formatter; the list exists so the next one cannot
-/// arrive unnoticed, and each entry must still be reachable.
-const UPSTREAM_UNSIGNED_SIGNED_FIELDS: &[(&str, &str)] = &[
-    (
-        "registry/p2p/calldata-NativeTokenVault.json",
-        "#.harvestParams.reward",
-    ),
-    (
-        "registry/serenita/calldata-EthVault.json",
-        "#.harvestParams.reward",
-    ),
-];
+/// through a formatter that is unsigned by definition; the list exists so the
+/// next one cannot arrive unnoticed, and each entry must still be reachable.
+///
+/// It used to be longer. Most of what was excused here was a field using
+/// `raw` on a signed parameter, which the patched engine now renders
+/// correctly — those were never defects in the descriptors, only in the
+/// reading of them.
+const UPSTREAM_UNSIGNED_SIGNED_FIELDS: &[(&str, &str)] = &[];
 
 #[test]
 fn every_signed_parameter_is_displayed_by_a_signed_formatter() {
@@ -247,7 +252,10 @@ fn every_signed_parameter_is_displayed_by_a_signed_formatter() {
             collect_fields(format.get("fields"), &document, &mut fields);
             for (field_path, field_format) in fields {
                 let leaf = field_path.rsplit('.').next().unwrap_or(field_path);
-                if !signed.contains(leaf) || field_format == Some(SIGNED_SAFE_FORMAT) {
+                // No format means `raw`, which the engine documents as the
+                // fallback and which now renders a signed word with its sign.
+                let effective = field_format.unwrap_or("raw");
+                if !signed.contains(leaf) || SIGNED_SAFE_FORMATS.contains(&effective) {
                     continue;
                 }
                 if let Some(known) = UPSTREAM_UNSIGNED_SIGNED_FIELDS
@@ -266,8 +274,9 @@ fn every_signed_parameter_is_displayed_by_a_signed_formatter() {
     }
     assert!(
         offenders.is_empty(),
-        "signed parameters displayed by an unsigned formatter, which prints \
-         -140 as 2^256 - 140; use {SIGNED_SAFE_FORMAT:?}: {offenders:#?}"
+        "signed parameters displayed by a formatter that is unsigned by \
+         definition, which prints -140 as 2^256 - 140; use one of \
+         {SIGNED_SAFE_FORMATS:?}: {offenders:#?}"
     );
     let listed: BTreeSet<_> = UPSTREAM_UNSIGNED_SIGNED_FIELDS.iter().copied().collect();
     assert_eq!(

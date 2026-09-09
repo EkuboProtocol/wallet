@@ -1043,3 +1043,347 @@ fn labels_render_addresses_in_eip55_checksum_case() {
     assert_eq!(checksummed_or_verbatim("missing"), "missing");
     assert_eq!(checksummed_or_verbatim("0x1234"), "0x1234");
 }
+
+#[tokio::test]
+async fn a_headline_names_each_call_in_order() {
+    let token = Address::repeat_byte(0x44);
+    let spender = Address::repeat_byte(0x22);
+    let recipient = Address::repeat_byte(0x55);
+    let headline = plan_headline(
+        &[
+            step(1, token, approve_calldata(spender, U256::from(1_000_000))),
+            step(2, token, transfer_calldata(recipient, U256::from(250_000))),
+        ],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    )
+    .await;
+    assert_eq!(
+        headline.as_deref(),
+        Some("Approve 1 USDC, transfer 0.25 USDC")
+    );
+}
+
+#[tokio::test]
+async fn a_headline_carries_no_address() {
+    // The whole point of a headline is that it fits on one row, so it names a
+    // token by symbol and leaves every address to the review. A row that
+    // showed part of an address would be the surface address poisoning wants.
+    let token = Address::repeat_byte(0x44);
+    let stranger = Address::repeat_byte(0x66);
+    let headline = plan_headline(
+        &[step(
+            1,
+            token,
+            transfer_calldata(stranger, U256::from(250_000)),
+        )],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(headline, "Transfer 0.25 USDC");
+    assert!(
+        !headline.to_ascii_lowercase().contains("0x"),
+        "a headline must never carry an address: {headline}"
+    );
+
+    // The owner's own account is the one name a headline adds, because it is
+    // the one fact about the other end a reader cannot read off the address.
+    let named = plan_headline(
+        &[step(
+            1,
+            token,
+            transfer_calldata(stranger, U256::from(250_000)),
+        )],
+        &usdc_metadata(token),
+        &OwnAccounts::from([(stranger, "savings".to_owned())]),
+    )
+    .await;
+    assert_eq!(
+        named.as_deref(),
+        Some("Transfer 0.25 USDC to your account savings")
+    );
+}
+
+#[tokio::test]
+async fn an_unnamed_token_stays_unnamed_and_an_unlimited_allowance_says_so() {
+    let token = Address::repeat_byte(0x44);
+    let spender = Address::repeat_byte(0x22);
+    let unlisted = plan_headline(
+        &[step(1, token, approve_calldata(spender, U256::from(5_u8)))],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await;
+    assert_eq!(unlisted.as_deref(), Some("Approve an unlisted token"));
+
+    let unlimited = plan_headline(
+        &[step(1, token, approve_calldata(spender, U256::MAX))],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    )
+    .await;
+    assert_eq!(unlimited.as_deref(), Some("Approve unlimited USDC"));
+
+    let revoked = plan_headline(
+        &[step(1, token, approve_calldata(spender, U256::ZERO))],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    )
+    .await;
+    assert_eq!(revoked.as_deref(), Some("Revoke approval for USDC"));
+}
+
+#[tokio::test]
+async fn a_plan_nothing_recognized_has_no_headline() {
+    // The caller titles such a row by its kind. A headline that said
+    // "unrecognized" three times would take the row and tell nobody anything.
+    let headline = plan_headline(
+        &[
+            step(1, Address::repeat_byte(0x44), vec![0xde, 0xad, 0xbe, 0xef]),
+            step(2, Address::repeat_byte(0x55), vec![0xba, 0xad, 0xf0, 0x0d]),
+        ],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await;
+    assert_eq!(headline, None);
+}
+
+#[tokio::test]
+async fn an_unrecognized_call_keeps_its_place_among_recognized_ones() {
+    let token = Address::repeat_byte(0x44);
+    let spender = Address::repeat_byte(0x22);
+    let headline = plan_headline(
+        &[
+            step(1, token, approve_calldata(spender, U256::from(1_000_000))),
+            step(2, Address::repeat_byte(0x55), vec![0xde, 0xad, 0xbe, 0xef]),
+        ],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    )
+    .await;
+    assert_eq!(
+        headline.as_deref(),
+        Some("Approve 1 USDC, call an unrecognized contract")
+    );
+}
+
+#[tokio::test]
+async fn a_long_plan_ends_in_a_count() {
+    let token = Address::repeat_byte(0x44);
+    let spender = Address::repeat_byte(0x22);
+    let steps = (1..=5)
+        .map(|index| {
+            step(
+                index,
+                token,
+                approve_calldata(spender, U256::from(1_000_000)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let headline = plan_headline(&steps, &usdc_metadata(token), &OwnAccounts::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        headline,
+        "Approve 1 USDC, approve 1 USDC, approve 1 USDC and 2 more calls"
+    );
+    assert!(headline.chars().count() <= MAX_HEADLINE_LEN);
+}
+
+#[tokio::test]
+async fn a_descriptor_supplies_the_headline_it_matches() {
+    // The same Ekubo Positions descriptor the warning test leans on. A
+    // headline prefers it to the standard decode, because it is the more
+    // specific reading of the same bytes -- and it is still local: the
+    // registry ships in the binary.
+    let positions: Address = "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D"
+        .parse()
+        .unwrap();
+    let headline = plan_headline(
+        &[step(
+            1,
+            positions,
+            set_approval_for_all_calldata(Address::repeat_byte(0x33), true),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !headline.starts_with("Grant operator control"),
+        "the descriptor did not match, so this proves nothing: {headline}"
+    );
+    assert!(
+        headline.to_lowercase().contains("operator"),
+        "the descriptor's own intent should be the headline: {headline}"
+    );
+}
+
+#[test]
+fn a_headline_needs_no_runtime() {
+    // The desktop decodes headlines inside `spawn_blocking`, where there is no
+    // async context to await from, so it drives this future with a bare
+    // executor. That is only sound while the descriptor engine awaits nothing
+    // but the maps it was handed -- the `clear-signing` crate does carry a
+    // tokio dependency, used by its network registry source and its uniffi
+    // bindings, neither of which this path touches. A version that moved a
+    // runtime primitive onto the formatting path would hang the wallet's
+    // snapshot thread rather than fail to build, so the claim is tested here
+    // with no runtime present at all.
+    let token = Address::repeat_byte(0x44);
+    let spender = Address::repeat_byte(0x22);
+    let headline = futures::executor::block_on(plan_headline(
+        &[step(
+            1,
+            token,
+            approve_calldata(spender, U256::from(1_000_000)),
+        )],
+        &usdc_metadata(token),
+        &OwnAccounts::new(),
+    ));
+    assert_eq!(headline.as_deref(), Some("Approve 1 USDC"));
+}
+
+/// How many calls a headline claims to account for: the ones it named, plus
+/// the ones its trailing count says it did not.
+fn calls_accounted_for(headline: &str) -> usize {
+    let (named, counted) = match headline.split_once(" and ") {
+        Some((named, tail)) => {
+            let count: usize = tail
+                .trim_end_matches(" more calls")
+                .trim_end_matches(" more call")
+                .parse()
+                .unwrap_or_else(|_| panic!("a headline's tail must be a count: {headline}"));
+            (named, count)
+        }
+        None => (headline, 0),
+    };
+    named.split(", ").count() + counted
+}
+
+#[test]
+fn a_headline_never_drops_the_count_of_what_it_did_not_name() {
+    // Understating a plan is the one thing a title must not do. Spending the
+    // whole width on phrases and appending the count afterwards truncated the
+    // count back off, so a five-call plan was titled as a two-call plan --
+    // with nothing on the line to say that anything was missing.
+    //
+    // Phrase lengths chosen to straddle the budget: two of these fit and the
+    // third does not, which is exactly where the count used to be lost.
+    let long = "transfer 0.25 WSTETH-WETH-LP to your account cold-storage".to_owned();
+    assert_eq!(long.chars().count(), 57);
+    for count in 1..=6_usize {
+        let headline = assemble_headline(&vec![long.clone(); count]);
+        assert!(
+            headline.chars().count() <= MAX_HEADLINE_LEN,
+            "{count} phrases overflowed the cap: {headline}"
+        );
+        assert_eq!(
+            calls_accounted_for(&headline),
+            count,
+            "{count} phrases produced a headline accounting for a different number: {headline}"
+        );
+    }
+
+    // A single phrase already past the cap keeps the count rather than the
+    // tail of the phrase: how many calls there are outranks the last few
+    // words of what the first one does.
+    let overlong = format!("grant operator control of every {} token", "W".repeat(70));
+    let remainder_width = " and 1 more call".len();
+    assert!(
+        overlong.chars().count() > MAX_HEADLINE_LEN - remainder_width,
+        "this phrase has to be too long to sit beside the count, or the case is untested"
+    );
+    let headline = assemble_headline(&[overlong, "approve 1 USDC".to_owned()]);
+    assert!(headline.chars().count() <= MAX_HEADLINE_LEN);
+    assert!(
+        headline.ends_with(" and 1 more call"),
+        "the count must survive a phrase that fills the line: {headline}"
+    );
+}
+
+#[tokio::test]
+async fn a_descriptor_does_not_silence_an_unlimited_allowance_in_the_headline() {
+    // The same stETH descriptor `a_descriptor_does_not_silence_the_unlimited_
+    // allowance_warning` leans on, held to the same rule one level up: the
+    // ceiling is a fact about the call, and a token popular enough to ship a
+    // descriptor is exactly one worth approving carefully. Without the
+    // qualifier this row would read tamer than the same call on an
+    // undescribed token, which is precisely backwards.
+    let steth: Address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+        .parse()
+        .unwrap();
+    let headline = plan_headline(
+        &[step(
+            1,
+            steth,
+            approve_calldata(Address::repeat_byte(0x22), U256::MAX),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !headline.starts_with("Approve "),
+        "the descriptor did not match, so this proves nothing: {headline}"
+    );
+    assert!(
+        headline.ends_with(" (unlimited)"),
+        "a descriptor-read approval must still say what ceiling it grants: {headline}"
+    );
+}
+
+#[tokio::test]
+async fn a_descriptor_that_reads_the_same_both_ways_still_says_which_way_it_went() {
+    // The Ekubo Positions descriptor renders `setApprovalForAll` as "Manage
+    // operator rights for" whether the grant is being made or revoked. A row
+    // carrying that intent alone cannot tell a reader which happened, and the
+    // two are opposites -- so the direction is attached here.
+    let positions: Address = "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D"
+        .parse()
+        .unwrap();
+    let operator = Address::repeat_byte(0x33);
+    let granted = plan_headline(
+        &[step(
+            1,
+            positions,
+            set_approval_for_all_calldata(operator, true),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    let revoked = plan_headline(
+        &[step(
+            1,
+            positions,
+            set_approval_for_all_calldata(operator, false),
+        )],
+        &TokenMetadataMap::new(),
+        &OwnAccounts::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !granted.starts_with("Grant operator control"),
+        "the descriptor did not match, so this proves nothing: {granted}"
+    );
+    assert_ne!(
+        granted, revoked,
+        "a grant and a revocation must not share a title: {granted}"
+    );
+    assert!(
+        granted.ends_with(" (granting operator control)"),
+        "{granted}"
+    );
+    assert!(
+        revoked.ends_with(" (revoking operator control)"),
+        "{revoked}"
+    );
+}

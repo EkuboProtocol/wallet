@@ -1547,3 +1547,128 @@ fn only_a_request_that_was_signed_can_ever_have_a_receipt() {
         assert!(status.can_reach_a_chain(), "{status:?} reaches a chain");
     }
 }
+
+/// Queue a plan the way the MCP adapter does, so the row carries the agent
+/// origin that withdrawal is gated on. The shared `create` helper stores
+/// `Unknown`, which is a row nothing claims and therefore nothing may take
+/// back.
+fn create_agent_request(
+    store: &mut PendingStore,
+    plan: &ExecutionPlan,
+) -> Result<PendingTransaction> {
+    let instance_id = store
+        .database
+        .get("primary")
+        .unwrap()
+        .unwrap()
+        .wallet_instance_id;
+    store.create_for_instance(
+        "primary",
+        instance_id,
+        "ethereum",
+        plan,
+        Some("mcp.ekubo.org"),
+        &RequestSource::agent(Some("claude_code"), Some("mcp.ekubo.org")),
+        1,
+        ReviewRequest::PolicyDecides,
+    )
+}
+
+#[test]
+fn withdrawal_releases_the_plan_so_the_same_plan_can_be_queued_again() {
+    let (_directory, mut store) = store();
+    let first = create_agent_request(&mut store, &plan()).unwrap();
+
+    // Before withdrawal the identical plan deduplicates into the stale row,
+    // which is the whole reason an agent that gave up on a wait cannot simply
+    // re-send: it gets its own stuck request back.
+    let duplicate = create_agent_request(&mut store, &plan()).unwrap();
+    assert_eq!(duplicate.request_id, first.request_id);
+
+    let withdrawn = store.withdraw(first.request_id).unwrap();
+    assert_eq!(withdrawn.status, PendingStatus::Cancelled);
+    // Nobody decided anything, so the row carries no decision either way. A
+    // withdrawal that read back as an approval or a rejection would be
+    // attributing a verdict to a person who never gave one.
+    assert!(withdrawn.approved_at.is_none());
+    assert!(withdrawn.rejected_at.is_none());
+    assert!(withdrawn.serialized_transaction.is_none());
+    assert!(withdrawn.generation > first.generation);
+
+    let fresh = create_agent_request(&mut store, &plan()).unwrap();
+    assert_ne!(fresh.request_id, first.request_id);
+    assert_eq!(fresh.status, PendingStatus::AwaitingApproval);
+}
+
+#[test]
+fn withdrawal_frees_awaiting_approval_capacity() {
+    let (_directory, mut store) = store();
+    let first = create_agent_request(&mut store, &plan()).unwrap();
+    for value in 2..=MAX_AWAITING_APPROVALS_PER_WALLET {
+        create_agent_request(&mut store, &plan_with_value(&value.to_string())).unwrap();
+    }
+    let overflow = plan_with_value(&(MAX_AWAITING_APPROVALS_PER_WALLET + 1).to_string());
+    assert!(create_agent_request(&mut store, &overflow).is_err());
+
+    store.withdraw(first.request_id).unwrap();
+    assert!(create_agent_request(&mut store, &overflow).is_ok());
+}
+
+#[test]
+fn withdrawal_refuses_a_request_no_agent_made() {
+    let (_directory, mut store) = store();
+    // A row from before the origin column existed reads back as `Unknown`,
+    // and a dapp's row names itself. Neither is an agent's to take back.
+    let unattributed = store
+        .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+        .unwrap();
+    assert!(store.withdraw(unattributed.request_id).is_err());
+    assert_eq!(
+        store.get(unattributed.request_id).unwrap().status,
+        PendingStatus::AwaitingApproval
+    );
+
+    let instance_id = store
+        .database
+        .get("primary")
+        .unwrap()
+        .unwrap()
+        .wallet_instance_id;
+    let dapp = store
+        .create_for_instance(
+            "primary",
+            instance_id,
+            "ethereum",
+            &plan_with_value("7"),
+            Some("mcp.ekubo.org"),
+            &RequestSource::walletconnect(Some("https://app.example.org")),
+            1,
+            ReviewRequest::PolicyDecides,
+        )
+        .unwrap();
+    assert!(store.withdraw(dapp.request_id).is_err());
+    assert_eq!(
+        store.get(dapp.request_id).unwrap().status,
+        PendingStatus::AwaitingApproval
+    );
+}
+
+#[test]
+fn withdrawal_refuses_a_request_that_already_left_the_queue() {
+    let (_directory, mut store) = store();
+    let withdrawn = create_agent_request(&mut store, &plan()).unwrap();
+    store.withdraw(withdrawn.request_id).unwrap();
+    assert!(store.withdraw(withdrawn.request_id).is_err());
+
+    // The owner's verdict wins the same compare-and-set the withdrawal would
+    // have used, and it stays their verdict afterwards.
+    let rejected = create_agent_request(&mut store, &plan_with_value("3")).unwrap();
+    store.reject(rejected.request_id).unwrap();
+    assert!(store.withdraw(rejected.request_id).is_err());
+    assert_eq!(
+        store.get(rejected.request_id).unwrap().status,
+        PendingStatus::Rejected
+    );
+
+    assert!(store.withdraw(Uuid::new_v4()).is_err());
+}

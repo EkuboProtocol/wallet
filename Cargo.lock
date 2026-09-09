@@ -2257,8 +2257,7 @@ dependencies = [
 [[package]]
 name = "clear-signing"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7fdf03058b3abe74d75efd426fed38be6029e2ff41afbb25416a2c1d659ec25"
+source = "git+https://github.com/EkuboProtocol/clear-signing?branch=fix-raw-signed-integers-0.1.0#c9471ee52dee0aab4ece1aec6f20292f05da1ba8"
 dependencies = [
  "hex",
  "num-bigint 0.4.8",
@@ -3195,7 +3194,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3347,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet"
-version = "1.6.0"
+version = "1.7.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3399,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-core"
-version = "1.6.0"
+version = "1.7.1"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -3639,7 +3638,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6388,7 +6387,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-bridge"
-version = "1.6.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -6718,7 +6717,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8113,7 +8112,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8912,7 +8911,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8979,7 +8978,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10218,7 +10217,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -11697,7 +11696,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -12670,9 +12669,9 @@ dependencies = [
 
 [[package]]
 name = "zbus_polkit"
-version = "5.0.0"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad23d5c4d198c7e2641b33e6e0d1f866f117408ba66fe80bbe52e289eeb77c52"
+checksum = "283d50dac36a7fee0d9c2e6b9c71253326c1f863a9d350342d338637aa3019ae"
 dependencies = [
  "enumflags2",
  "serde",

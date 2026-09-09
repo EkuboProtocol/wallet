@@ -746,3 +746,66 @@ fn a_permit_with_one_clock_reports_no_separate_expiration() {
         "one clock stays one clock"
     );
 }
+
+/// The queue state machine is shared with messages and exercised there. What
+/// is specific to this table is that it is the one being written and read, and
+/// that its extra `decided_at`/`approval_required` constraint admits a row
+/// nobody decided — which it did not before the migration that added
+/// withdrawal.
+#[test]
+fn an_agents_own_typed_data_request_withdraws_and_a_dapps_does_not() {
+    let (_directory, mut store) = store();
+    let payload = permit_payload();
+    let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
+    let queued = store
+        .create_bound(
+            Uuid::nil(),
+            "primary",
+            Address::ZERO,
+            chain_id,
+            &payload,
+            digest,
+            None,
+            &RequestSource::agent(Some("claude_code"), None),
+        )
+        .unwrap();
+
+    let withdrawn = store.withdraw(queued.request_id).unwrap();
+    assert_eq!(withdrawn.status, TypedDataStatus::Withdrawn);
+    assert!(withdrawn.approved_at.is_none());
+    assert!(withdrawn.rejected_at.is_none());
+    assert!(withdrawn.signature.is_none());
+
+    // The dedupe key is free again, so the same permit queues a fresh row.
+    let fresh = store
+        .create_bound(
+            Uuid::nil(),
+            "primary",
+            Address::ZERO,
+            chain_id,
+            &payload,
+            digest,
+            None,
+            &RequestSource::agent(Some("claude_code"), None),
+        )
+        .unwrap();
+    assert_ne!(fresh.request_id, queued.request_id);
+
+    let dapp = store
+        .create_bound(
+            Uuid::nil(),
+            "primary",
+            Address::ZERO,
+            chain_id,
+            &payload,
+            digest,
+            Some("Example (app.example.org)"),
+            &RequestSource::walletconnect(Some("https://app.example.org")),
+        )
+        .unwrap();
+    assert!(store.withdraw(dapp.request_id).is_err());
+    assert_eq!(
+        store.get(dapp.request_id).unwrap().status,
+        TypedDataStatus::AwaitingApproval
+    );
+}

@@ -26,13 +26,15 @@ fn signature_event(kind: SignatureKind, stage: SignatureStage, request_id: Uuid)
     }
 }
 
-const EVERY_SIGNATURE: [(SignatureKind, SignatureStage); 6] = [
+const EVERY_SIGNATURE: [(SignatureKind, SignatureStage); 8] = [
     (SignatureKind::Message, SignatureStage::Queued),
     (SignatureKind::Message, SignatureStage::Signed),
     (SignatureKind::Message, SignatureStage::Rejected),
     (SignatureKind::TypedData, SignatureStage::Queued),
     (SignatureKind::TypedData, SignatureStage::Signed),
     (SignatureKind::TypedData, SignatureStage::Rejected),
+    (SignatureKind::Message, SignatureStage::Withdrawn),
+    (SignatureKind::TypedData, SignatureStage::Withdrawn),
 ];
 
 fn transaction_event(stage: TransactionStage, request_id: Uuid) -> DomainEvent {
@@ -42,7 +44,7 @@ fn transaction_event(stage: TransactionStage, request_id: Uuid) -> DomainEvent {
     }
 }
 
-const EVERY_STAGE: [TransactionStage; 7] = [
+const EVERY_STAGE: [TransactionStage; 8] = [
     TransactionStage::Proposed,
     TransactionStage::Signed,
     TransactionStage::Broadcast,
@@ -50,6 +52,7 @@ const EVERY_STAGE: [TransactionStage; 7] = [
     TransactionStage::Reverted,
     TransactionStage::Replaced,
     TransactionStage::Cancelled,
+    TransactionStage::Withdrawn,
 ];
 
 fn detailed() -> NotificationPreferences {
@@ -68,6 +71,7 @@ fn every_transaction_lifecycle_stage_says_what_happened_and_where() {
         (TransactionStage::Reverted, "Transaction failed on chain"),
         (TransactionStage::Replaced, "Transaction superseded"),
         (TransactionStage::Cancelled, "Transaction cancelled"),
+        (TransactionStage::Withdrawn, "Request withdrawn"),
     ] {
         let event = transaction_event(stage, Uuid::new_v4());
         let notification = notification_for(&event, &context(), detailed()).unwrap();

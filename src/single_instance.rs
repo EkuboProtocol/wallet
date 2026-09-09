@@ -6,11 +6,11 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::Sender,
     },
     thread::JoinHandle,
     time::Duration,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 pub enum InstanceOutcome {
     Primary(SingleInstance),
@@ -26,7 +26,11 @@ pub struct SingleInstance {
 }
 
 impl SingleInstance {
-    pub fn acquire(data_dir: &Path, activations: Sender<()>) -> Result<InstanceOutcome> {
+    /// `activations` is unbounded and non-blocking on purpose: the listener
+    /// threads below send from outside any runtime, and the receiving end has
+    /// to stay a cancellable future rather than a parked blocking task, or the
+    /// Tokio join at quit would have to wait it out. See `join_tokio_runtime`.
+    pub fn acquire(data_dir: &Path, activations: UnboundedSender<()>) -> Result<InstanceOutcome> {
         std::fs::create_dir_all(data_dir)?;
         let lock_path = data_dir.join("application.lock");
         let lock = OpenOptions::new()

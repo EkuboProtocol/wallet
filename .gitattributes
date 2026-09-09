@@ -1,4 +1,42 @@
-# These documents are compiled into the MCP server with `include_str!`.
-# Normalize their bytes across platforms so Windows packages advertise the
-# same Markdown resources as macOS and Linux packages.
+# These files are compiled into the binary verbatim with `include_str!`.
+# Normalize their bytes across platforms so a Windows package advertises the
+# same resources, ships the same legal text, and parses the same data as the
+# macOS and Linux packages built from the same commit.
+#
+# Without this, Git converts them to CRLF on a Windows checkout and every one
+# of them is embedded with different bytes there. The rule used to name only
+# `docs/skills/**/SKILL.md`, which left the rest of the set converted; a test
+# asserting on a line break inside `docs/mcp-security-model.md` is what found
+# the gap. Anything new reached by `include_str!` belongs in this list.
+#
+# The catch-all below is what makes that instruction survive being forgotten.
+# Naming each file one at a time is exactly the rule that was already
+# incomplete twice: seven `include_str!` targets — this repository's own Rust
+# sources among them, which several tests scan as text — were still being
+# converted after the list was extended the first time. `* text=auto` puts
+# every text file in the repository on LF in the index, so a new
+# `include_str!` is normalized before anyone remembers to add a line here.
+# The explicit entries stay: they are the set whose bytes reach a package,
+# and `eol=lf` states it for them even where a future `.gitattributes` edit
+# narrows the default.
+* text=auto eol=lf
+docs/mcp-server-instructions.md text eol=lf
+docs/mcp-security-model.md text eol=lf
+docs/policy-authoring.md text eol=lf
 docs/skills/**/SKILL.md text eol=lf
+LICENSE text eol=lf
+THIRD_PARTY_LICENSES.md text eol=lf
+contrib/polkit/com.ekubo.wallet.policy text eol=lf
+crates/ekubo-wallet-core/networks.json text eol=lf
+crates/ekubo-wallet-core/default-tokens.json text eol=lf
+crates/ekubo-wallet-core/token-prices.json text eol=lf
+crates/mcp-bridge/src/offline_capabilities.json text eol=lf
+schemas/policy.schema.json text eol=lf
+assets/app-icon.svg text eol=lf
+# Rust sources are reached by `include_str!` too, and read as text by the
+# tests that scan a module for its own shape rather than running it.
+src/desktop.rs text eol=lf
+src/release_check.rs text eol=lf
+crates/ekubo-wallet-core/src/policy_store.rs text eol=lf
+crates/ekubo-wallet-core/src/reconcile.rs text eol=lf
+crates/ekubo-wallet-core/src/update_trust.rs text eol=lf

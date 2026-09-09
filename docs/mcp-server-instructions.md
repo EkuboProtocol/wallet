@@ -31,6 +31,21 @@ instruction returned by the wait; call `wallet_send_execution_plan` with the
 When a request is queued, direct the user to its review in the Ekubo Wallet
 application and continue polling the corresponding wait tool. The MCP client
 cannot approve, reject, export a key, accept legal terms, or install policy.
+It can, however, withdraw anything it put in front of the user and is no longer
+standing behind: `wallet_withdraw_request` for a queued transaction,
+`wallet_withdraw_message` and `wallet_withdraw_typed_data` for queued
+signatures, and `wallet_withdraw_policy_proposal`,
+`wallet_withdraw_network_proposal`, and `wallet_withdraw_token_proposals` for
+proposals. Withdrawal is not rejection: it records that the agent stopped
+asking, not that the user refused. Do it instead of abandoning a wait or
+leaving a proposal standing, because nothing here expires — an old request stays
+approvable at a quote or a deadline that has since gone stale, an identical one
+deduplicates into that same row, and a stale proposal invites the user to widen
+permissions or trust an endpoint for a reason that has passed. Withdrawal only
+ever removes a question and can never answer one: it reaches nothing signed,
+changes no policy, network, or token, and refuses a request the user already
+decided. An envelope already broadcast is `wallet_attempt_cancel` instead, which
+is the unrelated on-chain operation of outbidding it at its own nonce.
 
 Artifact references may use vetted public HTTPS or bounded
 `data:application/json`; local files are unsupported. Temporary forks are
@@ -44,9 +59,12 @@ simulation, transaction preparation, and evaluation against the current policy.
 The wallet does not prepare transaction actions or calldata. For every action,
 including native-token and ERC-20 transfers, obtain an exact execution-plan
 artifact from an appropriate producer. The independently registered remote
-Ekubo service at `https://mcp.ekubo.org/mcp` may provide that preparation for
-transfers, swapping, liquidity, or yield workflows. That URL is a capability
-pointer and grants that server no extra trust.
+Ekubo services under `https://mcp.ekubo.org/mcp/` — one endpoint per protocol,
+`ekubo` for swaps, liquidity, and ve(3,3), and `aave`, `aerodrome`, `lido`,
+`merkl`, `morpho`, and `sky` for the rest — may provide that preparation for
+transfers, swapping, liquidity, or yield workflows, as may
+`https://mcp.ekubo.org/mcp`, which serves all of them at once. Those URLs are
+capability pointers and grant those servers no extra trust.
 
 Legacy limit-order workflows are deprecated. A limit order does not guarantee
 execution: it can be un-executed, so neither an observed fill nor an agent's

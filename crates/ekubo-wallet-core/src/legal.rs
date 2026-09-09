@@ -293,21 +293,37 @@ compiled into the running application before shutting down, installing it,
 and relaunching. Package formats without in-place update support use the
 GitHub Releases page instead.
 
-## 7. Hosted MCP companion and agent tooling
+## 7. Hosted MCP companions and agent tooling
 
-When you install supported agent connections from Ekubo Wallet, the wallet
-adds a local `ekubo_wallet` entry to the agent's configuration. For harnesses
-whose configuration format supports remote MCP, it also adds a credential-free
-`ekubo` entry pointing to `https://mcp.ekubo.org/mcp`. Claude Desktop receives
-only the local entry in its configuration file; if you add the hosted companion
-through **Customize → Connectors**, that connector belongs to your Claude
-account. Neither entry contains a wallet key, access token, refresh token,
-authorization header, client secret, or other credential.
+When you sync a supported agent connection from Ekubo Wallet, the wallet adds
+a local `ekubo_wallet` entry to the agent's configuration. For harnesses whose
+configuration format supports remote MCP, it also adds one credential-free
+entry for each hosted Ekubo server you have selected in **Settings → Ekubo MCP
+servers**. Ekubo runs one server per protocol, and every one of them is
+selected until you turn it off:
 
-The hosted companion is operated by Ekubo, Inc. and is not part of the local
+- `ekubo` — `https://mcp.ekubo.org/mcp/ekubo`
+- `ekubo_aave` — `https://mcp.ekubo.org/mcp/aave`
+- `ekubo_aerodrome` — `https://mcp.ekubo.org/mcp/aerodrome`
+- `ekubo_lido` — `https://mcp.ekubo.org/mcp/lido`
+- `ekubo_merkl` — `https://mcp.ekubo.org/mcp/merkl`
+- `ekubo_morpho` — `https://mcp.ekubo.org/mcp/morpho`
+- `ekubo_sky` — `https://mcp.ekubo.org/mcp/sky`
+
+Changing your selection rewrites the configuration of every agent you have
+already connected, adding the entries you selected and removing the ones you
+did not. It never adds this wallet to an agent you have not connected. Claude
+Desktop receives only the local entry in its configuration file; if you add a
+hosted companion through **Customize → Connectors**, that connector belongs to
+your Claude account and this wallet cannot apply your selection to it. No
+entry contains a wallet key, access token, refresh token, authorization
+header, client secret, or other credential.
+
+Each hosted companion is operated by Ekubo, Inc. and is not part of the local
 wallet's custody or authorization boundary. It can receive the tool arguments
 your agent sends to it, including wallet addresses, networks, token amounts,
-and requested actions. To hand exact actions to the wallet without placing
+and requested actions. A server you have not selected is not in your agent's
+configuration and receives nothing from it. To hand exact actions to the wallet without placing
 large payloads in the conversation, it can temporarily store execution plans
 and other artifact bodies and return a reference URL. Those artifacts can
 identify the sender and the action being prepared. The service cannot read a

@@ -26,10 +26,216 @@ fn shutdown_timeout_is_created_inside_the_tokio_runtime() {
     assert_eq!(value, 42);
 }
 
+/// A blocking task models the thing that actually crashed the wallet: a worker
+/// part-way through dropping a `rusqlite::Connection`, which is where `SQLCipher`
+/// frees the encryption context. If shutdown returns while that is still in
+/// flight, `exit` frees the cipher provider underneath it.
+#[test]
+fn tokio_shutdown_waits_for_a_database_close_already_in_flight() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn_blocking({
+        let closed = Arc::clone(&closed);
+        let entered = Arc::clone(&entered);
+        move || {
+            entered.wait();
+            std::thread::sleep(Duration::from_millis(50));
+            closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    // Joining only means something once the work is genuinely running.
+    entered.wait();
+
+    assert!(
+        shutdown_tokio_runtime(runtime, Duration::from_secs(5)),
+        "a runtime whose work finishes must report a clean shutdown"
+    );
+    assert!(
+        closed.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown must not return while a database is still being closed"
+    );
+}
+
+/// Closer to the real crash than the blocking case above. The automation
+/// supervisor is an *async* task that owns its stores across every await, so
+/// the connections close when the runtime cancels the task and drops its
+/// future. Shutdown must not return until that drop has run.
+#[test]
+fn tokio_shutdown_waits_for_a_cancelled_task_to_drop_its_stores() {
+    struct StoreGuard(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for StoreGuard {
+        fn drop(&mut self) {
+            // Stands in for `rusqlite::Connection`'s drop, which is where
+            // SQLCipher frees the encryption context.
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn({
+        let guard = StoreGuard(Arc::clone(&dropped));
+        let entered = Arc::clone(&entered);
+        async move {
+            entered.wait();
+            // Never completes: only cancellation ends this task, exactly as
+            // the supervisor is ended at quit.
+            std::future::pending::<()>().await;
+            drop(guard);
+        }
+    });
+    entered.wait();
+
+    assert!(shutdown_tokio_runtime(runtime, Duration::from_secs(5)));
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown must not return before a cancelled task has dropped its connections"
+    );
+}
+
+/// The activation listener is the one receive that never completes on its own,
+/// so it decides whether an ordinary quit is instant or waits out the whole
+/// deadline. As a `spawn_blocking` it was the latter: `shutdown_timeout` cannot
+/// cancel a blocking closure that has already begun, and nothing drops the
+/// sender on a quit that is not an update. Awaited as a future it is simply
+/// cancelled, which is what this pins.
+#[test]
+fn an_activation_receive_never_holds_the_shutdown_open() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    // Deliberately kept alive for the whole test, exactly as the listener
+    // thread keeps it alive across an ordinary quit.
+    let (_activations, mut receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn({
+        let entered = Arc::clone(&entered);
+        async move {
+            entered.wait();
+            while receiver.recv().await.is_some() {}
+        }
+    });
+    entered.wait();
+
+    let started = Instant::now();
+    assert!(
+        shutdown_tokio_runtime(runtime, Duration::from_secs(5)),
+        "a pending activation receive must be cancelled, not waited out"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "quitting must not stall on the activation channel; took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn tokio_shutdown_reports_threads_it_could_not_join() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    runtime.spawn_blocking({
+        let release = Arc::clone(&release);
+        let entered = Arc::clone(&entered);
+        move || {
+            entered.wait();
+            while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    });
+    entered.wait();
+
+    assert!(
+        !shutdown_tokio_runtime(runtime, Duration::from_millis(200)),
+        "a task that outlasts the deadline must be reported, not silently abandoned"
+    );
+    // Let the stranded thread end so it does not outlive the test binary.
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `gpui_tokio::init` builds a runtime that `GlobalTokio::drop` tears down with
+/// `Runtime::shutdown_background`, which abandons the worker threads instead of
+/// joining them — they then race `SQLCipher`'s `exit` teardown. The wallet must
+/// own its runtime and hand `gpui_tokio` a handle, so this guards the wiring
+/// rather than the helper.
+#[test]
+fn the_desktop_never_lets_gpui_tokio_own_the_runtime() {
+    let source = include_str!("desktop.rs");
+
+    assert!(
+        !source.contains("gpui_tokio::init(cx)"),
+        "gpui_tokio::init abandons its threads at drop; build the runtime here \
+         and pass a handle to gpui_tokio::init_from_handle instead"
+    );
+    assert!(
+        source.contains("gpui_tokio::init_from_handle("),
+        "the desktop must install the runtime it owns"
+    );
+    // Two joins, because neither site runs everywhere: macOS ends the process
+    // inside `[NSApp terminate:]` and never returns from `Platform::run`.
+    assert!(
+        source.contains("join_tokio_runtime(&quit_tokio_slot, &update_data_dir)"),
+        "the quit handler must join the runtime — it is the path that runs on every platform"
+    );
+    assert!(
+        source.contains("join_tokio_runtime(&tokio_slot, &shutdown_data_dir)"),
+        "an exit that never reached a quit handler must still join the runtime"
+    );
+    // Nothing on the quit path may park a blocking thread, because the join
+    // cannot cancel one. The activation receive is the case that bit.
+    assert!(
+        source.contains("while receiver.recv().await.is_some()"),
+        "the activation receive must stay a cancellable future; a blocking \
+         receive makes every quit wait out the whole shutdown deadline"
+    );
+}
+
+#[test]
+fn joining_the_runtime_empties_its_slot_and_is_idempotent() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a Tokio runtime");
+    let slot = Mutex::new(Some(runtime));
+
+    join_tokio_runtime(&slot, directory.path());
+    assert!(
+        slot.lock().expect("the slot is not poisoned").is_none(),
+        "the join must take the runtime so the second caller cannot join it twice"
+    );
+
+    // The other shutdown path always runs; on an ordinary quit it arrives
+    // second and must do nothing at all.
+    join_tokio_runtime(&slot, directory.path());
+    assert!(
+        !crate::release_check::update_diagnostics_path(directory.path()).exists(),
+        "a runtime that shut down cleanly must not write a timeout diagnostic"
+    );
+}
+
 #[test]
 fn update_handoff_releases_the_instance_before_relaunch() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let (sender, _receiver) = std::sync::mpsc::channel();
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let InstanceOutcome::Primary(instance) =
         SingleInstance::acquire(directory.path(), sender.clone()).unwrap()
     else {
@@ -3003,4 +3209,305 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
     assert!(case.contains(r#".label("Edit the draft")"#));
     assert!(!review.contains(r#".label("Back to editing")"#));
     assert!(!review.contains(r#".label("Edit this draft")"#));
+}
+
+/// One transaction record, at the only two settings these tests vary.
+fn activity_transaction(chain_id: &str) -> OwnerActivityRecord {
+    let now = chrono::Utc::now();
+    OwnerActivityRecord::Transaction(Box::new(
+        serde_json::from_value(serde_json::json!({
+            "request_id": uuid::Uuid::new_v4(),
+            "wallet_instance_id": uuid::Uuid::new_v4(),
+            "wallet_id": "primary",
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "network_name": "ethereum",
+            "chain_id": chain_id,
+            "execution_plan": {
+                "schema_version": "1",
+                "chain_id": chain_id,
+                "caip2_chain_id": format!("eip155:{chain_id}"),
+                "sender": "0x1111111111111111111111111111111111111111",
+                "ordered_steps": [{
+                    "step": 1,
+                    "kind": "execution",
+                    "transaction": {
+                        "chain_id": chain_id,
+                        "from": "0x1111111111111111111111111111111111111111",
+                        "to": "0x2222222222222222222222222222222222222222",
+                        "data": "0x",
+                        "value": "1"
+                    }
+                }]
+            },
+            "digest": "0x00",
+            "policy_revision": 1,
+            "approval_required": false,
+            "status": "confirmed",
+            "created_at": now,
+            "updated_at": now
+        }))
+        .expect("test transaction"),
+    ))
+}
+
+#[test]
+fn a_row_is_titled_by_what_the_plan_does_and_names_its_network_after_the_account() {
+    // The title used to be "Transaction on Ethereum Mainnet", which spent the
+    // most prominent line on the one fact every row on the screen shares. The
+    // network moves down beside the account, where the rest of the row's
+    // context already is, and the title says what the plan actually does.
+    let networks = BTreeMap::from([(1_u64, SharedString::from("Ethereum Mainnet"))]);
+    let record = activity_transaction("1");
+    let now = chrono::Utc::now();
+
+    let headline = SharedString::from("Approve 1 USDC, swap");
+    let decoded = activity_row_summary(&record, &networks, None, Some(&headline), now);
+    assert_eq!(decoded.title, "Approve 1 USDC, swap");
+    assert!(
+        decoded
+            .subtitle
+            .starts_with("primary · Ethereum Mainnet · "),
+        "the network belongs after the account: {}",
+        decoded.subtitle
+    );
+
+    // A plan nothing recognized keeps a title that is at least honest, and
+    // loses nothing: its network is in the subtitle either way.
+    let undecoded = activity_row_summary(&record, &networks, None, None, now);
+    assert_eq!(undecoded.title, "Transaction");
+    assert_eq!(undecoded.subtitle, decoded.subtitle);
+}
+
+#[test]
+fn a_record_on_no_network_is_not_given_one() {
+    // `chain_label` answers "no network" for a record that names no chain,
+    // which is a sentence worth printing in a review and not worth spending a
+    // subtitle segment on. An absent part is left out instead.
+    assert_eq!(
+        row_subtitle(&["primary", "", "2 hours ago"]),
+        "primary · 2 hours ago"
+    );
+    assert_eq!(optional_chain_label(None, &BTreeMap::new()), "");
+    assert_eq!(
+        optional_chain_label(Some("not a chain"), &BTreeMap::new()),
+        ""
+    );
+    assert_eq!(
+        optional_chain_label(
+            Some("1"),
+            &BTreeMap::from([(1_u64, SharedString::from("Ethereum Mainnet"))])
+        ),
+        "Ethereum Mainnet"
+    );
+}
+
+#[test]
+fn a_request_withdrawn_before_signing_is_not_called_a_won_nonce_race() {
+    use ekubo_wallet_core::{
+        core::{policy::ReviewRequest, source::RequestSource},
+        pending::PendingStore,
+        policy_store::{DatabaseKey, PolicyStore},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let plan = ekubo_wallet_core::core::execution_plan::ExecutionPlan::parse(serde_json::json!({
+        "schema_version": "1",
+        "chain_id": "1",
+        "caip2_chain_id": "eip155:1",
+        "sender": "0x1111111111111111111111111111111111111111",
+        "ordered_steps": [{
+            "step": 1,
+            "kind": "execution",
+            "transaction": {
+                "chain_id": "1",
+                "from": "0x1111111111111111111111111111111111111111",
+                "to": "0x2222222222222222222222222222222222222222",
+                "data": "0x",
+                "value": "1"
+            }
+        }]
+    }))
+    .unwrap();
+    let mut database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    database
+        .put_for_wallet(
+            "primary",
+            plan.sender,
+            &ekubo_wallet_core::core::policy::WalletPolicy::allow_anything(),
+            None,
+        )
+        .unwrap();
+    let instance_id = database.get("primary").unwrap().unwrap().wallet_instance_id;
+    let mut pending = PendingStore::new(database);
+    let queued = pending
+        .create_for_instance(
+            "primary",
+            instance_id,
+            "ethereum",
+            &plan,
+            Some("mcp.ekubo.org"),
+            &RequestSource::agent(Some("claude_code"), None),
+            1,
+            ReviewRequest::PolicyDecides,
+        )
+        .unwrap();
+    let withdrawn = pending.withdraw(queued.request_id).unwrap();
+
+    // The stored status is `cancelled`, which the status-only wording reads as
+    // a replacement of the owner's having won a nonce race. There is no such
+    // replacement here — the row never held an envelope — so the activity list
+    // must not name a transaction the owner never sent.
+    assert_eq!(withdrawn.status, PendingStatus::Cancelled);
+    assert_eq!(transaction_record_label(&withdrawn), "Withdrawn");
+    let explanation = transaction_record_explanation(&withdrawn);
+    assert!(
+        explanation.contains("never signed or sent"),
+        "{explanation}"
+    );
+    assert!(!explanation.contains("mined first"), "{explanation}");
+}
+
+/// The confirmation exists because reporting only failure left success
+/// saying nothing. Each case below is a thing an owner would otherwise have
+/// to infer from a button that stopped being disabled.
+#[test]
+fn a_sync_confirmation_names_what_was_written() {
+    let report = AgentSyncReport {
+        updated: vec!["Claude Code"],
+        connector_only: Vec::new(),
+        servers: 7,
+        tools: 84,
+    };
+    let message = report.message().unwrap();
+    assert_eq!(
+        message,
+        "Claude Code now has this wallet and 7 Ekubo servers, about 84 tools in all."
+    );
+}
+
+#[test]
+fn a_sync_confirmation_lists_several_agents_readably() {
+    let report = AgentSyncReport {
+        updated: vec!["Claude Code", "Codex", "Cursor"],
+        connector_only: Vec::new(),
+        servers: 1,
+        tools: 51,
+    };
+    assert_eq!(
+        report.message().unwrap(),
+        "Claude Code, Codex, and Cursor now have this wallet and 1 Ekubo server, about 51 tools in all."
+    );
+    assert_eq!(join_names(&["a", "b"]), "a and b");
+    assert_eq!(join_names(&["a"]), "a");
+    assert_eq!(join_names(&[]), "");
+}
+
+/// Claude Desktop's file cannot carry hosted servers, which is not a failure
+/// and so never reached the error line. The confirmation is the one place an
+/// owner is looking when that fact matters.
+#[test]
+fn a_sync_confirmation_says_claude_desktop_needs_its_connectors_added() {
+    let report = AgentSyncReport {
+        updated: vec!["Cursor"],
+        connector_only: vec!["Claude Desktop"],
+        servers: 7,
+        tools: 84,
+    };
+    let message = report.message().unwrap();
+    assert!(message.starts_with("Cursor now has this wallet and 7 Ekubo servers"));
+    assert!(message.contains("Claude Desktop now has this wallet."));
+    assert!(message.contains("belong to your Claude account"));
+    assert!(message.contains("Customize → Connectors"));
+    // It must not claim seven servers were written to a file that carries none.
+    assert!(!message.contains("Claude Desktop now has this wallet and"));
+}
+
+/// Selecting nothing still writes the bridge, so the confirmation has to say
+/// so without claiming "0 Ekubo servers".
+#[test]
+fn a_sync_confirmation_reads_naturally_with_no_servers_selected() {
+    let report = AgentSyncReport {
+        updated: vec!["Codex"],
+        connector_only: Vec::new(),
+        servers: 0,
+        tools: 0,
+    };
+    assert_eq!(
+        report.message().unwrap(),
+        "Codex now has this wallet and no Ekubo servers."
+    );
+}
+
+/// A selection change that reached no agent looks exactly like one that
+/// reached every agent unless the screen says which happened.
+#[test]
+fn a_sync_that_touched_nothing_has_nothing_to_confirm() {
+    let report = AgentSyncReport::default();
+    assert!(report.touched_nothing());
+    assert!(report.message().is_none());
+}
+
+/// The report is derived from the adapters actually written, so Claude
+/// Desktop lands in the connector-only column by kind rather than by anyone
+/// remembering to special-case it at the call site.
+#[test]
+fn the_report_separates_agents_by_what_their_file_can_hold() {
+    let adapters: Vec<_> = AgentAdapter::supported()
+        .unwrap()
+        .into_iter()
+        .filter(|adapter| {
+            matches!(
+                adapter.kind,
+                AgentKind::ClaudeDesktop | AgentKind::Cursor | AgentKind::Codex
+            )
+        })
+        .collect();
+    let selection = CompanionSelection::all();
+    let report = AgentSyncReport::of(&adapters, &selection);
+    assert_eq!(report.connector_only, ["Claude Desktop"]);
+    assert_eq!(report.updated, ["Codex", "Cursor"]);
+    assert_eq!(report.servers, COMPANION_SERVERS.len());
+    assert_eq!(report.tools, selection.enabled_tool_count());
+}
+
+/// A selection the wallet could not read must not be acted on.
+///
+/// `CompanionSelection::all()` is the right value to *draw* when the stored
+/// preference is unreadable, and the wrong one to write: convergence needs no
+/// press, so defaulting and then converging would put servers an owner had
+/// switched off back into every agent they had connected, with nothing on
+/// screen saying so. The source is the subject here because the failure is a
+/// missing guard rather than a value any constructor returns.
+#[test]
+fn an_unreadable_selection_neither_converges_nor_edits() {
+    let source = include_str!("desktop.rs");
+
+    // The read keeps its error rather than collapsing it into the default.
+    assert!(
+        !source.contains("owner.companion_servers().unwrap_or_default()"),
+        "a discarded read error is indistinguishable from an owner who chose every server"
+    );
+    assert!(source.contains("companion_servers_error"));
+
+    // Convergence is gated on having read the selection, not merely on
+    // holding one.
+    assert!(
+        source.contains("let converge = self.companion_servers_error.is_none();"),
+        "convergence must not run on a defaulted selection"
+    );
+    assert!(
+        source.contains("fn detect_agents(selection: &CompanionSelection, converge: bool)"),
+        "detection takes the convergence decision from the caller that knows it"
+    );
+    assert!(source.contains("if converge && helper.is_ok()"));
+
+    // And the switches refuse to save over a selection nobody could read.
+    assert!(
+        source.contains("|| self.companion_servers_error.is_some()\n            || self.companion_servers.is_enabled(slug) == enabled"),
+        "editing an unread selection would save a guess over the owner's choice"
+    );
 }

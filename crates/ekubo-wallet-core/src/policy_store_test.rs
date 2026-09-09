@@ -368,7 +368,9 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_transactions DROP COLUMN request_source;
+                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                 ALTER TABLE pending_messages DROP COLUMN request_source;
+                 ALTER TABLE pending_transactions DROP COLUMN request_source;
                  ALTER TABLE tokens DROP COLUMN approximate_usd_price;
                  ALTER TABLE pending_transactions DROP COLUMN requested_review;
                  DROP INDEX automation_runs_by_automation;
@@ -497,7 +499,9 @@ fn seeding_approximate_values_never_overwrites_one_the_owner_recorded() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_transactions DROP COLUMN request_source;
+                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                 ALTER TABLE pending_messages DROP COLUMN request_source;
+                 ALTER TABLE pending_transactions DROP COLUMN request_source;
                  UPDATE schema_metadata SET version = 7 WHERE singleton = 1",
             )
             .unwrap();
@@ -1408,6 +1412,16 @@ fn widening_the_harness_vocabulary_moves_no_rows_and_keeps_every_index() {
             .connection
             .execute_batch("PRAGMA writable_schema = OFF")
             .unwrap();
+        // Schema 12 also added a column. A database actually at the version
+        // this winds back to would not have it, and replaying the step is how
+        // the migration is exercised at all.
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                 ALTER TABLE pending_messages DROP COLUMN request_source;",
+            )
+            .unwrap();
         store
             .connection
             .execute_batch("UPDATE schema_metadata SET version = 10 WHERE singleton = 1")
@@ -1482,4 +1496,155 @@ fn index_definitions(connection: &Connection) -> Vec<(String, String)> {
         .unwrap()
         .map(Result::unwrap)
         .collect()
+}
+
+/// The six substrings the signature widening swaps between have to be the ones
+/// the schema actually writes, or the migration matches nothing and reports
+/// success on a database it did not touch.
+#[test]
+fn the_signature_widening_names_the_constraints_the_schema_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PolicyStore::open(&directory.path().join("wallet.db"), &key(33)).unwrap();
+    let count = |needle: &str| -> i64 {
+        store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+                [needle],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(count(COMPLETE_SIGNATURE_STATUSES), 2);
+    assert_eq!(count(COMPLETE_TYPED_DATA_DECISION), 1);
+    assert_eq!(count(COMPLETE_MESSAGE_DECISION), 1);
+    assert_eq!(count(NARROW_SIGNATURE_STATUSES), 0);
+    assert_eq!(count(NARROW_TYPED_DATA_DECISION), 0);
+    assert_eq!(count(NARROW_MESSAGE_DECISION), 0);
+
+    // The status list carries its bracket because without one it is also a
+    // prefix of the transaction table's much longer list. If that ever stops
+    // being true the swap would rewrite the signing path's vocabulary, so the
+    // overlap is asserted rather than assumed.
+    assert_eq!(
+        count("'awaiting_approval', 'rejected', 'signed'"),
+        3,
+        "the bare prefix still matches the transaction table too"
+    );
+}
+
+/// Widening the signature constraints keeps everything else exactly as it was.
+///
+/// The second migration that writes `sqlite_master`, so it asserts what a
+/// table rebuild would have put at risk — the rows, the indexes including the
+/// partial unique ones that deduplicate awaiting requests, and the database's
+/// own opinion of its integrity — and then the point of the exercise: a row
+/// that leaves the queue without a decision, which both tables' `CHECK`s
+/// refused before.
+#[test]
+fn widening_the_signature_constraints_moves_no_rows_and_keeps_every_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("wallet.db");
+
+    let (indexes_before, rows_before) = {
+        let store = PolicyStore::open(&path, &key(33)).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO wallet_instances(instance_id, wallet_id, wallet_address, created_at)
+                 VALUES ('11111111-1111-1111-1111-111111111111', 'primary',
+                         '0x1111111111111111111111111111111111111111', 0);",
+            )
+            .unwrap();
+        let indexes = index_definitions(&store.connection);
+        let rows: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM wallet_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        // Wind all three constraints back to what a database created before
+        // withdrawal carried, and the version with it.
+        store
+            .connection
+            .execute_batch("PRAGMA writable_schema = ON")
+            .unwrap();
+        for (complete, narrow) in [
+            (COMPLETE_SIGNATURE_STATUSES, NARROW_SIGNATURE_STATUSES),
+            (COMPLETE_TYPED_DATA_DECISION, NARROW_TYPED_DATA_DECISION),
+            (COMPLETE_MESSAGE_DECISION, NARROW_MESSAGE_DECISION),
+        ] {
+            store
+                .connection
+                .execute(
+                    "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                     WHERE type = 'table' AND instr(sql, ?1) > 0",
+                    params![complete, narrow],
+                )
+                .unwrap();
+        }
+        store
+            .connection
+            .execute_batch("PRAGMA writable_schema = OFF")
+            .unwrap();
+        // Schema 12 also added a column. A database actually at the version
+        // this winds back to would not have it, and replaying the step is how
+        // the migration is exercised at all.
+        store
+            .connection
+            .execute_batch(
+                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                 ALTER TABLE pending_messages DROP COLUMN request_source;",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch("UPDATE schema_metadata SET version = 11 WHERE singleton = 1")
+            .unwrap();
+        (indexes, rows)
+    };
+
+    let store = PolicyStore::open(&path, &key(33)).unwrap();
+    store.assert_schema_current().unwrap();
+
+    // Nothing moved.
+    assert_eq!(index_definitions(&store.connection), indexes_before);
+    let rows_after: i64 = store
+        .connection
+        .query_row("SELECT count(*) FROM wallet_instances", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows_after, rows_before);
+    let integrity: String = store
+        .connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+
+    // And a request that left the queue with nobody deciding it now stores,
+    // in both tables, which is what all three constraints refused before.
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO pending_messages(
+                 request_id, wallet_instance_id, wallet_id, wallet_address, chain_id,
+                 message, message_encoding, digest, status, created_at, updated_at
+             ) VALUES (randomblob(16), '11111111-1111-1111-1111-111111111111', 'primary',
+                       '0x1111111111111111111111111111111111111111', 0,
+                       x'00', 'hex', randomblob(32), 'withdrawn', 0, 0)",
+        )
+        .expect("a withdrawn message has no decision timestamp");
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO pending_typed_data(
+                 request_id, wallet_instance_id, wallet_id, wallet_address, chain_id,
+                 typed_data_json, digest, status, created_at, updated_at
+             ) VALUES (randomblob(16), '11111111-1111-1111-1111-111111111111', 'primary',
+                       '0x1111111111111111111111111111111111111111', 1,
+                       '{}', randomblob(32), 'withdrawn', 0, 0)",
+        )
+        .expect("a withdrawn typed-data request has no decision timestamp");
 }

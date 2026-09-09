@@ -2,6 +2,7 @@
 
 use crate::{
     human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
+    mcp_companions::CompanionSelection,
     policy_store::{DatabaseKey, PolicyStore},
     sql::{Blob, Millis},
 };
@@ -220,6 +221,27 @@ impl DesktopStore {
 
     pub fn set_appearance_preference(&mut self, preference: AppearancePreference) -> Result<()> {
         self.set_setting("appearance_preference", &preference)
+    }
+
+    /// Which hosted Ekubo MCP servers the wallet writes into agent
+    /// configurations.
+    ///
+    /// Absent means every one of them: the wallet's default is that all the
+    /// Ekubo-provided servers are included, and an owner who has never opened
+    /// the screen has expressed no preference to store.
+    pub fn companion_servers(&self) -> Result<CompanionSelection> {
+        Ok(self.setting("companion_servers")?.unwrap_or_default())
+    }
+
+    /// Record the owner's selection.
+    ///
+    /// No owner authorization scope: the selection names public,
+    /// credential-free endpoints and grants no authority over keys, policy, or
+    /// signing. Writing it into an agent's file is a separate step in
+    /// `agent_config`, which is where the one exception permitting the wallet
+    /// to touch an agent-owned file lives.
+    pub fn set_companion_servers(&mut self, selection: &CompanionSelection) -> Result<()> {
+        self.set_setting("companion_servers", selection)
     }
 
     pub fn guided_setup(&self) -> Result<GuidedSetupState> {

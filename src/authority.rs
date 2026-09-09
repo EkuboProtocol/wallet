@@ -7,6 +7,7 @@ use crate::{
 use alloy::primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
+use ekubo_wallet_core::core::source::RequestSource;
 use ekubo_wallet_core::{
     agent_authority::AgentExecutionAuthority,
     approval::{
@@ -14,7 +15,7 @@ use ekubo_wallet_core::{
     },
     approval_summary::{
         OwnAccounts, TokenMetadataMap, address_label, format_fixed_point, interpret_steps,
-        plan_token_targets,
+        plan_headline, plan_token_targets,
     },
     automation::{Automation, AutomationState, PollFailure, PolledCall},
     automation_store::{AutomationRun, AutomationStore},
@@ -28,6 +29,7 @@ use ekubo_wallet_core::{
         authorize_owner,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
+    mcp_companions::CompanionSelection,
     message::{MessageStore, PendingMessage},
     orchestrator::{
         ApprovalOutcome, SendDisposition, approve_transaction, sign_reviewed_message,
@@ -714,6 +716,7 @@ impl DappApi {
         message: &[u8],
         encoding: ekubo_wallet_core::message::MessageEncoding,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingMessage> {
         let wallet = self.account(wallet_id)?;
         let queued = MessageStore::production(self.config.data_dir())?.create_for_wallet(
@@ -722,6 +725,7 @@ impl DappApi {
             message,
             encoding,
             Some(requester),
+            request_source,
         )?;
         publish_signature(
             &self.events,
@@ -738,6 +742,7 @@ impl DappApi {
         chain_id: u64,
         payload: &serde_json::Value,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
         let wallet = self.account(wallet_id)?;
         let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
@@ -751,6 +756,7 @@ impl DappApi {
             payload,
             digest,
             Some(requester),
+            request_source,
         )?;
         publish_signature(
             &self.events,
@@ -1076,6 +1082,16 @@ impl OwnerApi {
 
     pub fn set_appearance_preference(&self, preference: AppearancePreference) -> Result<()> {
         self.desktop()?.set_appearance_preference(preference)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
+    pub fn companion_servers(&self) -> Result<CompanionSelection> {
+        self.desktop()?.companion_servers()
+    }
+
+    pub fn set_companion_servers(&self, selection: &CompanionSelection) -> Result<()> {
+        self.desktop()?.set_companion_servers(selection)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }
@@ -1929,6 +1945,12 @@ impl OwnerApi {
             {
                 Some(crate::events::TransactionStage::Broadcast)
             }
+            // A `cancelled` row with no envelope was never signed, so it left
+            // the queue undecided rather than losing a nonce to a replacement
+            // the owner sent.
+            PendingStatus::Cancelled if record.serialized_transaction.is_none() => {
+                Some(crate::events::TransactionStage::Withdrawn)
+            }
             PendingStatus::Cancelled => Some(crate::events::TransactionStage::Cancelled),
             PendingStatus::Replaced => Some(crate::events::TransactionStage::Replaced),
             PendingStatus::Rejected => None,
@@ -2086,6 +2108,71 @@ impl OwnerApi {
         }
     }
 
+    /// One decoded headline per transaction, for the list rows that name a
+    /// request before anybody opens it.
+    ///
+    /// A batch rather than a lookup, because a list draws every row: the
+    /// records are grouped by chain so the token database answers once per
+    /// chain instead of once per row, and a history list holds hundreds of
+    /// rows naming a handful of chains between them.
+    ///
+    /// A record whose plan decodes to nothing recognizable is simply absent
+    /// from the map. Interpretation is entirely local — see
+    /// [`plan_headline`] for what a headline is allowed to be built from —
+    /// so no part of this contacts a network, and `block_on` waits on
+    /// nothing but the descriptor engine's own map lookups.
+    pub fn transaction_headlines(
+        &self,
+        transactions: &[&PendingTransaction],
+    ) -> Result<BTreeMap<Uuid, String>> {
+        let own_accounts = self
+            .config
+            .load()?
+            .wallets
+            .into_iter()
+            .map(|account| (account.address, account.id))
+            .collect::<OwnAccounts>();
+        let store = TokenStore::production(self.config.data_dir())?;
+        let mut targets: BTreeMap<u64, std::collections::BTreeSet<Address>> = BTreeMap::new();
+        let mut by_chain: BTreeMap<u64, Vec<&PendingTransaction>> = BTreeMap::new();
+        for pending in transactions {
+            let Ok(chain_id) = pending.chain_id.parse::<u64>() else {
+                continue;
+            };
+            let steps = &pending.execution_plan.ordered_steps;
+            targets
+                .entry(chain_id)
+                .or_default()
+                .extend(futures::executor::block_on(plan_token_targets(steps)));
+            by_chain.entry(chain_id).or_default().push(pending);
+        }
+        let mut headlines = BTreeMap::new();
+        for (chain_id, records) in by_chain {
+            let addresses = targets
+                .remove(&chain_id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+            // A chain whose metadata cannot be read still gets headlines,
+            // with its tokens unnamed. That is the same fallback an unlisted
+            // token already has, and a list that draws is worth more than one
+            // that names every symbol.
+            let metadata = store
+                .display_metadata(chain_id, &addresses)
+                .unwrap_or_default();
+            for pending in records {
+                if let Some(headline) = futures::executor::block_on(plan_headline(
+                    &pending.execution_plan.ordered_steps,
+                    &metadata,
+                    &own_accounts,
+                )) {
+                    headlines.insert(pending.request_id, headline);
+                }
+            }
+        }
+        Ok(headlines)
+    }
+
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = MessageStore::production(self.config.data_dir())?.get(request_id)?;
         let message_bytes = request.message_bytes()?;
@@ -2102,6 +2189,7 @@ impl OwnerApi {
         message: &[u8],
         encoding: ekubo_wallet_core::message::MessageEncoding,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingMessage> {
         let wallet = self.account(wallet_id)?;
         let queued = MessageStore::production(self.config.data_dir())?.create_for_wallet(
@@ -2110,6 +2198,7 @@ impl OwnerApi {
             message,
             encoding,
             Some(requester),
+            request_source,
         )?;
         self.publish_signature(
             queued.request_id,
@@ -2160,6 +2249,7 @@ impl OwnerApi {
         chain_id: u64,
         payload: &serde_json::Value,
         requester: &str,
+        request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
         let wallet = self.account(wallet_id)?;
         let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
@@ -2173,6 +2263,7 @@ impl OwnerApi {
             payload,
             digest,
             Some(requester),
+            request_source,
         )?;
         self.publish_signature(
             queued.request_id,

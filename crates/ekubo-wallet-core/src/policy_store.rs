@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1620,12 +1620,18 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
 /// One step from the schema version below it to the version it names.
 ///
 /// Every step is additive — a new table, a new index, a new column with a
-/// default — and that is a rule rather than a coincidence of the steps written
-/// so far. A migration that dropped or rewrote a column would be a migration
-/// that can lose signing history or, worse, silently reinterpret it, on a
-/// database whose only copy is the owner's. Anything genuinely destructive
-/// belongs in an explicit, owner-visible operation, not in a startup path that
-/// runs before the window opens.
+/// default, or a constraint that admits strictly more than it did — and that
+/// is a rule rather than a coincidence of the steps written so far. A
+/// migration that dropped or rewrote a column would be a migration that can
+/// lose signing history or, worse, silently reinterpret it, on a database
+/// whose only copy is the owner's. Anything genuinely destructive belongs in
+/// an explicit, owner-visible operation, not in a startup path that runs
+/// before the window opens.
+///
+/// Widening a `CHECK` is the one shape of change that cannot be expressed as
+/// an added column. The two steps that do it rewrite the constraint text in
+/// place rather than rebuilding the table, so no row moves and no index is
+/// re-declared from a second copy of its definition.
 struct Migration {
     to_version: i64,
     statements: &'static [&'static str],
@@ -1727,6 +1733,20 @@ const MIGRATIONS: &[Migration] = &[
         statements: &[],
         seed: Some(widen_harness_kind_vocabulary),
     },
+    // A queued signature can now be taken back by the agent that asked for it,
+    // which the two signature tables had no way to record: their statuses were
+    // the three a request could reach when every exit from the queue was a
+    // person deciding, and their `decided_at` checks said exactly that. The
+    // column is additive; the constraints are widened the same way the harness
+    // vocabulary was, and for the same reason.
+    Migration {
+        to_version: 12,
+        statements: &[
+            "ALTER TABLE pending_typed_data ADD COLUMN request_source TEXT",
+            "ALTER TABLE pending_messages ADD COLUMN request_source TEXT",
+        ],
+        seed: Some(widen_signature_status_vocabulary),
+    },
 ];
 
 /// The harness-kind vocabulary as the six attribution columns were first
@@ -1739,10 +1759,126 @@ const MIGRATIONS: &[Migration] = &[
 const NARROW_HARNESS_KINDS: &str = "requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode')";
 const COMPLETE_HARNESS_KINDS: &str = "requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')";
 
+/// The two signature queues' constraints as they were first written, and as
+/// they read now.
+///
+/// Three swaps rather than one because the tables say the same thing in three
+/// places and two of them are worded differently. Each is the exact substring
+/// its `CREATE TABLE` above contains, and `policy_store_test` reads all six
+/// back out of a fresh database rather than trusting that they still match.
+///
+/// The status list carries its closing bracket on purpose.
+/// `'awaiting_approval', 'rejected', 'signed'` on its own is also a prefix of
+/// `pending_transactions`'s much longer list, and a swap that matched there
+/// would rewrite a status vocabulary the signing path depends on.
+const NARROW_SIGNATURE_STATUSES: &str =
+    "'awaiting_approval', 'rejected', 'signed'\n                 )),";
+const COMPLETE_SIGNATURE_STATUSES: &str =
+    "'awaiting_approval', 'rejected', 'signed', 'withdrawn'\n                 )),";
+const NARROW_TYPED_DATA_DECISION: &str =
+    "= (status <> 'awaiting_approval' AND approval_required = 1)";
+const COMPLETE_TYPED_DATA_DECISION: &str = "= (status NOT IN ('awaiting_approval', 'withdrawn')\n                        AND approval_required = 1)";
+const NARROW_MESSAGE_DECISION: &str = "((status = 'awaiting_approval') = (decided_at IS NULL))";
+const COMPLETE_MESSAGE_DECISION: &str =
+    "((status IN ('awaiting_approval', 'withdrawn')) = (decided_at IS NULL))";
+
+/// Teach the two signature queues that a request can leave without anyone
+/// deciding it.
+///
+/// The same `sqlite_master` text swap [`widen_harness_kind_vocabulary`] argues
+/// for, and the argument carries over unchanged: a rebuild of these tables
+/// would mean re-declaring the partial unique indexes that deduplicate
+/// awaiting requests from a second copy of their definitions, and a copy that
+/// drifts does not fail loudly — it stops deduplicating, and two dapps asking
+/// for identical bytes quietly share one decision again.
+///
+/// What does not carry over is the early return. A database the harness-kind
+/// swap did not match was one that never had the narrow text, and nothing
+/// went wrong if it was left alone. Here a database left un-widened accepts
+/// every write until the first withdrawal, which fails a `CHECK` in front of
+/// the owner. So an unrecognized schema is refused inside the transaction that
+/// can still roll it back, rather than deferred to the first person who tries.
+fn widen_signature_status_vocabulary(connection: &Connection) -> Result<()> {
+    let count = |needle: &str| -> Result<i64> {
+        Ok(connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND instr(sql, ?1) > 0",
+            [needle],
+            |row| row.get(0),
+        )?)
+    };
+    // Three narrow sites over two tables, or a database that already has all
+    // three widened. Anything between those is a schema this build does not
+    // recognize, and rewriting part of it would be worse than not starting.
+    let narrow = [
+        (NARROW_SIGNATURE_STATUSES, 2),
+        (NARROW_TYPED_DATA_DECISION, 1),
+        (NARROW_MESSAGE_DECISION, 1),
+    ];
+    let found = narrow
+        .iter()
+        .map(|(needle, _)| count(needle))
+        .collect::<Result<Vec<_>>>()?;
+    if found == vec![0, 0, 0] {
+        let widened = [
+            (COMPLETE_SIGNATURE_STATUSES, 2),
+            (COMPLETE_TYPED_DATA_DECISION, 1),
+            (COMPLETE_MESSAGE_DECISION, 1),
+        ];
+        for (needle, expected) in widened {
+            ensure!(
+                count(needle)? == expected,
+                "the signature queues are neither the shape this build upgrades from nor the one \
+                 it upgrades to"
+            );
+        }
+        return Ok(());
+    }
+    ensure!(
+        found == narrow.iter().map(|(_, count)| *count).collect::<Vec<_>>(),
+        "the signature queues are neither the shape this build upgrades from nor the one it \
+         upgrades to"
+    );
+
+    connection.execute_batch("PRAGMA writable_schema = ON")?;
+    // Held so the pragma is turned back off on the way out whichever way this
+    // goes, exactly as the harness-kind swap does.
+    let rewrite = || -> Result<()> {
+        for ((narrow, expected), complete) in narrow.iter().zip([
+            COMPLETE_SIGNATURE_STATUSES,
+            COMPLETE_TYPED_DATA_DECISION,
+            COMPLETE_MESSAGE_DECISION,
+        ]) {
+            let widened = connection.execute(
+                "UPDATE sqlite_master SET sql = replace(sql, ?1, ?2)
+                 WHERE type = 'table' AND instr(sql, ?1) > 0",
+                params![narrow, complete],
+            )?;
+            ensure!(
+                i64::try_from(widened).unwrap_or(i64::MAX) == *expected,
+                "widened {widened} signature constraints but found {expected}"
+            );
+        }
+        let version: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;
+        connection.execute_batch(&format!("PRAGMA schema_version = {}", version + 1))?;
+        // Re-read rather than trust the write, while the transaction that
+        // would roll it back is still open.
+        for (needle, _) in narrow {
+            ensure!(
+                count(needle)? == 0,
+                "a signature constraint is still narrow"
+            );
+        }
+        Ok(())
+    };
+    let result = rewrite();
+    connection.execute_batch("PRAGMA writable_schema = OFF")?;
+    result
+}
+
 /// Widen the harness-kind `CHECK` on every column that carries one.
 ///
-/// The only migration here that is not additive, and the only one that
-/// touches `sqlite_master`. Both need arguing for.
+/// The first migration here that is not additive, and the first to touch
+/// `sqlite_master`. Both need arguing for.
 ///
 /// A `CHECK` cannot be altered in `SQLite`. The documented way to change one is
 /// to rebuild the table: create a replacement, copy every row, drop the
@@ -2066,7 +2202,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  typed_data_json TEXT NOT NULL,
                  digest BLOB NOT NULL CHECK (length(digest) = 32),
                  status TEXT NOT NULL CHECK (status IN (
-                     'awaiting_approval', 'rejected', 'signed'
+                     'awaiting_approval', 'rejected', 'signed', 'withdrawn'
                  )),
                  -- Who asked, when the caller knows: a dapp reached over
                  -- WalletConnect names itself, an MCP agent does not and
@@ -2085,6 +2221,13 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
                  requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
+                 -- Which channel delivered this request, as the closed
+                 -- `RequestSource` structure serializes to. `requester` above
+                 -- is a line of text a dapp half-authored for a person to
+                 -- read; this is the one of the two that a decision may rest
+                 -- on, which is why withdrawal reads it rather than checking
+                 -- whether the display text happens to be empty.
+                 request_source TEXT,
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER
@@ -2099,7 +2242,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  signature BLOB CHECK (signature IS NULL OR length(signature) = 65),
                  CHECK (
                      (decided_at IS NOT NULL)
-                     = (status <> 'awaiting_approval' AND approval_required = 1)
+                     = (status NOT IN ('awaiting_approval', 'withdrawn')
+                        AND approval_required = 1)
                  ),
                  CHECK ((status = 'signed') = (signature IS NOT NULL)),
                  CHECK (approval_required = 1 OR policy_revision IS NOT NULL)
@@ -2129,7 +2273,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                      CHECK (message_encoding IN ('text', 'hex')),
                  digest BLOB NOT NULL CHECK (length(digest) = 32),
                  status TEXT NOT NULL CHECK (status IN (
-                     'awaiting_approval', 'rejected', 'signed'
+                     'awaiting_approval', 'rejected', 'signed', 'withdrawn'
                  )),
                  -- Who asked, when the caller knows: a dapp reached over
                  -- WalletConnect names itself, an MCP agent does not and
@@ -2148,6 +2292,13 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
                  requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
+                 -- Which channel delivered this request, as the closed
+                 -- `RequestSource` structure serializes to. `requester` above
+                 -- is a line of text a dapp half-authored for a person to
+                 -- read; this is the one of the two that a decision may rest
+                 -- on, which is why withdrawal reads it rather than checking
+                 -- whether the display text happens to be empty.
+                 request_source TEXT,
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
                  -- One decision per request; `status` names which one it was.
@@ -2156,7 +2307,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- are the same event.
                  decided_at INTEGER,
                  signature BLOB CHECK (signature IS NULL OR length(signature) = 65),
-                 CHECK ((status = 'awaiting_approval') = (decided_at IS NULL)),
+                 CHECK ((status IN ('awaiting_approval', 'withdrawn')) = (decided_at IS NULL)),
                  CHECK ((status = 'signed') = (signature IS NOT NULL))
              ) STRICT",
             "CREATE UNIQUE INDEX pending_messages_unique_awaiting
