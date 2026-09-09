@@ -4527,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4580,7 +4580,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-core"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -4633,7 +4633,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-preview"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "alloy",
  "burn",
@@ -4648,7 +4648,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-preview-wasm"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "ekubo-wallet-preview",
  "serde",
@@ -7944,7 +7944,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-bridge"
-version = "1.8.0"
+version = "1.8.1"
 dependencies = [
  "anyhow",
  "directories",
