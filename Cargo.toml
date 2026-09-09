@@ -37,7 +37,7 @@ test = false
 
 [dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }
-ekubo-wallet-preview = { path = "crates/ekubo-wallet-preview" }
+ekubo-wallet-preview = { path = "crates/ekubo-wallet-preview", default-features = false }
 walletconnect-session = { path = "crates/walletconnect-session" }
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"
@@ -208,3 +208,11 @@ disallowed_types = "deny"
 # Remove this once the fix is upstream and released.
 [patch.crates-io]
 clear-signing = { git = "https://github.com/EkuboProtocol/clear-signing", branch = "fix-raw-signed-integers-0.1.0" }
+
+# Training/evaluation binaries need optimized arithmetic, but whole-program
+# LTO makes iterating on the model unnecessarily slow. Desktop release settings
+# remain independent.
+[profile.preview-train]
+inherits = "release"
+lto = false
+codegen-units = 16

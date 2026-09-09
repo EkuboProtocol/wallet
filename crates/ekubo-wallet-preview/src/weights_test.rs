@@ -73,3 +73,10 @@ fn the_fingerprint_covers_everything_that_changes_a_tensor() {
         assert!(expected.contains(key), "{key} missing from {expected}");
     }
 }
+
+#[test]
+fn shipped_weights_match_and_load() {
+    assert!(present(), "the wallet must ship the trained model");
+    load::<TestBackend>(&burn::backend::ndarray::NdArrayDevice::default())
+        .expect("retrain before shipping changed model semantics");
+}

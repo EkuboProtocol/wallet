@@ -55,7 +55,11 @@ fn render_test_lock() -> std::sync::MutexGuard<'static, ()> {
 fn wallet(
     cx: &mut gpui::TestAppContext,
 ) -> (
-    (tempfile::TempDir, std::sync::MutexGuard<'static, ()>),
+    (
+        tokio::runtime::Runtime,
+        tempfile::TempDir,
+        std::sync::MutexGuard<'static, ()>,
+    ),
     Entity<WalletWindow>,
     gpui::AnyWindowHandle,
 ) {
@@ -66,10 +70,18 @@ fn wallet(
     // unless it is told to expect it — the same hatch Zed's own tests use when
     // they bridge to a runtime they do not drive.
     cx.executor().allow_parking();
+    // Own the runtime in the fixture: dropping it joins blocking database
+    // work before the directory and process disappear. gpui_tokio::init uses
+    // shutdown_background, which can leave SQLCipher closing during exit.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("test runtime");
     let directory = tempfile::tempdir().expect("temp dir");
     let owner = cx.update(|cx| {
         gpui_component::init(cx);
-        gpui_tokio::init(cx);
+        gpui_tokio::init_from_handle(cx, runtime.handle().clone());
         load_application_fonts(cx).expect("embedded fonts must load");
         apply_interface_palette(cx);
         OwnerApi::for_test(directory.path()).expect("throwaway owner")
@@ -106,7 +118,7 @@ fn wallet(
             wallet.owner_auth = OwnerAuthState::Ready;
         }
     });
-    ((directory, lock), view, window.into())
+    ((runtime, directory, lock), view, window.into())
 }
 
 /// Make a test's detected-agent list the one the page actually draws.
@@ -4464,4 +4476,31 @@ fn run_fixture(
         request_id,
         calls: u32::from(request_id.is_some()),
     }
+}
+
+#[gpui::test]
+fn stale_preview_results_cannot_attach_to_a_new_snapshot(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+        wallet.desktop_snapshot_generation = 100;
+        let revision = wallet.desktop_snapshot_revision;
+        let previews = BTreeMap::from([(
+            HEADLINE_ROW,
+            ekubo_wallet_preview::TransactionPreview::unrecognized(),
+        )]);
+        wallet.apply_transaction_previews(99, previews.clone());
+        assert!(wallet.snapshot().unwrap().transaction_previews.is_empty());
+        assert_eq!(wallet.desktop_snapshot_revision, revision);
+        wallet.apply_transaction_previews(100, previews);
+        assert!(
+            wallet
+                .snapshot()
+                .unwrap()
+                .transaction_previews
+                .contains_key(&HEADLINE_ROW)
+        );
+        assert_eq!(wallet.desktop_snapshot_revision, revision + 1);
+    });
 }

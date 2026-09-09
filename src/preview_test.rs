@@ -45,3 +45,35 @@ fn an_unavailable_model_answers_an_empty_map_rather_than_failing() {
     let answered = previews(plans);
     assert!(answered.is_empty() || answered.contains_key(&Uuid::nil()));
 }
+
+#[test]
+fn unchanged_interpretations_reuse_previews_but_changed_warnings_do_not() {
+    let id = Uuid::new_v4();
+    let mut cache = PreviewCache::new();
+    let document = PlanDocument {
+        calls: vec![CallSummary {
+            description: Some("swap tokens".into()),
+            ..CallSummary::default()
+        }],
+    };
+    let expected = TransactionPreview::unrecognized();
+    let first = cached_previews(vec![(id, document.clone())], &mut cache, |documents| {
+        assert_eq!(documents.len(), 1);
+        Ok(vec![expected.clone()])
+    })
+    .unwrap();
+    let second = cached_previews(vec![(id, document.clone())], &mut cache, |_| {
+        panic!("unchanged plan was inferred twice")
+    })
+    .unwrap();
+    assert_eq!(first, second);
+    let mut changed = document;
+    changed.calls[0].warnings.push("unlimited allowance".into());
+    cached_previews(vec![(id, changed.clone())], &mut cache, |documents| {
+        assert_eq!(documents, [changed]);
+        Ok(vec![expected])
+    })
+    .unwrap();
+    cached_previews(vec![], &mut cache, |_| panic!("empty queue inferred")).unwrap();
+    assert!(cache.is_empty(), "settled requests must leave the cache");
+}

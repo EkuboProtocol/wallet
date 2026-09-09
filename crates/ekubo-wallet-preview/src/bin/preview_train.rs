@@ -25,9 +25,8 @@ use std::path::PathBuf;
 
 /// Where the fitting runs.
 ///
-/// The CPU is the default because it works everywhere and a 1.2M-parameter
-/// model over twenty thousand short sequences is minutes of work. It is also
-/// the only thing that worked on the machine this was first fitted on:
+/// The CPU is the default because it needs no GPU adapter. Training time
+/// depends on the model and corpus size. On the original development machine,
 /// `cubecl` sizes its `wgpu` memory pool from the adapter's reported memory,
 /// and on an integrated GPU with a 2 GB carve-out that is one ~3 GB allocation
 /// that simply fails.
@@ -164,6 +163,7 @@ fn fit<B: AutodiffBackend>(
     held_out_batches: &[(training::Shape, Vec<usize>)],
     weights: &[f32],
 ) -> Result<(), String> {
+    B::seed(device, arguments.seed);
     let mut model = PreviewModel::<B>::new(device);
     let mut optimizer = AdamWConfig::new().init();
     let mut rng = StdRng::seed_from_u64(arguments.seed);
@@ -172,6 +172,9 @@ fn fit<B: AutodiffBackend>(
 
     for epoch in 1..=arguments.epochs {
         let started = std::time::Instant::now();
+        let progress = ratio(epoch - 1, arguments.epochs);
+        let learning_rate = arguments.learning_rate
+            * (0.1 + 0.45 * (1.0 + (std::f64::consts::PI * progress).cos()));
         let mut total = 0.0_f64;
         let mut steps = 0_usize;
         training::shuffle_batches(&mut planned, &mut rng);
@@ -189,10 +192,10 @@ fn fit<B: AutodiffBackend>(
             total += f64::from(value);
             steps += 1;
             let gradients = GradientsParams::from_grads(loss.backward(), &model);
-            model = optimizer.step(arguments.learning_rate, model, gradients);
+            model = optimizer.step(learning_rate, model, gradients);
         }
         let mean = total / f64::from(u32::try_from(steps.max(1)).unwrap_or(u32::MAX));
-        let accuracy = tally(&model, evaluate, held_out_batches, device);
+        let accuracy = tally(&model.valid(), evaluate, held_out_batches, device);
         eprintln!(
             "epoch {epoch:>3}  loss {mean:.4}  held-out class {:.1}%  risk {:.1}%  ({:?})",
             100.0 * accuracy.class_accuracy(),
@@ -201,7 +204,7 @@ fn fit<B: AutodiffBackend>(
         );
     }
 
-    tally(&model, evaluate, held_out_batches, device).report();
+    tally(&model.valid(), evaluate, held_out_batches, device).report();
 
     // Saved from the inference view of the model, so the weights file carries
     // no autodiff state and loads under the plain backend the wallet runs.
@@ -293,6 +296,7 @@ fn tally<B: Backend>(
         right_by_class: [0; CLASS_COUNT],
         seen_by_class: [0; CLASS_COUNT],
     };
+    let mut visited = std::collections::BTreeSet::new();
     for (shape, indices) in batches {
         let chunk = training::gather(examples, indices);
         let batch = training::batch::<B>(&chunk, *shape, device);
@@ -301,6 +305,9 @@ fn tally<B: Backend>(
         let classes = infer::indices(prediction.class.argmax(1));
         let risks = infer::indices(prediction.risk.argmax(1));
         for (index, example) in chunk.iter().enumerate() {
+            if !visited.insert(indices[index]) {
+                continue;
+            }
             let predicted_class = classes.get(index).copied();
             let correct = predicted_class == i64::try_from(example.class).ok();
             tally.total += 1;

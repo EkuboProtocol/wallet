@@ -1,6 +1,6 @@
 # @ekubo/tx-preview
 
-A 2.4 MB transaction-preview model that runs entirely in the browser. Give it
+A 5.20 MB transaction-preview model that runs entirely in the browser. Give it
 the decoded reading of a transaction — the same clear-signing interpretation a
 wallet already shows — and it answers a category, a risk band, and one sentence.
 
@@ -21,9 +21,11 @@ await init();
 
 // WebGPU when the browser has it, CPU when it does not. A missing adapter is
 // an ordinary state, not an error.
-const previewer = await Previewer.initWebGpu().catch(() => Previewer.initCpu());
+const previewer = typeof Previewer.initWebGpu === "function" && navigator.gpu
+  ? await Previewer.initWebGpu().catch(() => Previewer.initCpu())
+  : Previewer.initCpu();
 
-const preview = previewer.preview([
+const preview = await previewer.preview([
   {
     description: "approve spender 0x1111…0582 for 1000.5 USDC (0xA0b8…eB48)",
     details: ["Spender: 0x1111…0582", "Amount: 1000.5 USDC"],
@@ -34,15 +36,14 @@ const preview = previewer.preview([
 ]);
 
 // { class: "approval", risk: "caution",
-//   summary: "approve usdc: let 0x1111…0582 spend 1000.5 USDC (0xA0b8…eB48)" }
+//   summary: "approve spender 0x1111…0582 for 1000.5 USDC (0xA0b8…eB48)" }
 ```
 
 For a queue of waiting requests, use `previewAll` and hand it every plan at
-once. Decoding is sequential in summary tokens but not in plans, so forty plans
-cost about what one does.
+once. Decoding is sequential in summary tokens but not in plans, with at most eight rows per dispatch. Long inputs use smaller batches; width-512 inputs run one at a time to bound attention memory.
 
 ```js
-const previews = previewer.previewAll([planA, planB, planC]);
+const previews = await previewer.previewAll([planA, planB, planC]);
 ```
 
 ## What it is for, and what it is not
@@ -58,24 +59,13 @@ It is **not** a security control and must not be used as one:
 - Do not treat `risk: "critical"` as a block or `risk: "routine"` as an
   all-clear.
 
-## Why a generated sentence is safe here
+## Value provenance and limits
 
-A language model writing prose next to a signing decision can commit one
-failure that matters: a fluent sentence naming the wrong amount. This model is
-never given the chance.
+The preview copies decoded actions and up to two model-selected labeled fields per call. Field labels keep a minimum output distinct from an amount being removed; contract addresses are not turned into recipients. The model can still misclassify a request or omit important fields. Show the authoritative decoded fields beside the machine-written summary.
 
-Every value in the input — amounts, addresses, token labels — is lifted out
-into a numbered slot before tokenization. The model sees the value's *kind*,
-never its digits. It emits words and slot *references*, and rendering
-substitutes each reference with the original text verbatim. The decoder cannot
-produce a slot reference from its vocabulary at all: it scores input positions,
-and every position not holding a value is masked out.
+`preview` and `previewAll` return Promises on both backends. GPU tensor readbacks are asynchronous; await them. Prefer running inference in a Worker so CPU computation does not block the page.
 
-So there is no path from the weights to a digit. The only thing a forward pass
-chooses is which already-decoded value to name. A wrong choice is a visibly
-wrong sentence next to the authoritative fields, not a plausible forgery. As a
-last check, a rendered summary containing a number or address that is not in
-the plan is dropped, and the category is returned alone.
+Inputs are bounded to 512 tokens and 48 slots per model invocation. A longer plan is processed call by call and the result identifies one call needing attention; review all calls. A single oversized call receives an explicit fallback. Warnings and undecoded calls cannot be downgraded to routine by the model.
 
 ## Input
 
@@ -111,12 +101,13 @@ class alone.
 
 | build                    | `.wasm` |
 | ------------------------ | ------- |
-| CPU only (default)       | ~4.2 MB |
-| WebGPU                   | ~8.4 MB |
+| CPU only       | 6.65 MB |
+| WebGPU                   | 10.15 MB |
 
-2.43 MB of either is the weights. The CPU build is the default because 1.2M
-parameters over a forty-token sequence is a few milliseconds either way, and
-half the download.
+About 5.20 MB of either is the weights. Build with `--no-default-features` for
+CPU-only browser compatibility and a smaller download. The default Cargo build
+includes WebGPU and the CPU fallback. Latency depends on the device,
+input length, and batch size; see the repository review measurements.
 
 ## Licence
 

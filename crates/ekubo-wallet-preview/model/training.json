@@ -1,0 +1,19 @@
+{
+  "trained_at": "2026-09-09",
+  "architecture_fingerprint": "revision=4 vocab_hash=6b186d48b5962662 heads=6 ff=384 encoder=4 decoder=2 vocab=977 classes=20 risks=3 d_model=192 slots=48 input=512 summary=20",
+  "weights_sha256": "970fcb073fff613784ead91a269f5baa9414a02fbf70b295a7d339ca1a020019",
+  "corpus_sha256": "2e85a81233688846ae8a1e3b1815718c2596065560ed264c701f25ea6684fbbc",
+  "registry_snapshot": "../../ekubo-wallet-core/clearsign/snapshot.json",
+  "examples": 30714,
+  "encoded": 30691,
+  "training": 27129,
+  "held_out": 2413,
+  "mixed_partition_excluded": 1149,
+  "seed": 20260908,
+  "epochs": 14,
+  "learning_rate": 0.0003,
+  "schedule": "cosine decay with 10% floor",
+  "backend": "Burn 0.21 Wgpu, NVIDIA H100",
+  "rust": "1.98.1",
+  "teacher": "scripts/preview-labels.py; deterministic rules and copy templates, not an independent reasoning model"
+}

@@ -29,7 +29,7 @@ IMAGE="${PREVIEW_DROPLET_IMAGE:-gpu-h100x1-base}"
 # A single hard-coded size fails outright roughly as often as it works: GPU
 # capacity moves, and a size the API lists as `available` in a region still
 # answers "Size is not available in this region" when that region is full.
-# Any of these fits a 1.2M-parameter model many times over, so the only thing
+# Any of these fits the preview model many times over, so the only thing
 # that distinguishes them here is price.
 #
 # `PREVIEW_DROPLET_SIZE` and `PREVIEW_DROPLET_REGION` override the list
@@ -78,7 +78,7 @@ for candidate in "${CANDIDATES[@]}"; do
   if DROPLET_ID="$(doctl compute droplet create "$NAME" \
       --size "$SIZE" --image "$IMAGE" --region "$REGION" \
       --ssh-keys "$KEY_ID" --tag-name ekubo-preview-train --wait \
-      --format ID --no-header 2>/dev/null)" && [ -n "$DROPLET_ID" ]; then
+      --format ID --no-header)" && [ -n "$DROPLET_ID" ]; then
     break
   fi
   DROPLET_ID=""
@@ -138,7 +138,7 @@ echo "machine settled" >&2
   && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libvulkan1 build-essential pkg-config \
   && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal" >/dev/null
 
-rsync -az --delete --exclude 'target/' --exclude '.git/' --exclude '.claude/' \
+git -C "$REPO" ls-files -z | rsync -az --from0 --files-from=- \
   -e "ssh -o StrictHostKeyChecking=no -i $KEY" "$REPO/" "root@$IP:/root/wallet/"
 rsync -az -e "ssh -o StrictHostKeyChecking=no -i $KEY" "$CORPUS" "root@$IP:/root/labeled.jsonl"
 
@@ -148,8 +148,8 @@ rsync -az -e "ssh -o StrictHostKeyChecking=no -i $KEY" "$CORPUS" "root@$IP:/root
 # which is a long time to bet on one ssh connection staying up.
 "${SSH[@]}" "cd /root/wallet && setsid nohup env PATH=/root/.cargo/bin:\$PATH \
   EKUBO_UPDATER_PUBLIC_KEY='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
-  bash -c 'cargo build --release -p ekubo-wallet-preview --features train \
-    && ./target/release/preview-train --corpus /root/labeled.jsonl \
+  bash -c 'cargo build --profile preview-train -p ekubo-wallet-preview --features train --bin preview-train \
+    && ./target/preview-train/preview-train --corpus /root/labeled.jsonl \
        --out /root/preview.bin --epochs $EPOCHS --device gpu; \
     echo \$? > /root/done' > /root/train.log 2>&1 < /dev/null &"
 

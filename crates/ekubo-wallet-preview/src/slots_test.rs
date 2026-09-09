@@ -20,13 +20,19 @@ fn plan(description: &str) -> PlanDocument {
 }
 
 fn kinds(slotized: &Slotized) -> Vec<SlotKind> {
-    slotized.slots.iter().map(|slot| slot.kind).collect()
+    slotized
+        .slots
+        .iter()
+        .filter(|slot| slot.kind != SlotKind::Action)
+        .map(|slot| slot.kind)
+        .collect()
 }
 
 fn texts(slotized: &Slotized) -> Vec<&str> {
     slotized
         .slots
         .iter()
+        .filter(|slot| slot.kind != SlotKind::Action)
         .map(|slot| slot.text.as_str())
         .collect()
 }
@@ -105,9 +111,9 @@ fn rendering_substitutes_slot_references_verbatim() {
     )));
     let summary = [
         vocab::token_of("approve"),
-        vocab::slot_token(1).unwrap(),
+        vocab::slot_token(slotized.role(0, SlotKind::Amount, 0).unwrap()).unwrap(),
         vocab::token_of("for"),
-        vocab::slot_token(0).unwrap(),
+        vocab::slot_token(slotized.role(0, SlotKind::Address, 0).unwrap()).unwrap(),
     ];
     assert_eq!(
         slotized.render(&summary),
@@ -379,5 +385,56 @@ fn an_undecoded_call_that_sends_value_is_not_opaque() {
     assert!(
         slotized.slots.iter().any(|slot| slot.text == "2.5 ETH"),
         "the amount must be lifted so a summary can name it"
+    );
+}
+
+#[test]
+fn zero_native_value_uses_the_amount_not_the_currency_suffix() {
+    for value in ["0 ETH", "0.000 ETH", "0", ""] {
+        assert!(is_zero_value(value));
+    }
+    for value in ["0.01 ETH", "1 wei", "2.5 ETH"] {
+        assert!(!is_zero_value(value));
+    }
+}
+
+#[test]
+fn boolean_values_remain_distinguishable_to_the_classifier() {
+    let plan = |flag| PlanDocument {
+        calls: vec![CallSummary {
+            description: Some(format!("setApprovalForAll operator 0x1111 enabled {flag}")),
+            details: vec![],
+            warnings: vec![],
+            target: "collection".into(),
+            native_value: "0 ETH".into(),
+        }],
+    };
+    let grant = slotize(&plan("true"));
+    let revoke = slotize(&plan("false"));
+    assert_ne!(grant.tokens, revoke.tokens);
+    assert!(grant.tokens.contains(&vocab::token_of("<true>")));
+    assert!(revoke.tokens.contains(&vocab::token_of("<false>")));
+    assert!(!vocab::is_output_word(vocab::token_of("<true>")));
+    assert!(!vocab::is_output_word(vocab::token_of("<false>")));
+}
+
+#[test]
+fn field_metadata_stays_bounded_when_details_are_large() {
+    let mut details = vec![format!("Data: 0x{}", "ab".repeat(2000))];
+    details.extend(std::iter::repeat_n("Amount: 1 ETH".into(), 1000));
+    let slots = slotize(&PlanDocument {
+        calls: vec![CallSummary {
+            description: Some("Protocol — Action".into()),
+            details,
+            ..Default::default()
+        }],
+    });
+    assert!(slots.truncated);
+    assert!(slots.fields.len() < 1000);
+    assert!(
+        slots
+            .fields
+            .iter()
+            .all(|field| field.text.chars().count() <= 160)
     );
 }

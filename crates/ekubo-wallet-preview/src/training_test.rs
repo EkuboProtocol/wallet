@@ -280,3 +280,43 @@ fn summaries_are_padded_to_one_fixed_width() {
     assert_eq!(batch.target.dims(), [2, SUMMARY_WIDTH - 1]);
     assert_eq!(batch.input.dims(), [2, 32]);
 }
+
+#[test]
+fn mixed_plans_do_not_leak_training_formats_into_evaluation() {
+    let training = (0..100)
+        .map(|i| format!("f{i}"))
+        .find(|f| !hash(f).is_multiple_of(10))
+        .unwrap();
+    let held = (0..100)
+        .map(|i| format!("f{i}"))
+        .find(|f| hash(f).is_multiple_of(10))
+        .unwrap();
+    let examples = [
+        vec![training.clone()],
+        vec![held.clone()],
+        vec![training.clone(), held.clone()],
+    ]
+    .into_iter()
+    .map(|formats| {
+        let mut example = labeled(&["swap"], &["swap"]);
+        example.formats = formats;
+        encode(&example, vocab::size()).unwrap()
+    })
+    .collect();
+    let (train, evaluate) = split(examples, 10);
+    assert_eq!(train.len(), 1);
+    assert_eq!(evaluate.len(), 1);
+    assert_eq!(evaluate[0].formats, [held]);
+    assert_eq!(train[0].formats, [training]);
+}
+
+#[test]
+fn an_overlong_summary_is_rejected_instead_of_teaching_a_partial_sentence() {
+    let pieces = vec!["swap"; MAX_SUMMARY_TOKENS];
+    assert!(encode(&labeled(&pieces, &["swap"]), vocab::size()).is_none());
+}
+
+#[test]
+fn a_masked_word_is_not_a_training_target() {
+    assert!(encode(&labeled(&["<call>"], &["swap"]), vocab::size()).is_none());
+}

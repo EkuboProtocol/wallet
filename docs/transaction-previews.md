@@ -1,209 +1,66 @@
 # Transaction previews
 
-The wallet ships a small language model that reads the clear-signing
-interpretation of a waiting transaction and answers three things: a category
-from a closed set, a risk band, and one sentence saying what the plan does. The
-review list shows all three, labeled as machine-written, beside the
-deterministic headline it already showed.
+The wallet embeds a small encoder-decoder model that reads deterministic clear-signing interpretations and proposes a transaction category, an advisory risk band, and a short summary. The review list displays it below the deterministic headline, labeled as machine-written. Inference is local; there is no model API or runtime download.
 
-It exists for triage. An owner with a queue of waiting requests should be able
-to tell a routine swap from an unlimited approval without opening each one, and
-the sentence should have been written for the plan in front of them rather than
-picked from a table of stock phrases.
+## Trust and limitations
 
-## What it is not
+The model is outside `ekubo-wallet-core`. Policy decisions and `ReviewDocument.identity` do not depend on it. The decoded fields remain authoritative. The model can misclassify a request or select incomplete/unhelpful supporting fields. The descriptor itself can also be wrong. A faithful extractive summary does **not** establish that the underlying transaction is correct.
 
-It is not part of the security kernel.
+Amounts, addresses, token labels, protocol names, and complete decoded action phrases are lifted into slots. The decoder copies action phrases instead of paraphrasing them; protocol and action copies must remain in call order. A missing or reordered action triggers a fallback showing the decoded actions directly. Supporting values retain their original field labels: the model selects up to two labeled fields per call, and the renderer copies each complete label/value line. Unlabeled or over-160-character fields are omitted; contract targets are never reinterpreted as recipients. Native value has its own explicit label. Free generated connecting words are not displayed. The word head is masked so it can emit only learned words or EOS; slot references must come from the copy head, whose scores are masked to input positions that contain slots. A final check rejects number/address fragments that are not complete value tokens in the input. This is a provenance check, not a check of the sentence's meaning.
 
-- The policy engine never consults it.
-- `ReviewDocument.identity` — the digest a reviewer approves — does not cover
-  it. Adding it there would make a model output part of what gets signed.
-- The authoritative reading of a transaction remains the deterministic field
-  list inside the review, which is decoded from calldata by
-  `approval_summary::interpret_steps` and the vendored ERC-7730 registry.
-- A preview that is absent, or wrong, changes nothing about what can be sent.
+An entirely undecoded call is always `Unrecognized / Needs care`. If it sends native value, its factual fallback names that value and target without asking the model to infer an action. Any decoded warning or undecoded component prevents the model from marking a plan routine. These display rules do not change signing authority.
 
-Absence is an ordinary state, not an error. A machine with no usable GPU
-adapter, a build with no weights committed, or weights that do not match the
-build all produce no previews and a wallet that behaves exactly as it did
-before this existed.
+## Bounded inference
 
-## Why a generated sentence is safe on this surface
+The model has four encoder layers, two decoder layers, width 192, and six attention heads. Half-precision weights are stored in the binary; computation uses the backend's float type. See the review report for measured size and latency.
 
-A language model writing prose next to a signing decision can commit one
-failure that actually matters: a fluent, plausible sentence naming the wrong
-amount or the wrong address. Training does not rule that out, and the review
-list is precisely where it would be believed.
+Each input has at most 512 tokens and 48 slots, including action phrases. Exceeding either limit is recorded explicitly. Plans with more than two calls, incomplete inputs, or a standard transfer/operator-approval or undecoded component are processed call by call; its aggregate uses the highest advisory risk and identifies one call needing attention, with an explicit instruction to review all calls. A single call that exceeds the limits receives an unavailable-summary message instead of a summary of its prefix. Long plans therefore do not silently discard their final calls. This is bounded per-call inference, not unlimited transformer context.
 
-So the model is never given the opportunity.
+Inference groups requests by width and runs at most eight rows per dispatch. Width-256 inputs use at most two rows and width-512 inputs one, bounding quadratic attention memory. Encoder padding is masked in every attention layer as well as during pooling and decoder cross-attention. Thus adding a longer neighboring request cannot change the meaning of a short request's padding. Greedy decoding ends at EOS; a sequence that exhausts the output limit without terminating is withheld rather than displayed as a finished sentence.
 
-Before tokenization, every concrete value in the decoded reading — amounts,
-addresses, token labels, opaque data, bare integers — is lifted out into a
-numbered slot (`crates/ekubo-wallet-preview/src/slots.rs`). What the model sees
-is the value's *kind* and its slot reference, never its digits. What the model
-emits is words and slot references. Rendering substitutes each reference with
-the slot's verbatim text, taken from the same deterministic interpretation the
-review displays.
+The desktop publishes the decoded snapshot first and computes previews in a separate background stage. Generation checks discard stale results. Desktop inference uses CPU by default: measured single-request latency and cold startup beat GPU dispatch for this small workload. The preview crate and browser bindings retain explicit GPU support. An in-memory cache keys each result by request ID **and the complete interpreted input**, so changing metadata or warnings invalidates it. Settled requests leave the cache. No preview cache is written to disk. Initialization and inference failures disable previews; Rust panic guards cannot recover from process-level faults such as SIGSEGV or a driver killing the process.
 
-There is therefore no path from the weights to a digit. The only thing a
-forward pass chooses is *which* already-decoded value to name. A wrong choice
-is a visibly wrong sentence sitting next to the authoritative field list — not
-a forgery.
+The Rust engine provides synchronous native entry points and `preview_all_async`. Browser bindings return Promises from `preview` and `previewAll`: GPU readbacks must yield to the browser event loop. CPU-only browser builds use the same asynchronous API.
 
-Three further constraints hold that shut:
+## Training
 
-- **The decoder cannot produce a slot reference from its vocabulary.** It
-  scores input *positions* instead, and every position that does not hold a
-  slot reference is masked to negative infinity. Pointing at a non-value is
-  impossible rather than unlikely, and the set of things the model can name is
-  exactly the set the deterministic interpretation lifted.
-- **The vocabulary contains no digit-leading word.** The tokenizer lifts
-  anything starting with a digit into a slot, so it could never *teach* one;
-  `vocab_test.rs` asserts it over the committed file, which is what catches a
-  regenerated vocabulary that harvested words from slot texts.
-- **A rendered summary is checked against the plan's slots before display.** A
-  number or address that is not in the plan drops the summary and leaves the
-  category standing alone. This should be unreachable; it is there because
-  "unreachable" is a claim about today's code.
+The teacher is `scripts/preview-labels.py`, a keyword classifier and per-class summary templates populated from decoded values and descriptor intents. The current weights are supervised by these rules. Boolean polarity is retained as input-only true/false markers. Decoded actions outside the category taxonomy keep their reading and receive caution, rather than being labeled like opaque calls. Action phrases and standard-call readings are copied from the interpreter; the model still learns which additional value slots to mention. The training decoder still learns the template token sequence, but display renders its selected fields through the label-preserving renderer. It has not been distilled from an independently reasoning larger LLM. Agreement with that teacher measures consistency with its labels; it does not demonstrate that the teacher assigned amounts or verbs correctly.
 
-The class and risk answers are indices into closed enums, so no forward pass
-can produce a category the review surface was not written to display.
+The corpus is generated through the actual wallet interpreter. Zero native value is determined from the amount, not from whether the rendered string still contains a currency suffix. Oversized input and summary targets are rejected, never silently shortened into incomplete training sentences. Standard `transferFrom` summaries retain both sender and recipient; an owned sender never makes an external recipient an owned account. Training uses a decaying learning rate and shuffles examples within width buckets each epoch, seeds the tensor backend as well as the data shuffle, and evaluates an inference-mode model with dropout disabled. Evaluation counts each example once even when a padded batch repeats it.
 
-## Shape
+Formats are assigned deterministically to training or held-out partitions. A plan mixing formats from both sides is excluded from both populations. Otherwise a mixed example could put a training format in the held-out population. Format separation does not imply protocol separation: related formats from the same protocol can still be present on both sides.
 
-1,214,750 parameters at `d_model` 128: a four-layer encoder, two
-classification heads pooled over it, and a two-layer decoder with cross
-attention and a copy head. That is **2.43 MB** committed, at half precision.
-The decoder is deliberately shallow — a one-sentence summary has no
-long-range structure worth the compute, and this runs while somebody waits.
+The model fingerprint includes the ordered vocabulary's hash and the architecture revision and dimensions. Vocabulary length alone cannot detect reordered token meanings. Any tokenizer or taxonomy semantic change requires reviewing and bumping the revision, regenerating the corpus as needed, and retraining. The committed-weight test requires a matching, loadable model.
 
-Where the parameters go, for anyone considering making it smaller: the encoder
-is 44%, the decoder 33%, the token embedding and the output head 8% each, and
-the input positional table 5%. The obvious remaining economy is tying the
-embedding to the output head, which would remove another 8% and often helps a
-model this size rather than hurting it.
+## Reproduction
 
-Inference runs on the GPU through `burn`'s `wgpu` backend, which is the same
-interface GPUI already draws through, so one source tree covers Metal,
-Direct3D and Vulkan. Previews for every waiting request are computed in one
-batch off the UI thread, during `DesktopSnapshot::capture`.
-
-## Rebuilding the model
-
-Four steps. Only the first three need the `train` feature, which pulls in
-`ekubo-wallet-core` and the autodiff backend and is never enabled by a release
-build.
-
-A release build of anything in this workspace needs
-`EKUBO_UPDATER_PUBLIC_KEY` set to canonical base64 — `crates/ekubo-wallet-core/build.rs`
-asserts it — so either export the real key or drop `--release`. Corpus
-generation is fine in debug; training is roughly ten times slower without
-optimizations, so it is worth the key.
+Use a scratch directory outside the repository for generated corpora and evaluation output. Release-derived profiles require `EKUBO_UPDATER_PUBLIC_KEY`; use the repository's configured public verification key.
 
 ```sh
-export EKUBO_UPDATER_PUBLIC_KEY="$(gh variable get EKUBO_UPDATER_PUBLIC_KEY)"
-
-# 1. Enumerate every call the vendored registry can interpret.
 python3 scripts/preview-corpus-spec.py \
   --clearsign crates/ekubo-wallet-core/clearsign --out /tmp/corpus-spec.json
-
-# 2. Synthesize plans and interpret them through the real engine.
-cargo run --release -p ekubo-wallet-preview --features train --bin preview-corpus -- \
+cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-corpus -- \
   --spec /tmp/corpus-spec.json --out /tmp/corpus.jsonl --samples 20
-
-# 3. Attach a class, a risk band, and a summary to each.
 python3 scripts/preview-labels.py \
   --spec /tmp/corpus-spec.json --corpus /tmp/corpus.jsonl --out /tmp/labeled.jsonl
-
-# 4. Rebuild the vocabulary, then fit.
-python3 scripts/build-preview-vocab.py \
-  --registry crates/ekubo-wallet-core/clearsign/registry \
-  --corpus /tmp/labeled.jsonl \
-  --out crates/ekubo-wallet-preview/model/vocab.txt
-cargo run --release -p ekubo-wallet-preview --features train --bin preview-train -- \
-  --corpus /tmp/labeled.jsonl --out crates/ekubo-wallet-preview/model/preview.bin
-
-# 5. Read what it actually says, on descriptors it was never fitted on.
-cargo run --release -p ekubo-wallet-preview --features train --bin preview-sample -- \
-  --corpus /tmp/labeled.jsonl --count 40
+cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-train -- \
+  --corpus /tmp/labeled.jsonl --out crates/ekubo-wallet-preview/model/preview.bin --epochs 14
+cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin preview-sample -- \
+  --corpus /tmp/labeled.jsonl --count 0 --device gpu > /tmp/predictions.jsonl
 ```
 
-Step 5 loads the committed weights through `gpu::load`, exactly as the wallet
-does, so it is also the check that inference runs on this machine's GPU at
-all.
+`--count 0` evaluates every strictly held-out example, including examples rejected by training. A positive count selects a reproducibly shuffled sample. JSONL predictions include expected and actual class, risk, and summary. Standard error reports per-class support, critical-risk underestimates, agreement with the teacher's field selection rendered through the same label-preserving renderer, empty summaries, and slot-text-coverage agreement. Coverage uses substring matching on both rendered texts, includes values nested in action slots, and ignores ordering and roles; it is not a semantic or provenance metric. Timing includes initialization of dispatched shapes; it is not a warm per-plan latency claim.
 
-Step 2 reports coverage — how many registry formats produced a reading. That
-number is the generator's own correctness check: signature canonicalization,
-include resolution and deployment addresses all have to be right for a reading
-to appear at all, so a mistake in any of them shows up as coverage rather than
-as a corpus of examples the engine would never produce.
+When changing the vocabulary, first regenerate it with `scripts/build-preview-vocab.py` using the new corpus and registry, then rebuild the training binary. The fingerprint and weights must be retrieved together after training.
 
-### The teacher is a rule table
+`scripts/train-preview-remote.sh /tmp/labeled.jsonl 14` can train on a temporary DigitalOcean GPU. It copies git-listed files, creates a temporary SSH key and droplet, and removes them on exit. Its `PREVIEW_DROPLET_SIZE` and `PREVIEW_DROPLET_REGION` overrides select a particular machine. The separate `preview-train` Cargo profile optimizes arithmetic without release LTO, reducing iteration time.
 
-`scripts/preview-labels.py` maps a descriptor's human-authored intent to a
-class by keyword, derives the risk band from what the call *is* (an unlimited
-allowance, blanket operator control, a delegation, or value sent somewhere
-nothing decoded), and fills a per-class summary template from the call's slot
-shapes.
+## Before treating quality numbers as a release criterion
 
-Rules rather than a per-format label sheet, for two reasons. A rule reviewed
-once applies to every format it matches, including ones vendored later, where
-a thousand hand labels are a thousand chances to be inconsistent about what
-"withdraw" means. And a rule can be read and argued with, where a label sheet
-only records that somebody once decided.
+Keep the synthetic held-out score separate from an independently reviewed challenge set. That set should cover swapped sender/recipient roles, multiple amounts with different meanings, approvals and revocations, mixed decoded/opaque calls, unknown protocols, and dangerous calls at the end of long plans. Class accuracy alone cannot validate generated signing prose. See [the review report](transaction-preview-review.md) for this branch's measurements and remaining limitations.
 
-The model is not the rules. It is fitted on what they produce and then runs on
-calls they have nothing to say about — an unlisted protocol, a standard token
-call, a phrasing the keyword table misses. Generalizing past the table is the
-entire reason for having a model rather than shipping the table.
+## Low-spec benchmark
 
-That claim is what the held-out set measures, which is why the split runs along
-*descriptor formats* rather than examples: an entire format goes to one side or
-the other, so the reported accuracy is reading a protocol the model was never
-fitted on.
+`preview-bench cpu` isolates model loading and inference from corpus parsing. It reports cold startup and warm p50/p95 latency for one call, eight requests, a 64-call plan, and single/queued near-limit inputs. Run the optimized binary under `taskset -c <available-core>` and `/usr/bin/time -v` to measure one-core CPU performance and process peak RSS. This is a constrained desktop benchmark, not a measurement on an actual low-end phone.
 
-### Retraining obligations
-
-The vocabulary's fixed prefix and the class and risk enums have indices that
-the rendering code and the weights both depend on. Widening a taxonomy or
-inserting a fixed vocabulary piece invalidates the committed weights:
-
-- `vocab.rs` has a compile-time assertion on where slot references begin, so
-  inserting a fixed piece fails the build rather than silently renumbering.
-- The heads are sized from `CLASS_COUNT` and `RISK_COUNT`, so a widened enum is
-  a shape mismatch at load rather than a misread label.
-- `TransactionClass::Unrecognized` stays last, and both enums are append-only,
-  so weights trained before a widening keep their meanings.
-
-Weights are committed to git, so every retrain writes a new copy into history;
-`weights_test.rs` fails if the file grows past 12 MB.
-
-### Where training runs
-
-`preview-train --device cpu` is the default and works anywhere. Fitting 1.2M
-parameters over twenty thousand short sequences is roughly ten minutes an epoch
-on a laptop CPU, which is slow but not prohibitive.
-
-`--device gpu` uses the same `wgpu` backend inference does, and needs a machine
-with real video memory. It will not work on a small integrated GPU: `cubecl`
-sizes its memory pool from the adapter's reported memory, and on a 2 GB
-carve-out that is a single ~3 GB allocation that fails outright — which is what
-sent the first fitting of this model to the CPU.
-
-`scripts/train-preview-remote.sh` does the GPU path on a DigitalOcean droplet:
-
-```sh
-scripts/train-preview-remote.sh /tmp/labeled.jsonl 12
-```
-
-It creates a throwaway SSH key and a GPU droplet, syncs this checkout and the
-corpus, builds, fits, copies the weights back over
-`crates/ekubo-wallet-preview/model/preview.bin`, and destroys both the droplet
-and the key. The teardown is a shell trap on `EXIT INT TERM`, because the
-droplet bills by the hour and leaving one running is the expensive mistake.
-Size, region and image are overridable through `PREVIEW_DROPLET_SIZE`,
-`PREVIEW_DROPLET_REGION` and `PREVIEW_DROPLET_IMAGE`.
-
-The weights are backend-agnostic, so which device fitted them changes nothing
-about what loads in the wallet — it is a flag rather than a fork, and the
-numbers below were reproduced on both.
+Training provenance and content hashes are recorded in `crates/ekubo-wallet-preview/model/training.json`; registry source revisions are recorded in `crates/ekubo-wallet-core/clearsign/snapshot.json`. See [the review measurements](transaction-preview-review.md) and [actual examples](transaction-preview-examples.md).

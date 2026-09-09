@@ -12,3 +12,6 @@
 /ekubo-updater.key
 /ekubo-updater.key.pub
 target/screenshots/
+
+# Python corpus tools generate bytecode locally.
+__pycache__/

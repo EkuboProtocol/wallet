@@ -13,7 +13,7 @@
 //! displays, and this only ever sat beside it.
 
 use crate::{
-    model::{D_MODEL, PreviewModel},
+    model::{D_FF, D_MODEL, DECODER_LAYERS, ENCODER_LAYERS, HEADS, PreviewModel},
     slots::{MAX_INPUT_TOKENS, MAX_SLOTS, MAX_SUMMARY_TOKENS},
     taxonomy::{CLASS_COUNT, RISK_COUNT},
     vocab,
@@ -47,8 +47,9 @@ const FINGERPRINT: &str = include_str!("../model/preview.fingerprint");
 #[must_use]
 pub fn fingerprint() -> String {
     format!(
-        "vocab={} classes={CLASS_COUNT} risks={RISK_COUNT} d_model={D_MODEL} \
+        "revision=4 vocab_hash={:016x} heads={HEADS} ff={D_FF} encoder={ENCODER_LAYERS} decoder={DECODER_LAYERS} vocab={} classes={CLASS_COUNT} risks={RISK_COUNT} d_model={D_MODEL} \
          slots={MAX_SLOTS} input={MAX_INPUT_TOKENS} summary={MAX_SUMMARY_TOKENS}",
+        vocab::fingerprint(),
         vocab::size()
     )
 }

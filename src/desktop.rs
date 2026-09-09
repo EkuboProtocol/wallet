@@ -3076,7 +3076,8 @@ impl DesktopSnapshot {
             }
         }
         let transaction_headlines = capture_transaction_headlines(owner, &reviews, &activity);
-        let transaction_previews = capture_transaction_previews(owner, &reviews);
+        // Publish the decoded review before loading or running the model.
+        let transaction_previews = BTreeMap::new();
         Self {
             reviews,
             activity,
@@ -3150,7 +3151,7 @@ fn capture_transaction_previews(
     };
     let waiting: Vec<&PendingTransaction> = queues.transactions.iter().collect();
     if waiting.is_empty() {
-        return BTreeMap::new();
+        return crate::preview::previews(Vec::new());
     }
     owner.transaction_previews(&waiting).unwrap_or_default()
 }
@@ -7596,6 +7597,7 @@ impl WalletWindow {
                         view.desktop_snapshot_revision =
                             view.desktop_snapshot_revision.wrapping_add(1);
                         view.desktop_snapshot_error = None;
+                        view.reload_transaction_previews(generation, cx);
                     }
                     Err(error) => {
                         view.desktop_snapshot_error =
@@ -7610,6 +7612,46 @@ impl WalletWindow {
             });
         })
         .detach();
+    }
+
+    /// Model work is a second stage: a slow CPU or GPU startup must not delay
+    /// the review controls. Generation matching prevents old results from
+    /// being attached after the owner changes metadata or the queue refreshes.
+    fn reload_transaction_previews(&self, generation: u64, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.desktop_snapshot.clone() else {
+            return;
+        };
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                capture_transaction_previews(&owner, &snapshot.reviews)
+            })
+            .await
+            .context("transaction preview task failed")
+        });
+        cx.spawn(async move |view, cx| {
+            if let Ok(previews) = task.await {
+                let _ = view.update(cx, |view, cx| {
+                    view.apply_transaction_previews(generation, previews);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn apply_transaction_previews(
+        &mut self,
+        generation: u64,
+        previews: BTreeMap<uuid::Uuid, ekubo_wallet_preview::TransactionPreview>,
+    ) {
+        if generation != self.desktop_snapshot_generation {
+            return;
+        }
+        if let Some(snapshot) = &mut self.desktop_snapshot {
+            Arc::make_mut(snapshot).transaction_previews = previews;
+            self.desktop_snapshot_revision = self.desktop_snapshot_revision.wrapping_add(1);
+        }
     }
 
     fn snapshot(&self) -> Result<&DesktopSnapshot> {
@@ -7793,6 +7835,7 @@ impl WalletWindow {
             list.delegate_mut().loading = true;
             cx.notify();
         });
+        let list = list.downgrade();
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
@@ -7807,7 +7850,7 @@ impl WalletWindow {
                 if view.token_list_generation != generation {
                     return;
                 }
-                list.update(cx, |list, cx| {
+                let _ = list.update(cx, |list, cx| {
                     list.delegate_mut().replace_tokens(result);
                     cx.notify();
                 });

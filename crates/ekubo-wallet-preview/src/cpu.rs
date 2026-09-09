@@ -1,10 +1,8 @@
 //! The CPU-backed engine, which exists everywhere the crate compiles.
 //!
-//! This is not only a fallback. For a 1.2M-parameter model over a forty-token
-//! sequence the arithmetic is small enough that a CPU forward pass is a few
-//! milliseconds, and it is the only backend that needs no adapter, no driver
-//! and no feature detection. A browser wallet without WebGPU, a headless
-//! machine, and a CI runner all land here and all work.
+//! It needs no GPU adapter or driver. Browser wallets without WebGPU,
+//! headless machines, and CI can all use this backend. See the review report
+//! for measured one-core latency and memory use.
 //!
 //! It is also what the tests use, which is deliberate: the shapes and the
 //! decode loop are checked on a backend that is available on every machine

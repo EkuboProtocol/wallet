@@ -21,13 +21,9 @@
 //!
 //! # Two backends
 //!
-//! `initWebGpu` is the intended path and mirrors the desktop wallet: the same
-//! `wgpu` family, batched across every waiting request. `initCpu` exists
-//! because WebGPU is not yet everywhere -- Safari and Firefox shipped it late,
-//! and extension contexts vary -- and because 1.2M parameters over a
-//! forty-token sequence is a few milliseconds of CPU work anyway. A wallet
-//! should try the first and fall back to the second rather than treating a
-//! missing adapter as an error.
+//! WebGPU builds offer `initWebGpu` and `initCpu`; CPU-only builds expose
+//! `initCpu`. Both inference APIs return Promises. Feature-detect the GPU
+//! initializer and fall back to CPU when adapter initialization fails.
 
 use ekubo_wallet_preview::{
     CallSummary, PlanDocument, TransactionPreview, cpu, weights::LoadError,
@@ -152,7 +148,7 @@ impl Previewer {
         // it does not work out.
         let engine = ekubo_wallet_preview::gpu::load_async()
             .await
-            .map_err(|error| describe(&error))?;
+            .map_err(|error| JsError::new(&error.to_string()))?;
         Ok(Self {
             engine: Backend::WebGpu(Box::new(engine)),
         })
@@ -174,12 +170,20 @@ impl Previewer {
     /// # Errors
     ///
     /// Rejects when the argument is not an array of calls.
-    pub fn preview(&self, calls: JsValue) -> Result<JsValue, JsError> {
+    pub async fn preview(&self, calls: JsValue) -> Result<JsValue, JsError> {
         let document = document_of(calls)?;
         let preview = match &self.engine {
-            Backend::Cpu(engine) => engine.preview(&document),
+            Backend::Cpu(engine) => engine
+                .preview_all_async(&[document])
+                .await
+                .map_err(|e| JsError::new(&e))?
+                .remove(0),
             #[cfg(feature = "webgpu")]
-            Backend::WebGpu(engine) => engine.preview(&document),
+            Backend::WebGpu(engine) => engine
+                .preview_all_async(&[document])
+                .await
+                .map_err(|e| JsError::new(&e))?
+                .remove(0),
         };
         serde_wasm_bindgen::to_value(&Preview::from(preview)).map_err(JsError::from)
     }
@@ -187,15 +191,14 @@ impl Previewer {
     /// Preview several plans in one pass.
     ///
     /// Worth using whenever there is more than one waiting request. Decoding is
-    /// sequential in summary tokens but not in plans, so forty plans cost about
-    /// what one does -- which is the difference between a list that renders at
-    /// once and one that fills in.
+    /// sequential in summary tokens but batched across plans, with at most
+    /// eight rows per dispatch to bound memory.
     ///
     /// # Errors
     ///
     /// Rejects when the argument is not an array of plans.
     #[wasm_bindgen(js_name = previewAll)]
-    pub fn preview_all(&self, plans: JsValue) -> Result<JsValue, JsError> {
+    pub async fn preview_all(&self, plans: JsValue) -> Result<JsValue, JsError> {
         let plans: Vec<Vec<Call>> = serde_wasm_bindgen::from_value(plans)?;
         let documents: Vec<PlanDocument> = plans
             .into_iter()
@@ -204,9 +207,15 @@ impl Previewer {
             })
             .collect();
         let previews = match &self.engine {
-            Backend::Cpu(engine) => engine.preview_all(&documents),
+            Backend::Cpu(engine) => engine
+                .preview_all_async(&documents)
+                .await
+                .map_err(|e| JsError::new(&e))?,
             #[cfg(feature = "webgpu")]
-            Backend::WebGpu(engine) => engine.preview_all(&documents),
+            Backend::WebGpu(engine) => engine
+                .preview_all_async(&documents)
+                .await
+                .map_err(|e| JsError::new(&e))?,
         };
         let answered: Vec<Preview> = previews.into_iter().map(Preview::from).collect();
         serde_wasm_bindgen::to_value(&answered).map_err(JsError::from)

@@ -46,21 +46,21 @@ use burn::{
 };
 
 /// Width of the residual stream.
-pub const D_MODEL: usize = 128;
+pub const D_MODEL: usize = 192;
 /// Attention heads per layer.
-const HEADS: usize = 4;
+pub(crate) const HEADS: usize = 6;
 /// The attention scale for copy scores, written out because `D_MODEL` is a
 /// constant and `sqrt` is not available in a const context.
-const SCALE: f64 = 11.313_708_498_984_76;
-const _: () = assert!(D_MODEL == 128, "SCALE is sqrt(D_MODEL); recompute it");
+const SCALE: f64 = 13.856_406_460_551_018;
+const _: () = assert!(D_MODEL == 192, "SCALE is sqrt(D_MODEL); recompute it");
 
 /// Feed-forward width.
-const D_FF: usize = 256;
+pub(crate) const D_FF: usize = 384;
 /// Encoder depth.
-const ENCODER_LAYERS: usize = 4;
+pub(crate) const ENCODER_LAYERS: usize = 4;
 /// Decoder depth. The summary is one short sentence with no long-range
 /// structure worth more than this.
-const DECODER_LAYERS: usize = 2;
+pub(crate) const DECODER_LAYERS: usize = 2;
 
 /// One pre-norm transformer block. `cross` is present in the decoder only.
 #[derive(Module, Debug)]
@@ -98,6 +98,11 @@ impl<B: Backend> Block<B> {
     ) -> Tensor<B, 3> {
         let normed = self.norm_self.forward(input.clone());
         let mut attention = MhaInput::self_attn(normed);
+        if memory.is_none()
+            && let Some(mask) = &pad
+        {
+            attention = attention.mask_pad(mask.clone());
+        }
         if let Some(mask) = causal {
             attention = attention.mask_attn(mask);
         }
@@ -233,7 +238,24 @@ impl<B: Backend> PreviewModel<B> {
         }
         let state = self.decoder_norm.forward(state);
 
-        let words = self.word_head.forward(state.clone());
+        // Input markers and slot IDs have embeddings but are never words the
+        // decoder may generate. Slots must go through the masked copy head.
+        let blocked_words: Vec<bool> = (0..vocab::size())
+            .map(|index| {
+                !vocab::is_output_word(vocab::Token::try_from(index).unwrap_or(vocab::UNK))
+            })
+            .collect();
+        let blocked_words = Tensor::<B, 1, Bool>::from_data(
+            burn::tensor::TensorData::new(blocked_words, [vocab::size()]),
+            &device,
+        )
+        .reshape([1, 1, vocab::size()])
+        .repeat_dim(0, batch)
+        .repeat_dim(1, steps);
+        let words = self
+            .word_head
+            .forward(state.clone())
+            .mask_fill(blocked_words, f64::NEG_INFINITY);
         // Copy scores: how well each decoder step matches each encoder
         // position, scaled the way attention logits are so the two halves of
         // the joint distribution stay comparable.

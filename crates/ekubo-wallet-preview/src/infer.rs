@@ -1,22 +1,5 @@
-//! Running the model: greedy decoding, and the checks that stand between it
-//! and a reviewer.
-//!
-//! Two things here are not optimizations and must not be treated as such.
-//!
-//! A plan whose calls nothing decoded never reaches the model at all. There is
-//! no signal in it to classify, and a confident category over calldata nobody
-//! read is the exact failure this whole surface has to avoid; the honest
-//! answer is [`TransactionClass::Unrecognized`], and it is cheaper as well as
-//! truer.
-//!
-//! And every rendered summary is checked against the values that were lifted
-//! out of the plan. Slotization already makes a fabricated digit unreachable
-//! -- the model emits positions, and rendering substitutes verbatim -- so this
-//! check should never fire. It is here because "should never fire" is a claim
-//! about code that will be changed later by someone reading less of it than
-//! you are now. If a summary ever contains a number or an address that is not
-//! in the plan it describes, the summary is dropped and the class stands
-//! alone.
+//! Bounded, asynchronous inference with copy constraints and explicit handling
+//! of incomplete inputs. Predictions are advisory and can be semantically wrong.
 
 use crate::{
     TransactionPreview,
@@ -51,42 +34,54 @@ impl<B: Backend> PreviewEngine<B> {
     ///
     /// Batched because the review list asks for every waiting request at the
     /// same moment, and the decode loop is sequential in *steps* but not in
-    /// plans: forty plans cost about what one does.
+    /// plans. Dispatches contain at most eight rows to bound tensor memory.
     #[must_use]
     pub fn preview_all(&self, documents: &[PlanDocument]) -> Vec<TransactionPreview> {
-        let mut previews = Vec::with_capacity(documents.len());
-        let mut pending = Vec::new();
-        let mut undecoded = Vec::new();
-        for (index, document) in documents.iter().enumerate() {
-            previews.push(TransactionPreview::unrecognized());
-            if document.is_opaque() {
-                continue;
-            }
-            if document.nothing_decoded() {
-                undecoded.push(index);
-            }
-            pending.push((index, slotize(document)));
+        futures::executor::block_on(self.preview_all_async(documents))
+            .unwrap_or_else(|_| vec![TransactionPreview::unrecognized(); documents.len()])
+    }
+
+    /// Browser-safe inference: GPU readbacks must yield to the event loop.
+    /// Batches are bounded and grouped by width so one long request cannot
+    /// inflate every other request's attention tensors.
+    pub async fn preview_all_async(
+        &self,
+        documents: &[PlanDocument],
+    ) -> Result<Vec<TransactionPreview>, String> {
+        let mut prepared = Prepared::default();
+        for document in documents {
+            prepared.push(document);
         }
-        if pending.is_empty() {
-            return previews;
-        }
-        for (index, mut preview) in self.run(&pending) {
-            // A plan nothing decoded keeps the answer we know rather than the
-            // one the model guessed. It still gets the sentence, because the
-            // value it is moving is worth naming.
-            if undecoded.contains(&index) {
-                preview.class = TransactionClass::Unrecognized;
-                preview.risk = RiskBand::Critical;
+        prepared
+            .pending
+            .sort_by_key(|(_, slots)| crate::slots::width_for(slots.tokens.len()));
+        for rows in prepared.pending.chunk_by(|a, b| {
+            crate::slots::width_for(a.1.tokens.len()) == crate::slots::width_for(b.1.tokens.len())
+        }) {
+            let width = crate::slots::width_for(rows[0].1.tokens.len());
+            for chunk in rows.chunks(batch_size_for(width)) {
+                for (index, mut preview) in self.run(chunk).await? {
+                    if let Some(floor) = prepared.warned.get(&index) {
+                        // A learned label cannot downgrade a decoded warning.
+                        preview.risk =
+                            RiskBand::from_index(preview.risk.index().max(floor.index()));
+                    }
+                    prepared.previews[index] = preview;
+                }
             }
-            if let Some(slot) = previews.get_mut(index) {
-                *slot = preview;
-            }
         }
-        previews
+        Ok(prepared
+            .groups
+            .iter()
+            .map(|group| aggregate(&prepared.previews[group.clone()]))
+            .collect())
     }
 
     /// Encode, classify, and decode one batch.
-    fn run(&self, pending: &[(usize, Slotized)]) -> Vec<(usize, TransactionPreview)> {
+    async fn run(
+        &self,
+        pending: &[(usize, Slotized)],
+    ) -> Result<Vec<(usize, TransactionPreview)>, String> {
         // Rounded up to one of a handful of widths rather than padded to the
         // longest member: a shape the backend has already compiled a kernel
         // for costs nothing, and a new one costs a compile and a fresh
@@ -101,11 +96,13 @@ impl<B: Backend> PreviewEngine<B> {
         let (input, pad, copyable) = self.tensors(pending, length);
         let memory = self.model.encode(input, &pad);
         let prediction = self.model.classify(memory.clone(), &pad);
-        let classes = indices(prediction.class.argmax(1));
-        let risks = indices(prediction.risk.argmax(1));
-        let summaries = self.decode_greedy(&memory, &pad, &copyable, pending);
+        let classes = indices_async(prediction.class.argmax(1)).await?;
+        let risks = indices_async(prediction.risk.argmax(1)).await?;
+        let summaries = self
+            .decode_greedy(&memory, &pad, &copyable, pending)
+            .await?;
 
-        pending
+        Ok(pending
             .iter()
             .enumerate()
             .map(|(row, (index, slotized))| {
@@ -119,9 +116,12 @@ impl<B: Backend> PreviewEngine<B> {
                     .map_or(RiskBand::Critical, RiskBand::from_index);
                 let summary = summaries
                     .get(row)
-                    .map(|tokens| slotized.render(tokens))
-                    .filter(|summary| values_are_all_from(summary, slotized))
-                    .unwrap_or_default();
+                    .filter(|tokens| preserves_actions(tokens, slotized))
+                    .filter(|tokens| values_are_all_from(&slotized.render(tokens), slotized))
+                    .map_or_else(
+                        || action_fallback(slotized),
+                        |tokens| render_summary(slotized, tokens),
+                    );
                 (
                     *index,
                     TransactionPreview {
@@ -131,7 +131,7 @@ impl<B: Backend> PreviewEngine<B> {
                     },
                 )
             })
-            .collect()
+            .collect())
     }
 
     /// The padded input, the padding mask, and the mask of positions a copy
@@ -166,15 +166,32 @@ impl<B: Backend> PreviewEngine<B> {
     /// the same sentence every time it is drawn, or a reviewer refreshing a
     /// request would see the wording change under them and have no way to tell
     /// that from the plan having changed.
-    fn decode_greedy(
+    async fn decode_greedy(
         &self,
         memory: &Tensor<B, 3>,
         pad: &Tensor<B, 2, Bool>,
         copyable: &Tensor<B, 2, Bool>,
         pending: &[(usize, Slotized)],
-    ) -> Vec<Vec<Token>> {
+    ) -> Result<Vec<Vec<Token>>, String> {
         let size = pending.len();
         let vocabulary = vocab::size();
+        let length = memory.dims()[1];
+        let blocked: Vec<bool> = pending
+            .iter()
+            .flat_map(|(_, slots)| {
+                (0..vocabulary + length).map(move |index| {
+                    index < vocabulary
+                        && !grounded_word(
+                            vocab::Token::try_from(index).unwrap_or(vocab::UNK),
+                            slots,
+                        )
+                })
+            })
+            .collect();
+        let blocked = Tensor::<B, 3, Bool>::from_data(
+            TensorData::new(blocked, [size, 1, vocabulary + length]),
+            &self.device,
+        );
         let mut prefixes = vec![vec![vocab::BOS]; size];
         let mut summaries = vec![Vec::new(); size];
         let mut finished = vec![false; size];
@@ -198,8 +215,9 @@ impl<B: Backend> PreviewEngine<B> {
             let logits = self
                 .model
                 .decode(memory.clone(), pad, copyable, prefix)
-                .slice([0..size, steps - 1..steps]);
-            let chosen = indices(logits.argmax(2));
+                .slice([0..size, steps - 1..steps])
+                .mask_fill(blocked.clone(), f64::NEG_INFINITY);
+            let chosen = indices_async(logits.argmax(2)).await?;
             for row in 0..size {
                 let picked = chosen.get(row).copied().unwrap_or(0);
                 let picked = usize::try_from(picked).unwrap_or(0);
@@ -211,6 +229,9 @@ impl<B: Backend> PreviewEngine<B> {
                     Token::try_from(picked).unwrap_or(vocab::PAD)
                 };
                 if token == vocab::EOS || token == vocab::PAD || finished[row] {
+                    if token == vocab::PAD {
+                        summaries[row].clear();
+                    }
                     finished[row] = true;
                     prefixes[row].push(vocab::EOS);
                     continue;
@@ -219,8 +240,335 @@ impl<B: Backend> PreviewEngine<B> {
                 prefixes[row].push(token);
             }
         }
-        summaries
+        for (summary, done) in summaries.iter_mut().zip(finished) {
+            if !done {
+                summary.clear();
+            }
+        }
+        Ok(summaries)
     }
+}
+
+/// Attention memory grows with batch × width². Long calls use smaller
+/// batches so a queue of near-limit inputs cannot multiply peak memory by eight.
+fn batch_size_for(width: usize) -> usize {
+    (8 * 128 * 128 / width.max(1).pow(2)).clamp(1, 8)
+}
+
+/// Action copies must preserve their original call order, with no omission or
+/// repetition. If generation cannot do this, show the decoded actions directly.
+fn preserves_actions(tokens: &[Token], slots: &Slotized) -> bool {
+    let expected: Vec<_> = slots
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| {
+            matches!(
+                slot.kind,
+                crate::slots::SlotKind::Action | crate::slots::SlotKind::Protocol
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let actual: Vec<_> = tokens
+        .iter()
+        .filter_map(|token| vocab::slot_index(*token))
+        .filter(|index| {
+            slots.slots.get(*index).is_some_and(|slot| {
+                matches!(
+                    slot.kind,
+                    crate::slots::SlotKind::Action | crate::slots::SlotKind::Protocol
+                )
+            })
+        })
+        .collect();
+    actual == expected
+}
+
+fn action_fallback(slots: &Slotized) -> String {
+    render_summary(slots, &[])
+}
+
+/// The model selects supporting fields; their original labels supply the
+/// relationship. Never turn "Minimum output: 0.01 ETH" into an assertion that
+/// the transaction removes 0.01 ETH of liquidity, or a contract into a recipient.
+#[must_use]
+pub fn render_summary(slots: &Slotized, tokens: &[Token]) -> String {
+    let selected: std::collections::BTreeSet<_> = tokens
+        .iter()
+        .filter_map(|token| vocab::slot_index(*token))
+        .filter_map(|index| slots.slots.get(index).and_then(|slot| slot.field))
+        .collect();
+    slots
+        .slots
+        .iter()
+        .filter(|slot| slot.kind == crate::slots::SlotKind::Action)
+        .map(|action| {
+            let mut text = slots
+                .call_slots(action.call)
+                .find(|(_, slot)| slot.kind == crate::slots::SlotKind::Protocol)
+                .map_or_else(
+                    || action.text.clone(),
+                    |(_, protocol)| format!("{}: {}", protocol.text, action.text),
+                );
+            let fields: Vec<_> = selected
+                .iter()
+                .filter_map(|index| slots.fields.get(*index))
+                .filter(|field| {
+                    field.call == action.call
+                        && field.text.chars().count() <= 160
+                        && field
+                            .text
+                            .split_once(':')
+                            .is_some_and(|(label, _)| !label.trim().is_empty())
+                })
+                .take(2)
+                .map(|field| field.text.as_str())
+                .collect();
+            if !fields.is_empty() {
+                text.push_str(" — ");
+                text.push_str(&fields.join("; "));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("; then ")
+}
+
+/// Content words must occur in the decoded input. Only grammatical connectors
+/// and generic summary scaffolding can be supplied from outside it. This stops
+/// familiar but unsupported completions such as "withdraw celo" for "withdraw
+/// core" without changing the model's learned weights or its copy mechanism.
+fn grounded_word(token: Token, slots: &Slotized) -> bool {
+    token == vocab::EOS
+        || slots.tokens.contains(&token)
+        || vocab::text_of(token).is_some_and(|word| {
+            matches!(
+                word,
+                "," | "."
+                    | ":"
+                    | ";"
+                    | "then"
+                    | "and"
+                    | "more"
+                    | "call"
+                    | "calls"
+                    | "one"
+                    | "two"
+                    | "three"
+                    | "several"
+                    | "a"
+                    | "an"
+                    | "the"
+                    | "contract"
+                    | "unrecognized"
+                    | "using"
+                    | "through"
+                    | "for"
+                    | "to"
+                    | "from"
+                    | "with"
+                    | "on"
+                    | "of"
+                    | "if"
+                    | "letting"
+                    | "spend"
+                    | "let"
+                    | "stop"
+                    | "controlling"
+                    | "every"
+                    | "token"
+                    | "tokens"
+                    | "actions"
+            )
+        })
+}
+
+/// Prepared rows retain their original grouping while inference sorts by width.
+#[derive(Default)]
+struct Prepared {
+    previews: Vec<TransactionPreview>,
+    pending: Vec<(usize, Slotized)>,
+    warned: std::collections::BTreeMap<usize, RiskBand>,
+    groups: Vec<std::ops::Range<usize>>,
+}
+
+impl Prepared {
+    fn push(&mut self, document: &PlanDocument) {
+        let start = self.previews.len();
+        let slots = slotize(document);
+        if document.calls.len() > 1
+            && (document.calls.len() > 2
+                || slots.truncated
+                || document
+                    .calls
+                    .iter()
+                    .any(|call| standard_class(call).is_some() || call.description.is_none()))
+        {
+            // Every call is examined, including a dangerous final call. Never
+            // label the entire plan from its first 512 tokens.
+            for call in &document.calls {
+                let part = PlanDocument {
+                    calls: vec![call.clone()],
+                };
+                let slots = slotize(&part);
+                self.push_part(&part, slots);
+            }
+        } else {
+            self.push_part(document, slots);
+        }
+        self.groups.push(start..self.previews.len());
+    }
+
+    fn push_part(&mut self, document: &PlanDocument, slots: Slotized) {
+        let index = self.previews.len();
+        self.previews.push(TransactionPreview::unrecognized());
+        if let [call] = document.calls.as_slice()
+            && let Some(class) = standard_class(call)
+        {
+            let base_risk = match class {
+                TransactionClass::Approval => RiskBand::Critical,
+                TransactionClass::Transfer => RiskBand::Caution,
+                _ => RiskBand::Routine,
+            };
+            self.previews[index] = TransactionPreview {
+                class,
+                risk: RiskBand::from_index(base_risk.index().max(call_risk_floor(call))),
+                summary: call.description.clone().unwrap_or_default(),
+            };
+            return;
+        }
+        if slots.truncated {
+            self.previews[index].summary =
+                "Call exceeds preview limits; review decoded fields.".into();
+            return;
+        }
+        if document.nothing_decoded() {
+            // There is no action verb to infer. State the missing reading and
+            // preserve the known native value without asking the model to guess.
+            if let [call] = document.calls.as_slice()
+                && !crate::slots::is_zero_value(&call.native_value)
+            {
+                self.previews[index].summary = format!(
+                    "Undecoded call to {} sending {}",
+                    call.target, call.native_value
+                );
+            }
+            return;
+        }
+        let floor = document
+            .calls
+            .iter()
+            .map(call_risk_floor)
+            .max()
+            .unwrap_or(0);
+        if floor > 0 {
+            self.warned.insert(index, RiskBand::from_index(floor));
+        }
+        self.pending.push((index, slots));
+    }
+}
+
+fn call_risk_floor(call: &crate::slots::CallSummary) -> usize {
+    if call.description.is_none() && call.details.is_empty() {
+        return RiskBand::Critical.index();
+    }
+    let critical = call.warnings.iter().any(|warning| {
+        let warning = warning.to_lowercase();
+        [
+            "unlimited",
+            "setapprovalforall",
+            "operator",
+            "all tokens",
+            "unrecognized",
+        ]
+        .iter()
+        .any(|phrase| warning.contains(phrase))
+    });
+    if critical {
+        RiskBand::Critical.index()
+    } else if call.warnings.is_empty() {
+        RiskBand::Routine.index()
+    } else {
+        RiskBand::Caution.index()
+    }
+}
+
+/// These standard readings already state the direction of authority or the
+/// sender/recipient relationship. A learned category must not reverse them.
+fn standard_class(call: &crate::slots::CallSummary) -> Option<TransactionClass> {
+    let description = call.description.as_deref()?;
+    if description.starts_with("transferFrom ") {
+        return Some(TransactionClass::Transfer);
+    }
+    let explicit_flag = description.starts_with("setApprovalForAll operator ");
+    if description.starts_with("setApprovalForAll: revoke operator ")
+        || (explicit_flag && description.ends_with(" approved false"))
+    {
+        return Some(TransactionClass::Revocation);
+    }
+    if description.starts_with("setApprovalForAll: grant operator ")
+        || (explicit_flag && description.ends_with(" approved true"))
+    {
+        return Some(TransactionClass::Approval);
+    }
+    None
+}
+
+fn aggregate(parts: &[TransactionPreview]) -> TransactionPreview {
+    if parts.len() == 1 {
+        return parts[0].clone();
+    }
+    let Some(first) = parts.first() else {
+        return TransactionPreview::unrecognized();
+    };
+    let class = if parts.iter().all(|part| part.class == first.class) {
+        first.class
+    } else {
+        TransactionClass::Batch
+    };
+    let (index, most_attention) = parts
+        .iter()
+        .enumerate()
+        .max_by_key(|(index, part)| {
+            (
+                part.risk.index(),
+                part.class == TransactionClass::Unrecognized,
+                std::cmp::Reverse(*index),
+            )
+        })
+        .expect("nonempty parts");
+    let detail = if most_attention.summary.is_empty() {
+        most_attention.class.label()
+    } else {
+        &most_attention.summary
+    };
+    TransactionPreview {
+        class,
+        risk: most_attention.risk,
+        summary: format!(
+            "{} calls; call {}: {detail}. Review all calls.",
+            parts.len(),
+            index + 1
+        ),
+    }
+}
+
+/// Readback failure is an error, never an empty index vector interpreted as
+/// the first (routine) label. Awaiting is required for browser WebGPU.
+async fn indices_async<B: Backend, const D: usize>(
+    tensor: Tensor<B, D, Int>,
+) -> Result<Vec<i64>, String> {
+    let expected: usize = tensor.dims().iter().product();
+    let data = tensor.into_data_async().await.map_err(|e| e.to_string())?;
+    let values: Vec<i64> = data
+        .convert::<i64>()
+        .to_vec()
+        .map_err(|e| format!("reading indices: {e:?}"))?;
+    if values.len() != expected {
+        return Err("incomplete index readback".into());
+    }
+    Ok(values)
 }
 
 /// Read a tensor of indices back to the host.
@@ -287,7 +635,12 @@ pub fn values_are_all_from(summary: &str, slotized: &Slotized) -> bool {
                 .chars()
                 .next()
                 .is_some_and(|first| first.is_ascii_digit());
-        !looks_like_a_value || slotized.slots.iter().any(|slot| slot.text.contains(word))
+        !looks_like_a_value
+            || slotized.slots.iter().any(|slot| {
+                slot.text
+                    .split_whitespace()
+                    .any(|value| value.trim_matches(|c: char| c.is_ascii_punctuation()) == word)
+            })
     })
 }
 

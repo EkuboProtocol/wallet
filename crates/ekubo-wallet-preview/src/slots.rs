@@ -1,25 +1,7 @@
-//! Slotization: the reason a generated summary cannot misstate a value.
-//!
-//! The model never sees a digit and never emits one. Before tokenization every
-//! concrete value in a decoded reading -- amounts, addresses, token labels,
-//! raw data, bare integers -- is lifted out into a numbered slot, and the
-//! model's input carries only the value's *kind* (`<amount>`, `<address>`, …)
-//! followed by its slot reference (`<s0>`, `<s1>`, …). The summary decoder
-//! emits the same slot references, and rendering substitutes each one with the
-//! slot's verbatim text.
-//!
-//! So the failure a language model would ordinarily be able to commit here --
-//! rendering `transfer 100 USDC` for calldata that moves 1000 -- is not a
-//! matter of how well it was trained. There is no path from the weights to a
-//! digit: the only thing a forward pass chooses is *which* already-decoded
-//! value to name, and every candidate came from the deterministic
-//! interpretation the review already displays. A wrong choice is a visibly
-//! wrong sentence next to the authoritative field list, not a plausible
-//! forgery.
-//!
-//! [`Slotized::render`] enforces the other half: a slot reference outside the
-//! table is dropped rather than printed, so a malformed decode degrades to a
-//! shorter sentence and never to `<s7>` shown to a human.
+//! Lift concrete values into numbered slots before tokenization. The model
+//! selects references to existing values instead of generating their digits.
+//! This preserves provenance; it does not prevent selecting the wrong value
+//! or relating two values incorrectly. Truncation is reported explicitly.
 
 use crate::vocab::{self, Token};
 
@@ -32,9 +14,8 @@ const MAX_PROTOCOL_CHARS: usize = 40;
 /// to name their last values rather than growing the vocabulary without bound.
 pub const MAX_SLOTS: usize = 48;
 
-/// Input tokens past this many are dropped. A plan long enough to reach it is
-/// summarized from its beginning, which is where its first and most
-/// consequential calls are.
+/// Maximum input length. Exceeding it marks the reading incomplete so the
+/// caller can process individual calls or return an explicit fallback.
 pub const MAX_INPUT_TOKENS: usize = 512;
 
 /// The padded widths a batch of plans may have.
@@ -99,6 +80,8 @@ pub enum SlotKind {
     /// which could never be a vocabulary word without breaking the rule that
     /// nothing the decoder can emit begins with a digit.
     Protocol,
+    /// The decoded action phrase, copied verbatim rather than paraphrased.
+    Action,
 }
 
 impl SlotKind {
@@ -113,6 +96,7 @@ impl SlotKind {
             Self::Number => "<number>",
             Self::Flag => "<flag>",
             Self::Protocol => "<protocol>",
+            Self::Action => "<action>",
         }
     }
 }
@@ -132,6 +116,15 @@ pub struct Slot {
     /// of an approve-then-swap plan would resolve its roles against the
     /// approval's values.
     pub call: usize,
+    /// Original labeled detail, if this value came from a detail line.
+    pub field: Option<usize>,
+}
+
+/// A labeled detail retained for faithful extractive rendering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub call: usize,
+    pub text: String,
 }
 
 /// A decoded reading with its values lifted out.
@@ -141,6 +134,10 @@ pub struct Slotized {
     pub tokens: Vec<Token>,
     /// The lifted values, indexed by slot number.
     pub slots: Vec<Slot>,
+    /// Detail labels bind selected values to their original roles.
+    pub fields: Vec<Field>,
+    /// Input tokens or values were omitted; never present this as a complete reading.
+    pub truncated: bool,
 }
 
 /// One call of a plan, as the deterministic interpretation left it.
@@ -220,6 +217,9 @@ pub fn slotize(document: &PlanDocument) -> Slotized {
     builder.push_literal("<calls>");
     builder.push_count(count);
     for (index, call) in document.calls.iter().enumerate() {
+        if builder.truncated {
+            break;
+        }
         builder.call = index;
         builder.push_literal("<call>");
         match &call.description {
@@ -229,14 +229,26 @@ pub fn slotize(document: &PlanDocument) -> Slotized {
         builder.push_literal("<target>");
         builder.push_text(&call.target);
         if !is_zero_value(&call.native_value) {
+            if call.native_value.chars().take(148).count() < 148 {
+                builder.start_field(&format!("Native value: {}", call.native_value));
+            }
             builder.push_literal("<value>");
             builder.push_text(&call.native_value);
+            builder.current_field = None;
         }
         for detail in &call.details {
+            if builder.truncated {
+                break;
+            }
+            builder.start_field(detail);
             builder.push_literal("<field>");
             builder.push_text(detail);
         }
+        builder.current_field = None;
         for warning in &call.warnings {
+            if builder.truncated {
+                break;
+            }
             builder.push_literal("<warn>");
             builder.push_text(warning);
         }
@@ -248,7 +260,7 @@ pub fn slotize(document: &PlanDocument) -> Slotized {
 /// Whether a rendered native value is zero, without reparsing the number: the
 /// renderer writes a leading `0 ` or a bare `0` for nothing, and anything else
 /// starts with a nonzero digit.
-fn is_zero_value(value: &str) -> bool {
+pub(crate) fn is_zero_value(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.is_empty()
         || trimmed == "0"
@@ -320,13 +332,29 @@ impl Slotized {
 struct Builder {
     tokens: Vec<Token>,
     slots: Vec<Slot>,
+    fields: Vec<Field>,
+    current_field: Option<usize>,
     call: usize,
+    truncated: bool,
 }
 
 impl Builder {
+    fn start_field(&mut self, text: &str) {
+        self.current_field = None;
+        if text.chars().take(161).count() <= 160 {
+            self.current_field = Some(self.fields.len());
+            self.fields.push(Field {
+                call: self.call,
+                text: text.to_owned(),
+            });
+        }
+    }
+
     fn push_literal(&mut self, piece: &str) {
         if self.tokens.len() < MAX_INPUT_TOKENS {
             self.tokens.push(vocab::token_of(piece));
+        } else {
+            self.truncated = true;
         }
     }
 
@@ -353,8 +381,13 @@ impl Builder {
     /// know an amount was there -- but no reference is, so the decoder has no
     /// way to name it. A value it cannot reference is one it cannot misrender.
     fn push_slot(&mut self, kind: SlotKind, text: String) {
+        if kind == SlotKind::Flag {
+            // A grant and a revocation must not have identical model inputs.
+            self.push_literal(if text == "true" { "<true>" } else { "<false>" });
+        }
         self.push_literal(kind.tag());
         if self.slots.len() >= MAX_SLOTS {
+            self.truncated = true;
             return;
         }
         let index = self.slots.len();
@@ -362,6 +395,7 @@ impl Builder {
             kind,
             text,
             call: self.call,
+            field: self.current_field,
         });
         self.push_literal(&vocab::slot_piece(index));
     }
@@ -370,6 +404,8 @@ impl Builder {
         Slotized {
             tokens: self.tokens,
             slots: self.slots,
+            fields: self.fields,
+            truncated: self.truncated,
         }
     }
 
@@ -386,9 +422,11 @@ impl Builder {
             && owner.chars().count() <= MAX_PROTOCOL_CHARS
         {
             self.push_slot(SlotKind::Protocol, owner.to_owned());
+            self.push_slot(SlotKind::Action, intent.to_owned());
             self.push_text(intent);
             return;
         }
+        self.push_slot(SlotKind::Action, text.to_owned());
         self.push_text(text);
     }
 
@@ -398,6 +436,7 @@ impl Builder {
         let mut at = 0;
         while at < characters.len() {
             if self.tokens.len() >= MAX_INPUT_TOKENS {
+                self.truncated = true;
                 return;
             }
             let character = characters[at];

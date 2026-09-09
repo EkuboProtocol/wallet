@@ -174,3 +174,59 @@ fn the_heads_are_sized_from_the_closed_enums() {
     assert_eq!(model.risk_head.weight.dims()[1], RISK_COUNT);
     assert_eq!(model.word_head.weight.dims()[1], crate::vocab::size());
 }
+
+#[test]
+fn encoder_output_does_not_depend_on_padding_width() {
+    let model = PreviewModel::<TestBackend>::new(&device());
+    let short = batch(32);
+    let long = batch(128);
+    let real = short.slotized.tokens.len();
+    let a: Vec<f32> = model
+        .encode(short.ids, &short.pad)
+        .slice([0..1, 0..real, 0..D_MODEL])
+        .into_data()
+        .to_vec()
+        .unwrap();
+    let b: Vec<f32> = model
+        .encode(long.ids, &long.pad)
+        .slice([0..1, 0..real, 0..D_MODEL])
+        .into_data()
+        .to_vec()
+        .unwrap();
+    let difference = a
+        .iter()
+        .zip(b)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        difference < 1e-4,
+        "padding changed encoded real tokens by {difference}"
+    );
+}
+
+#[test]
+fn word_head_cannot_emit_slots_or_input_only_markers() {
+    let model = PreviewModel::<TestBackend>::new(&device());
+    let batch = batch(32);
+    let memory = model.encode(batch.ids, &batch.pad);
+    let prefix = Tensor::from_data(
+        TensorData::new(vec![i32::try_from(vocab::BOS).unwrap()], [1, 1]),
+        &device(),
+    );
+    let scores: Vec<f32> = model
+        .decode(memory, &batch.pad, &batch.copyable, prefix)
+        .into_data()
+        .to_vec()
+        .unwrap();
+    for (index, score) in scores.iter().take(vocab::size()).enumerate() {
+        let token = vocab::Token::try_from(index).unwrap();
+        if token != vocab::EOS
+            && (vocab::slot_index(token).is_some() || vocab::text_of(token).is_none())
+        {
+            assert!(
+                score.is_infinite() && score.is_sign_negative(),
+                "input-only token {token} can be generated"
+            );
+        }
+    }
+}

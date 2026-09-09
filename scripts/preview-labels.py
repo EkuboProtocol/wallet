@@ -243,10 +243,11 @@ MAX_VERB_WORDS = 6
 # emit, which is exactly the path slotization closes.
 COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
 
-ROLE = re.compile(r"\{(protocol|amount|token|address|number|data|flag)(\d+)\}")
+ROLE = re.compile(r"\{(protocol|action|amount|token|address|number|data|flag)(\d+)\}")
 
 KIND_TAGS = {
     "protocol": "<protocol>",
+    "action": "<action>",
     "amount": "<amount>",
     "token": "<token>",
     "address": "<address>",
@@ -267,13 +268,15 @@ def classify(intent: str | None) -> str:
     return "unrecognized"
 
 
-def risk_of(name: str, warnings: list[str], has_value: bool, own: bool) -> str:
+def risk_of(name: str, warnings: list[str], has_value: bool, own: bool, decoded: bool = False) -> str:
     """The attention a call warrants, from what it is rather than how it reads."""
     joined = " ".join(warnings).lower()
     if any(phrase in joined for phrase in CRITICAL_WARNINGS):
         return "critical"
-    if name == "unrecognized" and has_value:
-        return "critical"
+    if name == "unrecognized":
+        return "caution" if decoded else "critical"
+    if warnings:
+        return "caution"
     # Moving assets between two accounts this wallet holds is not the thing
     # Caution exists to flag. A reviewer can read an address; what they cannot
     # read off one is whether the other end is also theirs, which is the whole
@@ -398,6 +401,13 @@ def summarize(
     vocabulary, doubling it from 709 entries to 1,476 and handing the decoder
     the ability to emit something that looks like an address.
     """
+    action = next((index for index, kind in slots if kind == "<action>"), None)
+    protocol = any(kind == "<protocol>" for _, kind in slots)
+    if action is not None and not protocol:
+        return [f"<s{action}>"]
+    if action is not None and name == "unrecognized":
+        owner = next(index for index, kind in slots if kind == "<protocol>")
+        return [f"<s{owner}>", ":", f"<s{action}>"]
     standard = standard_shape(described)
     if standard is not None:
         verb, templates = standard
@@ -405,7 +415,7 @@ def summarize(
             pieces = fill(template, slots, verb)
             if pieces is not None:
                 return pieces
-    verb = verb_words(intent, name)
+    verb = [f"<s{action}>"] if action is not None else verb_words(intent, name)
     for template in TEMPLATES.get(name, TEMPLATES["unrecognized"]):
         pieces = fill(template, slots, verb)
         if pieces is not None:
@@ -503,9 +513,13 @@ def label(example: dict[str, Any], intents: dict[str, str | None]) -> dict[str, 
     labeled["class"] = name
     # The interpretation writes "(your account …)" beside an address it
     # recognizes as the owner's own, so that annotation is the signal.
-    own = any("your account" in line for line in descriptions)
+    # An owned sender does not make an external recipient an owned account.
+    own = bool(descriptions) and all(
+        "your account" in line.partition(" to ")[2].partition(" for ")[0]
+        for line in descriptions
+    )
     labeled["risk"] = risk_of(
-        name, example.get("warnings", []), example.get("has_value", False), own
+        name, example.get("warnings", []), example.get("has_value", False), own, bool(descriptions)
     )
     labeled["summary_pieces"] = summary
     return labeled

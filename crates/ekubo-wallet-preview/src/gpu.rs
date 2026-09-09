@@ -26,9 +26,8 @@ pub type GpuEngine = PreviewEngine<GpuBackend>;
 /// # Errors
 ///
 /// Answers [`LoadError`] when no weights are committed or they do not match
-/// this build. A machine with no usable adapter does not fail here -- `wgpu`
-/// resolves one lazily -- so the caller must still be prepared for the first
-/// forward pass to be the thing that fails.
+/// this build. Creating weight tensors can initialize the adapter and panic
+/// if no usable device exists. The first dispatch can also fail.
 pub fn load() -> Result<GpuEngine, LoadError> {
     let device = burn::backend::wgpu::WgpuDevice::default();
     let model = weights::load::<GpuBackend>(&device)?;
@@ -47,9 +46,9 @@ pub fn load() -> Result<GpuEngine, LoadError> {
 /// # Errors
 ///
 /// Answers [`LoadError`] when no weights are committed or they do not match
-/// this build. A browser with no WebGPU does not error here -- adapter
-/// selection resolves to a fallback or the first dispatch fails -- so callers
-/// should still be prepared to use `crate::cpu` instead.
+/// this build. Adapter initialization or dispatch can also fail; browser
+/// callers should be prepared to use `crate::cpu` instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn load_async() -> Result<GpuEngine, LoadError> {
     let device = burn::backend::wgpu::WgpuDevice::default();
     burn::backend::wgpu::init_setup_async::<burn::backend::wgpu::graphics::AutoGraphicsApi>(
@@ -58,5 +57,40 @@ pub async fn load_async() -> Result<GpuEngine, LoadError> {
     )
     .await;
     let model = weights::load::<GpuBackend>(&device)?;
+    Ok(PreviewEngine::new(model, device))
+}
+
+/// Browser initialization must return adapter/device errors instead of panicking
+/// inside a wasm future, which can leave the JavaScript Promise unresolved.
+#[cfg(target_arch = "wasm32")]
+pub async fn load_async() -> Result<GpuEngine, String> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::BROWSER_WEBGPU,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .map_err(|error| format!("WebGPU adapter unavailable: {error}"))?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            required_features: adapter.features().difference(
+                wgpu::Features::MAPPABLE_PRIMARY_BUFFERS | wgpu::Features::all_experimental_mask(),
+            ),
+            required_limits: adapter.limits(),
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| format!("WebGPU device unavailable: {error}"))?;
+    let setup = burn::backend::wgpu::WgpuSetup {
+        backend: adapter.get_info().backend,
+        instance,
+        adapter,
+        device,
+        queue,
+    };
+    let device = burn::backend::wgpu::init_device(setup, Default::default());
+    let model = weights::load::<GpuBackend>(&device).map_err(|error| error.to_string())?;
     Ok(PreviewEngine::new(model, device))
 }

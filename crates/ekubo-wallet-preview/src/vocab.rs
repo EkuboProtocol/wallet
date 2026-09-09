@@ -99,7 +99,10 @@ fn build() -> Vocabulary {
     }
     // A line that duplicates a fixed piece is skipped rather than shadowing
     // it, so a stale file costs coverage and never correctness.
-    for line in LEARNED_SOURCE.lines() {
+    for line in LEARNED_SOURCE
+        .lines()
+        .chain(["<action>", "<true>", "<false>"])
+    {
         let piece = line.trim_end_matches('\r');
         if piece.is_empty() || by_piece.contains_key(piece) {
             continue;
@@ -133,6 +136,25 @@ pub fn text_of(token: Token) -> Option<&'static str> {
         .map(String::as_str)
         .filter(|piece| !piece.starts_with('<') || piece.starts_with("<s"))
         .filter(|piece| *piece != "<unk>")
+}
+
+/// Only learned words and EOS may be emitted by the vocabulary head.
+#[must_use]
+pub fn is_output_word(token: Token) -> bool {
+    token == EOS || (token >= LEARNED_BASE && text_of(token).is_some())
+}
+
+/// Hash the ordered token meanings, not just the number of rows. Reordering
+/// words without changing the vocabulary size must invalidate old weights.
+#[must_use]
+pub fn fingerprint() -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for piece in &VOCABULARY.pieces {
+        for byte in piece.bytes().chain(std::iter::once(0)) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 /// The piece a token stands for, structural tags included.
@@ -179,6 +201,7 @@ pub fn learned_pieces() -> impl Iterator<Item = &'static str> {
     VOCABULARY.pieces[LEARNED_BASE as usize..]
         .iter()
         .map(String::as_str)
+        .filter(|piece| !piece.starts_with('<'))
 }
 
 #[cfg(test)]

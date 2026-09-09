@@ -193,3 +193,245 @@ fn an_undecoded_call_that_sends_value_is_still_unrecognized() {
     assert_eq!(preview.class, TransactionClass::Unrecognized);
     assert_eq!(preview.risk, RiskBand::Critical);
 }
+
+#[test]
+fn a_suffix_or_prefix_of_a_value_is_not_the_value() {
+    let slots = slotize(&plan(&format!("transfer 1000.5 USDC ({USDC})")));
+    for summary in [
+        "transfer 100 USDC",
+        "transfer 0.5 USDC",
+        "send to 0xA0b86991",
+    ] {
+        assert!(!values_are_all_from(summary, &slots), "accepted {summary}");
+    }
+}
+
+#[test]
+fn an_overlong_single_call_is_not_summarized_from_its_prefix() {
+    let mut document = plan(&"swap ".repeat(600));
+    document.calls[0].warnings.push("unlimited approval".into());
+    let preview = engine().preview(&document);
+    assert_eq!(preview.class, TransactionClass::Unrecognized);
+    assert_eq!(preview.risk, RiskBand::Critical);
+    assert!(preview.summary.contains("exceeds preview limits"));
+}
+
+#[test]
+fn a_late_opaque_call_survives_long_plan_preparation() {
+    let mut document = PlanDocument {
+        calls: vec![plan("swap tokens").calls.remove(0); 200],
+    };
+    document.calls.push(CallSummary {
+        target: SPENDER.into(),
+        native_value: "2.5 ETH".into(),
+        ..CallSummary::default()
+    });
+    let mut prepared = Prepared::default();
+    prepared.push(&document);
+    assert_eq!(prepared.previews.len(), 201);
+    assert_eq!(prepared.pending.len(), 200);
+    let mut parts = vec![
+        TransactionPreview {
+            class: TransactionClass::Swap,
+            risk: RiskBand::Routine,
+            summary: "swap tokens".into()
+        };
+        200
+    ];
+    parts.push(prepared.previews[200].clone());
+    let preview = aggregate(&parts);
+    assert_eq!(preview.risk, RiskBand::Critical);
+    assert!(preview.summary.contains("201 calls; call 201:"));
+    assert!(preview.summary.contains("2.5 ETH"));
+}
+
+#[test]
+fn a_decoded_warning_cannot_be_downgraded_by_the_model() {
+    let mut document = plan("swap tokens");
+    document.calls[0]
+        .warnings
+        .push("unlimited spending allowance".into());
+    assert_eq!(engine().preview(&document).risk, RiskBand::Critical);
+}
+
+#[test]
+fn generation_cannot_substitute_an_unsupported_action_or_asset_word() {
+    let slots = slotize(&plan("CoreDAO Earn Contract — withdraw core"));
+    assert!(grounded_word(vocab::token_of("withdraw"), &slots));
+    assert!(grounded_word(vocab::token_of("core"), &slots));
+    for word in ["celo", "stake", "dca"] {
+        assert_ne!(
+            vocab::token_of(word),
+            vocab::UNK,
+            "fixture must exercise a real output word"
+        );
+        assert!(
+            !grounded_word(vocab::token_of(word), &slots),
+            "allowed unsupported {word}"
+        );
+    }
+}
+
+#[test]
+fn action_phrases_are_preserved_even_with_untrained_weights() {
+    let description = "Ethena — Cooldown shares";
+    let preview = engine().preview(&plan(description));
+    assert!(
+        preview.summary.contains("Ethena: Cooldown shares"),
+        "{}",
+        preview.summary
+    );
+}
+
+#[test]
+fn a_transfer_from_never_names_the_sender_as_the_destination() {
+    let description = format!("transferFrom {SPENDER} to {USDC} for 5 ETH");
+    let preview = engine().preview(&plan(&description));
+    assert_eq!(preview.class, TransactionClass::Transfer);
+    assert_eq!(preview.risk, RiskBand::Caution);
+    assert_eq!(preview.summary, description);
+}
+
+#[test]
+fn omitted_or_reordered_actions_trigger_the_extractive_fallback() {
+    let slots = slotize(&PlanDocument {
+        calls: vec![
+            plan("Ethena — Cooldown shares").calls.remove(0),
+            plan("CoreDAO — Withdraw CORE").calls.remove(0),
+        ],
+    });
+    let reading: Vec<_> = slots
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| {
+            matches!(
+                slot.kind,
+                crate::slots::SlotKind::Action | crate::slots::SlotKind::Protocol
+            )
+        })
+        .map(|(i, _)| vocab::slot_token(i).unwrap())
+        .collect();
+    assert!(preserves_actions(&reading, &slots));
+    assert!(!preserves_actions(&reading[..2], &slots));
+    assert!(!preserves_actions(
+        &reading.into_iter().rev().collect::<Vec<_>>(),
+        &slots
+    ));
+    assert_eq!(
+        action_fallback(&slots),
+        "Ethena: Cooldown shares; then CoreDAO: Withdraw CORE"
+    );
+}
+
+#[test]
+fn long_inputs_reduce_the_dispatch_size() {
+    assert_eq!(batch_size_for(32), 8);
+    assert_eq!(batch_size_for(128), 8);
+    assert_eq!(batch_size_for(256), 2);
+    assert_eq!(batch_size_for(512), 1);
+}
+
+#[test]
+fn selected_values_keep_their_field_roles_and_ignore_contract_targets() {
+    let slots = slotize(&PlanDocument {
+        calls: vec![crate::CallSummary {
+            description: Some("Uniswap — Remove liquidity".into()),
+            details: vec!["Liquidity: 50".into(), "Minimum output: 0.01 ETH".into()],
+            target: "0x1111111111111111111111111111111111111111".into(),
+            native_value: "0 ETH".into(),
+            warnings: vec![],
+        }],
+    });
+    let selected: Vec<_> = slots
+        .slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.text == "0.01 ETH" || slot.kind == crate::slots::SlotKind::Address)
+        .map(|(index, _)| vocab::slot_token(index).unwrap())
+        .collect();
+    assert_eq!(
+        render_summary(&slots, &selected),
+        "Uniswap: Remove liquidity — Minimum output: 0.01 ETH"
+    );
+}
+
+#[test]
+fn equal_values_in_different_fields_do_not_lose_their_roles() {
+    let slots = slotize(&PlanDocument {
+        calls: vec![crate::CallSummary {
+            description: Some("Protocol — Swap".into()),
+            details: vec![
+                "Maximum input: 10 ETH".into(),
+                "Minimum output: 10 ETH".into(),
+            ],
+            target: "contract".into(),
+            native_value: "0 ETH".into(),
+            warnings: vec![],
+        }],
+    });
+    let second = slots
+        .slots
+        .iter()
+        .position(|slot| slot.field == Some(1))
+        .unwrap();
+    assert_eq!(
+        render_summary(&slots, &[vocab::slot_token(second).unwrap()]),
+        "Protocol: Swap — Minimum output: 10 ETH"
+    );
+}
+
+#[test]
+fn a_selected_native_value_is_labeled_as_native_value() {
+    let slots = slotize(&PlanDocument {
+        calls: vec![crate::CallSummary {
+            description: Some("Lido — Stake ETH".into()),
+            details: vec![],
+            target: "contract".into(),
+            native_value: "0.5 ETH".into(),
+            warnings: vec![],
+        }],
+    });
+    let amount = slots
+        .slots
+        .iter()
+        .position(|slot| slot.text == "0.5 ETH")
+        .unwrap();
+    assert_eq!(
+        render_summary(&slots, &[vocab::slot_token(amount).unwrap()]),
+        "Lido: Stake ETH — Native value: 0.5 ETH"
+    );
+}
+
+#[test]
+fn explicit_operator_grants_and_revocations_do_not_need_a_prediction() {
+    for (description, class, risk) in [
+        (
+            "setApprovalForAll: grant operator 0x1234 control of all NFT tokens",
+            TransactionClass::Approval,
+            RiskBand::Critical,
+        ),
+        (
+            "setApprovalForAll: revoke operator 0x1234 for NFT",
+            TransactionClass::Revocation,
+            RiskBand::Routine,
+        ),
+        (
+            "setApprovalForAll operator 0x1234 approved false",
+            TransactionClass::Revocation,
+            RiskBand::Routine,
+        ),
+    ] {
+        let mut prepared = Prepared::default();
+        prepared.push(&PlanDocument {
+            calls: vec![crate::CallSummary {
+                description: Some(description.into()),
+                ..Default::default()
+            }],
+        });
+        assert!(prepared.pending.is_empty());
+        assert_eq!(prepared.previews[0].class, class);
+        assert_eq!(prepared.previews[0].risk, risk);
+        assert_eq!(prepared.previews[0].summary, description);
+    }
+}

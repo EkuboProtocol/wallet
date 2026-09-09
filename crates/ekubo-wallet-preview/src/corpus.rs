@@ -526,12 +526,10 @@ pub fn record(document: &PlanDocument, formats: Vec<String>, protocols: Vec<Stri
             .iter()
             .flat_map(|call| call.warnings.iter().cloned())
             .collect(),
-        has_value: document.calls.iter().any(|call| {
-            !call
-                .native_value
-                .trim_start_matches(['0', '.', ' '])
-                .is_empty()
-        }),
+        has_value: document
+            .calls
+            .iter()
+            .any(|call| !crate::slots::is_zero_value(&call.native_value)),
     }
 }
 

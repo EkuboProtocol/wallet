@@ -74,6 +74,9 @@ pub struct Encoded {
 /// otherwise become a target the model cannot reach.
 #[must_use]
 pub fn encode(labeled: &Labeled, vocabulary: usize) -> Option<Encoded> {
+    if crate::slots::slotize(&labeled.document).truncated {
+        return None;
+    }
     let class = TransactionClass::from_corpus_name(&labeled.class)?.index();
     let risk = RiskBand::from_corpus_name(&labeled.risk)?.index();
     let input: Vec<Token> = labeled
@@ -82,7 +85,10 @@ pub fn encode(labeled: &Labeled, vocabulary: usize) -> Option<Encoded> {
         .take(MAX_INPUT_TOKENS)
         .map(|piece| vocab::token_of(piece))
         .collect();
-    if input.is_empty() {
+    if input.is_empty()
+        || labeled.input_pieces.len() > MAX_INPUT_TOKENS
+        || labeled.summary_pieces.len() > MAX_SUMMARY_TOKENS - 2
+    {
         return None;
     }
     let copyable: Vec<bool> = input
@@ -99,13 +105,13 @@ pub fn encode(labeled: &Labeled, vocabulary: usize) -> Option<Encoded> {
 
     let mut summary_inputs = vec![vocab::BOS];
     let mut summary_targets = Vec::new();
-    for piece in labeled.summary_pieces.iter().take(MAX_SUMMARY_TOKENS - 2) {
+    for piece in &labeled.summary_pieces {
         if let Some(slot) = slot_reference(piece) {
             summary_targets.push(vocabulary + positions.get(&slot).copied()?);
             summary_inputs.push(vocab::slot_token(slot)?);
         } else {
             let token = vocab::token_of(piece);
-            if token == vocab::UNK {
+            if !vocab::is_output_word(token) || token == vocab::EOS {
                 return None;
             }
             summary_targets.push(token as usize);
@@ -395,7 +401,24 @@ pub fn plan_batches(examples: &[Encoded]) -> Vec<(Shape, Vec<usize>)> {
 /// backend compiles a kernel per shape -- so this is where the gradient noise
 /// that shuffling exists for comes from.
 pub fn shuffle_batches(planned: &mut [(Shape, Vec<usize>)], rng: &mut impl rand::RngExt) {
-    rand::seq::SliceRandom::shuffle(planned, rng);
+    use rand::seq::SliceRandom as _;
+    let mut buckets: BTreeMap<usize, std::collections::BTreeSet<usize>> = BTreeMap::new();
+    for (shape, indices) in planned.iter() {
+        buckets.entry(shape.width).or_default().extend(indices);
+    }
+    for (width, members) in buckets {
+        let mut members: Vec<_> = members.into_iter().collect();
+        members.shuffle(rng);
+        let mut at = 0;
+        for (shape, indices) in planned.iter_mut().filter(|(shape, _)| shape.width == width) {
+            indices.clear();
+            for offset in 0..shape.count {
+                indices.push(members[(at + offset) % members.len()]);
+            }
+            at += shape.count;
+        }
+    }
+    planned.shuffle(rng);
 }
 
 /// A count as a float. Corpus counts are far below `f32`'s exact-integer
@@ -422,18 +445,45 @@ pub fn split(examples: Vec<Encoded>, held_out_in: u64) -> (Vec<Encoded>, Vec<Enc
     let mut train = Vec::new();
     let mut evaluate = Vec::new();
     for example in examples {
-        let held = example
-            .formats
-            .iter()
-            .filter(|format| !format.is_empty())
-            .any(|format| hash(format).is_multiple_of(held_out_in));
-        if held {
-            evaluate.push(example);
-        } else {
-            train.push(example);
+        match partition(&example.formats, held_out_in) {
+            Partition::Train => train.push(example),
+            Partition::HeldOut => evaluate.push(example),
+            Partition::Mixed => {}
         }
     }
     (train, evaluate)
+}
+
+/// Mixed plans span both partitions and belong in neither population.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Partition {
+    Train,
+    HeldOut,
+    Mixed,
+}
+
+/// Assign formats individually before assigning the plan. A held-out format
+/// mixed with a training format is not an unseen-format evaluation example.
+#[must_use]
+pub fn partition(formats: &[String], held_out_in: u64) -> Partition {
+    assert!(
+        held_out_in > 1,
+        "the split needs a training and evaluation side"
+    );
+    let mut train = false;
+    let mut held = false;
+    for format in formats.iter().filter(|format| !format.is_empty()) {
+        if hash(format).is_multiple_of(held_out_in) {
+            held = true;
+        } else {
+            train = true;
+        }
+    }
+    match (train, held) {
+        (true, true) => Partition::Mixed,
+        (false, true) => Partition::HeldOut,
+        _ => Partition::Train,
+    }
 }
 
 /// A stable hash, so the same format lands on the same side across runs and

@@ -1,33 +1,7 @@
-//! The embedded transaction-preview model.
-//!
-//! A small transformer, shipped inside the binary and run on the GPU, that
-//! reads the *deterministic* clear-signing interpretation of a plan's calls
-//! and answers three things: which of a fixed set of categories the plan falls
-//! into, how much attention it warrants, and one sentence saying what it does.
-//!
-//! # What this is not
-//!
-//! It is not part of the security kernel and nothing here decides whether a
-//! transaction may be sent. The policy engine never consults it, the review
-//! digest never covers it, and a preview that is wrong -- or absent, on a
-//! machine with no usable GPU -- changes nothing about what gets signed. It
-//! exists so an owner scanning a list of waiting requests can tell a routine
-//! swap from an unlimited approval without opening each one, and so the
-//! sentence they read was written for the plan in front of them rather than
-//! assembled from a template.
-//!
-//! # Why a generated sentence is safe here
-//!
-//! Every value is lifted into a numbered slot before the model sees it, and
-//! the model emits slot *references* which are substituted verbatim
-//! afterwards. It never sees a digit and never writes one. See
-//! [`slots`] for the full argument; the short version is that the class of
-//! failure a language model would ordinarily be capable of on this surface --
-//! a plausible sentence naming the wrong amount -- has no path from the
-//! weights to the screen.
-//!
-//! The authoritative reading remains the deterministic field list the review
-//! already renders. This sits beside it, labeled as machine-generated.
+//! An embedded encoder-decoder over deterministic clear-signing interpretations.
+//! Produces advisory categories, risk bands, and summaries. Copied values preserve
+//! their spelling, not their semantic role: a summary can still be wrong.
+//! Nothing here grants signing authority. See docs/transaction-previews.md.
 
 #[cfg(feature = "train")]
 pub mod corpus;
