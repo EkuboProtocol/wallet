@@ -22,9 +22,29 @@ set -euo pipefail
 
 CORPUS="${1:?usage: $0 <labeled-corpus.jsonl> [epochs]}"
 EPOCHS="${2:-12}"
-SIZE="${PREVIEW_DROPLET_SIZE:-gpu-l40sx1-48gb}"
-REGION="${PREVIEW_DROPLET_REGION:-tor1}"
 IMAGE="${PREVIEW_DROPLET_IMAGE:-gpu-h100x1-base}"
+
+# Tried in order, cheapest first, until one is actually creatable.
+#
+# A single hard-coded size fails outright roughly as often as it works: GPU
+# capacity moves, and a size the API lists as `available` in a region still
+# answers "Size is not available in this region" when that region is full.
+# Any of these fits a 1.2M-parameter model many times over, so the only thing
+# that distinguishes them here is price.
+#
+# `PREVIEW_DROPLET_SIZE` and `PREVIEW_DROPLET_REGION` override the list
+# entirely, for when you want a specific machine.
+CANDIDATES=(
+  "gpu-4000adax1-20gb tor1"
+  "gpu-l40sx1-48gb tor1"
+  "gpu-6000adax1-48gb tor1"
+  "gpu-h100x1-80gb tor1"
+  "gpu-h100x1-80gb ams3"
+  "gpu-h100x1-80gb nyc2"
+)
+if [ -n "${PREVIEW_DROPLET_SIZE:-}" ]; then
+  CANDIDATES=("${PREVIEW_DROPLET_SIZE} ${PREVIEW_DROPLET_REGION:-tor1}")
+fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -48,16 +68,27 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "creating a $SIZE in $REGION" >&2
 ssh-keygen -t ed25519 -f "$KEY" -N "" -C "$NAME" -q
 KEY_ID="$(doctl compute ssh-key import "$NAME" --public-key-file "$KEY.pub" \
   --format ID --no-header)"
-DROPLET_ID="$(doctl compute droplet create "$NAME" \
-  --size "$SIZE" --image "$IMAGE" --region "$REGION" \
-  --ssh-keys "$KEY_ID" --tag-name ekubo-preview-train --wait \
-  --format ID --no-header)"
+
+for candidate in "${CANDIDATES[@]}"; do
+  read -r SIZE REGION <<<"$candidate"
+  echo "trying a $SIZE in $REGION" >&2
+  if DROPLET_ID="$(doctl compute droplet create "$NAME" \
+      --size "$SIZE" --image "$IMAGE" --region "$REGION" \
+      --ssh-keys "$KEY_ID" --tag-name ekubo-preview-train --wait \
+      --format ID --no-header 2>/dev/null)" && [ -n "$DROPLET_ID" ]; then
+    break
+  fi
+  DROPLET_ID=""
+done
+if [ -z "$DROPLET_ID" ]; then
+  echo "no GPU droplet could be created; every candidate size was unavailable" >&2
+  exit 1
+fi
 IP="$(doctl compute droplet get "$DROPLET_ID" --format PublicIPv4 --no-header)"
-echo "droplet $DROPLET_ID at $IP" >&2
+echo "droplet $DROPLET_ID ($SIZE, $REGION) at $IP" >&2
 
 SSH=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$KEY" "root@$IP")
 for _ in $(seq 1 60); do
