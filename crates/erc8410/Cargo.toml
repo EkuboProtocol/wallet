@@ -12,8 +12,8 @@ default = []
 schema = ["dep:schemars"]
 
 [dependencies]
-alloy-primitives = { version = "=1.7.1", default-features = false, features = ["serde"] }
-alloy-json-abi = { version = "=1.7.1", default-features = false }
+alloy-primitives = { version = "=1.7.2", default-features = false, features = ["serde"] }
+alloy-json-abi = { version = "=1.7.2", default-features = false }
 anyhow = { version = "1.0.100", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 schemars = { version = "1.1.0", default-features = false, features = ["derive"], optional = true }
