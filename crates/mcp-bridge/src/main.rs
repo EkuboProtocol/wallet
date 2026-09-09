@@ -13,6 +13,7 @@ use std::{collections::BTreeSet, env, fmt, time::Duration};
 mod bridge_protocol;
 use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+mod modern;
 
 const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
 const OFFLINE_CODE: i64 = -32_001;
@@ -477,6 +478,35 @@ async fn main() {
     }
 }
 
+/// A legacy client may probe before initializing. Reject malformed probes
+/// without latching the connection into the modern era or closing its stdin.
+async fn opening_request(
+    stdin: &mut BufReader<tokio::io::Stdin>,
+    stdout: &mut tokio::io::Stdout,
+) -> Result<Option<(Vec<u8>, Value)>> {
+    while let Some(frame) = read_frame(stdin).await? {
+        let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
+            emit(stdout, &parse_error()).await?;
+            continue;
+        };
+        if message["method"] == "initialize"
+            || message
+                .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+                .is_some()
+        {
+            return Ok(Some((frame, message)));
+        }
+        if message["method"] == "ping" {
+            if let Some(id) = request_id(&message) {
+                emit(stdout, &response(&id, &json!({}))).await?;
+            }
+        } else if let Some(error) = modern::invalid_request(&message) {
+            emit(stdout, &error).await?;
+        }
+    }
+    Ok(None)
+}
+
 // The bridge's whole stdio lifecycle in one place: read the initialize frame,
 // hand it to the client, then pump frames in both directions until stdin
 // closes, translating every transport and protocol error into a response the
@@ -487,15 +517,13 @@ async fn run() -> Result<()> {
     let client = arguments()?;
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    let initialize_frame = read_frame(&mut stdin)
-        .await?
-        .context("stdin closed before MCP initialize")?;
-    let initialize: Value =
-        serde_json::from_slice(&initialize_frame).context("invalid MCP initialize frame")?;
-    ensure!(
-        initialize.get("method").and_then(Value::as_str) == Some("initialize"),
-        "first MCP request must be initialize"
-    );
+    let Some((initialize_frame, initialize)) = opening_request(&mut stdin, &mut stdout).await?
+    else {
+        return Ok(());
+    };
+    if initialize.get("method").and_then(Value::as_str) != Some("initialize") {
+        return modern::run(client, stdin, stdout, initialize_frame).await;
+    }
     let initialize_id = initialize
         .get("id")
         .cloned()

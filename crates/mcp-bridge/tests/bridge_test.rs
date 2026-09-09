@@ -25,10 +25,16 @@ use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
 /// this table's current row wrong; the fix is to bump
 /// `BRIDGE_PROTOCOL_VERSION` and append a row, never to edit the row of a
 /// version that has shipped.
-const CAPABILITY_CONTRACT: &[(u32, &str)] = &[(
-    1,
-    r#"{"resources":{"listChanged":true},"tools":{"listChanged":true}}"#,
-)];
+const CAPABILITY_CONTRACT: &[(u32, &str)] = &[
+    (
+        1,
+        r#"{"resources":{"listChanged":true},"tools":{"listChanged":true}}"#,
+    ),
+    (
+        2,
+        r#"{"resources":{"listChanged":true},"tools":{"listChanged":true}}"#,
+    ),
+];
 
 /// Canonical form: parsed and re-serialized, so whitespace and key order in
 /// the source file cannot make this pass or fail on their own.

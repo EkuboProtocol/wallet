@@ -21,8 +21,8 @@
 //! - The framing: newline-delimited JSON, or the 24 MiB frame ceiling.
 //! - The hello frame the bridge sends first, or its `client` values.
 //! - The private sentinel request ids the bridge issues on its own behalf.
-//! - How `initialize` and `notifications/initialized` are replayed on
-//!   reconnect.
+//! - How legacy initialization is replayed on reconnect and how modern
+//!   discovery verifies compatibility before forwarding self-contained requests.
 //! - **The capability set.** This one is easy to miss because nothing about
 //!   it looks like a wire format. The bridge answers `initialize` on its own
 //!   when the wallet is down, and a harness records that answer once and
@@ -38,13 +38,14 @@
 
 /// The version of the contract described above.
 ///
-/// Version 1 is every build that also reports it. Wallets that predate the
+/// Version 2 adds modern MCP discovery and stateless forwarding alongside the
+/// unchanged legacy handshake. Version 1 introduced the contract. Wallets that predate the
 /// constant publish nothing, and the bridge falls back to comparing exact
 /// build versions with them, which is what those wallets expect.
-pub const BRIDGE_PROTOCOL_VERSION: u32 = 1;
+pub const BRIDGE_PROTOCOL_VERSION: u32 = 2;
 
 /// The `_meta` key the wallet publishes [`BRIDGE_PROTOCOL_VERSION`] under in
-/// its MCP `initialize` result.
+/// its MCP `initialize` and `server/discover` results.
 ///
 /// `_meta` is the field the MCP specification reserves for exactly this: data
 /// an implementation needs to carry that the protocol itself does not model.

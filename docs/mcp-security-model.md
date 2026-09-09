@@ -1,19 +1,33 @@
 # MCP transport security
 
 Local harnesses start the installed `ekubo-wallet-mcp-bridge` command over
-stdio with one fixed `--client` argument. The bridge completes MCP
-initialization without the wallet, keeps stdout exclusively for MCP frames,
+stdio with one fixed `--client` argument. The bridge supports MCP 2026-07-28
+discovery and self-contained requests as well as legacy initialization. It
+keeps stdout exclusively for MCP frames,
 and uses stderr for diagnostics. It remains alive while the harness stdin is
-open, reconnects automatically when a same-version wallet opens or restarts,
+open, reconnects when a compatible wallet opens or restarts,
 and enforces a 24 MiB frame ceiling in both directions. If wallet
-initialization reports an incompatible bridge protocol, the bridge exits with a
-diagnostic instead of retrying; the harness must launch the matching installed
+legacy initialization reports an incompatible bridge protocol, the bridge exits
+with a diagnostic; the modern path returns a request error without forwarding
+the operation. The harness must launch the matching installed
 helper in a new agent session. The installed path is fixed rather than
 versioned, so it always holds the current wallet's helper and that next launch
 matches without any change to the harness configuration.
 
+For modern clients, each new wallet connection starts with an internal
+`server/discover` compatibility check; client frames then pass through with
+their own metadata. Offline discovery has zero cache lifetime. Offline catalog
+requests return an availability error instead of a cacheable empty list. The
+next request reconnects, so starting the wallet requires no bridge restart.
+Interrupted requests receive an error and are never replayed automatically:
+the wallet may have already executed them. The client must inspect existing
+operation handles/status before retrying. Cancellation is forwarded, and late
+responses to cancelled requests are suppressed. The legacy reconnect path
+retains its catalog-change notifications and initialization replay.
+
 Compatibility is decided on the bridge protocol in `bridge_protocol.rs`, which
-the wallet publishes under a private `_meta` key in its `initialize` result —
+the wallet publishes under a private `_meta` key in its initialization and
+discovery results —
 not on build identity. The bridge forwards frames without interpreting tool
 schemas, arguments, or results, so a wallet that adds a tool or changes any
 behaviour behind one stays compatible with a bridge built before it, and only

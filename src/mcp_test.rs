@@ -143,6 +143,92 @@ fn accept_legal(server: &WalletMcpServer) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn modern_wire_discovery_catalog_and_calls_preserve_the_legal_gate() {
+    use rmcp::ServiceExt as _;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    let (_directory, server) = server();
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    let service = tokio::spawn(async move {
+        server
+            .serve(server_io)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+            .unwrap();
+    });
+    let (read, mut write) = tokio::io::split(client_io);
+    let mut read = BufReader::new(read);
+    for (id, method, params) in [
+        (1, "server/discover", serde_json::json!({})),
+        (2, "tools/list", serde_json::json!({})),
+        (
+            3,
+            "tools/call",
+            serde_json::json!({"name":"wallet_list","arguments":{}}),
+        ),
+        (
+            4,
+            "tools/call",
+            serde_json::json!({"name":"wallet_get_legal","arguments":{}}),
+        ),
+    ] {
+        let mut params = params;
+        params["_meta"] = serde_json::json!({
+            "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{}
+        });
+        let message = serde_json::json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+        write
+            .write_all(&serde_json::to_vec(&message).unwrap())
+            .await
+            .unwrap();
+        write.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), read.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], id, "{reply}");
+        if id == 3 {
+            assert!(
+                reply.get("error").is_some(),
+                "legal gate must reject the call: {reply}"
+            );
+            assert!(
+                reply["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Terms of Service and Privacy")
+            );
+            continue;
+        }
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_eq!(reply["result"]["resultType"], "complete", "{reply}");
+        if id == 1 {
+            assert_eq!(
+                reply["result"]["_meta"][crate::bridge_protocol::BRIDGE_PROTOCOL_META_KEY],
+                crate::bridge_protocol::BRIDGE_PROTOCOL_VERSION
+            );
+            assert_eq!(
+                reply["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+                "ekubo_wallet"
+            );
+        }
+        if id == 2 {
+            assert!(!reply["result"]["tools"].as_array().unwrap().is_empty());
+        }
+    }
+    drop(write);
+    drop(read);
+    tokio::time::timeout(Duration::from_secs(5), service)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 fn use_closed_local_rpc(server: &WalletMcpServer) {
     server
         .config
