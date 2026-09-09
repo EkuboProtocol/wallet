@@ -11160,11 +11160,7 @@ impl WalletWindow {
         cx.notify();
     }
 
-    /// Ask before forgetting the list, in the words of what is actually lost.
-    ///
-    /// Deleting local history is not a chain action and undoes nothing that
-    /// was sent — but it is the only record this wallet keeps of what its
-    /// agents asked it to do, and there is no copy anywhere else.
+    /// Explain the scope and retention of clearing the owner's activity list.
     fn confirm_activity_history_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.history_clearing {
             return;
@@ -11175,13 +11171,13 @@ impl WalletWindow {
             alert
                 .title("Clear decided history?")
                 .description(
-                    "Every record this wallet has finished with is deleted from this machine: sent, confirmed, reverted, rejected, and cancelled — for every account, including networks this window is not showing. Anything still waiting on you, or still able to reach the chain, stays. Nothing on chain changes, and deleted records cannot be brought back.",
+                    "Clear finished activity for every account and network, including hidden testnets. Transaction records are hidden from this list and remain accessible from automation runs. Decided message and typed-data signature records are deleted permanently. Pending and unsettled activity stays. Nothing on chain changes.",
                 )
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Clear history")
                         .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("Keep history")
+                        .cancel_text("Cancel")
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
@@ -13414,6 +13410,9 @@ impl WalletWindow {
                 ));
             }
         };
+        let has_decided_records = records
+            .iter()
+            .any(|record| !activity_record_is_awaiting_approval(record));
         let records = Arc::<[OwnerActivityRecord]>::from(
             records
                 .iter()
@@ -13426,30 +13425,9 @@ impl WalletWindow {
         );
         let items = records.as_ref();
         if items.is_empty() {
-            return panel.child(
-                // Same card as the "Waiting on you" empty state, so the two
-                // halves of the inbox look like one screen.
-                div()
-                    .p_5()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .font_semibold()
-                            .child(selectable_label("Nothing has happened yet")),
-                    )
-                    .child(div().text_color(cx.theme().muted_foreground).child(
-                        selectable_label(
-                            "Once this wallet signs or sends something, it stays here until you clear it — open any row to see what it did.",
-                        ),
-                    )),
-            );
+            return panel.child(Self::render_activity_history_empty(has_decided_records, cx));
         }
+
         let row_count = items.len();
         let selected_record = self.selected_record;
         let busy = Arc::new(self.activity_busy.clone());
@@ -13524,12 +13502,48 @@ impl WalletWindow {
             )
     }
 
-    /// How much history there is, and the one control that ends it.
-    ///
-    /// The count is the argument for the button being here at all: this list
-    /// only grows, every row is a card the window lays out on every frame, and
-    /// the person watching it get slower is the only one who can say which of
-    /// it still matters.
+    fn render_activity_history_empty(filtered: bool, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .debug_selector(|| "activity-history-empty".to_owned())
+            .p_5()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div().font_semibold().child(selectable_label(if filtered {
+                    "Testnet history is hidden"
+                } else {
+                    "No activity to show"
+                })),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(if filtered {
+                        "Turn on Testnet mode in Settings to see activity on those networks."
+                    } else {
+                        "Decided requests and transaction activity appear here. Cleared records are no longer listed."
+                    })),
+            )
+            .when(filtered, |panel| {
+                panel.child(
+                    h_flex().child(
+                        app_button("activity-history-settings")
+                            .debug_selector(|| "activity-history-settings".to_owned())
+                            .label("Open Settings")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.navigate_route(Route::Settings, cx);
+                            })),
+                    ),
+                )
+            })
+    }
+
+    /// The visible count and an ordinary entry point to the clear confirmation.
     fn render_activity_history_header(&self, shown: usize, cx: &mut Context<Self>) -> gpui::Div {
         let mut header = div().w_full().flex().flex_col().gap_2();
         if let Some(error) = &self.history_clear_error {
@@ -13561,8 +13575,8 @@ impl WalletWindow {
                 )
                 .child(
                     app_button("clear-activity-history")
-                        .danger()
                         .label("Clear history…")
+                        .loading(self.history_clearing)
                         .disabled(self.history_clearing)
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.confirm_activity_history_clear(window, cx);
