@@ -89,18 +89,8 @@ impl<B: Backend> PreviewEngine<B> {
         let (input, pad, copyable) = self.tensors(pending, length);
         let memory = self.model.encode(input, &pad);
         let prediction = self.model.classify(memory.clone(), &pad);
-        let classes: Vec<i64> = prediction
-            .class
-            .argmax(1)
-            .into_data()
-            .to_vec()
-            .unwrap_or_default();
-        let risks: Vec<i64> = prediction
-            .risk
-            .argmax(1)
-            .into_data()
-            .to_vec()
-            .unwrap_or_default();
+        let classes = indices(prediction.class.argmax(1));
+        let risks = indices(prediction.risk.argmax(1));
         let summaries = self.decode_greedy(&memory, &pad, &copyable, pending);
 
         pending
@@ -197,7 +187,7 @@ impl<B: Backend> PreviewEngine<B> {
                 .model
                 .decode(memory.clone(), pad, copyable, prefix)
                 .slice([0..size, steps - 1..steps]);
-            let chosen: Vec<i64> = logits.argmax(2).into_data().to_vec().unwrap_or_default();
+            let chosen = indices(logits.argmax(2));
             for row in 0..size {
                 let picked = chosen.get(row).copied().unwrap_or(0);
                 let picked = usize::try_from(picked).unwrap_or(0);
@@ -219,6 +209,29 @@ impl<B: Backend> PreviewEngine<B> {
         }
         summaries
     }
+}
+
+/// Read a tensor of indices back to the host.
+///
+/// The conversion is the point. A tensor's integer element type is the
+/// backend's choice -- `i64` under `NdArray`, `i32` under `Wgpu` -- and asking
+/// `to_vec` for the wrong one fails rather than converting. Paired with
+/// `unwrap_or_default` that failure becomes an *empty vector*, which every
+/// caller then reads as "no index at this position" and silently substitutes a
+/// default for.
+///
+/// This is not hypothetical. Fitting on a GPU reported a held-out accuracy of
+/// exactly 0.0% while the loss fell normally, because every `argmax` came back
+/// empty; the same call sits in the decode loop, where it would have made
+/// every preview answer the first class and the first risk band. The tests
+/// could not have caught it, because they run on `NdArray`, where the type
+/// happens to match.
+pub fn indices<B: Backend, const D: usize>(tensor: Tensor<B, D, Int>) -> Vec<i64> {
+    tensor
+        .into_data()
+        .convert::<i64>()
+        .to_vec()
+        .unwrap_or_default()
 }
 
 /// The slot reference sitting at an input position.

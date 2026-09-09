@@ -106,3 +106,24 @@ fn the_same_plan_produces_the_same_summary_every_time() {
     assert_eq!(first.summary, second.summary);
     assert_eq!(first.class, second.class);
 }
+
+/// Reading indices back must produce one per row, never an empty vector.
+///
+/// This test cannot fail on the backend it runs on. `NdArray`'s integer
+/// element is already `i64`, so a raw `to_vec::<i64>()` would pass here too --
+/// which is exactly why the bug this guards reached a GPU before anything
+/// noticed. What the test is for is the count: every caller of `indices`
+/// treats a missing entry as a default, so a silent shortfall is indistinguishable
+/// from a confident wrong answer, and this at least pins the contract that
+/// there is one index per row.
+#[test]
+fn reading_indices_back_yields_one_per_row() {
+    let device = burn::backend::ndarray::NdArrayDevice::default();
+    let scores = Tensor::<TestBackend, 2>::from_data(
+        burn::tensor::TensorData::new(vec![0.1_f32, 0.9, 0.2, 0.7, 0.1, 0.1], [2, 3]),
+        &device,
+    );
+    let read = indices(scores.argmax(1));
+    assert_eq!(read.len(), 2, "one index per row, never an empty vector");
+    assert_eq!(read, [1, 0]);
+}

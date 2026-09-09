@@ -14,6 +14,7 @@ use burn::{
     tensor::backend::{AutodiffBackend, Backend},
 };
 use ekubo_wallet_preview::{
+    infer,
     model::PreviewModel,
     taxonomy::{CLASS_COUNT, TransactionClass},
     training::{self, Encoded, Labeled},
@@ -239,18 +240,8 @@ fn tally<B: Backend>(
         let batch = training::batch::<B>(chunk, *shape, device);
         let memory = model.encode(batch.input.clone(), &batch.pad);
         let prediction = model.classify(memory, &batch.pad);
-        let classes: Vec<i64> = prediction
-            .class
-            .argmax(1)
-            .into_data()
-            .to_vec()
-            .unwrap_or_default();
-        let risks: Vec<i64> = prediction
-            .risk
-            .argmax(1)
-            .into_data()
-            .to_vec()
-            .unwrap_or_default();
+        let classes = infer::indices(prediction.class.argmax(1));
+        let risks = infer::indices(prediction.risk.argmax(1));
         for (index, example) in chunk.iter().enumerate() {
             if classes.get(index).copied() == i64::try_from(example.class).ok() {
                 class_right += 1;
@@ -276,13 +267,7 @@ fn report_per_class<B: Backend>(
     for (shape, chunk) in batches {
         let batch = training::batch::<B>(chunk, *shape, device);
         let memory = model.encode(batch.input.clone(), &batch.pad);
-        let classes: Vec<i64> = model
-            .classify(memory, &batch.pad)
-            .class
-            .argmax(1)
-            .into_data()
-            .to_vec()
-            .unwrap_or_default();
+        let classes = infer::indices(model.classify(memory, &batch.pad).class.argmax(1));
         for (index, example) in chunk.iter().enumerate() {
             seen[example.class] += 1;
             if classes.get(index).copied() == i64::try_from(example.class).ok() {
