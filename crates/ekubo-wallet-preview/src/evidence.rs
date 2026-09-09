@@ -26,7 +26,13 @@ pub fn project(call: &CallSummary) -> CallSummary {
             .details
             .push(format!("Calldata selector: 0x{}", &hex[..8]));
     }
-    for candidate in evidence.abi.iter().take(4) {
+    // A decoded reading takes precedence over public selector guesses.
+    for candidate in evidence
+        .abi
+        .iter()
+        .filter(|_| call.description.is_none())
+        .take(4)
+    {
         let source = if candidate.contract_match {
             "Contract ABI"
         } else {

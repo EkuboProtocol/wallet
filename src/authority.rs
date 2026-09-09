@@ -2263,18 +2263,15 @@ impl OwnerApi {
                             from: step.transaction.from.to_checksum(None),
                             to: step.transaction.to.to_checksum(None),
                             calldata: format!("{:#x}", step.transaction.data),
-                            abi: ekubo_wallet_core::clear_signing::calldata_candidates(
-                                chain_id,
-                                step.transaction.to,
-                                &step.transaction.data,
-                            )
-                            .into_iter()
-                            .map(|candidate| ekubo_wallet_preview::slots::AbiCandidate {
-                                signature: candidate.signature,
-                                contract_match: candidate.contract_match,
-                                arguments: candidate.arguments,
-                            })
-                            .collect(),
+                            abi: interpretation
+                                .candidates
+                                .iter()
+                                .map(|candidate| ekubo_wallet_preview::slots::AbiCandidate {
+                                    signature: candidate.signature.clone(),
+                                    contract_match: candidate.contract_match,
+                                    arguments: candidate.arguments.clone(),
+                                })
+                                .collect(),
                         });
                         summary
                     })

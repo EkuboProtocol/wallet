@@ -40,3 +40,7 @@ src/release_check.rs text eol=lf
 crates/ekubo-wallet-core/src/policy_store.rs text eol=lf
 crates/ekubo-wallet-core/src/reconcile.rs text eol=lf
 crates/ekubo-wallet-core/src/update_trust.rs text eol=lf
+
+crates/ekubo-wallet-core/fourbyte/signatures.bin binary
+crates/ekubo-wallet-core/fourbyte/LICENSE text eol=lf
+crates/ekubo-wallet-core/fourbyte/snapshot.json text eol=lf

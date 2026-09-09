@@ -2,6 +2,7 @@ use super::*;
 
 fn interpretation(description: Option<&str>) -> StepInterpretation {
     StepInterpretation {
+        candidates: Vec::new(),
         step: 1,
         description: description.map(ToOwned::to_owned),
         details: vec!["Amount: 1.5 USDC".to_owned()],

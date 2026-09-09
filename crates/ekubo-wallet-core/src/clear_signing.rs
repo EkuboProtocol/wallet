@@ -419,67 +419,6 @@ pub struct CalldataCandidate {
     pub arguments: Vec<(String, String)>,
 }
 
-/// Offline four-byte lookup using vendored ABI signatures. Canonical decoding
-/// and re-encoding reject malformed candidates; chain/address matches sort
-/// first. No remote signature service learns which transactions are reviewed.
-#[must_use]
-pub fn calldata_candidates(chain_id: u64, to: Address, calldata: &[u8]) -> Vec<CalldataCandidate> {
-    static INDEX: LazyLock<BTreeMap<[u8; 4], Vec<usize>>> = LazyLock::new(|| {
-        let mut index = BTreeMap::<[u8; 4], Vec<usize>>::new();
-        for (position, format) in registry().calldata_formats.iter().enumerate() {
-            index
-                .entry(format.function.selector().into())
-                .or_default()
-                .push(position);
-        }
-        index
-    });
-    let Some((selector, body)) = calldata.split_at_checked(4) else {
-        return Vec::new();
-    };
-    if body.len() > 65_536 {
-        return Vec::new();
-    }
-    let target = format!("{to:#x}");
-    let key: [u8; 4] = selector.try_into().expect("four-byte split");
-    let mut functions = BTreeMap::new();
-    for position in INDEX.get(&key).into_iter().flatten() {
-        let format = &registry().calldata_formats[*position];
-        let matched = format.chain_id == chain_id && format.address == target;
-        let entry = functions
-            .entry(format.function.signature())
-            .or_insert((&format.function, false));
-        if matched {
-            *entry = (&format.function, true);
-        }
-    }
-    let mut functions: Vec<_> = functions.into_iter().collect();
-    functions.sort_by_key(|(signature, (_, matched))| (!*matched, signature.clone()));
-    functions
-        .into_iter()
-        .take(8)
-        .filter_map(|(signature, (function, contract_match))| {
-            let values = function.abi_decode_input(body).ok()?;
-            if !values.iter().all(within_declared_width)
-                || function.abi_encode_input_raw(&values).ok()? != body
-            {
-                return None;
-            }
-            let arguments = function
-                .inputs
-                .iter()
-                .zip(values)
-                .map(|(parameter, value)| (parameter.name.clone(), format!("{value:?}")))
-                .collect();
-            Some(CalldataCandidate {
-                signature,
-                contract_match,
-                arguments,
-            })
-        })
-        .collect()
-}
-
 fn is_canonical_descriptor_calldata(chain_id: u64, to: Address, calldata: &[u8]) -> bool {
     let Some((selector, body)) = calldata.split_at_checked(4) else {
         return false;
@@ -503,7 +442,7 @@ fn is_canonical_descriptor_calldata(chain_id: u64, to: Address, calldata: &[u8])
     })
 }
 
-fn within_declared_width(value: &DynSolValue) -> bool {
+pub(crate) fn within_declared_width(value: &DynSolValue) -> bool {
     match value {
         DynSolValue::Uint(word, bits) => *bits >= 256 || *word < (U256::from(1) << *bits),
         DynSolValue::Int(word, bits) => {

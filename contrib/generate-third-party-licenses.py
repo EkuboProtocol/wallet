@@ -243,6 +243,18 @@ def main():
         "",
     ]
 
+    lines.extend([
+        "## Vendored signature directory",
+        "",
+        "The offline function-signature index includes ethereum-lists/4bytes (MIT).",
+        "Source: https://github.com/ethereum-lists/4bytes. Snapshot provenance:",
+        "`crates/ekubo-wallet-core/fourbyte/snapshot.json`.",
+        "",
+        "```text",
+        (ROOT / "crates/ekubo-wallet-core/fourbyte/LICENSE").read_text(encoding="utf-8").rstrip(),
+        "```",
+        "",
+    ])
     lines.extend(render_package_index(by_license))
     lines.extend(render_license_appendix(packages))
 

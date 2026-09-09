@@ -61,7 +61,7 @@ It is **not** a security control and must not be used as one:
 
 The preview summarizes ordered actions under a 100-character cap. A learned whole-plan ranker allocates detail to the main intent. Field roles, exact versus unlimited permissions, distinct recipients and call order constrain the wording. The model can still misclassify a request or omit useful detail; keep the full decoded review beside it.
 
-An optional `evidence` object adds `{ chainId, from, to, calldata, abi }`; each ABI candidate is `{ signature, contractMatch, arguments }`, with `arguments` as name/value string pairs. Distinguish a contract-bound ABI from a selector-only guess. Raw data is retained while compact typed evidence feeds the encoder. Unknown calls stay explicit even when a selector suggests a possible action.
+An optional `evidence` object adds `{ chainId, from, to, calldata, abi }`; each ABI candidate is `{ signature, contractMatch, arguments }`, with `arguments` as name/value string pairs. Only supply directory candidates when there is no decoded reading, after validating the selector and an exact canonical ABI round trip. The wallet core bundles the offline directory; this standalone model Wasm does not. Distinguish a contract-bound ABI from a selector-only guess. Raw data is retained while compact typed evidence feeds the encoder. Unknown calls stay explicit even when a selector suggests a possible action.
 
 `preview` and `previewAll` return Promises on both backends. GPU tensor readbacks are asynchronous; await them. Prefer running inference in a Worker so CPU computation does not block the page.
 

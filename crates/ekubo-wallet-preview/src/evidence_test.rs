@@ -52,3 +52,28 @@ fn address_identity_survives_display_labels_and_checksum_case() {
     ));
     assert!(!same_address_or_label("", ""));
 }
+
+#[test]
+fn decoded_readings_do_not_receive_public_signature_guesses() {
+    let call = CallSummary {
+        description: Some("Protocol — Deposit".into()),
+        evidence: Some(CallEvidence {
+            calldata: "0x12345678".into(),
+            abi: vec![crate::slots::AbiCandidate {
+                signature: "misleadingSwap(uint256)".into(),
+                contract_match: false,
+                arguments: vec![("amount".into(), "999".into())],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let projection = project(&call);
+    assert_eq!(projection.description, call.description);
+    assert!(
+        !projection
+            .details
+            .iter()
+            .any(|line| line.contains("misleading") || line.contains("999"))
+    );
+}

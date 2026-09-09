@@ -28,6 +28,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
 clear-signing = "=0.1.0"
 directories = "6.0.0"
 ekubo_sdk = { version = "3.2.0", features = ["evm"] }
+flate2 = "1.1.9"
 fs2 = "0.4.3"
 hex = "0.4.3"
 keyring = "4.1.6"
@@ -51,7 +52,6 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 cron = "0.17"
 
 [dev-dependencies]
-flate2 = "1.1.9"
 futures = "0.3.31"
 minisign = "0.9.1"
 proptest = "1.9.0"
@@ -61,7 +61,6 @@ libc = "0.2.189"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
-flate2 = "1.1.9"
 objc2 = "0.6.3"
 objc2-foundation = { version = "0.3.1", features = ["NSError", "NSString"] }
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "LAPublicDefines", "block2"] }
