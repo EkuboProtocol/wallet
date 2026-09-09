@@ -12,6 +12,8 @@ categories = ["cryptography::cryptocurrencies", "gui"]
 
 [workspace]
 members = [
+    "crates/erc8410",
+    "crates/erc8410-wasm",
     "crates/ekubo-wallet-core",
     "crates/mcp-bridge",
     "crates/walletconnect-session",

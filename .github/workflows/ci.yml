@@ -73,6 +73,30 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
+  execution-plan:
+    name: Execution plan (no_std and JavaScript)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust targets
+        run: |
+          rustup update stable --no-self-update
+          rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
+      - name: Test execution plans with both JSON map implementations
+        run: |
+          cargo test --locked -p erc8410 --no-default-features
+          cargo test --locked -p erc8410 --features schema,serde_json/preserve_order
+      - name: Check without a standard library
+        run: cargo check --locked -p erc8410 --no-default-features --target thumbv7em-none-eabi
+      - name: Build Wasm
+        run: cargo build --locked -p erc8410-wasm --target wasm32-unknown-unknown --release
+      - name: Generate and test JavaScript bindings
+        run: |
+          version=$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+          wasm-bindgen target/wasm32-unknown-unknown/release/erc8410_wasm.wasm --target nodejs --out-dir crates/erc8410-wasm/pkg-node
+          node crates/erc8410-wasm/smoke-test.cjs
   test:
     name: Test (${{ matrix.runner }})
     strategy:

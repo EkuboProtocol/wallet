@@ -3413,6 +3413,7 @@ dependencies = [
  "cron",
  "directories",
  "ekubo_sdk",
+ "erc8410",
  "flate2",
  "fs2",
  "futures",
@@ -3629,6 +3630,28 @@ dependencies = [
  "serde",
  "serde_core",
  "typeid",
+]
+
+[[package]]
+name = "erc8410"
+version = "0.1.0"
+dependencies = [
+ "alloy-json-abi",
+ "alloy-primitives 1.7.1",
+ "anyhow",
+ "hex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "erc8410-wasm"
+version = "0.1.0"
+dependencies = [
+ "erc8410",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]
