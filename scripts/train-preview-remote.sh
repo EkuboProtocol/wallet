@@ -96,6 +96,30 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 
+# The NVIDIA image finishes its driver setup and then reboots itself, part way
+# through whatever you were doing. That killed two runs before it was
+# understood: an eight-minute cargo build would reach minute six, the machine
+# would go down, ssh would die, and the run would end with a droplet still
+# billing and nothing to show.
+#
+# So wait for the machine to be done rearranging itself before asking it for
+# anything. `cloud-init status --wait` blocks until first-boot configuration
+# has finished, and the boot-id comparison afterwards catches the reboot if it
+# lands anyway -- in which case we wait for ssh a second time and carry on.
+echo "waiting for first-boot configuration to settle" >&2
+"${SSH[@]}" "cloud-init status --wait >/dev/null 2>&1 || true" || true
+BOOT_ID="$("${SSH[@]}" "cat /proc/sys/kernel/random/boot_id" 2>/dev/null || echo unknown)"
+sleep 20
+for _ in $(seq 1 60); do
+  NOW="$("${SSH[@]}" "cat /proc/sys/kernel/random/boot_id" 2>/dev/null || echo "")"
+  if [ -n "$NOW" ] && [ "$NOW" = "$BOOT_ID" ]; then
+    break
+  fi
+  [ -n "$NOW" ] && BOOT_ID="$NOW"
+  sleep 10
+done
+echo "machine settled" >&2
+
 # libvulkan1 is the loader; the NVIDIA image already ships the ICD beside it.
 "${SSH[@]}" "DEBIAN_FRONTEND=noninteractive apt-get update -qq \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libvulkan1 build-essential pkg-config \
@@ -107,12 +131,28 @@ rsync -az -e "ssh -o StrictHostKeyChecking=no -i $KEY" "$CORPUS" "root@$IP:/root
 
 # The build-time updater key only has to be canonical base64; this binary never
 # checks for an update, and nothing it produces is shipped.
-"${SSH[@]}" "cd /root/wallet && PATH=/root/.cargo/bin:\$PATH \
+# Detached, and polled. A build and a fit take twenty minutes between them,
+# which is a long time to bet on one ssh connection staying up.
+"${SSH[@]}" "cd /root/wallet && setsid nohup env PATH=/root/.cargo/bin:\$PATH \
   EKUBO_UPDATER_PUBLIC_KEY='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
-  cargo build --release -p ekubo-wallet-preview --features train"
+  bash -c 'cargo build --release -p ekubo-wallet-preview --features train \
+    && ./target/release/preview-train --corpus /root/labeled.jsonl \
+       --out /root/preview.bin --epochs $EPOCHS --device gpu; \
+    echo \$? > /root/done' > /root/train.log 2>&1 < /dev/null &"
 
-"${SSH[@]}" "cd /root/wallet && ./target/release/preview-train \
-  --corpus /root/labeled.jsonl --out /root/preview.bin --epochs $EPOCHS --device gpu"
+echo "building and fitting; this takes about twenty minutes" >&2
+for _ in $(seq 1 240); do
+  if "${SSH[@]}" "test -f /root/done" 2>/dev/null; then
+    break
+  fi
+  sleep 15
+done
+"${SSH[@]}" "grep -E '^epoch|accuracy by class|^  [a-z_]+ ' /root/train.log || tail -30 /root/train.log" >&2
+STATUS="$("${SSH[@]}" "cat /root/done 2>/dev/null || echo 1")"
+if [ "$STATUS" != "0" ]; then
+  echo "the remote run failed; last output above" >&2
+  exit 1
+fi
 
 # Both files, always together. The fingerprint is what `weights::load` checks
 # to refuse weights fitted against a different build, so retrieving the weights
