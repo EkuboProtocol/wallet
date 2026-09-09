@@ -31,7 +31,7 @@ cargo test --locked --workspace --all-features
 ```
 
 GPUI is pinned to Zed revision
-`cc053a4a6fa2fd0e8793201ed9099466af1be0b1`; `gpui-component` is pinned to
+`52b2927a1bac46be5d50ad341ac00b665e13764b`; `gpui-component` is pinned to
 `26cc9366abb27ccedce386ac99a615a8fa7018da`. The application consumes only the
 Apache-2.0 GPUI infrastructure, not Zed's GPL workspace/UI crates.
 

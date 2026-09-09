@@ -91,6 +91,8 @@ jobs:
         run: cargo check --locked -p erc8410 --no-default-features --target thumbv7em-none-eabi
       - name: Build Wasm
         run: cargo build --locked -p erc8410-wasm --target wasm32-unknown-unknown --release
+      - name: Check browser transaction-preview backend
+        run: cargo check --locked -p ekubo-wallet-preview-wasm --target wasm32-unknown-unknown
       - name: Generate and test JavaScript bindings
         run: |
           version=$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')

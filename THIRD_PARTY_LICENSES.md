@@ -49,11 +49,6 @@ SOFTWARE.
 
 - unicode-ident 1.0.24 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/unicode-ident
 
-## (license file only)
-
-- gpui_shared_string 0.1.0
-- gpui_util 0.1.0
-
 ## 0BSD
 
 - doctest-file 1.1.1 — Goat — https://codeberg.org/Goat7658/doctest-file
@@ -63,7 +58,7 @@ SOFTWARE.
 
 ## 0BSD OR Apache-2.0
 
-- interprocess 2.4.3 — Goat — https://github.com/kotauskas/interprocess
+- interprocess 2.4.4 — Goat — https://github.com/kotauskas/interprocess
 
 ## 0BSD OR MIT OR Apache-2.0
 
@@ -95,7 +90,9 @@ SOFTWARE.
 - gpui_macos 0.1.0
 - gpui_macros 0.1.0
 - gpui_platform 0.1.0
+- gpui_shared_string 0.1.0
 - gpui_tokio 0.1.0
+- gpui_util 0.1.0
 - gpui_web 0.1.0
 - gpui_wgpu 0.1.0
 - gpui_windows 0.1.0
@@ -108,8 +105,8 @@ SOFTWARE.
 - parity-scale-codec-derive 3.7.5 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/parity-scale-codec
 - perf 0.1.0
 - refineable 0.1.0
-- rmcp 3.1.4 — https://github.com/modelcontextprotocol/rust-sdk/
-- rmcp-macros 3.1.4 — https://github.com/modelcontextprotocol/rust-sdk/
+- rmcp 3.2.0 — https://github.com/modelcontextprotocol/rust-sdk/
+- rmcp-macros 3.2.0 — https://github.com/modelcontextprotocol/rust-sdk/
 - safetensors 0.3.3 — https://github.com/huggingface/safetensors
 - safetensors 0.7.0 — https://github.com/huggingface/safetensors
 - scheduler 0.1.0
@@ -315,6 +312,7 @@ SOFTWARE.
 - alloc-stdlib 0.2.2 — Daniel Reiter Horn <danielrh@dropbox.com> — https://github.com/dropbox/rust-alloc-no-stdlib
 - avif-serialize 0.8.9 — Kornel Lesiński <kornel@geekhood.net> — https://github.com/kornelski/avif-serialize
 - bindgen 0.71.1 — Jyun-Yan You <jyyou.tw@gmail.com>, Emilio Cobos Álvarez <emilio@crisal.io>, Nick Fitzgerald <fitzgen@gmail.com>, The Servo project developers — https://github.com/rust-lang/rust-bindgen
+- bindgen 0.72.1 — Jyun-Yan You <jyyou.tw@gmail.com>, Emilio Cobos Álvarez <emilio@crisal.io>, Nick Fitzgerald <fitzgen@gmail.com>, The Servo project developers — https://github.com/rust-lang/rust-bindgen
 - curve25519-dalek 5.0.0 — Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca> — https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek
 - deunicode 1.6.2 — Kornel Lesinski <kornel@geekhood.net>, Amit Chowdhury <amitc97@gmail.com> — https://github.com/kornelski/deunicode/
 - ed25519-dalek 3.0.0 — isis lovecruft <isis@patternsinthevoid.net>, Tony Arcieri <bascule@gmail.com>, Michael Rosenberg <michael@mrosenberg.pub> — https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek
@@ -710,13 +708,11 @@ SOFTWARE.
 ## MIT OR Apache-2.0
 
 - accesskit 0.24.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
-- accesskit_atspi_common 0.18.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
-- accesskit_consumer 0.36.0 — The AccessKit contributors — https://github.com/AccessKit/accesskit
-- accesskit_consumer 0.37.0 — The AccessKit contributors — https://github.com/AccessKit/accesskit
+- accesskit_atspi_common 0.19.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
 - accesskit_consumer 0.38.0 — The AccessKit contributors — https://github.com/AccessKit/accesskit
 - accesskit_macos 0.26.3 — The AccessKit contributors — https://github.com/AccessKit/accesskit
-- accesskit_unix 0.21.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
-- accesskit_windows 0.33.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
+- accesskit_unix 0.22.1 — The AccessKit contributors — https://github.com/AccessKit/accesskit
+- accesskit_windows 0.34.0 — The AccessKit contributors — https://github.com/AccessKit/accesskit
 - aead 0.6.1 — RustCrypto Developers — https://github.com/RustCrypto/traits
 - aes 0.8.4 — RustCrypto Developers — https://github.com/RustCrypto/block-ciphers
 - ahash 0.8.12 — Tom Kaitchuck <Tom.Kaitchuck@gmail.com> — https://github.com/tkaitchuck/ahash
@@ -728,7 +724,7 @@ SOFTWARE.
 - alloy-consensus-any 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-contract 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-core 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-dyn-abi 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-dyn-abi 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-eip2124 0.2.0 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip2930 0.2.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7702 0.6.3 — Alloy Contributors — https://github.com/alloy-rs/eips
@@ -736,12 +732,12 @@ SOFTWARE.
 - alloy-eips 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-ens 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-genesis 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-json-abi 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-json-abi 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-json-rpc 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-network 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-network-primitives 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-primitives 0.6.4 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-primitives 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-primitives 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-provider 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-rlp 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
 - alloy-rlp-derive 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
@@ -752,11 +748,11 @@ SOFTWARE.
 - alloy-serde 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-signer 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-signer-local 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-sol-macro 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-macro-expander 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-macro-input 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-type-parser 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-types 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro-expander 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro-input 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-type-parser 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-types 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-transport 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-transport-http 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-trie 0.9.5 — rkrasiuk <rokrassyuk@gmail.com>, gakonst <me@gakonst.com>, DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/alloy-rs/trie
@@ -1047,9 +1043,9 @@ SOFTWARE.
 - jni-sys 0.4.1 — Steven Fackler <sfackler@gmail.com>, Robert Bragg <robert@sixbynine.org> — https://github.com/jni-rs/jni-sys
 - jni-sys-macros 0.4.1 — Robert Bragg <robert@sixbynine.org> — https://github.com/jni-rs/jni-sys
 - jobserver 0.1.35 — Alex Crichton <alex@alexcrichton.com> — https://github.com/rust-lang/jobserver-rs
-- js-sys 0.3.103 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
+- js-sys 0.3.105 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
 - keyboard-types 0.7.0 — Pyfisch <pyfisch@posteo.org> — https://github.com/pyfisch/keyboard-types
-- keyring 4.1.6 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/keyring-rs
+- keyring 4.2.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/keyring-rs
 - keyring-core 1.0.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/keyring-core.git
 - khronos-egl 6.0.0 — Timothée Haudebourg <author@haudebourg.net>, Sean Kerr <sean@metatomic.io> — https://github.com/timothee-haudebourg/khronos-egl
 - lazy_static 1.5.0 — Marvin Löbel <loebel.marvin@gmail.com> — https://github.com/rust-lang-nursery/lazy-static.rs
@@ -1248,7 +1244,7 @@ SOFTWARE.
 - syn 1.0.109 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
 - syn 2.0.119 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
 - syn 3.0.3 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
-- syn-solidity 1.7.1 — Alloy Contributors — https://github.com/alloy-rs/core
+- syn-solidity 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
 - sys-locale 0.3.2 — 1Password — https://github.com/1Password/sys-locale
 - system-configuration 0.6.1 — Mullvad VPN — https://github.com/mullvad/system-configuration-rs
 - system-configuration-sys 0.6.0 — Mullvad VPN — https://github.com/mullvad/system-configuration-rs
@@ -1319,13 +1315,13 @@ SOFTWARE.
 - vcpkg 0.2.15 — Jim McGrath <jimmc2@gmail.com> — https://github.com/mcgoo/vcpkg-rs
 - version_check 0.9.5 — Sergio Benitez <sb@sergio.bz> — https://github.com/SergioBenitez/version_check
 - wait-timeout 0.2.1 — Alex Crichton <alex@alexcrichton.com> — https://github.com/alexcrichton/wait-timeout
-- wasm-bindgen 0.2.126 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen
-- wasm-bindgen-futures 0.4.76 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
-- wasm-bindgen-macro 0.2.126 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
-- wasm-bindgen-macro-support 0.2.126 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support
-- wasm-bindgen-shared 0.2.126 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
+- wasm-bindgen 0.2.128 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen
+- wasm-bindgen-futures 0.4.78 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
+- wasm-bindgen-macro 0.2.128 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
+- wasm-bindgen-macro-support 0.2.128 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support
+- wasm-bindgen-shared 0.2.128 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
 - wasm-streams 0.4.2 — Mattias Buelens <mattias@buelens.com> — https://github.com/MattiasBuelens/wasm-streams/
-- web-sys 0.3.103 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
+- web-sys 0.3.105 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
 - web-time 1.1.0 — https://github.com/daxpedda/web-time
 - weezl 0.1.12 — The image-rs Developers — https://github.com/image-rs/weezl
 - wgpu 29.0.4 — gfx-rs developers — https://github.com/gfx-rs/wgpu
@@ -1365,7 +1361,7 @@ SOFTWARE.
 - windows-numerics 0.2.0 — https://github.com/microsoft/windows-rs
 - windows-numerics 0.3.1 — https://github.com/microsoft/windows-rs
 - windows-registry 0.4.0 — Microsoft — https://github.com/microsoft/windows-rs
-- windows-registry 0.5.3 — Microsoft — https://github.com/microsoft/windows-rs
+- windows-registry 0.6.1 — https://github.com/microsoft/windows-rs
 - windows-result 0.1.2 — Microsoft — https://github.com/microsoft/windows-rs
 - windows-result 0.2.0 — Microsoft — https://github.com/microsoft/windows-rs
 - windows-result 0.3.4 — Microsoft — https://github.com/microsoft/windows-rs
@@ -1531,20 +1527,18 @@ SOFTWARE.
 ## Packages without a shipped license file
 
 - accesskit 0.24.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- accesskit_atspi_common 0.18.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- accesskit_consumer 0.36.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- accesskit_consumer 0.37.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- accesskit_atspi_common 0.19.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - accesskit_consumer 0.38.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - accesskit_macos 0.26.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- accesskit_unix 0.21.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- accesskit_windows 0.33.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- accesskit_unix 0.22.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- accesskit_windows 0.34.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloc-stdlib 0.2.2: BSD-3-Clause — BSD 3-Clause License: https://opensource.org/license/bsd-3-clause
 - alloy 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus-any 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-contract 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-core 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-dyn-abi 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-dyn-abi 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2124 0.2.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2930 0.2.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7702 0.6.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1552,12 +1546,12 @@ SOFTWARE.
 - alloy-eips 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-ens 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-genesis 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-json-abi 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-json-abi 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-rpc 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-network 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-network-primitives 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-primitives 0.6.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-primitives 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-primitives 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-provider 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp-derive 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1568,11 +1562,11 @@ SOFTWARE.
 - alloy-serde 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-signer 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-signer-local 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro-expander 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro-input 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-type-parser 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-types 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro-expander 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro-input 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-type-parser 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-types 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-transport 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-transport-http 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-tx-macros 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1691,8 +1685,8 @@ SOFTWARE.
 - r-efi 5.3.0: MIT OR Apache-2.0 OR LGPL-2.1-or-later — MIT License: https://opensource.org/license/mit
 - r-efi 6.0.0: MIT OR Apache-2.0 OR LGPL-2.1-or-later — MIT License: https://opensource.org/license/mit
 - rlp 0.5.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- rmcp 3.1.4: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
-- rmcp-macros 3.1.4: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- rmcp 3.2.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- rmcp-macros 3.2.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - ruint 1.20.0: MIT — MIT License: https://opensource.org/license/mit
 - ruint-macro 1.2.1: MIT — MIT License: https://opensource.org/license/mit
 - rust-i18n-macro 4.2.1: MIT — MIT License: https://opensource.org/license/mit
@@ -1707,7 +1701,7 @@ SOFTWARE.
 - spirv 0.4.0+sdk-1.4.341.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - starknet-types-core 1.0.0: MIT — MIT License: https://opensource.org/license/mit
 - svg_fmt 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- syn-solidity 1.7.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- syn-solidity 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - taffy 0.13.0: MIT — MIT License: https://opensource.org/license/mit
 - torch-sys 0.22.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - tracel-llvm 20.1.4-7: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -2008,7 +2002,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: apple-native-keyring-store 1.0.1, keyring 4.1.6, keyring-core 1.0.0, windows-native-keyring-store 1.1.0, zbus-secret-service-keyring-store 1.0.0
+## License text for: apple-native-keyring-store 1.0.1, keyring 4.2.0, keyring-core 1.0.0, windows-native-keyring-store 1.1.0, zbus-secret-service-keyring-store 1.0.0
 
 ```text
 Copyright (c) 2016 keyring Developers
@@ -3223,7 +3217,7 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: backtrace 0.3.76, bzip2 0.4.4, cc 1.4.0, cfg-if 1.0.4, cmake 0.1.58, filetime 0.2.29, find-msvc-tools 0.1.9, jobserver 0.1.35, js-sys 0.3.103, openssl-probe 0.2.1, openssl-src 300.5.0+3.5.0, openssl-sys 0.9.112, pkg-config 0.3.33, rustc-demangle 0.1.28, scoped-tls 1.0.1, socket2 0.6.5, wait-timeout 0.2.1, wasm-bindgen 0.2.126, wasm-bindgen-futures 0.4.76, wasm-bindgen-macro 0.2.126, wasm-bindgen-macro-support 0.2.126, wasm-bindgen-shared 0.2.126, web-sys 0.3.103
+## License text for: backtrace 0.3.76, bzip2 0.4.4, cc 1.4.0, cfg-if 1.0.4, cmake 0.1.58, filetime 0.2.29, find-msvc-tools 0.1.9, jobserver 0.1.35, js-sys 0.3.105, openssl-probe 0.2.1, openssl-src 300.5.0+3.5.0, openssl-sys 0.9.112, pkg-config 0.3.33, rustc-demangle 0.1.28, scoped-tls 1.0.1, socket2 0.6.5, wait-timeout 0.2.1, wasm-bindgen 0.2.128, wasm-bindgen-futures 0.4.78, wasm-bindgen-macro 0.2.128, wasm-bindgen-macro-support 0.2.128, wasm-bindgen-shared 0.2.128, web-sys 0.3.105
 
 ```text
 Copyright (c) 2014 Alex Crichton
@@ -3417,7 +3411,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: bindgen 0.71.1
+## License text for: bindgen 0.71.1, bindgen 0.72.1
 
 ```text
 BSD 3-Clause License
@@ -10838,7 +10832,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: interprocess 2.4.3
+## License text for: interprocess 2.4.4
 
 ```text
 BSD Zero Clause License
@@ -17983,7 +17977,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: windows 0.57.0, windows 0.58.0, windows 0.61.3, windows 0.62.2, windows-collections 0.2.0, windows-collections 0.3.2, windows-core 0.57.0, windows-core 0.58.0, windows-core 0.61.2, windows-core 0.62.2, windows-future 0.2.1, windows-future 0.3.2, windows-implement 0.57.0, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.57.0, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.2.0, windows-numerics 0.3.1, windows-registry 0.4.0, windows-registry 0.5.3, windows-result 0.1.2, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.3.1, windows-strings 0.4.2, windows-strings 0.5.1, windows-sys 0.48.0, windows-sys 0.52.0, windows-sys 0.59.0, windows-sys 0.61.2, windows-targets 0.48.5, windows-targets 0.52.6, windows-targets 0.53.5, windows-threading 0.1.0, windows-threading 0.2.1, windows-version 0.1.7, windows_aarch64_gnullvm 0.48.5, windows_aarch64_gnullvm 0.52.6, windows_aarch64_gnullvm 0.53.1, windows_aarch64_msvc 0.48.5, windows_aarch64_msvc 0.52.6, windows_aarch64_msvc 0.53.1, windows_i686_gnu 0.48.5, windows_i686_gnu 0.52.6, windows_i686_gnu 0.53.1, windows_i686_gnullvm 0.52.6, windows_i686_gnullvm 0.53.1, windows_i686_msvc 0.48.5, windows_i686_msvc 0.52.6, windows_i686_msvc 0.53.1, windows_x86_64_gnu 0.48.5, windows_x86_64_gnu 0.52.6, windows_x86_64_gnu 0.53.1, windows_x86_64_gnullvm 0.48.5, windows_x86_64_gnullvm 0.52.6, windows_x86_64_gnullvm 0.53.1, windows_x86_64_msvc 0.48.5, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1
+## License text for: windows 0.57.0, windows 0.58.0, windows 0.61.3, windows 0.62.2, windows-collections 0.2.0, windows-collections 0.3.2, windows-core 0.57.0, windows-core 0.58.0, windows-core 0.61.2, windows-core 0.62.2, windows-future 0.2.1, windows-future 0.3.2, windows-implement 0.57.0, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.57.0, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.2.0, windows-numerics 0.3.1, windows-registry 0.4.0, windows-registry 0.6.1, windows-result 0.1.2, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.3.1, windows-strings 0.4.2, windows-strings 0.5.1, windows-sys 0.48.0, windows-sys 0.52.0, windows-sys 0.59.0, windows-sys 0.61.2, windows-targets 0.48.5, windows-targets 0.52.6, windows-targets 0.53.5, windows-threading 0.1.0, windows-threading 0.2.1, windows-version 0.1.7, windows_aarch64_gnullvm 0.48.5, windows_aarch64_gnullvm 0.52.6, windows_aarch64_gnullvm 0.53.1, windows_aarch64_msvc 0.48.5, windows_aarch64_msvc 0.52.6, windows_aarch64_msvc 0.53.1, windows_i686_gnu 0.48.5, windows_i686_gnu 0.52.6, windows_i686_gnu 0.53.1, windows_i686_gnullvm 0.52.6, windows_i686_gnullvm 0.53.1, windows_i686_msvc 0.48.5, windows_i686_msvc 0.52.6, windows_i686_msvc 0.53.1, windows_x86_64_gnu 0.48.5, windows_x86_64_gnu 0.52.6, windows_x86_64_gnu 0.53.1, windows_x86_64_gnullvm 0.48.5, windows_x86_64_gnullvm 0.52.6, windows_x86_64_gnullvm 0.53.1, windows_x86_64_msvc 0.48.5, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1
 
 ```text
 MIT License

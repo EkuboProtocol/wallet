@@ -126,7 +126,7 @@ icons = ["assets/app-icon-512.png"]
 files = { "contrib/polkit/com.ekubo.wallet.policy" = "/usr/share/polkit-1/actions/com.ekubo.wallet.policy" }
 
 [package.metadata.gpui-revisions]
-zed = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+zed = "52b2927a1bac46be5d50ad341ac00b665e13764b"
 gpui-component = "26cc9366abb27ccedce386ac99a615a8fa7018da"
 
 # Unoptimized MSVC frames for the deeply generic alloy, rmcp, and schemars call

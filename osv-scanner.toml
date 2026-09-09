@@ -37,23 +37,11 @@ reason = "Informational unmaintained notice for transitive ttf-parser; migrate t
 # their exact Cargo manifests declare Apache-2.0. Keep that evidence explicit
 # and expiring instead of allowing every package with UNKNOWN metadata.
 [[PackageOverrides]]
-name = "collections|derive_refineable|gpui-component(-assets|-macros)?|gpui_(apple|linux|macos|macros|platform|tokio|web|wgpu|windows)|http_client|perf|refineable|sum_tree|util_macros"
+name = "collections|derive_refineable|gpui-component(-assets|-macros)?|gpui_(apple|linux|macos|macros|platform|shared_string|tokio|util|web|wgpu|windows)|http_client|perf|refineable|sum_tree|util_macros"
 nameIsRegex = true
 license.override = ["Apache-2.0"]
 effectiveUntil = 2027-02-15
 reason = "The exact pinned Git package manifest declares Apache-2.0; deps.dev has no matching package-version record."
-
-# These two tiny GPUI support crates omit a package-level SPDX declaration in
-# the pinned upstream tree. They are used only by the Apache-2.0-declared GPUI
-# graph, but the repository root is mixed-license, so do not invent a license.
-# This narrow, expiring exception keeps UNKNOWN fail-closed for every other
-# dependency while upstream clarification is pursued.
-[[PackageOverrides]]
-name = "gpui_shared_string|gpui_util"
-nameIsRegex = true
-license.ignore = true
-effectiveUntil = 2027-02-15
-reason = "Pinned GPUI support manifest omits license metadata; review upstream clarification before this exception expires."
 
 # OSV-Scanner's allowlist accepts SPDX license identifiers but not standalone
 # exception identifiers. LLVM-exception only relaxes Apache-2.0's conditions,
