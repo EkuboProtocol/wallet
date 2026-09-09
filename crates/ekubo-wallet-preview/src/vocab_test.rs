@@ -67,6 +67,7 @@ fn every_slot_kind_has_a_distinct_tag_in_the_vocabulary() {
         SlotKind::Data,
         SlotKind::Number,
         SlotKind::Flag,
+        SlotKind::Protocol,
     ];
     let mut tokens: Vec<Token> = kinds.iter().map(|kind| kind_token(*kind)).collect();
     tokens.sort_unstable();

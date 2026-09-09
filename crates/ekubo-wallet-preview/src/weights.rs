@@ -12,12 +12,46 @@
 //! deterministic interpretation is untouched -- it is what the review
 //! displays, and this only ever sat beside it.
 
-use crate::model::PreviewModel;
+use crate::{
+    model::{D_MODEL, PreviewModel},
+    slots::{MAX_INPUT_TOKENS, MAX_SLOTS, MAX_SUMMARY_TOKENS},
+    taxonomy::{CLASS_COUNT, RISK_COUNT},
+    vocab,
+};
 use burn::{
     module::Module,
     record::{BinBytesRecorder, HalfPrecisionSettings, Recorder},
     tensor::backend::Backend,
 };
+
+/// What the committed weights were fitted against.
+///
+/// This exists because burn does not check. Loading a record whose tensors are
+/// the wrong shape succeeds silently -- verified: a build whose vocabulary had
+/// shrunk by two entries loaded weights sized for the old one without
+/// complaint, and would then have answered confidently from an embedding table
+/// where every learned word had shifted.
+///
+/// That is the worst available failure for this crate. A preview that is
+/// missing is ordinary and handled everywhere; a preview that is fluent and
+/// systematically wrong is the thing the whole design exists to prevent. So
+/// the numbers a retrain would change are written down beside the weights and
+/// compared here, and a disagreement refuses the load.
+const FINGERPRINT: &str = include_str!("../model/preview.fingerprint");
+
+/// The fingerprint this build expects.
+///
+/// Every constant that changes a tensor's shape or an index's meaning. Adding
+/// one is cheap; leaving one out means a retrain that should have been forced
+/// silently is not.
+#[must_use]
+pub fn fingerprint() -> String {
+    format!(
+        "vocab={} classes={CLASS_COUNT} risks={RISK_COUNT} d_model={D_MODEL} \
+         slots={MAX_SLOTS} input={MAX_INPUT_TOKENS} summary={MAX_SUMMARY_TOKENS}",
+        vocab::size()
+    )
+}
 
 /// The trained weights, committed under `model/`.
 ///
@@ -76,6 +110,14 @@ pub const fn size() -> usize {
 pub fn load<B: Backend>(device: &B::Device) -> Result<PreviewModel<B>, LoadError> {
     if !present() {
         return Err(LoadError::Absent);
+    }
+    let expected = fingerprint();
+    let committed = FINGERPRINT.trim();
+    if committed != expected {
+        return Err(LoadError::Mismatched(format!(
+            "the weights were fitted against `{committed}` but this build is `{expected}`; \
+             regenerate the corpus and retrain"
+        )));
     }
     let record = BinBytesRecorder::<HalfPrecisionSettings>::default()
         .load(WEIGHTS.to_vec(), device)

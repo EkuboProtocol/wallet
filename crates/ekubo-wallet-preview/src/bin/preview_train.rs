@@ -205,7 +205,21 @@ fn fit<B: AutodiffBackend>(
         .valid()
         .save_file(arguments.out.clone(), &recorder)
         .map_err(|error| format!("writing {}: {error}", arguments.out.display()))?;
-    eprintln!("wrote {}", arguments.out.display());
+    // Beside the weights, and written by the same step that writes them, so
+    // the two cannot get out of step. `weights::load` refuses a mismatch --
+    // burn itself does not check, and a silently wrong embedding table is the
+    // one failure this crate must never have.
+    let fingerprint = arguments.out.with_extension("fingerprint");
+    std::fs::write(
+        &fingerprint,
+        format!("{}\n", ekubo_wallet_preview::weights::fingerprint()),
+    )
+    .map_err(|error| format!("writing {}: {error}", fingerprint.display()))?;
+    eprintln!(
+        "wrote {} and {}",
+        arguments.out.display(),
+        fingerprint.display()
+    );
     Ok(())
 }
 

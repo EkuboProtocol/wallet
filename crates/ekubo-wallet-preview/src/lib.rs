@@ -31,6 +31,8 @@
 
 #[cfg(feature = "train")]
 pub mod corpus;
+pub mod cpu;
+#[cfg(any(feature = "gpu", feature = "webgpu"))]
 pub mod gpu;
 pub mod infer;
 pub mod model;

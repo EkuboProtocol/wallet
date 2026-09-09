@@ -114,107 +114,130 @@ CRITICAL_WARNINGS = (
     "unrecognized",
 )
 
-# One template per (class, shape). `{kind}{n}` names the nth slot of that kind
-# within the call, counting from one. A template whose roles a call cannot fill
-# falls through to the next, and the last entry of each class fills nothing, so
-# every class always has something to say.
+# How a call's values are attached to its verb phrase.
+#
+# `{verb}` is the descriptor's own human-authored intent -- "Burn vote-escrow
+# NFT", "Register Group", "Claim unstaked AVAX" -- not a word invented here.
+# That is the whole point of this table's shape. An earlier version wrote the
+# verb itself, three phrasings per class, and the result was that every
+# governance call became "vote using X" whether it registered a group or
+# deaffiliated an account, and every NFT call became "transfer an nft" whether
+# it minted or burned one. The model learned that faithfully, because a model
+# cannot be better than what it is shown.
+#
+# The registry already carries a reviewed one-line intent for every format.
+# Using it means the summary says what the protocol's own authors say it does,
+# and this table only decides where the amounts and addresses go.
+#
+# Every shape exists twice: once leading with `{protocol1}` and once without.
+# The protocol is the most recognizable thing in a transaction -- somebody who
+# cannot read calldata still knows whether they meant to be talking to Lido --
+# so a summary says it whenever the descriptor declared one, and the bare form
+# is only reached for standard token calls and opaque targets, which belong to
+# no protocol.
+#
+# Ordered: the first shape whose roles the call can fill wins. The last entry
+# of each class fills nothing, so every call always has something to say.
 TEMPLATES: dict[str, list[str]] = {
     "swap": [
-        "swap {amount1} for {amount2}",
-        "swap {amount1} through {token1}",
-        "swap {amount1}",
-        "swap through {address1}",
-        "swap tokens",
+        "{protocol1}: {verb} {amount1} for {amount2}", "{verb} {amount1} for {amount2}",
+        "{protocol1}: {verb} {amount1}", "{verb} {amount1}",
+        "{protocol1}: {verb} through {address1}", "{verb} through {address1}",
+        "{protocol1}: {verb}", "{verb}",
     ],
     "approval": [
-        "approve {address1} to spend {amount1}",
-        "approve {address1} to spend {token1}",
-        "approve {address1}",
-        "grant an allowance",
+        "{protocol1}: {verb} letting {address1} spend {amount1}", "{verb} letting {address1} spend {amount1}",
+        "{protocol1}: {verb} letting {address1} spend {token1}", "{verb} letting {address1} spend {token1}",
+        "{protocol1}: {verb} for {address1}", "{verb} for {address1}",
+        "{protocol1}: {verb}", "{verb}",
     ],
-    "revocation": [
-        "revoke {address1} for {token1}",
-        "revoke {address1}",
-        "revoke an approval",
-    ],
+    "revocation": ["{protocol1}: {verb} for {address1}", "{verb} for {address1}", "{protocol1}: {verb} {token1}", "{verb} {token1}", "{protocol1}: {verb}", "{verb}"],
     "transfer": [
-        "send {amount1} to {address1}",
-        "send {token1} to {address1}",
-        "send to {address1}",
-        "transfer tokens",
+        "{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}",
+        "{protocol1}: {verb} {token1} to {address1}", "{verb} {token1} to {address1}",
+        "{protocol1}: {verb} to {address1}", "{verb} to {address1}",
+        "{protocol1}: {verb}", "{verb}",
     ],
-    "bridge": [
-        "bridge {amount1} to {address1}",
-        "bridge {amount1}",
-        "bridge tokens",
-    ],
+    "bridge": ["{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}", "{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb}", "{verb}"],
     "supply": [
-        "supply {amount1} to {address1}",
-        "supply {amount1}",
-        "supply {token1}",
-        "supply to {address1}",
-        "supply funds",
+        "{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}",
+        "{protocol1}: {verb} {amount1}", "{verb} {amount1}",
+        "{protocol1}: {verb} {token1}", "{verb} {token1}",
+        "{protocol1}: {verb} to {address1}", "{verb} to {address1}",
+        "{protocol1}: {verb}", "{verb}",
     ],
-    "borrow": ["borrow {amount1} from {address1}", "borrow {amount1}", "borrow funds"],
-    "repay": ["repay {amount1} to {address1}", "repay {amount1}", "repay a loan"],
+    "borrow": ["{protocol1}: {verb} {amount1} from {address1}", "{verb} {amount1} from {address1}", "{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb}", "{verb}"],
+    "repay": ["{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}", "{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb}", "{verb}"],
     "withdraw": [
-        "withdraw {amount1} to {address1}",
-        "withdraw {amount1}",
-        "withdraw {token1}",
-        "withdraw to {address1}",
-        "withdraw funds",
+        "{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}",
+        "{protocol1}: {verb} {amount1}", "{verb} {amount1}",
+        "{protocol1}: {verb} {token1}", "{verb} {token1}",
+        "{protocol1}: {verb} to {address1}", "{verb} to {address1}",
+        "{protocol1}: {verb}", "{verb}",
     ],
-    "stake": [
-        "stake {amount1} with {address1}",
-        "stake {amount1}",
-        "stake {token1}",
-        "stake with {address1}",
-        "stake funds",
-    ],
-    "unstake": ["unstake {amount1}", "unstake {token1}", "unstake from {address1}", "unstake"],
-    "claim": [
-        "claim {amount1} to {address1}",
-        "claim {amount1}",
-        "claim rewards from {address1}",
-        "claim rewards",
-    ],
+    "stake": ["{protocol1}: {verb} {amount1} with {address1}", "{verb} {amount1} with {address1}", "{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb}", "{verb}"],
+    "unstake": ["{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb} {token1}", "{verb} {token1}", "{protocol1}: {verb}", "{verb}"],
+    "claim": ["{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}", "{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb}", "{verb}"],
     "liquidity_add": [
-        "provide {amount1} and {amount2} of liquidity",
-        "provide {amount1} of liquidity",
-        "provide liquidity to {address1}",
-        "provide liquidity",
+        "{protocol1}: {verb} {amount1} and {amount2}", "{verb} {amount1} and {amount2}",
+        "{protocol1}: {verb} {amount1}", "{verb} {amount1}",
+        "{protocol1}: {verb} to {address1}", "{verb} to {address1}",
+        "{protocol1}: {verb}", "{verb}",
     ],
-    "liquidity_remove": [
-        "remove {amount1} of liquidity",
-        "remove liquidity from {address1}",
-        "remove liquidity",
-    ],
-    "governance": [
-        "vote using {address1}",
-        "update {address1}",
-        "change a protocol setting",
-    ],
-    "nft": [
-        "transfer an nft to {address1}",
-        "mint an nft using {address1}",
-        "move an nft",
-    ],
-    "wrap_unwrap": ["wrap {amount1}", "wrap {token1}", "wrap ether"],
-    "delegation": [
-        "delegate {amount1} to {address1}",
-        "delegate to {address1}",
-        "delegate voting power",
-    ],
-    "batch": ["run {number1} batched calls", "run several batched calls"],
+    "liquidity_remove": ["{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb} from {address1}", "{verb} from {address1}", "{protocol1}: {verb}", "{verb}"],
+    "governance": ["{protocol1}: {verb} using {address1}", "{verb} using {address1}", "{protocol1}: {verb} {number1}", "{verb} {number1}", "{protocol1}: {verb}", "{verb}"],
+    "nft": ["{protocol1}: {verb} {number1}", "{verb} {number1}", "{protocol1}: {verb} to {address1}", "{verb} to {address1}", "{protocol1}: {verb}", "{verb}"],
+    "wrap_unwrap": ["{protocol1}: {verb} {amount1}", "{verb} {amount1}", "{protocol1}: {verb} {token1}", "{verb} {token1}", "{protocol1}: {verb}", "{verb}"],
+    "delegation": ["{protocol1}: {verb} {amount1} to {address1}", "{verb} {amount1} to {address1}", "{protocol1}: {verb} to {address1}", "{verb} to {address1}", "{protocol1}: {verb}", "{verb}"],
+    "batch": ["{protocol1}: {verb} {number1}", "{verb} {number1}", "{protocol1}: {verb}", "{verb}"],
     "unrecognized": ["call {address1}", "call an unrecognized contract"],
 }
 
-# How the tail of a long plan counts its unnamed calls.
+# When a call has no descriptor behind it -- a standard token call, an opaque
+# target -- there is no authored intent to borrow, so the class supplies the
+# verb instead. These are the only verbs this file still invents, and they
+# cover calls whose meaning is fixed by the ERC rather than by a protocol.
+CLASS_VERBS: dict[str, str] = {
+    "swap": "swap",
+    "approval": "approve",
+    "revocation": "revoke",
+    "transfer": "send",
+    "bridge": "bridge",
+    "supply": "supply",
+    "borrow": "borrow",
+    "repay": "repay",
+    "withdraw": "withdraw",
+    "stake": "stake",
+    "unstake": "unstake",
+    "claim": "claim",
+    "liquidity_add": "provide liquidity",
+    "liquidity_remove": "remove liquidity",
+    "governance": "update",
+    "nft": "move an nft",
+    "wrap_unwrap": "wrap",
+    "delegation": "delegate",
+    "batch": "run batched calls",
+    "unrecognized": "call an unrecognized contract",
+}
+
+# The owner prefix a descriptor puts in front of its intent: "Ekubo Protocol —
+# Swap". Stripped from the verb phrase because it is lifted into a
+# `<protocol>` slot instead, so the summary names it verbatim through a copy
+# reference rather than through words the model could get wrong.
+OWNER_SEPARATOR = "\u2014"
+
+# A verb phrase longer than this stops being a verb phrase.
+MAX_VERB_WORDS = 6
+
+# How the tail of a long plan counts its unnamed calls. Spelled, never as
+# digits: a digit here would enter the vocabulary as a word the decoder can
+# emit, which is exactly the path slotization closes.
 COUNT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
 
-ROLE = re.compile(r"\{(amount|token|address|number|data|flag)(\d+)\}")
+ROLE = re.compile(r"\{(protocol|amount|token|address|number|data|flag)(\d+)\}")
 
 KIND_TAGS = {
+    "protocol": "<protocol>",
     "amount": "<amount>",
     "token": "<token>",
     "address": "<address>",
@@ -247,7 +270,22 @@ def risk_of(name: str, warnings: list[str], has_value: bool) -> str:
     return "routine"
 
 
-def fill(template: str, slots: list[tuple[int, str]]) -> list[str] | None:
+def verb_words(intent: str | None, name: str) -> list[str]:
+    """The words a summary should lead with.
+
+    The descriptor's own intent when there is one, reduced to vocabulary words,
+    with the protocol owner prefix dropped. Otherwise the class's fixed verb.
+    """
+    source = CLASS_VERBS.get(name, "call a contract")
+    if intent:
+        body = intent.split(OWNER_SEPARATOR)[-1]
+        found = [word.lower() for word in re.findall(r"[A-Za-z][A-Za-z0-9]*", body)]
+        if found:
+            source = " ".join(found[:MAX_VERB_WORDS])
+    return source.split()
+
+
+def fill(template: str, slots: list[tuple[int, str]], verb: list[str]) -> list[str] | None:
     """Resolve a template's roles against one call's slots.
 
     `slots` pairs each of the call's slots with its **plan-global** index, and
@@ -264,25 +302,41 @@ def fill(template: str, slots: list[tuple[int, str]]) -> list[str] | None:
     """
     pieces: list[str] = []
     for word in template.split():
+        # A template may punctuate a placeholder -- "{protocol1}:" -- and the
+        # punctuation is a piece of its own, because the renderer joins it to
+        # whatever precedes it rather than treating it as part of a word.
+        trailing = ""
+        if word.endswith(":") or word.endswith(","):
+            word, trailing = word[:-1], word[-1]
+        if word == "{verb}":
+            pieces.extend(verb)
+            if trailing:
+                pieces.append(trailing)
+            continue
         match = ROLE.fullmatch(word)
         if match is None:
             pieces.append(word)
+            if trailing:
+                pieces.append(trailing)
             continue
         wanted, nth = KIND_TAGS[match.group(1)], int(match.group(2)) - 1
         matching = [index for index, kind in slots if kind == wanted]
         if nth >= len(matching):
             return None
         pieces.append(f"<s{matching[nth]}>")
+        if trailing:
+            pieces.append(trailing)
     return pieces
 
 
-def summarize(name: str, slots: list[tuple[int, str]]) -> list[str]:
+def summarize(name: str, slots: list[tuple[int, str]], intent: str | None) -> list[str]:
     """The first template of a class whose roles this call can fill."""
+    verb = verb_words(intent, name)
     for template in TEMPLATES.get(name, TEMPLATES["unrecognized"]):
-        pieces = fill(template, slots)
+        pieces = fill(template, slots, verb)
         if pieces is not None:
             return pieces
-    return ["call", "a", "contract"]
+    return verb or ["call", "a", "contract"]
 
 
 def plan_class(names: list[str]) -> str:
@@ -344,7 +398,8 @@ def label(example: dict[str, Any], intents: dict[str, str | None]) -> dict[str, 
             )
             if owner == call
         ]
-        per_call.append(summarize(names[call], slots))
+        intent = intents.get(example["formats"][call]) if call < len(example["formats"]) else None
+        per_call.append(summarize(names[call], slots, intent))
     # Every reference a call's summary makes must be to a slot that call
     # produced. This is the invariant the plan-global indexing above exists to
     # keep, and it is checked rather than trusted: getting it wrong is silent,

@@ -23,6 +23,10 @@
 
 use crate::vocab::{self, Token};
 
+/// A protocol name longer than this is not a protocol name; the reading is
+/// something else that happens to contain an em dash.
+const MAX_PROTOCOL_CHARS: usize = 40;
+
 /// Values past this many are still shown to the model as a bare kind tag, but
 /// cannot be referenced by the summary. Long plans therefore lose the ability
 /// to name their last values rather than growing the vocabulary without bound.
@@ -81,6 +85,20 @@ pub enum SlotKind {
     Number,
     /// A boolean rendered as a word.
     Flag,
+    /// The protocol a descriptor declares itself to belong to: "Aave DAO",
+    /// "Ekubo Protocol", "1inch Network".
+    ///
+    /// A slot rather than ordinary words, for three reasons. It is the single
+    /// most recognizable thing in a transaction -- somebody who cannot read
+    /// calldata still knows whether they meant to be talking to Lido -- so it
+    /// has to survive into the summary intact. Lifting it means the model
+    /// *points at* the name the descriptor declared instead of generating one,
+    /// so it cannot answer "Aave" for a Lido transaction any more than it can
+    /// invent an amount. And several real protocol names begin with a digit --
+    /// `1inch` -- which the amount scanner would otherwise tear in half, and
+    /// which could never be a vocabulary word without breaking the rule that
+    /// nothing the decoder can emit begins with a digit.
+    Protocol,
 }
 
 impl SlotKind {
@@ -94,6 +112,7 @@ impl SlotKind {
             Self::Data => "<data>",
             Self::Number => "<number>",
             Self::Flag => "<flag>",
+            Self::Protocol => "<protocol>",
         }
     }
 }
@@ -176,7 +195,7 @@ pub fn slotize(document: &PlanDocument) -> Slotized {
         builder.call = index;
         builder.push_literal("<call>");
         match &call.description {
-            Some(description) => builder.push_text(description),
+            Some(description) => builder.push_description(description),
             None => builder.push_literal("<opaque>"),
         }
         builder.push_literal("<target>");
@@ -324,6 +343,25 @@ impl Builder {
             tokens: self.tokens,
             slots: self.slots,
         }
+    }
+
+    /// Scan a call's one-line reading, lifting the protocol name first.
+    ///
+    /// The descriptor engine renders this as `Owner — intent`, so the part
+    /// before the em dash is the protocol the registry declares. Lifting it
+    /// keeps the name a reviewer recognizes intact and verbatim, rather than
+    /// letting it fall through the word scanner that would lowercase
+    /// "Aave DAO" and split "1inch" around its leading digit.
+    fn push_description(&mut self, text: &str) {
+        if let Some((owner, intent)) = text.split_once(" \u{2014} ")
+            && !owner.is_empty()
+            && owner.chars().count() <= MAX_PROTOCOL_CHARS
+        {
+            self.push_slot(SlotKind::Protocol, owner.to_owned());
+            self.push_text(intent);
+            return;
+        }
+        self.push_text(text);
     }
 
     /// Scan one line, lifting values and keeping words.

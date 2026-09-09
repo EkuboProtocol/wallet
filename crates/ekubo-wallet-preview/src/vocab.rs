@@ -46,6 +46,7 @@ const FIXED: &[&str] = &[
     "<data>",
     "<number>",
     "<flag>",
+    "<protocol>",
 ];
 
 /// The padding token. Positions holding it are masked out of attention and
@@ -64,14 +65,14 @@ pub const EOS: Token = 3;
 /// Written as a literal rather than derived from `FIXED.len()`, because this
 /// number is the thing that must not move: the assertion below is what fails
 /// the build when someone inserts a fixed piece instead of appending one.
-const SLOT_BASE: Token = 24;
+const SLOT_BASE: Token = 25;
 const _: () = assert!(
     SLOT_BASE as usize == FIXED.len(),
     "a fixed piece was inserted or removed; slot references would renumber and every committed weight would mean something else"
 );
 
 /// Where the learned words begin.
-const LEARNED_BASE: Token = 72;
+const LEARNED_BASE: Token = 73;
 const _: () = assert!(SLOT_BASE as usize + MAX_SLOTS == LEARNED_BASE as usize);
 
 /// The learned half, exactly as committed.

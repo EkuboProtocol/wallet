@@ -297,3 +297,56 @@ fn a_plan_is_padded_to_one_of_a_few_fixed_widths() {
 fn a_plan_past_the_widest_bucket_pads_to_the_input_cap() {
     assert_eq!(width_for(MAX_INPUT_TOKENS + 1), MAX_INPUT_TOKENS);
 }
+
+/// The protocol a descriptor declares is lifted verbatim, not folded through
+/// the word scanner.
+///
+/// Two things depend on that. A reviewer recognizes "Aave DAO" and would not
+/// recognize "aave dao", and `1inch Network` begins with a digit -- the amount
+/// scanner would take the `1` for a quantity and leave `inch` behind, and no
+/// vocabulary may contain a digit-leading word. Lifting sidesteps both, and
+/// means the model can only ever name the protocol the descriptor declared.
+#[test]
+fn a_protocol_name_is_lifted_verbatim_including_a_leading_digit() {
+    for (reading, expected) in [
+        ("1inch Network \u{2014} Swap", "1inch Network"),
+        ("Aave DAO \u{2014} Repay loan", "Aave DAO"),
+        ("Lido DAO \u{2014} Wrap stETH", "Lido DAO"),
+    ] {
+        let slotized = slotize(&plan(reading));
+        let lifted = slotized
+            .slots
+            .iter()
+            .find(|slot| slot.kind == SlotKind::Protocol)
+            .unwrap_or_else(|| panic!("{reading} lifted no protocol"));
+        assert_eq!(lifted.text, expected);
+    }
+}
+
+/// A reading with no owner prefix lifts no protocol, rather than lifting the
+/// first few words of the sentence.
+#[test]
+fn a_reading_without_an_owner_prefix_lifts_no_protocol() {
+    let slotized = slotize(&plan(
+        "approve spender 0x1111111254EEB25477B68fb85Ed929f73A960582 for 5 USDC",
+    ));
+    assert!(
+        !slotized
+            .slots
+            .iter()
+            .any(|slot| slot.kind == SlotKind::Protocol)
+    );
+}
+
+/// An em dash inside a long sentence is not an owner prefix.
+#[test]
+fn a_long_prefix_is_not_mistaken_for_a_protocol() {
+    let long = "this whole clause is far too long to be anybody's protocol name \u{2014} swap";
+    let slotized = slotize(&plan(long));
+    assert!(
+        !slotized
+            .slots
+            .iter()
+            .any(|slot| slot.kind == SlotKind::Protocol)
+    );
+}

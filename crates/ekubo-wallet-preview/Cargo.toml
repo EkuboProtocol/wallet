@@ -9,6 +9,20 @@ license = "FSL-1.1-MIT"
 publish = false
 
 [features]
+default = ["gpu"]
+
+# The desktop wallet's backend: native `wgpu`, which is Metal, Direct3D or
+# Vulkan depending on the platform, and the same interface GPUI already draws
+# through.
+gpu = ["burn/wgpu"]
+
+# A browser wallet's backend: WebGPU through wasm-bindgen. Optional because
+# WebGPU is not everywhere yet -- a build with neither this nor `gpu` runs the
+# forward pass on the CPU through `ndarray`, which for 1.2M parameters over a
+# forty-token sequence is a few milliseconds and compiles to a much smaller
+# `.wasm`.
+webgpu = ["burn/webgpu"]
+
 # The training pipeline: corpus synthesis from the vendored ERC-7730 registry,
 # the autodiff backend, and the optimizer loop.
 #
@@ -27,9 +41,11 @@ train = [
 ]
 
 [dependencies]
-# `default-features = false` keeps the dataset/TUI training stack out; the
-# forward pass needs the tensor library and the two backends and nothing else.
-burn = { version = "0.21.0", default-features = false, features = ["ndarray", "std", "wgpu"] }
+# `default-features = false` keeps the dataset and training stack out. Only
+# `ndarray` is unconditional: it is the CPU fallback, the backend the tests run
+# on, and the one that works everywhere including `wasm32` with no adapter. A
+# GPU backend is a feature on top.
+burn = { version = "0.21.0", default-features = false, features = ["ndarray", "std"] }
 
 alloy = { version = "=2.4.1", features = ["dyn-abi", "json-abi"], optional = true }
 ekubo-wallet-core = { path = "../ekubo-wallet-core", optional = true }
@@ -37,6 +53,19 @@ futures = { version = "0.3.31", optional = true }
 rand = { version = "0.10.0", optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
+
+# On `wasm32-unknown-unknown` there is no ambient entropy source, so
+# `getrandom` -- which reaches this crate through burn's own dependencies --
+# refuses to build until it is told to use the browser's `crypto` object. It is
+# named here rather than left to a downstream wallet because a browser build of
+# *this* crate is a thing we support, and a compile error that only appears
+# three crates away is not.
+#
+# Nothing in the forward pass draws random numbers. This is a build-time
+# requirement of a transitive dependency, not a source of entropy the model
+# uses.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 serde_json = "1.0.145"

@@ -4637,9 +4637,21 @@ dependencies = [
  "burn",
  "ekubo-wallet-core",
  "futures",
+ "getrandom 0.4.3",
  "rand 0.10.2",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ekubo-wallet-preview-wasm"
+version = "1.7.1"
+dependencies = [
+ "ekubo-wallet-preview",
+ "serde",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -11109,6 +11121,17 @@ dependencies = [
  "serde_core",
  "smallvec",
  "zmij",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]

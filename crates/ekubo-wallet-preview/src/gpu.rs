@@ -34,3 +34,29 @@ pub fn load() -> Result<GpuEngine, LoadError> {
     let model = weights::load::<GpuBackend>(&device)?;
     Ok(PreviewEngine::new(model, device))
 }
+
+/// Load onto a GPU, resolving the adapter first.
+///
+/// This is the browser's entry point and the reason it is a separate function.
+/// In a browser there is no synchronous way to obtain a WebGPU adapter: the
+/// request is a promise, the user agent may prompt, and it may simply have no
+/// adapter to hand back. So the resolution happens here, awaited, rather than
+/// lazily inside the first forward pass where a caller has no way to await it
+/// and no way to fall back.
+///
+/// # Errors
+///
+/// Answers [`LoadError`] when no weights are committed or they do not match
+/// this build. A browser with no WebGPU does not error here -- adapter
+/// selection resolves to a fallback or the first dispatch fails -- so callers
+/// should still be prepared to use `crate::cpu` instead.
+pub async fn load_async() -> Result<GpuEngine, LoadError> {
+    let device = burn::backend::wgpu::WgpuDevice::default();
+    burn::backend::wgpu::init_setup_async::<burn::backend::wgpu::graphics::AutoGraphicsApi>(
+        &device,
+        burn::backend::wgpu::RuntimeOptions::default(),
+    )
+    .await;
+    let model = weights::load::<GpuBackend>(&device)?;
+    Ok(PreviewEngine::new(model, device))
+}

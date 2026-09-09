@@ -14,6 +14,7 @@ categories = ["cryptography::cryptocurrencies", "gui"]
 members = [
     "crates/ekubo-wallet-core",
     "crates/ekubo-wallet-preview",
+    "crates/ekubo-wallet-preview-wasm",
     "crates/mcp-bridge",
     "crates/walletconnect-session",
     "crates/ztracing-compat",
@@ -134,6 +135,21 @@ gpui-component = "26cc9366abb27ccedce386ac99a615a8fa7018da"
 # binaries they spawn.
 [profile.dev]
 opt-level = 1
+
+# Browser builds only. Separate from `release` because the desktop wallet needs
+# unwinding -- it catches a panic from inside the graphics driver so a failed
+# preview cannot take the window down -- while a `.wasm` has no such guard to
+# preserve and pays for unwinding tables in bytes a wallet has to download.
+#
+# Size is the whole point here. A browser wallet that ships this is asking a
+# person to fetch it before they can review a transaction.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 [profile.release]
 lto = "thin"
