@@ -2521,9 +2521,9 @@ fn repair_bridge_helper() -> Result<()> {
     Ok(())
 }
 
-fn detect_agents(selection: &CompanionSelection) -> Result<Vec<DetectedAgent>> {
+fn detect_agents(selection: &CompanionSelection, converge: bool) -> Result<Vec<DetectedAgent>> {
     let helper = repair_bridge_helper().map_err(|error| SharedString::from(format!("{error:#}")));
-    if helper.is_ok() {
+    if converge && helper.is_ok() {
         converge_installed_agents(selection);
     }
     Ok(AgentAdapter::supported()?
@@ -2856,6 +2856,16 @@ pub struct WalletWindow {
     detected_agents: AgentDetectionState,
     /// Which hosted Ekubo MCP servers the wallet writes into agent configs.
     companion_servers: CompanionSelection,
+    /// Why the stored selection could not be read, when it could not.
+    ///
+    /// A failed read is not the same as "every server". Defaulting and then
+    /// converging would write servers the owner had switched off back into
+    /// every agent they have connected — silently, because convergence needs
+    /// no press. So the error is kept: it disables the switches, says so on
+    /// the screen, and stops convergence rather than letting it act on a
+    /// guess. The all-enabled value behind it is only what the disabled rows
+    /// draw.
+    companion_servers_error: Option<SharedString>,
     /// What the last successful sync wrote. Cleared when the next one starts,
     /// so the line on screen always describes the write in front of it.
     agent_sync_status: Option<SharedString>,
@@ -6810,7 +6820,15 @@ impl WalletWindow {
             render_embedded_png(include_bytes!("../assets/tray/dark_mode_tray_icon.png"))
                 .expect("embedded dark tray icon must be valid");
         // Read before `owner` moves into the struct.
-        let companion_servers = owner.companion_servers().unwrap_or_default();
+        let (companion_servers, companion_servers_error) = match owner.companion_servers() {
+            Ok(selection) => (selection, None),
+            Err(error) => (
+                CompanionSelection::all(),
+                Some(SharedString::from(format!(
+                    "Your MCP server selection could not be read, so it is shown as every server and cannot be changed until this is fixed. No agent configuration will be written: {error:#}"
+                ))),
+            ),
+        };
         let mut window = Self {
             owner,
             desktop_snapshot: None,
@@ -6874,6 +6892,7 @@ impl WalletWindow {
             // A read failure is not a reason to write fewer servers than the
             // default promises; the screen reports the failure when they save.
             companion_servers,
+            companion_servers_error,
             agent_sync_status: None,
             detected_agents_generation: 0,
             #[cfg(target_os = "linux")]
@@ -7399,8 +7418,13 @@ impl WalletWindow {
             self.detected_agents = AgentDetectionState::Loading;
         }
         let selection = self.companion_servers.clone();
+        // Converging rewrites agent configurations with no press, so it must
+        // only ever act on a selection this wallet actually read. When the
+        // read failed the list still draws — it just reports what is there
+        // against the default, and changes nothing on disk.
+        let converge = self.companion_servers_error.is_none();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || detect_agents(&selection))
+            tokio::task::spawn_blocking(move || detect_agents(&selection, converge))
                 .await
                 .context("agent detection task failed")?
         });
@@ -9701,6 +9725,7 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) {
         if self.agent_reinstall == AgentReinstallState::Running
+            || self.companion_servers_error.is_some()
             || self.companion_servers.is_enabled(slug) == enabled
         {
             return;
@@ -13481,9 +13506,17 @@ impl WalletWindow {
         claude_desktop_detected: bool,
         cx: &mut Context<Self>,
     ) -> GroupBox {
-        let busy = self.legal_gate || self.agent_reinstall == AgentReinstallState::Running;
+        // A selection nobody could read is not one anybody can edit: saving
+        // over it would write a guess, and the owner cannot see what they
+        // would be overwriting.
+        let busy = self.legal_gate
+            || self.agent_reinstall == AgentReinstallState::Running
+            || self.companion_servers_error.is_some();
         let mut group = GroupBox::new()
             .id("companion-server-settings")
+            .when_some(self.companion_servers_error.clone(), |group, error| {
+                group.child(selectable_error_alert("companion-servers-error", error))
+            })
             .child(
                 div()
                     .debug_selector(|| "settings-prose".to_owned())

@@ -797,8 +797,8 @@ fn merge_codex(
         .or_insert_with(|| Item::Table(Table::new()))
         .as_table_mut()
         .context("Codex mcp_servers configuration must be a table")?;
-    // Replace both wallet-managed entries with their exact credential-free
-    // shapes instead of trying to enumerate fields which must not survive;
+    // Replace every wallet-managed entry with its exact credential-free
+    // shape instead of trying to enumerate fields which must not survive;
     // future harness credential fields are thereby removed without granting
     // the wallet authority over any sibling or global key.
     let mut local = Table::new();

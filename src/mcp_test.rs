@@ -2081,6 +2081,13 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
     assert!(SECURITY_MODEL.contains("Every server is selected by default"));
     assert!(SECURITY_MODEL.contains("removed from the file"));
     assert!(SECURITY_MODEL.contains("the wallet cannot apply\nthe selection there"));
+    // The resource is served to agents as authoritative, so it must describe
+    // the interface that exists. It described two managed entries and an
+    // install-or-removal button after both had stopped being true.
+    assert!(!SECURITY_MODEL.contains("two managed entries"));
+    assert!(!SECURITY_MODEL.contains("install or removal"));
+    assert!(SECURITY_MODEL.contains("offers a typed sync for that agent alone"));
+    assert!(SECURITY_MODEL.contains("There is no uninstall in the interface"));
     assert!(!SECURITY_MODEL.contains("trusted plan producer"));
 }
 

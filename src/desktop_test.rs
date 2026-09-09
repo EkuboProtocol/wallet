@@ -3473,3 +3473,41 @@ fn the_report_separates_agents_by_what_their_file_can_hold() {
     assert_eq!(report.servers, COMPANION_SERVERS.len());
     assert_eq!(report.tools, selection.enabled_tool_count());
 }
+
+/// A selection the wallet could not read must not be acted on.
+///
+/// `CompanionSelection::all()` is the right value to *draw* when the stored
+/// preference is unreadable, and the wrong one to write: convergence needs no
+/// press, so defaulting and then converging would put servers an owner had
+/// switched off back into every agent they had connected, with nothing on
+/// screen saying so. The source is the subject here because the failure is a
+/// missing guard rather than a value any constructor returns.
+#[test]
+fn an_unreadable_selection_neither_converges_nor_edits() {
+    let source = include_str!("desktop.rs");
+
+    // The read keeps its error rather than collapsing it into the default.
+    assert!(
+        !source.contains("owner.companion_servers().unwrap_or_default()"),
+        "a discarded read error is indistinguishable from an owner who chose every server"
+    );
+    assert!(source.contains("companion_servers_error"));
+
+    // Convergence is gated on having read the selection, not merely on
+    // holding one.
+    assert!(
+        source.contains("let converge = self.companion_servers_error.is_none();"),
+        "convergence must not run on a defaulted selection"
+    );
+    assert!(
+        source.contains("fn detect_agents(selection: &CompanionSelection, converge: bool)"),
+        "detection takes the convergence decision from the caller that knows it"
+    );
+    assert!(source.contains("if converge && helper.is_ok()"));
+
+    // And the switches refuse to save over a selection nobody could read.
+    assert!(
+        source.contains("|| self.companion_servers_error.is_some()\n            || self.companion_servers.is_enabled(slug) == enabled"),
+        "editing an unread selection would save a guess over the owner's choice"
+    );
+}
