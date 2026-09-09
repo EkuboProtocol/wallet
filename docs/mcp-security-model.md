@@ -84,9 +84,17 @@ contains only local stdio servers, so the user adds companions as account-level
 custom connectors through Customize → Connectors and the wallet cannot apply
 the selection there. Installing or repairing managed file entries
 creates no credential and requires no owner authentication. Grok Build uses its native `~/.grok/config.toml`
-`[mcp_servers]` table with the same exact two managed entries.
+`[mcp_servers]` table with the same exact managed entries as every other
+harness whose format supports remote MCP.
 Settings derives each larger check or X from those exact managed entries and
-offers a typed install or removal for that agent alone.
+offers a typed sync for that agent alone: one action, in every state, that
+writes the local entry and the selected companions and removes the companions
+that are not selected. There is no uninstall in the interface — the wallet
+withdraws only what it wrote, and only when an owner changes the selection.
+Changing the selection re-runs that same typed write for every agent whose
+configuration already names this wallet, and for no other; an agent whose
+configuration predates the per-protocol split is brought up to the current
+selection the next time the wallet reads the list.
 It does not treat the number of live bridge processes as installation status:
 harnesses start and stop their stdio bridges as needed.
 The local transport has no HTTP listener, OAuth routes, bearer credentials, or

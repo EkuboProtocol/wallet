@@ -34,7 +34,7 @@ use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, GuidedSetupState};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
-use ekubo_wallet_core::mcp_companions::{COMPANION_SERVERS, CompanionSelection};
+use ekubo_wallet_core::mcp_companions::{COMPANION_SERVERS, CompanionSelection, companion_by_slug};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
@@ -2359,16 +2359,113 @@ fn pluralize(count: usize, singular: &str) -> String {
 /// config to take a working connection away was never the thing anyone
 /// reached for. `preview_remove` stays as the wallet's own ability to
 /// withdraw what it wrote, exercised by the tests that pin the removal shape.
-fn sync_agent(kind: AgentKind, selection: &CompanionSelection) -> Result<()> {
+fn sync_agent(kind: AgentKind, selection: &CompanionSelection) -> Result<AgentSyncReport> {
     let adapter = AgentAdapter::supported()?
         .into_iter()
         .find(|adapter| adapter.kind == kind)
         .with_context(|| format!("{} is not a supported agent", kind.label()))?;
+    let report = AgentSyncReport::of(std::slice::from_ref(&adapter), selection);
     let batch = crate::agent_config::ConfigBatchInstall::install(vec![
         adapter.preview_install(selection)?,
     ])?;
     batch.commit();
-    Ok(())
+    Ok(report)
+}
+
+/// What a sync wrote, in the words the owner needs to read it back.
+///
+/// Reporting only failure left the successful case saying nothing at all: the
+/// button went un-pressed-looking, and the one moment an owner is actually
+/// thinking about which servers their agent has passed without the app ever
+/// naming them. It is also the only place Claude Desktop's limitation lands
+/// where somebody will see it — a file that cannot carry hosted servers is
+/// not a failure, so it never reached the error line, and the explanation sat
+/// in a settings section they had no reason to still be looking at.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AgentSyncReport {
+    /// Agents whose configuration now carries the bridge and the selection.
+    updated: Vec<&'static str>,
+    /// Agents whose configuration carries the bridge but cannot carry hosted
+    /// servers, so the owner adds those themselves. Claude Desktop, whose
+    /// remote connectors belong to a Claude account rather than to this file.
+    connector_only: Vec<&'static str>,
+    /// Hosted servers in the selection when the write happened.
+    servers: usize,
+    /// Roughly how many tools those servers put in an agent's context.
+    tools: usize,
+}
+
+impl AgentSyncReport {
+    fn of(adapters: &[AgentAdapter], selection: &CompanionSelection) -> Self {
+        let mut report = Self {
+            servers: selection.enabled_count(),
+            tools: selection.enabled_tool_count(),
+            ..Self::default()
+        };
+        for adapter in adapters {
+            if adapter.kind == AgentKind::ClaudeDesktop {
+                report.connector_only.push(adapter.display_name);
+            } else {
+                report.updated.push(adapter.display_name);
+            }
+        }
+        report
+    }
+
+    fn touched_nothing(&self) -> bool {
+        self.updated.is_empty() && self.connector_only.is_empty()
+    }
+
+    /// The confirmation line, or `None` when there is nothing to confirm.
+    fn message(&self) -> Option<String> {
+        if self.touched_nothing() {
+            return None;
+        }
+        let mut sentences = Vec::new();
+        if !self.updated.is_empty() {
+            sentences.push(format!(
+                "{} now {} this wallet and {}.",
+                join_names(&self.updated),
+                if self.updated.len() == 1 {
+                    "has"
+                } else {
+                    "have"
+                },
+                self.server_phrase(),
+            ));
+        }
+        if !self.connector_only.is_empty() {
+            sentences.push(format!(
+                "{} now {} this wallet. Its hosted connectors belong to your Claude account, so add the server URLs above through Customize → Connectors.",
+                join_names(&self.connector_only),
+                if self.connector_only.len() == 1 { "has" } else { "have" },
+            ));
+        }
+        Some(sentences.join(" "))
+    }
+
+    /// Says the tool cost alongside the count, because that is the number the
+    /// switches are about and the one an owner cannot work out for themselves.
+    fn server_phrase(&self) -> String {
+        if self.servers == 0 {
+            return "no Ekubo servers".to_owned();
+        }
+        format!(
+            "{}, about {} in all",
+            pluralize(self.servers, "Ekubo server"),
+            pluralize(self.tools, "tool"),
+        )
+    }
+}
+
+/// `a`, `a and b`, `a, b, and c`.
+fn join_names(names: &[&'static str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 /// Bring every agent that already has this wallet up to the current selection,
@@ -2383,18 +2480,20 @@ fn sync_agent(kind: AgentKind, selection: &CompanionSelection) -> Result<()> {
 /// One batch rather than seven writes, so a failure part-way through restores
 /// every file it had already replaced instead of leaving half the machine on
 /// the old selection.
-fn sync_installed_agents(selection: &CompanionSelection) -> Result<usize> {
+fn sync_installed_agents(selection: &CompanionSelection) -> Result<AgentSyncReport> {
+    let mut connected = Vec::new();
     let mut previews = Vec::new();
     for adapter in AgentAdapter::supported()? {
         if !adapter.detected() || !adapter.has_wallet_entry().unwrap_or(false) {
             continue;
         }
         previews.push(adapter.preview_install(selection)?);
+        connected.push(adapter);
     }
-    let count = previews.len();
+    let report = AgentSyncReport::of(&connected, selection);
     let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
     batch.commit();
-    Ok(count)
+    Ok(report)
 }
 
 /// Put this build's bridge at the path every managed config names.
@@ -2422,9 +2521,9 @@ fn repair_bridge_helper() -> Result<()> {
     Ok(())
 }
 
-fn detect_agents(selection: &CompanionSelection) -> Result<Vec<DetectedAgent>> {
+fn detect_agents(selection: &CompanionSelection, converge: bool) -> Result<Vec<DetectedAgent>> {
     let helper = repair_bridge_helper().map_err(|error| SharedString::from(format!("{error:#}")));
-    if helper.is_ok() {
+    if converge && helper.is_ok() {
         converge_installed_agents(selection);
     }
     Ok(AgentAdapter::supported()?
@@ -2757,6 +2856,19 @@ pub struct WalletWindow {
     detected_agents: AgentDetectionState,
     /// Which hosted Ekubo MCP servers the wallet writes into agent configs.
     companion_servers: CompanionSelection,
+    /// Why the stored selection could not be read, when it could not.
+    ///
+    /// A failed read is not the same as "every server". Defaulting and then
+    /// converging would write servers the owner had switched off back into
+    /// every agent they have connected — silently, because convergence needs
+    /// no press. So the error is kept: it disables the switches, says so on
+    /// the screen, and stops convergence rather than letting it act on a
+    /// guess. The all-enabled value behind it is only what the disabled rows
+    /// draw.
+    companion_servers_error: Option<SharedString>,
+    /// What the last successful sync wrote. Cleared when the next one starts,
+    /// so the line on screen always describes the write in front of it.
+    agent_sync_status: Option<SharedString>,
     detected_agents_generation: u64,
     #[cfg(target_os = "linux")]
     owner_auth: OwnerAuthState,
@@ -6801,7 +6913,15 @@ impl WalletWindow {
             render_embedded_png(include_bytes!("../assets/tray/dark_mode_tray_icon.png"))
                 .expect("embedded dark tray icon must be valid");
         // Read before `owner` moves into the struct.
-        let companion_servers = owner.companion_servers().unwrap_or_default();
+        let (companion_servers, companion_servers_error) = match owner.companion_servers() {
+            Ok(selection) => (selection, None),
+            Err(error) => (
+                CompanionSelection::all(),
+                Some(SharedString::from(format!(
+                    "Your MCP server selection could not be read, so it is shown as every server and cannot be changed until this is fixed. No agent configuration will be written: {error:#}"
+                ))),
+            ),
+        };
         let mut window = Self {
             owner,
             desktop_snapshot: None,
@@ -6865,6 +6985,8 @@ impl WalletWindow {
             // A read failure is not a reason to write fewer servers than the
             // default promises; the screen reports the failure when they save.
             companion_servers,
+            companion_servers_error,
+            agent_sync_status: None,
             detected_agents_generation: 0,
             #[cfg(target_os = "linux")]
             owner_auth: OwnerAuthState::Unknown,
@@ -7389,8 +7511,13 @@ impl WalletWindow {
             self.detected_agents = AgentDetectionState::Loading;
         }
         let selection = self.companion_servers.clone();
+        // Converging rewrites agent configurations with no press, so it must
+        // only ever act on a selection this wallet actually read. When the
+        // read failed the list still draws — it just reports what is there
+        // against the default, and changes nothing on disk.
+        let converge = self.companion_servers_error.is_none();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || detect_agents(&selection))
+            tokio::task::spawn_blocking(move || detect_agents(&selection, converge))
                 .await
                 .context("agent detection task failed")?
         });
@@ -9714,6 +9841,7 @@ impl WalletWindow {
         self.run_agent_configuration(
             move || sync_agent(kind, &selection),
             move |error| format!("Could not sync {}: {error:#}", kind.label()),
+            AgentSyncReport::message,
             cx,
         );
     }
@@ -9732,6 +9860,7 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) {
         if self.agent_reinstall == AgentReinstallState::Running
+            || self.companion_servers_error.is_some()
             || self.companion_servers.is_enabled(slug) == enabled
         {
             return;
@@ -9747,9 +9876,23 @@ impl WalletWindow {
             return;
         }
         self.companion_servers = selection.clone();
+        let title = companion_by_slug(slug).map_or(slug, |server| server.title);
         self.run_agent_configuration(
-            move || sync_installed_agents(&selection).map(|_| ()),
+            move || sync_installed_agents(&selection),
             |error| format!("The selection was saved, but agents could not be updated: {error:#}"),
+            move |report| {
+                let change = format!("{title} turned {}.", if enabled { "on" } else { "off" });
+                // Saying "no connected agent" is the point rather than an
+                // omission: a selection that reached nothing looks identical
+                // to one that reached everything, and the owner is one press
+                // of Sync away from the difference.
+                Some(match report.message() {
+                    Some(written) => format!("{change} {written}"),
+                    None => format!(
+                        "{change} No connected agent to update yet — press Sync on one below.",
+                    ),
+                })
+            },
             cx,
         );
     }
@@ -9761,14 +9904,16 @@ impl WalletWindow {
     /// the settings route, and refresh what the screen says afterwards.
     fn run_agent_configuration(
         &mut self,
-        work: impl FnOnce() -> Result<()> + Send + 'static,
+        work: impl FnOnce() -> Result<AgentSyncReport> + Send + 'static,
         describe: impl FnOnce(anyhow::Error) -> String + Send + 'static,
+        confirm: impl FnOnce(&AgentSyncReport) -> Option<String> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.agent_reinstall == AgentReinstallState::Running {
             return;
         }
         self.clear_route_error(Route::Settings);
+        self.agent_sync_status = None;
         self.agent_reinstall = AgentReinstallState::Running;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(work)
@@ -9779,8 +9924,11 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.agent_reinstall = AgentReinstallState::Idle;
-                if let Err(error) = result {
-                    view.set_route_error(Route::Settings, describe(error));
+                match result {
+                    Ok(report) => {
+                        view.agent_sync_status = confirm(&report).map(SharedString::from);
+                    }
+                    Err(error) => view.set_route_error(Route::Settings, describe(error)),
                 }
                 view.reload_detected_agents(cx);
                 cx.notify();
@@ -13502,9 +13650,17 @@ impl WalletWindow {
         claude_desktop_detected: bool,
         cx: &mut Context<Self>,
     ) -> GroupBox {
-        let busy = self.legal_gate || self.agent_reinstall == AgentReinstallState::Running;
+        // A selection nobody could read is not one anybody can edit: saving
+        // over it would write a guess, and the owner cannot see what they
+        // would be overwriting.
+        let busy = self.legal_gate
+            || self.agent_reinstall == AgentReinstallState::Running
+            || self.companion_servers_error.is_some();
         let mut group = GroupBox::new()
             .id("companion-server-settings")
+            .when_some(self.companion_servers_error.clone(), |group, error| {
+                group.child(selectable_error_alert("companion-servers-error", error))
+            })
             .child(
                 div()
                     .debug_selector(|| "settings-prose".to_owned())
@@ -13514,6 +13670,21 @@ impl WalletWindow {
                     .child(selectable_label(
                         "Ekubo runs one MCP server per protocol. Each is public, needs no credential, and can only prepare unsigned transactions for this wallet to simulate and for you to authorize. Everything here is on by default; turn one off to keep its tools out of your agent's context. Your choice is written to every agent already connected below.",
                     )),
+            )
+            // The one number the switches are actually about. A reader can
+            // see what each row costs but not what they add up to, and the
+            // total is what decides whether narrowing the set is worth doing
+            // at all.
+            .child(
+                div()
+                    .debug_selector(|| "companion-server-total".to_owned())
+                    .text_sm()
+                    .font_medium()
+                    .child(selectable_label(format!(
+                        "{} selected, about {} in your agent's context.",
+                        pluralize(self.companion_servers.enabled_count(), "server"),
+                        pluralize(self.companion_servers.enabled_tool_count(), "tool"),
+                    ))),
             );
         for (index, server) in COMPANION_SERVERS.into_iter().enumerate() {
             let enabled = self.companion_servers.is_enabled(server.slug);
@@ -13530,7 +13701,29 @@ impl WalletWindow {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().font_medium().child(server.title))
+                            .child(
+                                h_flex()
+                                    .items_baseline()
+                                    .gap_2()
+                                    .child(div().font_medium().child(server.title))
+                                    // Approximate on purpose: the count ships
+                                    // with the wallet and the catalog lives on
+                                    // the server, so it is an ordering cue for
+                                    // "51 against 6" rather than a promise
+                                    // about what the endpoint serves today.
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(selectable_text(
+                                                ("companion-server-tools", index),
+                                                &format!(
+                                                    "~{}",
+                                                    pluralize(server.tool_count, "tool")
+                                                ),
+                                            )),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .text_sm()
@@ -13886,7 +14079,20 @@ impl WalletWindow {
                                 "Sync writes a credential-free stdio entry plus your selected Ekubo servers into an agent's configuration. That agent starts the bridge when it uses the wallet; the bridge reaches this app through same-user operating-system IPC. Changing your selection above syncs every agent already connected, so this button is only needed for one that is not yet.",
                             )),
                     )
-                    .child(agents),
+                    .child(agents)
+                    // What the last write actually did. It sits under the
+                    // agent list rather than above it because that is where
+                    // the eye already is after pressing Sync, and it clears
+                    // itself the moment the next write starts.
+                    .when_some(self.agent_sync_status.clone(), |group, status| {
+                        group.child(
+                            Alert::success(
+                                "agent-sync-status",
+                                selectable_text("agent-sync-status-message", &status),
+                            )
+                            .into_any_element(),
+                        )
+                    }),
             ))
             .child(self.render_updates(cx))
             // Last of the settings proper, under updates, because it is the

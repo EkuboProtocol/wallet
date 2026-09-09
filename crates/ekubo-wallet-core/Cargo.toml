@@ -17,6 +17,7 @@ publish = false
 test-hooks = []
 
 [dependencies]
+erc8410 = { path = "../erc8410", features = ["schema"] }
 cargo-packager-updater = "0.2.3"
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 alloy-dyn-abi = { version = "=1.7.1", features = ["eip712"] }

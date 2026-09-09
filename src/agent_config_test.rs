@@ -705,10 +705,20 @@ fn a_pre_split_config_reads_as_present_but_out_of_sync() {
     let selection = CompanionSelection::all();
     assert!(!adapter.has_wallet_entry().unwrap());
 
-    let legacy = format!(
-        r#"{{"mcpServers":{{"ekubo_wallet":{{"command":"{}","args":["--client","cursor"]}},"ekubo":{{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}}}}"#,
-        helper.to_string_lossy()
-    );
+    // Serialized rather than interpolated. A Windows helper path is
+    // `C:\Users\…`, and splicing it into a JSON string literal emits invalid
+    // escapes — `\U` is not one — so the fixture was unparseable there and the
+    // entry it is supposed to establish read as absent.
+    let legacy = serde_json::json!({
+        "mcpServers": {
+            "ekubo_wallet": {
+                "command": helper.to_string_lossy(),
+                "args": ["--client", "cursor"],
+            },
+            "ekubo": {"type": "http", "url": "https://mcp.ekubo.org/mcp"},
+        }
+    })
+    .to_string();
     fs::write(&config, &legacy).unwrap();
     assert!(adapter.has_wallet_entry().unwrap());
     assert!(!adapter.in_sync(&selection).unwrap());

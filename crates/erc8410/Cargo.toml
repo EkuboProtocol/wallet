@@ -1,0 +1,24 @@
+[package]
+name = "erc8410"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+description = "ERC-8410 execution plan types, validation, and wallet-compatible digests"
+repository = "https://github.com/EkuboProtocol/wallet"
+license = "FSL-1.1-MIT"
+
+[features]
+default = []
+schema = ["dep:schemars"]
+
+[dependencies]
+alloy-primitives = { version = "=1.7.1", default-features = false, features = ["serde"] }
+alloy-json-abi = { version = "=1.7.1", default-features = false }
+anyhow = { version = "1.0.100", default-features = false }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+schemars = { version = "1.1.0", default-features = false, features = ["derive"], optional = true }
+serde = { version = "1.0.228", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1.0.145", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true
