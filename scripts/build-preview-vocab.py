@@ -36,6 +36,18 @@ import sys
 WORD = re.compile(r"[a-z_][a-z0-9_]*")
 LABEL_KEYS = ("label", "intent", "title", "description")
 
+# Enum tables map a raw parameter value to the words a reviewer actually sees:
+# a `uint8` of 2 renders as "Perp" rather than as 2. Those words are display
+# text like any label, and leaving them out meant a field the descriptor went
+# to the trouble of naming came through as an unknown token.
+#
+# Deliberately *not* harvested from anywhere else in a descriptor. `path`,
+# `$ref`, `format`, `includes` and `url` are machine identifiers that never
+# reach a reader, and `address` is a value -- one the tokenizer lifts into a
+# slot precisely so the decoder can never emit it. A vocabulary containing
+# `0x1111…` would undo the property this whole model rests on.
+ENUM_KEY = "enums"
+
 # Punctuation the renderer knows how to place. Everything else a decoded line
 # contains is dropped rather than given an entry nothing was trained to use.
 PUNCTUATION = list(",.;:()%-/")
@@ -65,13 +77,25 @@ withdraws wrap wraps yield your
 
 
 def shaped(word: str) -> bool:
-    """Whether the tokenizer could ever emit this piece as a word."""
+    """Whether the tokenizer could ever emit this piece as a word.
+
+    The hex rule below is not belt-and-braces. Mining verb words out of a
+    decoded reading -- which names addresses -- once doubled this vocabulary
+    from 709 entries to 1,476, every extra one a fragment like `xdef1c0ded`.
+    A vocabulary entry is something the decoder may emit, so that would have
+    handed it the ability to write something that looks like an address.
+    """
     if not word or word.startswith("<") or WORD.fullmatch(word) is None:
         return False
     # Belt and braces against a hex blob arriving as a word: the address
     # scanner already lifts these, and an entry like `a0b86991` in the
     # vocabulary would be a value the decoder could emit.
-    return "0x" not in word and not is_long_hex(word)
+    return "0x" not in word and not is_long_hex(word) and not is_hex_fragment(word)
+
+
+def is_hex_fragment(word: str) -> bool:
+    """An address with its `0` eaten by a word-boundary regex: `xdef1c0ded`."""
+    return len(word) >= 6 and word[0] == "x" and all(c in "0123456789abcdef" for c in word[1:])
 
 
 def is_long_hex(word: str) -> bool:
@@ -88,6 +112,8 @@ def registry_words(registry: pathlib.Path) -> set[str]:
             for key, value in node.items():
                 if key in LABEL_KEYS:
                     found.update(text_words(value))
+                if key == ENUM_KEY:
+                    found.update(enum_words(value))
                 visit(value)
         elif isinstance(node, list):
             for item in node:
@@ -108,6 +134,20 @@ def text_words(value: object) -> set[str]:
     if isinstance(value, dict):
         return set().union(*(text_words(item) for item in value.values()), set())
     return set()
+
+
+def enum_words(node: object) -> set[str]:
+    """The words an enum table renders, which are its values rather than its
+    keys: the key is the raw parameter, the value is what a reader sees."""
+    found: set[str] = set()
+    if isinstance(node, dict):
+        for table in node.values():
+            if isinstance(table, dict):
+                for shown in table.values():
+                    found |= text_words(shown)
+            else:
+                found |= text_words(table)
+    return found
 
 
 def corpus_words(corpus: pathlib.Path) -> set[str]:

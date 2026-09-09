@@ -38,6 +38,15 @@ CLASS_RULES: list[tuple[str, str]] = [
     # Removing an authority, before the rule that grants one: "Revoke
     # Delegation" is not a delegation and "Decrease allowance" is not an
     # approval.
+    # `setApprovalForAll` first, both directions, because it is the single
+    # most dangerous shape a wallet signs -- blanket operator control of an
+    # entire collection -- and because the word-boundary rules below miss it
+    # entirely: "setapprovalforall" has no boundary in front of "approve", so
+    # it fell through every rule and landed on "unrecognized". A drainer
+    # approval labelled as an unrecognized call is the worst outcome this
+    # table can produce.
+    (r"setapprovalforall.*\brevoke|setapprovalforall.*\bfalse", "revocation"),
+    (r"setapprovalforall|\bblanket operator|\boperator .*\bcontrol of all", "approval"),
     (r"\brevoke|\bderegister|\bunwhitelist|\bdeaffiliate"
      r"|\bremove (signer|member|vote signer|addresses|root)"
      r"|\bdelete delegation|\bdecrease allowance|\bclear .*vote|\brenounce", "revocation"),
@@ -258,16 +267,61 @@ def classify(intent: str | None) -> str:
     return "unrecognized"
 
 
-def risk_of(name: str, warnings: list[str], has_value: bool) -> str:
+def risk_of(name: str, warnings: list[str], has_value: bool, own: bool) -> str:
     """The attention a call warrants, from what it is rather than how it reads."""
     joined = " ".join(warnings).lower()
     if any(phrase in joined for phrase in CRITICAL_WARNINGS):
         return "critical"
     if name == "unrecognized" and has_value:
         return "critical"
+    # Moving assets between two accounts this wallet holds is not the thing
+    # Caution exists to flag. A reviewer can read an address; what they cannot
+    # read off one is whether the other end is also theirs, which is the whole
+    # reason the interpretation annotates it -- and having done so, the risk
+    # band should not then treat the transfer as though it left.
+    if own and name in ("transfer", "bridge"):
+        return "routine"
     if name in CAUTION_CLASSES:
         return "caution"
     return "routine"
+
+
+# The standard ERC calls, whose meaning is fixed by the standard rather than by
+# a protocol, so the wording can be too. `setApprovalForAll` earns two entries
+# of its own: the class verb "approve" produced "approve letting 0x… spend
+# 0x…", which describes an allowance over one token, when what is actually
+# being granted is control of every token in a collection. Getting the wording
+# right matters most exactly where the transaction is most dangerous.
+STANDARD_SHAPES: list[tuple[str, str, list[str]]] = [
+    (
+        "setapprovalforall: grant",
+        "let",
+        ["{verb} {address1} control every {token1}", "{verb} {address1} control every token"],
+    ),
+    (
+        "setapprovalforall: revoke",
+        "stop",
+        ["{verb} {address1} controlling every {token1}", "{verb} {address1} controlling every token"],
+    ),
+]
+
+
+def standard_shape(description: str | None) -> tuple[list[str], list[str]] | None:
+    """The verb and shapes for a call the ERC defines rather than a protocol.
+
+    Only `setApprovalForAll` so far, and it is here because the class verb got
+    it badly wrong: "approve letting 0x… spend 0x…" describes an allowance over
+    one token, when what is being granted is control of every token in a
+    collection. The wording has to be right exactly where the transaction is
+    most dangerous.
+    """
+    if not description:
+        return None
+    lowered = description.lower()
+    for marker, verb, templates in STANDARD_SHAPES:
+        if marker in lowered:
+            return verb.split(), templates
+    return None
 
 
 def verb_words(intent: str | None, name: str) -> list[str]:
@@ -329,8 +383,28 @@ def fill(template: str, slots: list[tuple[int, str]], verb: list[str]) -> list[s
     return pieces
 
 
-def summarize(name: str, slots: list[tuple[int, str]], intent: str | None) -> list[str]:
-    """The first template of a class whose roles this call can fill."""
+def summarize(
+    name: str,
+    slots: list[tuple[int, str]],
+    intent: str | None,
+    described: str | None,
+) -> list[str]:
+    """The first template whose roles this call can fill.
+
+    `intent` is the descriptor's authored line and is safe to take words from:
+    a human wrote it and it names no addresses. `described` is the decoded
+    reading, which does name addresses, so it is only ever *matched against*
+    -- never mined for words. Taking words from it put hex fragments into the
+    vocabulary, doubling it from 709 entries to 1,476 and handing the decoder
+    the ability to emit something that looks like an address.
+    """
+    standard = standard_shape(described)
+    if standard is not None:
+        verb, templates = standard
+        for template in templates:
+            pieces = fill(template, slots, verb)
+            if pieces is not None:
+                return pieces
     verb = verb_words(intent, name)
     for template in TEMPLATES.get(name, TEMPLATES["unrecognized"]):
         pieces = fill(template, slots, verb)
@@ -398,8 +472,9 @@ def label(example: dict[str, Any], intents: dict[str, str | None]) -> dict[str, 
             )
             if owner == call
         ]
-        intent = intents.get(example["formats"][call]) if call < len(example["formats"]) else None
-        per_call.append(summarize(names[call], slots, intent))
+        key = example["formats"][call] if call < len(example["formats"]) else ""
+        described = descriptions[call] if call < len(descriptions) else None
+        per_call.append(summarize(names[call], slots, intents.get(key), described))
     # Every reference a call's summary makes must be to a slot that call
     # produced. This is the invariant the plan-global indexing above exists to
     # keep, and it is checked rather than trusted: getting it wrong is silent,
@@ -426,7 +501,12 @@ def label(example: dict[str, Any], intents: dict[str, str | None]) -> dict[str, 
     name = plan_class(names)
     labeled = dict(example)
     labeled["class"] = name
-    labeled["risk"] = risk_of(name, example.get("warnings", []), example.get("has_value", False))
+    # The interpretation writes "(your account …)" beside an address it
+    # recognizes as the owner's own, so that annotation is the signal.
+    own = any("your account" in line for line in descriptions)
+    labeled["risk"] = risk_of(
+        name, example.get("warnings", []), example.get("has_value", False), own
+    )
     labeled["summary_pieces"] = summary
     return labeled
 

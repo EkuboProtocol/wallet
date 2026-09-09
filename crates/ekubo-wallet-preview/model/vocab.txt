@@ -99,6 +99,7 @@ calls
 cancel
 cancels
 cast
+cbbtc
 cctp
 celo
 chain
@@ -126,6 +127,7 @@ content
 contenturi
 contract
 control
+controlling
 convert
 converts
 cooldown
@@ -138,6 +140,7 @@ creator
 credentials
 current
 curve
+dai
 data
 datas
 date
@@ -159,6 +162,7 @@ delegator
 delete
 deposit
 deposits
+deprecated
 dequeue
 deregister
 desc
@@ -303,6 +307,7 @@ lend
 lends
 lengths
 lesser
+let
 letting
 limit
 limits
@@ -416,6 +421,7 @@ per
 percentages
 period
 permit
+perp
 place
 plus
 poap
@@ -553,6 +559,7 @@ signaturedeadline
 signatures
 signer
 signing
+single
 six
 skip
 slashing
@@ -564,8 +571,10 @@ spender
 spending
 split
 splitter
+spot
 src
 ssv
+stable
 stake
 staked
 stakes
@@ -573,6 +582,7 @@ start
 state
 static
 steth
+stop
 storage
 storageid
 subtracted
@@ -656,6 +666,7 @@ upvote
 uri
 url
 usdc
+usdt
 use
 user
 using
@@ -680,6 +691,7 @@ votes
 voting
 vp
 vs
+weth
 when
 while
 whitelist

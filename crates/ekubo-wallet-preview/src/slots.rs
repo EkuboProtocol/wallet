@@ -171,15 +171,26 @@ pub struct PlanDocument {
 }
 
 impl PlanDocument {
-    /// True when nothing in the plan decoded to anything nameable. The engine
-    /// answers `Unrecognized` for these without a forward pass: there is no
-    /// signal to classify, and spending a GPU dispatch to guess at one is
-    /// exactly the confident-noise failure this model must not have.
+    /// True when nothing in the plan decoded to anything nameable *and*
+    /// nothing is being sent.
+    ///
+    /// The engine answers `Unrecognized` for these without a forward pass:
+    /// there is no signal to classify, and spending a dispatch to guess at one
+    /// is the confident-noise failure this model must not have.
+    ///
+    /// Native value is the exception, and it is the case that matters. A call
+    /// nobody decoded which is also *sending two and a half ether* is not a
+    /// plan with nothing to say about it -- the amount is the whole story, the
+    /// slotizer lifts it, and returning no sentence there left the most
+    /// alarming transaction in the list as the only one with no words next to
+    /// it.
     #[must_use]
     pub fn is_opaque(&self) -> bool {
-        self.calls
-            .iter()
-            .all(|call| call.description.is_none() && call.details.is_empty())
+        self.calls.iter().all(|call| {
+            call.description.is_none()
+                && call.details.is_empty()
+                && is_zero_value(&call.native_value)
+        })
     }
 }
 

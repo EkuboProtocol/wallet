@@ -350,3 +350,34 @@ fn a_long_prefix_is_not_mistaken_for_a_protocol() {
             .any(|slot| slot.kind == SlotKind::Protocol)
     );
 }
+
+/// A call nobody decoded which is also sending ether is not a plan with
+/// nothing to say about it: the amount is the whole story.
+#[test]
+fn an_undecoded_call_that_sends_value_is_not_opaque() {
+    let silent = PlanDocument {
+        calls: vec![CallSummary {
+            target: SPENDER.to_owned(),
+            native_value: "0 ETH".to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(silent.is_opaque());
+
+    let sending = PlanDocument {
+        calls: vec![CallSummary {
+            target: SPENDER.to_owned(),
+            native_value: "2.5 ETH".to_owned(),
+            ..CallSummary::default()
+        }],
+    };
+    assert!(
+        !sending.is_opaque(),
+        "the most alarming call in a list must not be the only one with no words beside it"
+    );
+    let slotized = slotize(&sending);
+    assert!(
+        slotized.slots.iter().any(|slot| slot.text == "2.5 ETH"),
+        "the amount must be lifted so a summary can name it"
+    );
+}
