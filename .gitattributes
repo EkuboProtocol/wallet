@@ -1,4 +1,21 @@
-# These documents are compiled into the MCP server with `include_str!`.
-# Normalize their bytes across platforms so Windows packages advertise the
-# same Markdown resources as macOS and Linux packages.
+# These files are compiled into the binary verbatim with `include_str!`.
+# Normalize their bytes across platforms so a Windows package advertises the
+# same resources, ships the same legal text, and parses the same data as the
+# macOS and Linux packages built from the same commit.
+#
+# Without this, Git converts them to CRLF on a Windows checkout and every one
+# of them is embedded with different bytes there. The rule used to name only
+# `docs/skills/**/SKILL.md`, which left the rest of the set converted; a test
+# asserting on a line break inside `docs/mcp-security-model.md` is what found
+# the gap. Anything new reached by `include_str!` belongs in this list.
+docs/mcp-server-instructions.md text eol=lf
+docs/mcp-security-model.md text eol=lf
+docs/policy-authoring.md text eol=lf
 docs/skills/**/SKILL.md text eol=lf
+LICENSE text eol=lf
+THIRD_PARTY_LICENSES.md text eol=lf
+contrib/polkit/com.ekubo.wallet.policy text eol=lf
+crates/ekubo-wallet-core/networks.json text eol=lf
+crates/ekubo-wallet-core/default-tokens.json text eol=lf
+crates/ekubo-wallet-core/token-prices.json text eol=lf
+crates/mcp-bridge/src/offline_capabilities.json text eol=lf
