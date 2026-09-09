@@ -157,7 +157,7 @@ Then, mechanically:
   needed. Then *look at them*. Shoot before your change as well as after: at
   base 16 a faithful `rem` conversion is pixel-identical, so a diff there is a
   regression, and base 20 is where fixed pixels give themselves away.
-- The full gate in `CLAUDE.md` before landing.
+- The full gate in `AGENTS.md` before landing.
 
 A render test passing is not a design review, and one screenshot is not proof.
 Keyboard path, focus restoration, window minimum, and the failure states are
