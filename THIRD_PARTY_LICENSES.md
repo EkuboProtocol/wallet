@@ -795,7 +795,7 @@ SOFTWARE.
 - async-recursion 1.1.1 — Robert Usher <266585+dcchut@users.noreply.github.com> — https://github.com/dcchut/async-recursion
 - async-trait 0.1.92 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/async-trait
 - auto_impl 1.3.0 — Ashley Mannix <ashleymannix@live.com.au>, Lukas Kalbertodt <lukas.kalbertodt@gmail.com> — https://github.com/auto-impl-rs/auto_impl/
-- backhand 0.25.1 — wcampbell <wcampbell1995@gmail.com> — https://github.com/wcampbell0x2a/backhand
+- backhand 0.25.2 — wcampbell <wcampbell1995@gmail.com> — https://github.com/wcampbell0x2a/backhand
 - backtrace 0.3.76 — The Rust Project Developers — https://github.com/rust-lang/backtrace-rs
 - base64 0.13.1 — Alice Maz <alice@alicemaz.com>, Marshall Pierce <marshall@mpierce.org> — https://github.com/marshallpierce/rust-base64
 - base64 0.22.1 — Marshall Pierce <marshall@mpierce.org> — https://github.com/marshallpierce/rust-base64
@@ -1570,7 +1570,7 @@ SOFTWARE.
 - alloy-transport 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-transport-http 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-tx-macros 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- backhand 0.25.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- backhand 0.25.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - bitcoin-consensus-encoding 1.1.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-internals 0.6.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-io 0.1.101: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode

@@ -148,6 +148,54 @@ fn package_version_marker_is_unambiguous_and_old_signed_bytes_cannot_claim_a_new
     assert!(embedded_binary_version(ambiguous).is_err());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn appimage_version_verification_reads_compressed_blocks_and_rejects_version_replay() {
+    use backhand::{FilesystemCompressor, FilesystemWriter, NodeHeader, compression::Compressor};
+
+    for compressor in [Compressor::Gzip, Compressor::Xz, Compressor::Zstd] {
+        let mut binary = vec![b'x'; 300_000];
+        binary.extend_from_slice(b"\0EKUBO-WALLET-PACKAGE-VERSION:2.0.0\0");
+        let mut filesystem = FilesystemWriter::default();
+        filesystem.set_compressor(FilesystemCompressor::new(compressor, None).unwrap());
+        filesystem
+            .push_dir_all("usr/bin", NodeHeader::default())
+            .unwrap();
+        filesystem
+            .push_file(
+                Cursor::new(binary),
+                "usr/bin/ekubo-wallet",
+                NodeHeader::default(),
+            )
+            .unwrap();
+        let mut squashfs = Cursor::new(Vec::new());
+        filesystem.write(&mut squashfs).unwrap();
+        let mut appimage = b"AppImage runtime prefix".to_vec();
+        appimage.extend(squashfs.into_inner());
+
+        assert_eq!(
+            embedded_package_version(&appimage, UpdateFormat::AppImage)
+                .unwrap()
+                .to_string(),
+            "2.0.0"
+        );
+        verify_embedded_package_version(
+            &update("2.0.0", "https://example.test/wallet.AppImage"),
+            &appimage,
+        )
+        .unwrap();
+        assert!(
+            verify_embedded_package_version(
+                &update("3.0.0", "https://example.test/wallet.AppImage"),
+                &appimage
+            )
+            .is_err()
+        );
+        appimage.truncate(40);
+        assert!(embedded_package_version(&appimage, UpdateFormat::AppImage).is_err());
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_archive(version: &str) -> Vec<u8> {
     let binary = format!("prefix\0EKUBO-WALLET-PACKAGE-VERSION:{version}\0suffix");
