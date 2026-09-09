@@ -49,6 +49,7 @@ mod sealed;
 pub(crate) mod signature_requests;
 pub mod signature_review;
 pub mod simulation;
+pub mod simulation_preview;
 pub mod simulation_store;
 pub mod sql;
 pub mod token_list;

@@ -12,12 +12,19 @@ fn summary(calls: Vec<CallSummary>) -> String {
     let predictions = calls
         .iter()
         .map(|_| TransactionPreview {
+            basis: crate::SummaryBasis::Interpretation,
             class: TransactionClass::Swap,
             risk: RiskBand::Routine,
             summary: String::new(),
         })
         .collect::<Vec<_>>();
-    summarize(&PlanDocument { calls }, &predictions)
+    summarize(
+        &PlanDocument {
+            simulation: None,
+            calls,
+        },
+        &predictions,
+    )
 }
 fn swap() -> CallSummary {
     let mut result = call(
@@ -249,5 +256,110 @@ fn same_symbol_different_asset_does_not_omit_approval_amount() {
     assert_eq!(
         summary(vec![approval, action]),
         "Approve 250 USDC and swap 250 USDC for ETH"
+    );
+}
+
+fn simulated_plan() -> PlanDocument {
+    PlanDocument {
+        calls: vec![CallSummary {
+            native_value: "1 ETH".into(),
+            ..CallSummary::default()
+        }],
+        simulation: Some(crate::slots::SimulatedFlows {
+            sent: vec!["1 ETH".into()],
+            received: vec!["2400 USDG".into()],
+            from_logs: false,
+        }),
+    }
+}
+
+#[test]
+fn opaque_calls_describe_simulated_receipts_without_claiming_a_swap() {
+    let mut plan = simulated_plan();
+    assert_eq!(summarize(&plan, &[]), "Send 1 ETH and receive 2400 USDG");
+    plan.simulation.as_mut().unwrap().from_logs = true;
+    assert_eq!(summarize(&plan, &[]), "Send 1 ETH and receive 2400 USDG");
+    plan.simulation = None;
+    assert_eq!(summarize(&plan, &[]), "Unknown call sending 1 ETH");
+}
+
+#[test]
+fn simulation_does_not_override_decoded_intent_or_hide_permissions() {
+    let mut plan = simulated_plan();
+    plan.calls[0].description = Some("deposit".into());
+    assert_eq!(compose(&plan, &[]).basis, SummaryBasis::Interpretation);
+    plan.calls[0].description = None;
+    let mut approval = call("approve spender router for 250 USDC", &[]);
+    approval.warnings.push("Unlimited approval".into());
+    plan.calls.insert(0, approval);
+    let text = summarize(&plan, &[]);
+    assert!(text.starts_with("Unlimited approve"), "{text}");
+    assert!(text.contains("receive 2400 USDG"), "{text}");
+    plan.calls.push(CallSummary::default());
+    assert!(
+        compose(&plan, &[]).basis == SummaryBasis::Interpretation,
+        "global effects cannot be assigned to either unknown call"
+    );
+}
+
+#[test]
+fn long_simulated_outcomes_respect_the_card_limit_without_cutting_amounts() {
+    let mut plan = simulated_plan();
+    plan.simulation.as_mut().unwrap().received =
+        vec!["123456789012345678901234567890 VERY_LONG_TOKEN_SYMBOL".into(); 8];
+    let text = summarize(&plan, &[]);
+    assert!(text.chars().count() <= MAX_CHARS);
+    assert_eq!(text, "Unknown call sending 1 ETH");
+}
+
+#[test]
+fn inferred_intent_requires_candidate_agreement_and_compatible_effects() {
+    let mut plan = simulated_plan();
+    let candidate = |signature: &str| crate::slots::AbiCandidate {
+        signature: signature.into(),
+        contract_match: false,
+        arguments: vec![],
+    };
+    plan.calls[0].evidence = Some(crate::slots::CallEvidence {
+        abi: vec![candidate("swapExactInput(uint256)")],
+        ..Default::default()
+    });
+    let result = compose(&plan, &[]);
+    assert_eq!(result.text, "Swap 1 ETH for 2400 USDG");
+    assert_eq!(result.basis, SummaryBasis::InferredIntent);
+    assert_eq!(result.inferred_class, Some(TransactionClass::Swap));
+    plan.calls[0]
+        .evidence
+        .as_mut()
+        .unwrap()
+        .abi
+        .push(candidate("deposit(uint256)"));
+    assert_eq!(compose(&plan, &[]).inferred_class, None);
+    assert_eq!(summarize(&plan, &[]), "Send 1 ETH and receive 2400 USDG");
+    plan.calls[0].evidence.as_mut().unwrap().abi = vec![candidate("deposit(uint256)")];
+    assert_eq!(summarize(&plan, &[]), "Deposit 1 ETH");
+    plan.calls[0].evidence.as_mut().unwrap().abi = vec![candidate("repay(uint256)")];
+    assert_eq!(
+        compose(&plan, &[]).inferred_class,
+        None,
+        "repayment cannot explain an unrelated receipt"
+    );
+    plan.simulation.as_mut().unwrap().received.clear();
+    assert_eq!(summarize(&plan, &[]), "Repay 1 ETH");
+    plan.calls[0].evidence.as_mut().unwrap().abi = vec![candidate("swapExactInput(uint256)")];
+    assert_eq!(
+        compose(&plan, &[]).inferred_class,
+        None,
+        "a swap needs an observed receipt"
+    );
+}
+
+#[test]
+fn compound_function_names_do_not_hide_their_final_action() {
+    assert_eq!(candidate_action("swapAndDeposit(uint256)"), None);
+    assert_eq!(candidate_action("depositAndStake(uint256)"), None);
+    assert_eq!(
+        candidate_action("unwrapWETH9(uint256,address)"),
+        Some("unwrap")
     );
 }

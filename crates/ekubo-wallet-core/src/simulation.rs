@@ -335,6 +335,13 @@ pub async fn simulate_execution(
         );
     }
 
+    if fork.is_none() {
+        crate::simulation_preview::invalidate(
+            wallet.instance_id,
+            network.chain_id,
+            &format!("{:#x}", plan.digest()),
+        );
+    }
     let _permit = simulation_slot().await?;
 
     // Failover, at the granularity of the whole simulation rather than the
@@ -451,6 +458,7 @@ async fn finalize_policy(
         .as_ref()
         .map(crate::execution::PreparedExecution::summary);
     result.prepared_execution = prepared;
+    crate::simulation_preview::record(wallet.instance_id, network.chain_id, &result);
     Ok(result)
 }
 

@@ -79,12 +79,19 @@ Each neural input is bounded to 512 tokens and 48 slots. A per-plan attention-wo
 | `target`      | `string`   | the contract, already labeled                     |
 | `nativeValue` | `string`   | native value, already rendered with its currency  |
 
+The call-array form remains supported. To supply exact-plan simulation context, pass `{ calls, simulation: { sent: ["1 ETH"], received: ["2400 USDG"], from_logs: false } }`; each member of `previewAll` accepts either form. The caller must bind this display-only context to the actual wallet and plan, use trusted token identities/units, and distinguish measured balances from transfer-log estimates. `evidence.tokens` supplies trusted address/label pairs found in the call.
+
 The model reads a compact projection of the decoded interpretation and optional execution evidence. Concrete displayed values remain bound to the supplied fields.
 
 ## Output
 
 ```ts
-{ class: string; risk: "routine" | "caution" | "critical"; summary: string }
+{
+  class: string;
+  risk: "routine" | "caution" | "critical";
+  summary: string;
+  basis: "interpretation" | "simulation" | "simulationTransfers" | "inferredIntent";
+}
 ```
 
 `class` is one of: `swap`, `approval`, `revocation`, `transfer`, `bridge`,
@@ -92,7 +99,9 @@ The model reads a compact projection of the decoded interpretation and optional 
 `liquidity_add`, `liquidity_remove`, `governance`, `nft`, `wrap_unwrap`,
 `delegation`, `batch`, `unrecognized`.
 
-Both are closed sets, so a forward pass cannot invent a category your UI has no
+`basis` belongs in secondary metadata, not as a headline prefix. An inferred intent is advisory; it does not establish a contract match or lower the unknown-call risk floor.
+
+The class and risk are closed sets, so a forward pass cannot invent a category your UI has no
 rendering for. `summary` is capped at 100 characters, including incomplete-plan fallbacks. Handle initialization or inference errors by retaining the decoded review.
 
 ## Size

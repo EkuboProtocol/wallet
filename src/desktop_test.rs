@@ -3511,3 +3511,16 @@ fn an_unreadable_selection_neither_converges_nor_edits() {
         "editing an unread selection would save a guess over the owner's choice"
     );
 }
+
+#[test]
+fn walletconnect_progress_distinguishes_transport_from_waiting_for_the_dapp() {
+    use crate::walletconnect::SessionStatus;
+    assert!(walletconnect_pairing_status(Some(&SessionStatus::Pairing)).starts_with("Connecting"));
+    assert!(
+        walletconnect_pairing_status(Some(&SessionStatus::AwaitingProposal))
+            .starts_with("Waiting for the dapp")
+    );
+    assert!(
+        walletconnect_pairing_status(Some(&SessionStatus::Reconnecting)).contains("Reconnecting")
+    );
+}

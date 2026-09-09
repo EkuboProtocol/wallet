@@ -84,6 +84,8 @@ pub struct Preview {
     /// One sentence. Empty when the model produced nothing renderable, which
     /// callers should show as the class alone rather than as an error.
     pub summary: String,
+    /// Display provenance, separate from the intent headline.
+    pub basis: String,
 }
 
 impl From<TransactionPreview> for Preview {
@@ -92,6 +94,13 @@ impl From<TransactionPreview> for Preview {
             class: preview.class.corpus_name().to_owned(),
             risk: preview.risk.corpus_name().to_owned(),
             summary: preview.summary,
+            basis: match preview.basis {
+                ekubo_wallet_preview::SummaryBasis::Interpretation => "interpretation",
+                ekubo_wallet_preview::SummaryBasis::BalanceChanges => "simulation",
+                ekubo_wallet_preview::SummaryBasis::TransferLogs => "simulationTransfers",
+                ekubo_wallet_preview::SummaryBasis::InferredIntent => "inferredIntent",
+            }
+            .into(),
         }
     }
 }
@@ -198,13 +207,8 @@ impl Previewer {
     /// Rejects when the argument is not an array of plans.
     #[wasm_bindgen(js_name = previewAll)]
     pub async fn preview_all(&self, plans: JsValue) -> Result<JsValue, JsError> {
-        let plans: Vec<Vec<Call>> = serde_wasm_bindgen::from_value(plans)?;
-        let documents: Vec<PlanDocument> = plans
-            .into_iter()
-            .map(|calls| PlanDocument {
-                calls: calls.into_iter().map(CallSummary::from).collect(),
-            })
-            .collect();
+        let plans: Vec<PlanInput> = serde_wasm_bindgen::from_value(plans)?;
+        let documents: Vec<PlanDocument> = plans.into_iter().map(PlanDocument::from).collect();
         let previews = match &self.engine {
             Backend::Cpu(engine) => engine
                 .card_all_async(&documents)
@@ -221,11 +225,34 @@ impl Previewer {
     }
 }
 
-fn document_of(calls: JsValue) -> Result<PlanDocument, JsError> {
-    let calls: Vec<Call> = serde_wasm_bindgen::from_value(calls)?;
-    Ok(PlanDocument {
-        calls: calls.into_iter().map(CallSummary::from).collect(),
-    })
+/// Accept the existing call array or an object with exact-plan display context.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PlanInput {
+    Calls(Vec<Call>),
+    Context {
+        calls: Vec<Call>,
+        #[serde(default)]
+        simulation: Option<ekubo_wallet_preview::slots::SimulatedFlows>,
+    },
+}
+
+impl From<PlanInput> for PlanDocument {
+    fn from(input: PlanInput) -> Self {
+        let (calls, simulation) = match input {
+            PlanInput::Calls(calls) => (calls, None),
+            PlanInput::Context { calls, simulation } => (calls, simulation),
+        };
+        Self {
+            calls: calls.into_iter().map(CallSummary::from).collect(),
+            simulation,
+        }
+    }
+}
+
+fn document_of(input: JsValue) -> Result<PlanDocument, JsError> {
+    let input: PlanInput = serde_wasm_bindgen::from_value(input)?;
+    Ok(input.into())
 }
 
 fn describe(error: &LoadError) -> JsError {

@@ -1011,18 +1011,11 @@ fn waiting_card_bounds_with_preview(
     measure(cx, window, view, &["inbox-waiting-card"])[0].expect("the waiting card must draw")
 }
 
-/// A preview is drawn, and it is drawn *in addition to* the deterministic
-/// headline rather than in place of it.
-///
-/// The card growing taller is what says the second line landed. If a future
-/// change ever renders the model's sentence instead of the decoded one, the
-/// card stops growing and this fails -- which is the point, because the
-/// decoded headline is the part that was checked.
+/// The AI sentence is the primary title, with provenance in the metadata.
 #[gpui::test]
-fn a_preview_draws_below_the_headline_rather_than_replacing_it(cx: &mut gpui::TestAppContext) {
+fn a_preview_replaces_the_decoded_headline(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
-
     let without = waiting_card_bounds(cx, window, &view, TWO_LINE_HEADLINE);
     let with = waiting_card_bounds_with_preview(
         cx,
@@ -1030,26 +1023,17 @@ fn a_preview_draws_below_the_headline_rather_than_replacing_it(cx: &mut gpui::Te
         &view,
         TWO_LINE_HEADLINE,
         Some(ekubo_wallet_preview::TransactionPreview {
+            basis: ekubo_wallet_preview::SummaryBasis::Interpretation,
             class: ekubo_wallet_preview::TransactionClass::Approval,
             risk: ekubo_wallet_preview::RiskBand::Critical,
-            summary: "approve 0x1111111254EEB25477B68fb85Ed929f73A960582 to spend \
-                      1000.5 USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)"
-                .to_owned(),
+            summary: "Unlimited approve and swap USDC for ETH".into(),
         }),
     );
     assert!(
-        with.size.height > without.size.height,
-        "the preview must take its own line beside the headline, not replace it: \
-         {} against {}",
-        with.size.height,
-        without.size.height
+        with.size.height <= without.size.height,
+        "the AI summary replaces the title without an extra summary row"
     );
-    assert!(
-        with.size.width <= without.size.width,
-        "a long summary must wrap inside the card rather than widen it: {} against {}",
-        with.size.width,
-        without.size.width
-    );
+    assert_eq!(with.size.width, without.size.width);
 }
 
 /// A machine with no model is the ordinary case, not an error, so the card
@@ -4607,4 +4591,97 @@ fn stale_preview_results_cannot_attach_to_a_new_snapshot(cx: &mut gpui::TestAppC
         );
         assert_eq!(wallet.desktop_snapshot_revision, revision + 1);
     });
+}
+
+#[gpui::test]
+fn contextual_operation_status_is_visible_until_work_finishes(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+        wallet.set_route(Route::Activity);
+        wallet.desktop_snapshot_loading = false;
+        wallet.transaction_previews_loading = false;
+        wallet.review_flow = ReviewFlowState::Processing("Rejecting request");
+        assert_eq!(wallet.operation_status(), Some("Rejecting request"));
+    });
+    assert!(measure(cx, window, &view, &["wallet-operation-status"])[0].is_some());
+    cx.update_entity(&view, |wallet, _| {
+        wallet.review_flow = ReviewFlowState::Ready;
+        wallet.desktop_snapshot_loading = true;
+        assert_eq!(wallet.operation_status(), Some("Updating requests"));
+        wallet.desktop_snapshot_loading = false;
+        assert_eq!(wallet.operation_status(), None);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn notification_loading_is_cancelled_when_navigation_changes(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
+        wallet.set_route(Route::Activity);
+        wallet.inbox_tab = InboxTab::Decided;
+        wallet.notification_record_loading = Some(HEADLINE_ROW);
+        assert_eq!(
+            wallet.operation_status(),
+            Some("Opening requested activity")
+        );
+    });
+    assert!(measure(cx, window, &view, &["wallet-operation-status"])[0].is_some());
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_inbox_tab(InboxTab::Waiting, cx);
+        assert!(wallet.notification_record_loading.is_none());
+        wallet.notification_record_loading = Some(HEADLINE_ROW);
+        let generation = wallet.notification_load_generation;
+        wallet.set_route(Route::WalletConnect);
+        assert!(wallet.notification_record_loading.is_none());
+        assert_ne!(wallet.notification_load_generation, generation);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn confirmed_rejection_removes_the_waiting_card_before_snapshot_refresh(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, cx| {
+        let mut record = cleared_transaction_fixture(HEADLINE_ROW);
+        record.status = PendingStatus::AwaitingApproval;
+        let mut snapshot = quiet_snapshot();
+        snapshot
+            .reviews
+            .as_mut()
+            .unwrap()
+            .transactions
+            .push(record.clone());
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        // An older read is already in flight when the decision is confirmed.
+        wallet.desktop_snapshot_loading = true;
+        record.status = PendingStatus::Rejected;
+        wallet.synchronize_transaction_activity(HEADLINE_ROW, Some(record), cx);
+        assert!(
+            wallet
+                .snapshot()
+                .unwrap()
+                .reviews
+                .as_ref()
+                .unwrap()
+                .transactions
+                .is_empty()
+        );
+        assert!(
+            wallet.desktop_snapshot_invalidated,
+            "the earlier read must not resurrect the card"
+        );
+        assert!(wallet.desktop_snapshot_dirty);
+        wallet.desktop_snapshot_loading = false;
+        wallet.desktop_snapshot_dirty = false;
+        wallet.desktop_snapshot_invalidated = false;
+    });
+    release(cx, &view);
 }

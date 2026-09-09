@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 
-use crate::{CallSummary, PlanDocument, TransactionClass, TransactionPreview};
+use crate::{CallSummary, PlanDocument, SummaryBasis, TransactionClass, TransactionPreview};
 
 /// Preferred card width in Unicode scalar values. Shorter complete summaries
 /// are preferable to padding; the hard limit also applies to fallbacks.
@@ -26,8 +26,24 @@ struct Phrase {
 /// before supporting actions. It never slices a finished sentence or a value.
 #[must_use]
 pub fn summarize(document: &PlanDocument, predictions: &[TransactionPreview]) -> String {
+    compose(document, predictions).text
+}
+
+pub(crate) struct CardSummary {
+    pub text: String,
+    pub basis: SummaryBasis,
+    pub inferred_class: Option<TransactionClass>,
+}
+
+pub(crate) fn compose(document: &PlanDocument, predictions: &[TransactionPreview]) -> CardSummary {
+    let mut basis = SummaryBasis::Interpretation;
+    let mut inferred_class = None;
     if document.calls.is_empty() {
-        return "No calls".into();
+        return CardSummary {
+            text: "No calls".into(),
+            basis,
+            inferred_class,
+        };
     }
     let salience = crate::focus::scores(
         &predictions
@@ -42,7 +58,7 @@ pub fn summarize(document: &PlanDocument, predictions: &[TransactionPreview]) ->
             })
             .collect::<Vec<_>>(),
     );
-    let phrases: Vec<_> = document
+    let mut phrases: Vec<_> = document
         .calls
         .iter()
         .enumerate()
@@ -52,11 +68,43 @@ pub fn summarize(document: &PlanDocument, predictions: &[TransactionPreview]) ->
             p
         })
         .collect();
+    if let Some((summary, action)) = simulated_outcome(document) {
+        let opaque = document
+            .calls
+            .iter()
+            .position(|call| call.description.is_none());
+        if let Some(index) = opaque
+            && phrases.iter().enumerate().all(|(other, phrase)| {
+                other == index
+                    || (phrase.permission
+                        && crate::slots::is_zero_value(&document.calls[other].native_value))
+            })
+        {
+            inferred_class = action;
+            basis = if action.is_some() {
+                SummaryBasis::InferredIntent
+            } else if document
+                .simulation
+                .as_ref()
+                .is_some_and(|flows| flows.from_logs)
+            {
+                SummaryBasis::TransferLogs
+            } else {
+                SummaryBasis::BalanceChanges
+            };
+            phrases[index].brief.clone_from(&summary);
+            phrases[index].detail = summary;
+        }
+    }
     let phrases = bind_permissions(document, phrases);
     let phrases = coalesce(&phrases);
     let baseline: Vec<_> = phrases.iter().map(|phrase| phrase.brief.clone()).collect();
     if length(&join(&baseline)) > MAX_CHARS {
-        return overview(&phrases, document.calls.len());
+        return CardSummary {
+            text: overview(&phrases, document.calls.len()),
+            basis: SummaryBasis::Interpretation,
+            inferred_class: None,
+        };
     }
     let mut chosen = baseline;
     let mut order: Vec<_> = (0..phrases.len()).collect();
@@ -86,7 +134,131 @@ pub fn summarize(document: &PlanDocument, predictions: &[TransactionPreview]) ->
             break;
         }
     }
-    join(&chosen)
+    CardSummary {
+        text: join(&chosen),
+        basis,
+        inferred_class,
+    }
+}
+
+// An opaque call accompanied only by permissions has no decoded asset intent to override. Prefer the
+// observed pay/receive outcome, explicitly marked simulated. Never call it a
+// swap merely because assets moved, nor attribute whole-plan effects to one
+// step among several substantive calls. Oversized outcomes retain the unknown fallback.
+fn simulated_outcome(document: &PlanDocument) -> Option<(String, Option<TransactionClass>)> {
+    let mut opaque = document
+        .calls
+        .iter()
+        .filter(|call| call.description.is_none());
+    let call = opaque.next()?;
+    if opaque.next().is_some() {
+        return None;
+    }
+    let flows = document.simulation.as_ref()?;
+    if flows.received.len() + flows.sent.len() > 4
+        || flows
+            .received
+            .iter()
+            .chain(&flows.sent)
+            .any(|value| value.len() > MAX_CHARS * 4)
+    {
+        return None;
+    }
+    if let Some((action, text)) = inferred_outcome(call, flows)
+        && length(&text) <= MAX_CHARS
+    {
+        return Some((text, Some(action)));
+    }
+    if flows.received.is_empty() {
+        return None;
+    }
+    let received = flows.received.join(", ");
+    let summary = if flows.sent.is_empty() {
+        format!("receive {received}")
+    } else {
+        format!("send {} and receive {received}", flows.sent.join(", "))
+    };
+    (length(&summary) <= MAX_CHARS).then_some((summary, None))
+}
+
+// Function-name agreement plus observed economic direction supports an intent
+// estimate. A selector collision must not let the first candidate win. Generic
+// execute/multicall names and flow shape alone never become a swap claim.
+fn inferred_outcome(
+    call: &CallSummary,
+    flows: &crate::slots::SimulatedFlows,
+) -> Option<(TransactionClass, String)> {
+    let candidates = &call.evidence.as_ref()?.abi;
+    if candidates.is_empty() || candidates.len() > 4 {
+        return None;
+    }
+    let action = candidate_action(&candidates[0].signature)?;
+    if !candidates
+        .iter()
+        .all(|candidate| candidate_action(&candidate.signature) == Some(action))
+    {
+        return None;
+    }
+    let sent = match flows.sent.as_slice() {
+        [amount] => Some(amount.as_str()),
+        _ => None,
+    };
+    let received = match flows.received.as_slice() {
+        [amount] => Some(amount.as_str()),
+        _ => None,
+    };
+    let (class, text) = match action {
+        "swap" => (
+            TransactionClass::Swap,
+            format!("swap {} for {}", sent?, received?),
+        ),
+        "deposit" => (TransactionClass::Supply, format!("deposit {}", sent?)),
+        "withdraw" => (
+            TransactionClass::Withdraw,
+            format!("withdraw {}", received?),
+        ),
+        "repay" if flows.received.is_empty() => {
+            (TransactionClass::Repay, format!("repay {}", sent?))
+        }
+        "borrow" => (TransactionClass::Borrow, format!("borrow {}", received?)),
+        "stake" => (TransactionClass::Stake, format!("stake {}", sent?)),
+        "claim" if flows.sent.is_empty() => {
+            (TransactionClass::Claim, format!("claim {}", received?))
+        }
+        "wrap" if received.is_some() => (TransactionClass::WrapUnwrap, format!("wrap {}", sent?)),
+        "unwrap" if sent.is_some() => (
+            TransactionClass::WrapUnwrap,
+            format!("unwrap {}", received?),
+        ),
+        _ => return None,
+    };
+    Some((class, text))
+}
+
+fn candidate_action(signature: &str) -> Option<&'static str> {
+    let name = signature.split_once('(')?.0.to_ascii_lowercase();
+    // Keep ambiguous generic names out. In particular deposit() may mean
+    // wrapping, staking or a vault deposit; "deposit" is the common action.
+    let actions = [
+        ("swap", "swap"),
+        ("deposit", "deposit"),
+        ("supply", "deposit"),
+        ("withdraw", "withdraw"),
+        ("redeem", "withdraw"),
+        ("repay", "repay"),
+        ("borrow", "borrow"),
+        ("stake", "stake"),
+        ("claim", "claim"),
+        ("unwrap", "unwrap"),
+        ("wrap", "wrap"),
+    ];
+    let (prefix, action) = actions
+        .iter()
+        .find(|(prefix, _)| name.starts_with(prefix))?;
+    let rest = &name[prefix.len()..];
+    // A compound function may contain another substantive action whose
+    // intent would be hidden by choosing its first verb.
+    (!actions.iter().any(|(other, _)| rest.contains(other))).then_some(*action)
 }
 
 fn bind_permissions(document: &PlanDocument, mut phrases: Vec<Phrase>) -> Vec<Phrase> {

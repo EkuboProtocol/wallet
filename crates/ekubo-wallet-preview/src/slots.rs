@@ -175,6 +175,9 @@ pub struct CallEvidence {
     pub calldata: String,
     #[serde(default)]
     pub abi: Vec<AbiCandidate>,
+    /// Trusted token identities actually present in this call.
+    #[serde(default)]
+    pub tokens: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -189,7 +192,21 @@ pub struct AbiCandidate {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "train", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlanDocument {
+    /// Net wallet effects from a recent successful simulation of this exact
+    /// plan. Global effects are never assigned to an individual decoded call.
+    #[cfg_attr(feature = "train", serde(default))]
+    pub simulation: Option<SimulatedFlows>,
     pub calls: Vec<CallSummary>,
+}
+
+/// Trusted, already formatted asset amounts. These are observations, not
+/// evidence that the target implements a particular protocol or function.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimulatedFlows {
+    #[serde(default)]
+    pub from_logs: bool,
+    pub sent: Vec<String>,
+    pub received: Vec<String>,
 }
 
 impl PlanDocument {

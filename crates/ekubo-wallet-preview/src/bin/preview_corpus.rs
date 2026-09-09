@@ -97,6 +97,7 @@ fn main() -> Result<(), String> {
             {
                 let example = corpus::record(
                     &PlanDocument {
+                        simulation: None,
                         calls: vec![summary],
                     },
                     vec![String::new()],
@@ -242,7 +243,10 @@ fn build(
         protocols.push(protocol);
     }
     Some(corpus::record(
-        &PlanDocument { calls: summaries },
+        &PlanDocument {
+            simulation: None,
+            calls: summaries,
+        },
         formats,
         protocols,
     ))

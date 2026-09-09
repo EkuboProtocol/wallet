@@ -15,6 +15,7 @@ fn call(description: &str) -> CallSummary {
 
 fn plan(description: &str) -> PlanDocument {
     PlanDocument {
+        simulation: None,
         calls: vec![call(description)],
     }
 }
@@ -159,6 +160,7 @@ fn values_past_the_cap_lose_their_reference_not_their_kind() {
         .map(|index| format!("n {index}"))
         .collect();
     let document = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some("batch".to_owned()),
             details,
@@ -179,13 +181,17 @@ fn values_past_the_cap_lose_their_reference_not_their_kind() {
 #[test]
 fn a_long_plan_is_truncated_rather_than_growing_without_bound() {
     let calls = (0..400).map(|_| call("swap tokens for tokens")).collect();
-    let slotized = slotize(&PlanDocument { calls });
+    let slotized = slotize(&PlanDocument {
+        simulation: None,
+        calls,
+    });
     assert!(slotized.tokens.len() <= MAX_INPUT_TOKENS);
 }
 
 #[test]
 fn a_plan_that_decoded_to_nothing_is_opaque() {
     let opaque = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             target: SPENDER.to_owned(),
             ..CallSummary::default()
@@ -199,6 +205,7 @@ fn a_plan_that_decoded_to_nothing_is_opaque() {
 fn a_zero_native_value_is_left_out_of_the_input() {
     for zero in ["0", "0 ETH", "0.0 ETH", " "] {
         let document = PlanDocument {
+            simulation: None,
             calls: vec![CallSummary {
                 description: Some("call".to_owned()),
                 native_value: zero.to_owned(),
@@ -212,6 +219,7 @@ fn a_zero_native_value_is_left_out_of_the_input() {
         );
     }
     let document = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some("call".to_owned()),
             native_value: "1.5 ETH".to_owned(),
@@ -230,6 +238,7 @@ fn a_zero_native_value_is_left_out_of_the_input() {
 #[test]
 fn the_target_is_lifted_too() {
     let document = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some("swap".to_owned()),
             target: format!("USDC ({USDC})"),
@@ -247,6 +256,7 @@ fn the_target_is_lifted_too() {
 #[test]
 fn a_slot_remembers_which_call_produced_it() {
     let document = PlanDocument {
+        simulation: None,
         calls: vec![
             call(&format!("approve spender {SPENDER} for 500 USDC ({USDC})")),
             call(&format!(
@@ -362,6 +372,7 @@ fn a_long_prefix_is_not_mistaken_for_a_protocol() {
 #[test]
 fn an_undecoded_call_that_sends_value_is_not_opaque() {
     let silent = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             target: SPENDER.to_owned(),
             native_value: "0 ETH".to_owned(),
@@ -371,6 +382,7 @@ fn an_undecoded_call_that_sends_value_is_not_opaque() {
     assert!(silent.is_opaque());
 
     let sending = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             target: SPENDER.to_owned(),
             native_value: "2.5 ETH".to_owned(),
@@ -401,6 +413,7 @@ fn zero_native_value_uses_the_amount_not_the_currency_suffix() {
 #[test]
 fn boolean_values_remain_distinguishable_to_the_classifier() {
     let plan = |flag| PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             evidence: None,
             description: Some(format!("setApprovalForAll operator 0x1111 enabled {flag}")),
@@ -424,6 +437,7 @@ fn field_metadata_stays_bounded_when_details_are_large() {
     let mut details = vec![format!("Data: 0x{}", "ab".repeat(2000))];
     details.extend(std::iter::repeat_n("Amount: 1 ETH".into(), 1000));
     let slots = slotize(&PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some("Protocol — Action".into()),
             details,

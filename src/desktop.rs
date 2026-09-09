@@ -2786,6 +2786,10 @@ pub struct WalletWindow {
     /// requested. What is derived from a snapshot is keyed on this.
     desktop_snapshot_revision: u64,
     desktop_snapshot_loading: bool,
+    desktop_snapshot_invalidated: bool,
+    transaction_previews_loading: bool,
+    notification_record_loading: Option<uuid::Uuid>,
+    notification_load_generation: u64,
     desktop_snapshot_dirty: bool,
     desktop_snapshot_error: Option<SharedString>,
     tray: Rc<RefCell<Option<PlatformTray>>>,
@@ -3302,6 +3306,7 @@ enum ReviewFlowState {
     Ready,
     Loading,
     Busy,
+    Processing(&'static str),
 }
 
 impl ReviewFlowState {
@@ -3919,6 +3924,22 @@ const PAIRING_URI_SCHEME: &str = "wc:";
 fn clipboard_pairing_uri(text: &str) -> Option<&str> {
     let text = text.trim();
     text.starts_with(PAIRING_URI_SCHEME).then_some(text)
+}
+
+fn walletconnect_pairing_status(
+    status: Option<&crate::walletconnect::SessionStatus>,
+) -> &'static str {
+    use crate::walletconnect::SessionStatus;
+    match status {
+        Some(SessionStatus::AwaitingProposal) => {
+            "Waiting for the dapp to request a connection. Keep its connect dialog open; your review opens when the request arrives."
+        }
+        Some(SessionStatus::Reconnecting) => "Connection interrupted. Reconnecting to the dapp.",
+        Some(SessionStatus::Disconnecting) => "Cancelling connection",
+        _ => {
+            "Connecting to WalletConnect. You can cancel while the connection is being established."
+        }
+    }
 }
 
 fn walletconnect_pairing_is_in_flight(sessions: &[SessionSummary], connecting: uuid::Uuid) -> bool {
@@ -4704,64 +4725,6 @@ fn render_inbox_waiting_card(
             cx,
         ))
         .into_any_element()
-}
-
-/// The model's reading of a waiting request: a category chip, and the sentence
-/// it wrote.
-///
-/// Marked as machine-written, and deliberately placed *below* the headline
-/// rather than in place of it. The headline is decoded deterministically and
-/// the fields inside the review are authoritative; this is a second opinion
-/// that helps somebody triage a queue, and the wording has to say so or a
-/// reader will reasonably take it for a fact the wallet checked.
-fn render_preview_line(
-    id: &SharedString,
-    preview: &ekubo_wallet_preview::TransactionPreview,
-    cx: &App,
-) -> AnyElement {
-    let colour = match preview.risk {
-        ekubo_wallet_preview::RiskBand::Critical => cx.theme().danger,
-        ekubo_wallet_preview::RiskBand::Caution => cx.theme().warning,
-        ekubo_wallet_preview::RiskBand::Routine => cx.theme().muted_foreground,
-    };
-    let mut line = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_2()
-        .text_sm()
-        .child(
-            div()
-                .px_2()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(colour)
-                .text_color(colour)
-                .text_xs()
-                .child(preview.class.label()),
-        );
-    if !preview.summary.is_empty() {
-        line = line.child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .text_color(cx.theme().foreground)
-                .child(
-                    selectable_text(
-                        SharedString::from(format!("{id}-preview")),
-                        &preview.summary,
-                    )
-                    .whitespace_normal(),
-                ),
-        );
-    }
-    line.child(
-        div()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child("AI summary"),
-    )
-    .into_any_element()
 }
 
 /// One changed rule: which way it moves authority, and what it now says.
@@ -6928,6 +6891,10 @@ impl WalletWindow {
             desktop_snapshot_generation: 0,
             desktop_snapshot_revision: 0,
             desktop_snapshot_loading: false,
+            desktop_snapshot_invalidated: false,
+            transaction_previews_loading: false,
+            notification_record_loading: None,
+            notification_load_generation: 0,
             desktop_snapshot_dirty: false,
             desktop_snapshot_error: None,
             tray,
@@ -7676,6 +7643,32 @@ impl WalletWindow {
         cx.notify();
     }
 
+    /// A completed action makes an older in-flight reading obsolete.
+    fn invalidate_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.desktop_snapshot_invalidated = self.desktop_snapshot_loading;
+        self.reload_desktop_snapshot(cx);
+    }
+
+    fn operation_status(&self) -> Option<&'static str> {
+        match self.review_flow {
+            ReviewFlowState::Loading => return Some("Preparing transaction review"),
+            ReviewFlowState::Processing(label) => return Some(label),
+            _ => {}
+        }
+        if self.route == Route::Activity {
+            if self.notification_record_loading.is_some() {
+                return Some("Opening requested activity");
+            }
+            if self.desktop_snapshot_loading {
+                return Some("Updating requests");
+            }
+            if self.transaction_previews_loading && self.inbox_tab == InboxTab::Waiting {
+                return Some("Summarizing transactions");
+            }
+        }
+        None
+    }
+
     fn reload_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
         if self.desktop_snapshot_loading {
             self.desktop_snapshot_dirty = true;
@@ -7698,6 +7691,13 @@ impl WalletWindow {
                     return;
                 }
                 view.desktop_snapshot_loading = false;
+                if view.desktop_snapshot_invalidated {
+                    view.desktop_snapshot_invalidated = false;
+                    view.desktop_snapshot_dirty = false;
+                    view.reload_desktop_snapshot(cx);
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(snapshot) => {
                         if let Ok(networks) = &snapshot.networks {
@@ -7744,10 +7744,11 @@ impl WalletWindow {
     /// Model work is a second stage: a slow CPU or GPU startup must not delay
     /// the review controls. Generation matching prevents old results from
     /// being attached after the owner changes metadata or the queue refreshes.
-    fn reload_transaction_previews(&self, generation: u64, cx: &mut Context<Self>) {
+    fn reload_transaction_previews(&mut self, generation: u64, cx: &mut Context<Self>) {
         let Some(snapshot) = self.desktop_snapshot.clone() else {
             return;
         };
+        self.transaction_previews_loading = true;
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
@@ -7757,12 +7758,11 @@ impl WalletWindow {
             .context("transaction preview task failed")
         });
         cx.spawn(async move |view, cx| {
-            if let Ok(previews) = task.await {
-                let _ = view.update(cx, |view, cx| {
-                    view.apply_transaction_previews(generation, previews);
-                    cx.notify();
-                });
-            }
+            let previews = task.await.unwrap_or_default();
+            let _ = view.update(cx, |view, cx| {
+                view.apply_transaction_previews(generation, previews);
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -7775,6 +7775,7 @@ impl WalletWindow {
         if generation != self.desktop_snapshot_generation {
             return;
         }
+        self.transaction_previews_loading = false;
         if let Some(snapshot) = &mut self.desktop_snapshot {
             Arc::make_mut(snapshot).transaction_previews = previews;
             self.desktop_snapshot_revision = self.desktop_snapshot_revision.wrapping_add(1);
@@ -8656,8 +8657,9 @@ impl WalletWindow {
             .walletconnect
             .lock()
             .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))?
-            .begin_uri(uri)?
-            .0;
+            .begin_uri(uri)?;
+        let (start, summary) = start;
+        self.walletconnect_sessions.push(summary);
         let session_id = start.id;
         self.walletconnect_connecting = Some(session_id);
         self.clear_route_error(Route::WalletConnect);
@@ -8825,6 +8827,7 @@ impl WalletWindow {
 
     fn finish_review_flow(&mut self, cx: &mut Context<Self>) {
         self.review_flow = ReviewFlowState::Ready;
+        self.invalidate_desktop_snapshot(cx);
         self.activate_next_waiting_surface(cx);
     }
 
@@ -8926,6 +8929,7 @@ impl WalletWindow {
             return;
         }
         self.inbox_tab = tab;
+        self.notification_record_loading = None;
         self.selected_record = None;
         self.reset_inbox_scroll();
         if tab == InboxTab::Decided {
@@ -10970,16 +10974,23 @@ impl WalletWindow {
     ) {
         if let Some(updated) = updated
             && let Some(snapshot) = self.desktop_snapshot.as_mut()
-            && let Ok(activity) = &mut Arc::make_mut(snapshot).activity
-            && let Some(record) = Arc::make_mut(activity).iter_mut().find(|record| {
-                matches!(
-                    record,
-                    OwnerActivityRecord::Transaction(existing)
-                        if existing.request_id == request_id
-                )
-            })
         {
-            *record = OwnerActivityRecord::Transaction(Box::new(updated));
+            let snapshot = Arc::make_mut(snapshot);
+            if updated.status != ekubo_wallet_core::pending::PendingStatus::AwaitingApproval
+                && let Ok(queues) = &mut snapshot.reviews
+            {
+                queues
+                    .transactions
+                    .retain(|record| record.request_id != request_id);
+            }
+            if let Ok(activity) = &mut snapshot.activity
+                && let Some(record) = Arc::make_mut(activity)
+                    .iter_mut()
+                    .find(|record| record.request_id() == request_id)
+            {
+                *record = OwnerActivityRecord::Transaction(Box::new(updated));
+            }
+            self.desktop_snapshot_revision = self.desktop_snapshot_revision.wrapping_add(1);
         }
         self.activity_inspections.remove(&request_id);
         if self.selected_record == Some(request_id) {
@@ -10988,7 +10999,7 @@ impl WalletWindow {
         // An action may persist a terminal status and then return an error
         // (notably cancellation discovering that the original already mined),
         // so reload on every outcome rather than only on a domain event.
-        self.reload_desktop_snapshot(cx);
+        self.invalidate_desktop_snapshot(cx);
     }
 
     fn refresh_visible_pending_transactions(&mut self, cx: &mut Context<Self>) {
@@ -11386,54 +11397,70 @@ impl WalletWindow {
     }
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
-            self.set_route_error(Route::Activity, "Finish or close the current review first.");
-            cx.notify();
-            return;
-        }
-        match self.owner.message_review_document(request_id) {
-            Ok(document) => {
-                let digest = document.request.digest.clone().unwrap_or_default();
-                self.active_review = Some(ActiveReview::new(
-                    document,
-                    None,
-                    Some(ActiveReviewCompletion::Message { request_id, digest }),
-                ));
-                self.clear_route_error(Route::Activity);
-            }
-            Err(error) => {
-                self.set_route_error(
-                    Route::Activity,
-                    format!("Could not open message review: {error:#}"),
-                );
-            }
-        }
-        cx.notify();
+        self.begin_signature_review(request_id, false, cx);
     }
 
     fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.begin_signature_review(request_id, true, cx);
+    }
+
+    fn begin_signature_review(
+        &mut self,
+        request_id: uuid::Uuid,
+        typed: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
         }
-        match self.owner.typed_data_review_document(request_id) {
-            Ok(document) => {
-                let digest = document.request.digest.clone().unwrap_or_default();
-                self.active_review = Some(ActiveReview::new(
-                    document,
-                    None,
-                    Some(ActiveReviewCompletion::TypedData { request_id, digest }),
-                ));
-                self.clear_route_error(Route::Activity);
-            }
-            Err(error) => {
-                self.set_route_error(
-                    Route::Activity,
-                    format!("Could not open typed-data review: {error:#}"),
-                );
-            }
-        }
+        self.notification_record_loading = None;
+        self.review_flow = ReviewFlowState::Processing(if typed {
+            "Preparing typed-data review"
+        } else {
+            "Preparing message review"
+        });
+        self.clear_route_error(Route::Activity);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                if typed {
+                    owner.typed_data_review_document(request_id)
+                } else {
+                    owner.message_review_document(request_id)
+                }
+            })
+            .await
+            .context("signature review task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.review_flow = ReviewFlowState::Ready;
+                match result {
+                    Ok(document) => {
+                        let digest = document.request.digest.clone().unwrap_or_default();
+                        let completion = if typed {
+                            ActiveReviewCompletion::TypedData { request_id, digest }
+                        } else {
+                            ActiveReviewCompletion::Message { request_id, digest }
+                        };
+                        view.active_review =
+                            Some(ActiveReview::new(document, None, Some(completion)));
+                    }
+                    Err(error) => {
+                        view.set_route_error(
+                            Route::Activity,
+                            format!("Could not open signature review: {error:#}"),
+                        );
+                        view.activate_next_waiting_surface(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -11446,6 +11473,7 @@ impl WalletWindow {
         }
         self.clear_route_error(Route::Activity);
         let owner = self.owner.clone();
+        self.notification_record_loading = None;
         let presenter = self.review_presenter.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
@@ -11558,6 +11586,15 @@ impl WalletWindow {
             return;
         }
         let completion = active.completion.take();
+        let progress = match (&command, &completion) {
+            (GuiReviewCommand::Reject, _) => "Rejecting request",
+            (GuiReviewCommand::Close, _) => "Closing review",
+            (_, Some(ActiveReviewCompletion::Message { .. })) => "Signing message",
+            (_, Some(ActiveReviewCompletion::TypedData { .. })) => "Signing typed data",
+            (_, Some(ActiveReviewCompletion::WalletConnect { .. })) => "Authorizing connection",
+            (_, Some(ActiveReviewCompletion::AccountRemoval { .. })) => "Removing account",
+            _ => "Approving and sending transaction",
+        };
         let owner = self.owner.clone();
         let mut wait_for_flow = false;
         match (command, completion) {
@@ -11611,26 +11648,54 @@ impl WalletWindow {
                 Some(ActiveReviewCompletion::Message { request_id, .. }),
             ) => {
                 self.active_review = None;
-                match owner.reject_message(request_id) {
-                    Ok(_) => self.clear_route_error(Route::Activity),
-                    Err(error) => self.set_route_error(
-                        Route::Activity,
-                        format!("Could not reject message: {error:#}"),
-                    ),
-                }
+                wait_for_flow = true;
+                let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    tokio::task::spawn_blocking(move || owner.reject_message(request_id))
+                        .await
+                        .context("request rejection task failed")?
+                });
+                cx.spawn(async move |view, cx| {
+                    let result = task.await;
+                    let _ = view.update(cx, |view, cx| {
+                        view.finish_review_flow(cx);
+                        match result {
+                            Ok(_) => view.clear_route_error(Route::Activity),
+                            Err(error) => view.set_route_error(
+                                Route::Activity,
+                                format!("Could not reject request: {error:#}"),
+                            ),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             (
                 GuiReviewCommand::Reject,
                 Some(ActiveReviewCompletion::TypedData { request_id, .. }),
             ) => {
                 self.active_review = None;
-                match owner.reject_typed_data(request_id) {
-                    Ok(_) => self.clear_route_error(Route::Activity),
-                    Err(error) => self.set_route_error(
-                        Route::Activity,
-                        format!("Could not reject typed data: {error:#}"),
-                    ),
-                }
+                wait_for_flow = true;
+                let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    tokio::task::spawn_blocking(move || owner.reject_typed_data(request_id))
+                        .await
+                        .context("request rejection task failed")?
+                });
+                cx.spawn(async move |view, cx| {
+                    let result = task.await;
+                    let _ = view.update(cx, |view, cx| {
+                        view.finish_review_flow(cx);
+                        match result {
+                            Ok(_) => view.clear_route_error(Route::Activity),
+                            Err(error) => view.set_route_error(
+                                Route::Activity,
+                                format!("Could not reject request: {error:#}"),
+                            ),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             (
                 GuiReviewCommand::Approve,
@@ -11810,7 +11875,7 @@ impl WalletWindow {
             }
         }
         if wait_for_flow {
-            self.review_flow = ReviewFlowState::Busy;
+            self.review_flow = ReviewFlowState::Processing(progress);
         }
         self.activate_next_waiting_surface(cx);
         cx.notify();
@@ -11835,6 +11900,8 @@ impl WalletWindow {
     }
 
     fn set_route(&mut self, route: Route) {
+        self.notification_record_loading = None;
+        self.notification_load_generation = self.notification_load_generation.wrapping_add(1);
         if self.network_editor_open && route != self.route {
             return;
         }
@@ -11945,14 +12012,7 @@ impl WalletWindow {
                 request_id,
             } => {
                 self.inbox_tab = InboxTab::Decided;
-                self.selected_record = Some(request_id);
-                // Only a transaction has a receipt to fetch. A decided
-                // signature is complete in the row the snapshot already holds.
-                if subject == NotificationSubject::Transaction
-                    && !self.activity_inspections.contains_key(&request_id)
-                {
-                    self.load_transaction_inspection(request_id, cx);
-                }
+                self.open_notification_activity(request_id, subject, cx);
             }
             NotificationRoute::WalletConnect => {
                 // The proposal presents itself as a modal the moment it
@@ -11972,6 +12032,69 @@ impl WalletWindow {
         }
         cx.notify();
         true
+    }
+
+    fn open_notification_activity(
+        &mut self,
+        request_id: uuid::Uuid,
+        subject: NotificationSubject,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_record = None;
+        self.notification_record_loading = Some(request_id);
+        self.notification_load_generation = self.notification_load_generation.wrapping_add(1);
+        let generation = self.notification_load_generation;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.activity_record(request_id))
+                .await
+                .context("reading requested activity failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.notification_load_generation != generation
+                    || view.notification_record_loading != Some(request_id)
+                    || view.route != Route::Activity
+                {
+                    return;
+                }
+                view.notification_record_loading = None;
+                if view.selected_record.is_some() || view.notification_navigation_blocked() {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(record) => {
+                        if let Some(snapshot) = &mut view.desktop_snapshot
+                            && let Ok(activity) = &mut Arc::make_mut(snapshot).activity
+                            && let Some(listed) = Arc::make_mut(activity)
+                                .iter_mut()
+                                .find(|listed| listed.request_id() == request_id)
+                        {
+                            *listed = record.clone();
+                            view.desktop_snapshot_revision =
+                                view.desktop_snapshot_revision.wrapping_add(1);
+                        }
+                        view.detached_activity_records.insert(request_id, record);
+                        view.selected_record = Some(request_id);
+                        view.clear_route_error(Route::Activity);
+                        // A read begun before this exact lookup must not undo
+                        // it. Later snapshots can advance the visible record.
+                        view.invalidate_desktop_snapshot(cx);
+                        if subject == NotificationSubject::Transaction {
+                            view.load_transaction_inspection(request_id, cx);
+                        }
+                    }
+                    Err(error) => view.set_route_error(
+                        Route::Activity,
+                        format!("Could not open requested activity: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
@@ -12258,6 +12381,27 @@ impl WalletWindow {
         button: Button,
         cx: &App,
     ) -> gpui::Div {
+        let ai_summary = preview
+            .map(|p| p.summary.as_str())
+            .filter(|text| !text.trim().is_empty());
+        let title = ai_summary.unwrap_or(title);
+        let subtitle = if ai_summary.is_some() {
+            let source = match preview.map(|preview| preview.basis) {
+                Some(ekubo_wallet_preview::SummaryBasis::BalanceChanges) => {
+                    "AI summary · Simulation"
+                }
+                Some(ekubo_wallet_preview::SummaryBasis::TransferLogs) => {
+                    "AI summary · Simulated transfers"
+                }
+                Some(ekubo_wallet_preview::SummaryBasis::InferredIntent) => {
+                    "AI summary · Inferred intent"
+                }
+                _ => "AI summary",
+            };
+            format!("{source} · {subtitle}")
+        } else {
+            subtitle.to_owned()
+        };
         div()
             .w_full()
             .min_w_0()
@@ -12284,14 +12428,16 @@ impl WalletWindow {
                             .font_medium()
                             .whitespace_normal(),
                     )
-                    .children(preview.map(|preview| render_preview_line(id, preview, cx)))
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(
-                                selectable_text(SharedString::from(format!("{id}-meta")), subtitle)
-                                    .whitespace_normal(),
+                                selectable_text(
+                                    SharedString::from(format!("{id}-meta")),
+                                    &subtitle,
+                                )
+                                .whitespace_normal(),
                             ),
                     ),
             )
@@ -12441,16 +12587,8 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3();
-        if self.review_flow == ReviewFlowState::Loading {
-            content = content.child(
-                h_flex()
-                    .id("transaction-review-loading")
-                    .flex_none()
-                    .gap_2()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(Spinner::new().small())
-                    .child(selectable_label("Opening the exact transaction review")),
-            );
+        if self.desktop_snapshot.is_none() && self.desktop_snapshot_loading {
+            return content;
         }
         let cards = match self.inbox_waiting_cards() {
             Ok(cards) => cards,
@@ -12505,7 +12643,7 @@ impl WalletWindow {
         );
         self.inbox_overflow_indicator
             .set_scroll_handle(self.inbox_waiting_list.clone());
-        let blocked = self.review_flow.is_in_progress();
+        let blocked = self.review_flow.is_in_progress() || self.desktop_snapshot_loading;
         let view = cx.entity().downgrade();
         let cards = Arc::<[InboxWaitingCard]>::from(cards);
         content.child(
@@ -13099,14 +13237,14 @@ impl WalletWindow {
         let Some(request_id) = self.selected_record else {
             return div().into_any_element();
         };
-        let Ok(records) = self.cached_activity_records() else {
-            return div().into_any_element();
-        };
+        let records = self.cached_activity_records().ok();
         let Some(record) = records
-            .iter()
-            .find(|record| record.request_id() == request_id)
-            // A record cleared out of the list is hidden, not deleted, and an
-            // automation run still points at it. One fetched by id lives here.
+            .as_ref()
+            .and_then(|records| {
+                records
+                    .iter()
+                    .find(|record| record.request_id() == request_id)
+            })
             .or_else(|| self.detached_activity_records.get(&request_id))
         else {
             // Unreachable in a settled frame: `render` drops a selection the
@@ -14716,7 +14854,8 @@ impl WalletWindow {
                     .child(
                         app_button("paste-walletconnect-uri")
                             .debug_selector(|| "paste-walletconnect-uri".to_owned())
-                            .label("Paste link & connect")
+                            .label(if connecting.is_some() { "Connecting" } else { "Paste link & connect" })
+                            .loading(connecting.is_some())
                             .primary()
                             .disabled(account_unavailable || connecting.is_some())
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -14738,7 +14877,12 @@ impl WalletWindow {
                         )
                     }),
             );
-        if connecting.is_some() {
+        if let Some(session_id) = connecting {
+            let status = self
+                .walletconnect_sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| &session.status);
             panel = panel.child(
                 // With the spinner, because this is a wait on a relay and a
                 // dapp, and the only thing on screen saying so was a sentence
@@ -14746,15 +14890,12 @@ impl WalletWindow {
                 // stalled. Waiting is a state the interface has to show, not
                 // one the reader should have to infer from a disabled button.
                 h_flex()
+                    .debug_selector(|| "walletconnect-pairing-status".to_owned())
                     .gap_2()
                     .items_center()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(Spinner::new().small())
-                    .child(selectable_label(
-                        "Paired. The review window opens when the dapp proposes a \
-                         connection; Cancel drops the pairing.",
-                    )),
+                    .child(selectable_label(walletconnect_pairing_status(status))),
             );
         }
         if let Some(error) = account_error {
@@ -15487,6 +15628,7 @@ impl WalletWindow {
     }
 
     fn show_activity_record(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.notification_record_loading = None;
         self.set_route(Route::Activity);
         self.inbox_tab = InboxTab::Decided;
         self.selected_record = Some(request_id);
@@ -19564,6 +19706,19 @@ impl WalletWindow {
             .gap_4()
             .when(route_fills_window, |content| content.flex_1().min_h_0())
             .when(!route_fills_window, gpui::Styled::flex_shrink_0)
+            .when_some(self.operation_status(), |content, status| {
+                content.child(
+                    h_flex()
+                        .debug_selector(|| "wallet-operation-status".to_owned())
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Spinner::new().small())
+                        .child(selectable_label(status)),
+                )
+            })
             .when_some(self.desktop_snapshot_error.clone(), |content, error| {
                 content.child(
                     selectable_error_alert("desktop-snapshot-error", error)

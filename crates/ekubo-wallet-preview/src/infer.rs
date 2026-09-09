@@ -113,6 +113,7 @@ impl<B: Backend> PreviewEngine<B> {
                 .calls
                 .iter()
                 .map(|call| TransactionPreview {
+                    basis: crate::SummaryBasis::Interpretation,
                     class: TransactionClass::Unrecognized,
                     risk: if call.description.is_some() {
                         RiskBand::Caution
@@ -126,6 +127,7 @@ impl<B: Backend> PreviewEngine<B> {
             let mut pending = Vec::new();
             for (index, call) in document.calls.iter().enumerate() {
                 let part = PlanDocument {
+                    simulation: None,
                     calls: vec![crate::evidence::project(call)],
                 };
                 let slots = slotize(&part);
@@ -215,7 +217,12 @@ impl<B: Backend> PreviewEngine<B> {
             if document.nothing_decoded() {
                 result.class = TransactionClass::Unrecognized;
             }
-            result.summary = crate::card::summarize(document, &predictions);
+            let summary = crate::card::compose(document, &predictions);
+            result.summary = summary.text;
+            result.basis = summary.basis;
+            if let Some(class) = summary.inferred_class {
+                result.class = class;
+            }
             outputs.push(result);
         }
         Ok(outputs)
@@ -269,6 +276,7 @@ impl<B: Backend> PreviewEngine<B> {
                 (
                     *index,
                     TransactionPreview {
+                        basis: crate::SummaryBasis::Interpretation,
                         class,
                         risk,
                         summary,
@@ -553,6 +561,7 @@ impl Prepared {
             // label the entire plan from its first 512 tokens.
             for call in &document.calls {
                 let part = PlanDocument {
+                    simulation: None,
                     calls: vec![call.clone()],
                 };
                 let slots = slotize(&part);
@@ -576,6 +585,7 @@ impl Prepared {
                 _ => RiskBand::Routine,
             };
             self.previews[index] = TransactionPreview {
+                basis: crate::SummaryBasis::Interpretation,
                 class,
                 risk: RiskBand::from_index(base_risk.index().max(call_risk_floor(call))),
                 summary: call.description.clone().unwrap_or_default(),
@@ -695,6 +705,7 @@ fn aggregate(parts: &[TransactionPreview]) -> TransactionPreview {
         &most_attention.summary
     };
     TransactionPreview {
+        basis: crate::SummaryBasis::Interpretation,
         class,
         risk: most_attention.risk,
         summary: format!(

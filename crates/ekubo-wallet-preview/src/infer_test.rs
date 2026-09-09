@@ -13,6 +13,7 @@ fn engine() -> PreviewEngine<TestBackend> {
 
 fn plan(description: &str) -> PlanDocument {
     PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some(description.to_owned()),
             ..CallSummary::default()
@@ -26,6 +27,7 @@ fn plan(description: &str) -> PlanDocument {
 #[test]
 fn an_opaque_plan_is_unrecognized_without_a_forward_pass() {
     let opaque = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             target: SPENDER.to_owned(),
             ..CallSummary::default()
@@ -53,6 +55,7 @@ fn a_batch_answers_one_preview_per_plan_in_order() {
     let documents = vec![
         plan("swap tokens"),
         PlanDocument {
+            simulation: None,
             calls: vec![CallSummary::default()],
         },
         plan(&format!("transfer 1.5 USDC ({USDC}) to {SPENDER}")),
@@ -181,6 +184,7 @@ fn punctuation_does_not_let_an_invented_value_through() {
 #[test]
 fn an_undecoded_call_that_sends_value_is_still_unrecognized() {
     let sending = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             target: SPENDER.to_owned(),
             native_value: "2.5 ETH".to_owned(),
@@ -219,6 +223,7 @@ fn an_overlong_single_call_is_not_summarized_from_its_prefix() {
 #[test]
 fn a_late_opaque_call_survives_long_plan_preparation() {
     let mut document = PlanDocument {
+        simulation: None,
         calls: vec![plan("swap tokens").calls.remove(0); 200],
     };
     document.calls.push(CallSummary {
@@ -232,6 +237,7 @@ fn a_late_opaque_call_survives_long_plan_preparation() {
     assert_eq!(prepared.pending.len(), 200);
     let mut parts = vec![
         TransactionPreview {
+            basis: crate::SummaryBasis::Interpretation,
             class: TransactionClass::Swap,
             risk: RiskBand::Routine,
             summary: "swap tokens".into()
@@ -295,6 +301,7 @@ fn a_transfer_from_never_names_the_sender_as_the_destination() {
 #[test]
 fn omitted_or_reordered_actions_trigger_the_extractive_fallback() {
     let slots = slotize(&PlanDocument {
+        simulation: None,
         calls: vec![
             plan("Ethena — Cooldown shares").calls.remove(0),
             plan("CoreDAO — Withdraw CORE").calls.remove(0),
@@ -335,6 +342,7 @@ fn long_inputs_reduce_the_dispatch_size() {
 #[test]
 fn selected_values_keep_their_field_roles_and_ignore_contract_targets() {
     let slots = slotize(&PlanDocument {
+        simulation: None,
         calls: vec![crate::CallSummary {
             evidence: None,
             description: Some("Uniswap — Remove liquidity".into()),
@@ -360,6 +368,7 @@ fn selected_values_keep_their_field_roles_and_ignore_contract_targets() {
 #[test]
 fn equal_values_in_different_fields_do_not_lose_their_roles() {
     let slots = slotize(&PlanDocument {
+        simulation: None,
         calls: vec![crate::CallSummary {
             evidence: None,
             description: Some("Protocol — Swap".into()),
@@ -386,6 +395,7 @@ fn equal_values_in_different_fields_do_not_lose_their_roles() {
 #[test]
 fn a_selected_native_value_is_labeled_as_native_value() {
     let slots = slotize(&PlanDocument {
+        simulation: None,
         calls: vec![crate::CallSummary {
             evidence: None,
             description: Some("Lido — Stake ETH".into()),
@@ -427,6 +437,7 @@ fn explicit_operator_grants_and_revocations_do_not_need_a_prediction() {
     ] {
         let mut prepared = Prepared::default();
         prepared.push(&PlanDocument {
+            simulation: None,
             calls: vec![crate::CallSummary {
                 description: Some(description.into()),
                 ..Default::default()
@@ -464,4 +475,29 @@ fn card_operator_risk_does_not_depend_on_model_output_or_optional_warnings() {
         "setApprovalForAll operator 0x2222222222222222222222222222222222222222 approved false",
     ));
     assert_eq!(revoke.risk, RiskBand::Routine);
+}
+
+#[test]
+fn simulated_receipts_ground_the_card_without_promoting_unknown_calls() {
+    let engine = crate::cpu::load().unwrap();
+    let mut document = PlanDocument {
+        calls: vec![CallSummary {
+            native_value: "1 ETH".into(),
+            ..CallSummary::default()
+        }],
+        simulation: Some(crate::slots::SimulatedFlows {
+            sent: vec!["1 ETH".into()],
+            received: vec!["2400 USDG".into()],
+            from_logs: false,
+        }),
+    };
+    let preview = engine.preview_all(&[document.clone()]).remove(0);
+    assert_eq!(preview.class, TransactionClass::Unrecognized);
+    assert_eq!(preview.risk, RiskBand::Critical);
+    assert_eq!(preview.summary, "Send 1 ETH and receive 2400 USDG");
+    document.simulation = None;
+    assert_eq!(
+        engine.preview_all(&[document]).remove(0).summary,
+        "Unknown call sending 1 ETH"
+    );
 }

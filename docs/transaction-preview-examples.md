@@ -186,3 +186,17 @@ Category: `transfer`. Advisory risk: `caution`.
 **Generated:** Deposit on Aave
 
 Category: `supply`. Advisory risk: `routine`.
+
+## Simulation context and inferred intent
+
+These outputs use the embedded model and constrained renderer. Simulation provenance is shown in the card metadata, not in the headline. Inferred function candidates remain advisory; the risk floor stays critical.
+
+| Evidence | Generated headline |
+|---|---|
+| Opaque ETH payment receiving USDG | Send 1 ETH and receive 2400 USDG |
+| Opaque ETH payment with USDG transfer logs | Send 1 ETH and receive 2400 USDG |
+| Opaque ETH payment without simulation | Unknown call sending 1 ETH |
+| Swap candidate with matching asset exchange | Swap 1 ETH for 2400 USDG |
+| Vault deposit is not inferred as a swap | Deposit 1 ETH |
+| Wrap is not inferred as a swap | Wrap 1 ETH |
+| Ambiguous execute stays an outcome | Send 1 ETH and receive 2400 USDG |

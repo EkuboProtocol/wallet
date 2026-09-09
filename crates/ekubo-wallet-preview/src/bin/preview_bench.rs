@@ -22,6 +22,7 @@ fn main() -> Result<(), String> {
 
 fn plan(calls: usize) -> PlanDocument {
     PlanDocument {
+        simulation: None,
         calls: (0..calls)
             .map(|i| CallSummary {
                 description: Some("Ethena — Cooldown shares".into()),

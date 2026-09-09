@@ -22,6 +22,7 @@ struct Batch {
 
 fn batch(length: usize) -> Batch {
     let document = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some(
                 "approve spender 0x1111111254EEB25477B68fb85Ed929f73A960582 for 5.5 USDC (0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48)"

@@ -36,7 +36,7 @@ fn main() -> Result<(), String> {
         failures += usize::from(!ok);
         println!(
             "{}",
-            serde_json::json!({"name":example.name,"document":example.document,"summary":preview.summary,"class":preview.class.corpus_name(),"risk":preview.risk.corpus_name(),"passed":ok})
+            serde_json::json!({"name":example.name,"document":example.document,"summary":preview.summary,"class":preview.class.corpus_name(),"risk":preview.risk.corpus_name(),"basis":format!("{:?}",preview.basis),"passed":ok})
         );
     }
     if failures > 0 {

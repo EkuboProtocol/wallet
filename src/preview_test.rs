@@ -36,6 +36,7 @@ fn an_unavailable_model_answers_an_empty_map_rather_than_failing() {
     let plans = vec![(
         Uuid::nil(),
         PlanDocument {
+            simulation: None,
             calls: vec![call_summary(
                 &interpretation(Some("swap tokens")),
                 "0xA0b8".to_owned(),
@@ -52,6 +53,7 @@ fn unchanged_interpretations_reuse_previews_but_changed_warnings_do_not() {
     let id = Uuid::new_v4();
     let mut cache = PreviewCache::new();
     let document = PlanDocument {
+        simulation: None,
         calls: vec![CallSummary {
             description: Some("swap tokens".into()),
             ..CallSummary::default()

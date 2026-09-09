@@ -1,6 +1,6 @@
 # Transaction previews
 
-The wallet produces a short summary of an entire waiting execution plan. The card targets 60–80 characters and never exceeds 100 Unicode scalar values. Shorter complete summaries stay short. Call order is preserved, while a learned plan-focus model decides which action gets more detail.
+The wallet produces a short summary of an entire waiting execution plan. The AI sentence is the primary waiting-card title, with “AI summary” provenance in the metadata; the decoded headline is the fallback when inference is unavailable. Full clear-signing details remain in the review. The card targets 60–80 characters and never exceeds 100 Unicode scalar values. Shorter complete summaries stay short. Call order is preserved, while a learned plan-focus model decides which action gets more detail.
 
 For example: `Approve and swap 250 USDC for ETH`, `Unlimited approve USDC and swap 250 USDC for ETH`, or `Swap 250 USDC for ETH, then revoke approval`.
 
@@ -14,7 +14,9 @@ Every candidate must have the correct selector, decode successfully with valid d
 
 The neural input is a compact projection of this evidence: clear-signing text, selector, candidate signatures with their provenance, and bounded typed argument readings. The model does not spend thousands of language tokens regenerating hex. Raw canonical approval bytes are also inspected directly to preserve an unlimited grant independently of prose or optional warnings. The full evidence stays in the document and in cache identity.
 
-Nested bytes and selector candidates do not establish an execution trace. A model-supported candidate can appear as `Unknown call (possible swap)`; it remains explicitly unknown and cannot lower the risk floor. Large or unfamiliar router payloads may still receive a general or incomplete summary. Simulation effects are not currently fed into this model.
+Nested bytes and selector candidates do not establish an execution trace. A model-supported candidate can appear as `Unknown call (possible swap)`; it remains explicitly unknown and cannot lower the risk floor. Large or unfamiliar router payloads may still receive a general or incomplete summary. Recent simulation effects now ground the constrained renderer. Core retains at most 64 successful real-chain results for two minutes, bound to wallet incarnation, chain and exact plan digest. Only balance evidence is retained; no policy verdict or signing handle is reused. This is a process-local display cache, so a restart or expired result falls back to call evidence without starting an RPC request.
+
+Trusted token addresses found in bounded canonical calldata words are labeled before neural projection, and observed simulation token addresses use current trusted symbols and decimals. Unknown identities cannot acquire a ticker through output substitution. An opaque call can say `Send 1 ETH and receive 2400 USDG`. Provenance is a separate typed field, displayed in the card metadata rather than prefixed to the headline. Compatible simulated flows plus agreement among function candidates can support `Swap 1 ETH for 2400 USDG`, `Deposit 1 ETH`, or another inferred action. Generic execute calls, conflicting candidates, and incompatible flows do not become swaps merely because two assets moved. Inferred intent stays advisory and does not relax the unknown call's risk floor. A single opaque asset-moving call can retain surrounding approvals/revocations, in order. Several substantive calls cannot have their combined effects assigned to one call. Decoded intent remains authoritative for composition; oversized or incomplete outcomes retain the ordinary unknown fallback. No new model weights or extra neural pass are required.
 
 ## Fast, hierarchical inference
 
@@ -65,3 +67,7 @@ cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin
 `preview-bench cpu` measures the card path, including typical calls, repeated and distinct 4,096-call plans, 8 MiB calldata, and near-limit model inputs. Its optional second argument `legacy` measures the earlier autoregressive path. Run an optimized build on one pinned CPU core and report cold initialization, warm p50/p95 and process memory separately. The target is below 300 ms per summary; measurements on a constrained modern desktop do not guarantee that latency on every low-end device or for an arbitrarily large queue.
 
 `preview-sample --count 0` deliberately retains the legacy decoder evaluation so its earlier synthetic-teacher measurements remain reproducible. Those scores are not the new card-summary quality metric. See [the review](transaction-preview-review.md) and [actual card examples](transaction-preview-examples.md).
+
+### September 9 context update benchmark
+
+On one pinned core of an AMD Ryzen AI 9 HX 470, the optimized CPU card path measured 2.2 ms p95 for a typical call and 205.5 ms p95 for 4,096 distinct readings (20 warm iterations). Cold initialization plus the first summary took 16 ms. These measurements cover inference and rendering, not RPC simulation or wallet input assembly, and do not establish a latency guarantee on every low-spec device. The context update reuses recent simulation results and adds no RPC wait to generation.

@@ -26,6 +26,13 @@ pub fn project(call: &CallSummary) -> CallSummary {
             .details
             .push(format!("Calldata selector: 0x{}", &hex[..8]));
     }
+    for (address, label) in evidence.tokens.iter().take(16) {
+        if address.len() <= 42 && label.len() <= 128 {
+            projected
+                .details
+                .push(format!("Known token {address}: {label}"));
+        }
+    }
     // A decoded reading takes precedence over public selector guesses.
     for candidate in evidence
         .abi

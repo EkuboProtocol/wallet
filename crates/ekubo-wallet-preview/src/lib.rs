@@ -24,9 +24,20 @@ pub mod weights;
 pub use slots::{CallSummary, PlanDocument};
 pub use taxonomy::{RiskBand, TransactionClass};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SummaryBasis {
+    #[default]
+    Interpretation,
+    BalanceChanges,
+    TransferLogs,
+    InferredIntent,
+}
+
 /// What the model answered for one plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionPreview {
+    /// Provenance belongs beside the headline, not inside its sentence.
+    pub basis: SummaryBasis,
     /// The category, from a closed set.
     pub class: TransactionClass,
     /// How much attention the plan warrants. Advisory ordering only.
@@ -42,6 +53,7 @@ impl TransactionPreview {
     #[must_use]
     pub fn unrecognized() -> Self {
         Self {
+            basis: SummaryBasis::Interpretation,
             class: TransactionClass::Unrecognized,
             risk: RiskBand::Critical,
             summary: String::new(),
