@@ -658,7 +658,10 @@ fn embedded_package_version(
                 "the packaged application binary is too large"
             );
             let binary = read_bounded(
-                filesystem.file(file).reader(),
+                filesystem
+                    .file(file)
+                    .reader_checked()
+                    .context("the packaged application has an invalid fragment reference")?,
                 MAX_PACKAGED_BINARY_BYTES,
                 "packaged application binary",
             )?;
