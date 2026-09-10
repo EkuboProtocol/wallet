@@ -19,6 +19,9 @@ pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
     deny_unknown_fields
 )]
 pub enum Request {
+    WaitForEvents {
+        after: Option<crate::events::EventCursor>,
+    },
     Automations,
     AutomationRuns {
         automation_id: uuid::Uuid,

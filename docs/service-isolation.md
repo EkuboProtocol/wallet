@@ -148,6 +148,15 @@ inside the protected service remain outside this boundary.
   automation. The unconditional removal API was removed; store tests use the
   production stopped-only operation.
 
+- A shared event feed now relays the existing domain-event metadata over owner
+  IPC. Its in-memory journal is bounded by count and serialized size, with
+  independent epoch/sequence cursors and bounded long polls. Initial connection,
+  restart, eviction, or an oversized event returns an explicit refresh request;
+  the desktop must capture authoritative state and then resume at the returned
+  cursor. This retains changes made during snapshot capture. Local broadcast
+  subscribers continue to receive the original events in journal order. No
+  event or cursor conveys authority. Desktop adoption remains required.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
@@ -235,7 +244,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 187 service tests and six client tests,
+- Service and client library suites pass: 194 service tests and six client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -244,6 +253,9 @@ before the at-rest requirement is resolved.
   and verifies the RPC response contains no authorization proof. Automation RPC
   tests preserve lifecycle/history and resolve restart against a newer policy;
   the core tests cover restart-before-delete and exact schedule wire round trips.
+  Event tests cover independent cursors, changes during snapshot capture, bounded
+  history/batches, restart and eviction gaps, wake-ups, and cancelled waiter
+  capacity. Owner RPC tests also round-trip configuration invalidations.
 - These tests use temporary encrypted state, synthetic metadata, and fake owner
   authentication. Session cancellation uses a local worker, not a live relay.
   They do not prove native polkit/Windows authentication or process isolation.
@@ -252,10 +264,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1639 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1652 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
-  library: 445 passed, two ignored. Log:
-  `~/Documents/wallet-automation-workspace-tests.log`.
+  library: 451 passed, two ignored. Log:
+  `~/Documents/wallet-event-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.

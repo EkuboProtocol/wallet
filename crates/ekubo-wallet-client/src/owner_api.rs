@@ -14,6 +14,16 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    /// Poll once. On initial connection or a history gap, refresh authoritative
+    /// state before polling again from the returned cursor. Never use events as
+    /// authorization or replay an ambiguous mutation when reconnecting.
+    pub async fn wait_for_events(
+        &self,
+        after: Option<crate::events::EventCursor>,
+    ) -> Result<crate::events::EventBatch> {
+        self.call(&Request::WaitForEvents { after }).await
+    }
+
     pub async fn automations(&self) -> Result<Vec<ekubo_wallet_core::automation::Automation>> {
         self.call(&Request::Automations).await
     }

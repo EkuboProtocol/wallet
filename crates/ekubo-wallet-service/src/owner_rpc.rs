@@ -28,6 +28,9 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::WaitForEvents { after } => {
+                serde_json::to_value(owner.event_bus().wait_since(after).await?)?
+            }
             Request::Automations => serde_json::to_value(owner.automations()?)?,
             Request::AutomationRuns {
                 automation_id,

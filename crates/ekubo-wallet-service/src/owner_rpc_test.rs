@@ -257,3 +257,55 @@ async fn network_disable_rejects_changed_reviewed_configuration() {
     .unwrap();
     assert!(owner.networks().unwrap()[0].disabled);
 }
+
+#[tokio::test]
+async fn owner_events_round_trip_configuration_changes_without_draining_them() {
+    use ekubo_wallet_client::events::{DomainEventKind, EventBatch};
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let initial: EventBatch = serde_json::from_value(
+        dispatch(
+            &owner,
+            &DappReviews::default(),
+            Request::WaitForEvents { after: None },
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(initial.refresh_required);
+    owner
+        .set_testnet_mode(!owner.testnet_mode().unwrap())
+        .unwrap();
+    let wire = serde_json::to_vec(&Request::WaitForEvents {
+        after: Some(initial.cursor),
+    })
+    .unwrap();
+    let changes: EventBatch = serde_json::from_value(
+        dispatch(
+            &owner,
+            &DappReviews::default(),
+            serde_json::from_slice(&wire).unwrap(),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(!changes.refresh_required);
+    assert_eq!(changes.events.len(), 1);
+    assert_eq!(
+        changes.events[0].kind,
+        DomainEventKind::ConfigurationChanged
+    );
+    let again: EventBatch = serde_json::from_value(
+        dispatch(
+            &owner,
+            &DappReviews::default(),
+            serde_json::from_slice(&wire).unwrap(),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(again, changes);
+}

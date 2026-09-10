@@ -4,6 +4,7 @@
 pub mod automation_report;
 pub mod dapp_review;
 pub mod dapp_session;
+pub mod events;
 pub mod framing;
 #[cfg(target_os = "linux")]
 mod owner_client;
