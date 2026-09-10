@@ -23,6 +23,7 @@ mod linux_owner_rpc;
 #[path = "../../../src/mcp_transport.rs"]
 mod mcp_transport;
 pub mod owner_rpc;
+mod transaction_previews;
 mod transaction_reviews;
 #[path = "../../../src/walletconnect.rs"]
 pub mod walletconnect;

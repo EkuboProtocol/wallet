@@ -87,3 +87,20 @@ fn history_clear_has_no_caller_selected_deletion_scope() {
         assert!(serde_json::from_value::<Request>(request).is_err());
     }
 }
+
+#[test]
+fn preview_generation_cannot_accept_caller_authored_evidence() {
+    for field in [
+        "plans",
+        "transactions",
+        "metadata",
+        "summary",
+        "simulation",
+        "model_path",
+    ] {
+        let mut request =
+            serde_json::json!({"method":"transaction_previews", "params":{"request_ids":[]}});
+        request["params"][field] = serde_json::json!("replacement");
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+}

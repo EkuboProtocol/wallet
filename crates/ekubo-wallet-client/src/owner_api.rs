@@ -267,6 +267,17 @@ impl OwnerClient {
         })
         .await
     }
+    /// Generate at most eight advisory summaries from service-held records.
+    pub async fn transaction_previews(
+        &self,
+        request_ids: &[uuid::Uuid],
+    ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::TransactionPreviews {
+            request_ids: request_ids.to_vec(),
+        })
+        .await
+    }
+
     pub async fn saved_transaction_summaries(
         &self,
         request_ids: &[uuid::Uuid],

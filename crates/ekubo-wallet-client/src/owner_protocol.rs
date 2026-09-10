@@ -114,6 +114,9 @@ pub enum Request {
     TransactionHeadlines {
         request_ids: Vec<uuid::Uuid>,
     },
+    TransactionPreviews {
+        request_ids: Vec<uuid::Uuid>,
+    },
     SavedTransactionSummaries {
         request_ids: Vec<uuid::Uuid>,
     },

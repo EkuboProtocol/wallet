@@ -452,3 +452,37 @@ async fn clearing_owner_history_keeps_live_records_and_hides_finished_transactio
         0
     );
 }
+
+#[tokio::test]
+async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let wallet = register(&owner, "primary").await;
+    let mut pending = PendingStore::production(directory.path()).unwrap();
+    let record = pending
+        .create(&wallet.id, "ethereum", &plan(), None, 1)
+        .unwrap();
+    let saved = pending
+        .save_transaction_summary(&record, "Synthetic saved summary")
+        .unwrap();
+    let result: std::collections::BTreeMap<uuid::Uuid, String> = call(
+        &owner,
+        Request::TransactionPreviews {
+            request_ids: vec![record.request_id],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, [(record.request_id, saved)].into_iter().collect());
+    assert_eq!(pending.get(record.request_id).unwrap(), record);
+    assert!(
+        call::<serde_json::Value>(
+            &owner,
+            Request::TransactionPreviews {
+                request_ids: vec![uuid::Uuid::new_v4()]
+            }
+        )
+        .await
+        .is_err()
+    );
+}

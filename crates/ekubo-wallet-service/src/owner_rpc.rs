@@ -15,6 +15,7 @@ pub(crate) struct OwnerDispatcher {
     owner: OwnerApi,
     dapps: Arc<DappRuntime>,
     transactions: crate::transaction_reviews::TransactionReviews,
+    previews: crate::transaction_previews::TransactionPreviews,
 }
 
 impl Drop for OwnerDispatcher {
@@ -43,6 +44,7 @@ impl OwnerDispatcher {
     /// Platform hosts close pending reviews before tearing down their owner
     /// transport. This also cancels preparation before any frame is published.
     pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
+        self.previews.shutdown();
         self.transactions.shutdown()
     }
 
@@ -54,6 +56,7 @@ impl OwnerDispatcher {
             owner,
             dapps,
             transactions: crate::transaction_reviews::TransactionReviews::default(),
+            previews: crate::transaction_previews::TransactionPreviews::default(),
         }
     }
 
@@ -68,10 +71,36 @@ impl OwnerDispatcher {
         ids.iter().map(|id| self.owner.transaction(*id)).collect()
     }
 
+    async fn remove_account(
+        &self,
+        reviewed: &ekubo_wallet_core::config::WalletMetadata,
+        reviewed_identity: &str,
+    ) -> anyhow::Result<ekubo_wallet_core::config::WalletMetadata> {
+        let current = self.owner.account_removal_document(&reviewed.id)?;
+        anyhow::ensure!(
+            current.wallet.instance_id == reviewed.instance_id
+                && current.wallet.address == reviewed.address
+                && current.document.identity == reviewed_identity,
+            "account changed; review its removal again"
+        );
+        // Keep this future on the initiating owner call. Core authenticates
+        // natively and rechecks the exact account under its lifecycle lock.
+        self.owner.remove_account(&current.wallet).await
+    }
+
     pub(crate) async fn dispatch(&self, request: Request) -> anyhow::Result<Value> {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            request @ (Request::Networks
+            | Request::NetworkByChainId { .. }
+            | Request::ResetNetworksToDefaults { .. }
+            | Request::NetworkProposals
+            | Request::AcceptNetworkProposal { .. }
+            | Request::RejectNetworkProposal { .. }
+            | Request::AddNetwork { .. }
+            | Request::ReplaceNetwork { .. }
+            | Request::SetNetworkDisabled { .. }) => self.dispatch_network(request).await?,
             Request::BeginPrivateKeyExport { .. } => {
                 anyhow::bail!("private-key export requires the direct reply encoder")
             }
@@ -93,18 +122,7 @@ impl OwnerDispatcher {
             Request::RemoveAccount {
                 reviewed,
                 reviewed_identity,
-            } => {
-                let current = owner.account_removal_document(&reviewed.id)?;
-                anyhow::ensure!(
-                    current.wallet.instance_id == reviewed.instance_id
-                        && current.wallet.address == reviewed.address
-                        && current.document.identity == reviewed_identity,
-                    "account changed; review its removal again"
-                );
-                // Core still authenticates natively and rechecks the exact
-                // account under its lifecycle lock after authentication.
-                serde_json::to_value(owner.remove_account(&current.wallet).await?)?
-            }
+            } => serde_json::to_value(self.remove_account(&reviewed, &reviewed_identity).await?)?,
             Request::ReviewTransaction { request_id } => {
                 serde_json::to_value(Box::pin(self.transactions.review(owner, request_id)).await?)?
             }
@@ -190,6 +208,9 @@ impl OwnerDispatcher {
                 serde_json::to_value(
                     owner.transaction_headlines(&records.iter().collect::<Vec<_>>())?,
                 )?
+            }
+            Request::TransactionPreviews { request_ids } => {
+                serde_json::to_value(self.previews.generate(owner.clone(), request_ids).await?)?
             }
             Request::SavedTransactionSummaries { request_ids } => {
                 let records = self.transaction_records(&request_ids)?;
@@ -307,41 +328,12 @@ impl OwnerDispatcher {
                     .install_policy(&wallet_id, &policy, reviewed_revision)
                     .await?,
             )?,
-            Request::Networks => serde_json::to_value(owner.networks()?)?,
-            Request::NetworkByChainId { chain_id } => {
-                serde_json::to_value(owner.network_by_chain_id(chain_id)?)?
-            }
-            Request::ResetNetworksToDefaults { reviewed } => {
-                serde_json::to_value(owner.reset_networks_to_defaults(&reviewed).await?)?
-            }
-            Request::NetworkProposals => serde_json::to_value(owner.network_proposals()?)?,
-            Request::AcceptNetworkProposal { proposal } => {
-                owner.accept_network_proposal(&proposal).await?;
-                Value::Null
-            }
-            Request::RejectNetworkProposal { proposal } => {
-                serde_json::to_value(owner.reject_network_proposal(&proposal)?)?
-            }
             Request::PolicyProposals => serde_json::to_value(owner.policy_proposals()?)?,
             Request::ApplyPolicyProposal { proposal } => {
                 serde_json::to_value(owner.apply_policy_proposal(&proposal).await?)?
             }
             Request::RejectPolicyProposal { proposal } => {
                 serde_json::to_value(owner.reject_policy_proposal(&proposal)?)?
-            }
-            Request::AddNetwork { network } => {
-                owner.add_network(network).await?;
-                Value::Null
-            }
-            Request::ReplaceNetwork {
-                reviewed,
-                replacement,
-            } => {
-                owner.replace_network(&reviewed, *replacement).await?;
-                Value::Null
-            }
-            Request::SetNetworkDisabled { reviewed, disabled } => {
-                serde_json::to_value(owner.set_network_disabled(&reviewed, disabled).await?)?
             }
             Request::DetailedNotificationPreviews => {
                 serde_json::to_value(owner.detailed_notification_previews()?)?
@@ -381,6 +373,43 @@ impl OwnerDispatcher {
                 owner.accept_legal(document, &reviewed_digest)?;
                 Value::Null
             }
+        })
+    }
+    /// Network operations retain the initiating owner's authentication context
+    /// and delegate every mutation to the existing core-enforced `OwnerApi`.
+    async fn dispatch_network(&self, request: Request) -> anyhow::Result<Value> {
+        let owner = &self.owner;
+        Ok(match request {
+            Request::Networks => serde_json::to_value(owner.networks()?)?,
+            Request::NetworkByChainId { chain_id } => {
+                serde_json::to_value(owner.network_by_chain_id(chain_id)?)?
+            }
+            Request::ResetNetworksToDefaults { reviewed } => {
+                serde_json::to_value(owner.reset_networks_to_defaults(&reviewed).await?)?
+            }
+            Request::NetworkProposals => serde_json::to_value(owner.network_proposals()?)?,
+            Request::AcceptNetworkProposal { proposal } => {
+                owner.accept_network_proposal(&proposal).await?;
+                Value::Null
+            }
+            Request::RejectNetworkProposal { proposal } => {
+                serde_json::to_value(owner.reject_network_proposal(&proposal)?)?
+            }
+            Request::AddNetwork { network } => {
+                owner.add_network(network).await?;
+                Value::Null
+            }
+            Request::ReplaceNetwork {
+                reviewed,
+                replacement,
+            } => {
+                owner.replace_network(&reviewed, *replacement).await?;
+                Value::Null
+            }
+            Request::SetNetworkDisabled { reviewed, disabled } => {
+                serde_json::to_value(owner.set_network_disabled(&reviewed, disabled).await?)?
+            }
+            _ => anyhow::bail!("not a network operation"),
         })
     }
 }

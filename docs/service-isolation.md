@@ -515,3 +515,27 @@ The history RPC checkpoint passed the full local gate: 1,689 tests passed,
 vulnerability scanning, and license policy passed. Logs use the prefix
 `~/Documents/wallet-history-` with `workspace-tests.log`, `clippy.log`,
 `osv.log`, and `licenses.log`.
+
+Transaction preview generation now has a shared owner RPC accepting at most
+eight stored request IDs, matching the desktop's current batch size. The service
+reloads records and trusted metadata itself and reuses the existing local model
+and persistence path. One blocking worker runs at a time, with sixteen admitted
+requests including the running request. Waiting requests are cancellation-safe;
+an abandoned running call keeps its worker/admission permits until computation
+finishes. Shutdown closes admission and wakes waiting calls. Already-running
+advisory computation may finish and persist its exact-plan summary; it performs
+no signing and inherits no native owner-authentication context. Model failure
+retains the existing optional-preview behavior. Tests exercise worker lifetime,
+waiting-call cancellation, oversized input rejection, and saved-summary RPC
+reads without initializing the model. Desktop adoption remains required.
+
+Network dispatch and account-removal validation are factored into private
+helpers to keep owner dispatch within the repository complexity limit. Both
+remain awaited on the initiating owner task; native authorization is neither
+moved into the preview worker nor represented by a transport-supplied flag.
+
+The preview-worker checkpoint passed the full local gate: 1,694 tests passed,
+11 ignored; formatting, workspace Clippy, Ruff, generated licenses,
+vulnerability scanning, and license policy passed. Logs use the prefix
+`~/Documents/wallet-previews-` with `workspace-tests.log`, `clippy.log`,
+`osv.log`, and `licenses.log`. Native CI for this checkpoint remains required.
