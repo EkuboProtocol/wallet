@@ -1,5 +1,5 @@
-//! Windows private-state validation and relative child reads. These checks do
-//! not activate custody; protected root bootstrap, writes, and migration remain.
+//! Windows protected profile bootstrap and relative child reads. These checks
+//! do not activate custody; provisioning, writes, and migration remain separate.
 
 use crate::windows_security::AccessEntry;
 use anyhow::{Result, ensure};
@@ -8,12 +8,70 @@ use anyhow::{Result, ensure};
 #[path = "windows_service_storage_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub use native::{open_private_child, validate_private_handle};
+pub use native::{PrivateStorageRoot, open_private_child, validate_private_handle};
 
 #[derive(Clone, Copy, Debug)]
 pub enum StorageKind {
     Directory,
     File,
+}
+
+fn machine_path(path: &str) -> Result<(String, Vec<&str>)> {
+    let bytes = path.as_bytes();
+    ensure!(
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == b":\\",
+        "machine storage requires an absolute local drive path"
+    );
+    let components: Vec<_> = path[3..].split('\\').collect();
+    for component in &components {
+        ensure!(
+            !component.is_empty()
+                && component.encode_utf16().count() <= 255
+                && !component.ends_with(['.', ' '])
+                && !component
+                    .chars()
+                    .any(|character| character.is_control() || "<>:\"/\\|?*".contains(character)),
+            "invalid machine storage path component"
+        );
+    }
+    Ok((path[..3].to_ascii_uppercase(), components))
+}
+
+fn validate_machine_security(
+    owner: &str,
+    entries: &[AccessEntry],
+    trusted: &[String],
+    allow_child_creation: bool,
+) -> Result<()> {
+    ensure!(
+        trusted.iter().any(|sid| sid == owner),
+        "machine storage directory has an untrusted owner"
+    );
+    // Shared OS directories may let users create siblings. Existing protected
+    // children are checked independently; deletion, ACL/owner changes, and
+    // attribute-write rights are never accepted. Native callers
+    // retain handles that deny data-write and delete sharing during traversal.
+    let permitted =
+        0x8000_0000 | 0x2000_0000 | 0x0012_0000 | 0xa9 | if allow_child_creation { 0x6 } else { 0 };
+    for entry in entries {
+        match entry {
+            AccessEntry::Allow {
+                sid,
+                mask,
+                inherit_only,
+            } => ensure!(
+                *inherit_only
+                    || mask & !permitted == 0
+                    || trusted.iter().any(|trusted| trusted == sid),
+                "machine storage directory grants untrusted mutation rights"
+            ),
+            AccessEntry::Deny => {}
+            AccessEntry::Unsupported => {
+                anyhow::bail!("machine storage directory uses an unsupported access entry")
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_component(component: &str) -> Result<()> {

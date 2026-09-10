@@ -365,6 +365,37 @@ The relative-open checkpoint passed the full local gate (1,708 tests passed,
 Native execution is still pending. Logs: `~/Documents/wallet-win-path-gate.log`
 and `~/Documents/wallet-win-path-cross.log`.
 
+`PrivateStorageRoot::open` now bootstraps existing Windows profiles at the OS
+ProgramData location under `EkuboWallet/Owners/<profile UUID without hyphens>`.
+The owner selector resolves protected registry metadata and verifies the actual
+dedicated service identity before any filesystem bootstrap. ProgramData comes
+from `SHGetKnownFolderPath`, not an IPC path. Only absolute paths on fixed local
+drives are accepted. Every component is opened relative to its pinned parent;
+reparse points, unsafe ACLs/owners, and incompatible existing writer/delete
+handles fail the open. All ancestor handles remain owned by the root object.
+
+OS ancestors may grant namespace creation beside existing protected children;
+their ACLs must still deny untrusted deletion, ACL/owner changes, and attribute
+writes. Handles deny data-write/delete sharing while retained. The Ekubo and
+Owners directories have stricter machine ownership and mutation checks, and
+the profile itself requires the exact service SID and private ACL. The root
+exposes validated existing-file reads only. It creates no directory, repairs
+no permissions, and does not yet activate custody or replace desktop startup.
+The installer must provision new protected directories and quiesce migration;
+this is not permission repair for a previously exposed profile.
+
+Portable tests cover machine-path ambiguity and ancestor access policy. Native
+tests now include read-only validation of the runner's actual ProgramData
+ancestry. The Windows GNU harness compiles all native tests, but their latest
+native execution is still pending. Logs: `~/Documents/wallet-win-root-cross.log`
+and `~/Documents/wallet-win-root-tests.log`. CI now runs Windows service-boundary
+tests before compiling the full desktop test suite, keeping all existing gates.
+See [SHGetKnownFolderPath](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath).
+The root-bootstrap checkpoint passed the full local gate with 1,710 tests
+passed and 12 ignored. Formatting, workspace Clippy, Ruff, generated licenses,
+vulnerability scanning, and license policy passed.
+Log: `~/Documents/wallet-win-root-gate.log`.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,

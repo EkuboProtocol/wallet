@@ -2,6 +2,63 @@ use super::*;
 const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 
 #[test]
+fn machine_paths_reject_remote_relative_and_ambiguous_names() {
+    assert_eq!(
+        machine_path(r"c:\ProgramData").unwrap(),
+        (r"C:\".into(), vec!["ProgramData"])
+    );
+    assert!(machine_path(r"D:\Données\ProgramData").is_ok());
+    for path in [
+        r"\\server\share",
+        r"\\?\C:\ProgramData",
+        r"C:ProgramData",
+        r"C:/ProgramData",
+        r"C:\a\..\b",
+        r"C:\a\b:stream",
+        r"C:\a.\b",
+        r"C:\a \b",
+        "C:\\a\0b",
+        r"C:\\ProgramData",
+    ] {
+        assert!(machine_path(path).is_err(), "{path:?}");
+    }
+}
+
+#[test]
+fn machine_ancestors_allow_siblings_but_not_replacement_or_security_changes() {
+    let trusted = vec!["S-1-5-18".to_owned(), "S-1-5-32-544".to_owned()];
+    let reader = [allow("S-1-5-32-545", 0x0012_00a9, false)];
+    assert!(validate_machine_security("S-1-5-18", &reader, &trusted, false).is_ok());
+    let creator = [allow("S-1-5-32-545", 0x6, false)];
+    assert!(validate_machine_security("S-1-5-18", &creator, &trusted, true).is_ok());
+    assert!(validate_machine_security("S-1-5-18", &creator, &trusted, false).is_err());
+    for mask in [
+        0x10,
+        0x40,
+        0x100,
+        0x10000,
+        0x40000,
+        0x80000,
+        0x4000_0000,
+        0x1000_0000,
+    ] {
+        assert!(
+            validate_machine_security(
+                "S-1-5-18",
+                &[allow("S-1-5-32-545", mask, false)],
+                &trusted,
+                true
+            )
+            .is_err()
+        );
+    }
+    assert!(validate_machine_security("S-1-5-32-545", &reader, &trusted, true).is_err());
+    assert!(
+        validate_machine_security("S-1-5-18", &[AccessEntry::Unsupported], &trusted, true).is_err()
+    );
+}
+
+#[test]
 fn child_names_cannot_select_paths_streams_or_dos_devices() {
     for name in [
         "",

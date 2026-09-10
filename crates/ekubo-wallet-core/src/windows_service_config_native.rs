@@ -126,13 +126,17 @@ fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<K
     Ok(key)
 }
 
-fn read_configuration(owner: &str) -> Result<InstalledServiceIdentity> {
-    validate_owner_component(owner)?;
-    let trusted = vec![
+pub(crate) fn machine_trustees() -> Result<Vec<String>> {
+    Ok(vec![
         "S-1-5-18".to_owned(),
         "S-1-5-32-544".to_owned(),
         account_sid("NT SERVICE\\TrustedInstaller")?,
-    ];
+    ])
+}
+
+fn read_configuration(owner: &str) -> Result<InstalledServiceIdentity> {
+    validate_owner_component(owner)?;
+    let trusted = machine_trustees()?;
     let mut keys = Vec::new();
     let mut parent = HKEY_LOCAL_MACHINE;
     for component in ["SOFTWARE", "EkuboWallet", "Owners", owner] {

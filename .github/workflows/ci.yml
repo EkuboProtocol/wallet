@@ -164,6 +164,15 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
         run: cargo test --locked -p ekubo-wallet-core --all-features --lib credential_store::tests::recovers_after_secret_service_startup_and_restart -- --ignored
 
+      - name: Test Windows service boundary
+        if: runner.os == 'Windows'
+        env:
+          RUST_MIN_STACK: 67108864
+          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
+        # Execute native custody checks before linking the large desktop suite.
+        # The complete workspace checks below remain required.
+        run: cargo test --locked -p ekubo-wallet-core --all-features --lib --jobs ${{ matrix.test_jobs }} windows_service_
+
       - name: Compile application and integration tests
         if: runner.os != 'Linux'
         env:

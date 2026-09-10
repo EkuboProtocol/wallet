@@ -8,6 +8,15 @@ use windows::{
 
 const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 
+#[test]
+fn native_program_data_ancestors_pass_machine_directory_checks() {
+    // Read only OS directory metadata. No Ekubo directory or credential is
+    // opened, installed, or modified by this test.
+    let trusted = crate::windows_service_config::machine_trustees().unwrap();
+    let ancestors = program_data_ancestors(&trusted).unwrap();
+    assert!(ancestors.len() >= 2);
+}
+
 struct Directory(std::path::PathBuf);
 impl Directory {
     fn new() -> Self {
