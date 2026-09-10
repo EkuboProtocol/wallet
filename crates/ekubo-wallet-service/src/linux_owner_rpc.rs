@@ -65,7 +65,7 @@ impl LinuxOwnerInterface {
         let result = ekubo_wallet_core::service_presence::with_owner_call(
             connection,
             &header,
-            self.dispatcher.dispatch(request),
+            Box::pin(self.dispatcher.dispatch(request)),
         )
         .await
         .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?

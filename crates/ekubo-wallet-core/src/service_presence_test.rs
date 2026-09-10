@@ -82,6 +82,62 @@ async fn bus_identity_is_live_profile_bound_and_task_local() {
         })
         .await;
     assert!(current(uid).is_err());
-    desktop.close().await.unwrap();
+    assert_cancelled_on_disconnect(&call, async { desktop.clone().close().await.unwrap() }).await;
     assert!(call.verify().await.is_err());
+    let entered = std::sync::atomic::AtomicBool::new(false);
+    assert!(
+        call.execute(async {
+            entered.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await
+        .is_err()
+    );
+    assert!(!entered.load(std::sync::atomic::Ordering::SeqCst));
+
+    let replacement = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let replacement_call = OwnerCall {
+        sender: replacement.unique_name().unwrap().clone(),
+        ..call
+    };
+    assert_ne!(&replacement_call.sender, desktop.unique_name().unwrap());
+    assert_eq!(replacement_call.execute(async { 42 }).await.unwrap(), 42);
+    assert_cancelled_on_disconnect(&replacement_call, async {
+        daemon.0.kill().unwrap();
+        daemon.0.wait().unwrap();
+    })
+    .await;
+}
+
+async fn assert_cancelled_on_disconnect(call: &OwnerCall, disconnect: impl Future<Output = ()>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Reservation<'a>(&'a AtomicBool);
+    impl Drop for Reservation<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let released = AtomicBool::new(false);
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let operation = call.execute(async {
+        let _reservation = Reservation(&released);
+        assert_eq!(current(call.owner_uid).unwrap().sender, call.sender);
+        started.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let disconnect = async {
+        entered.await.unwrap();
+        disconnect.await;
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(operation, disconnect)
+    })
+    .await
+    .expect("an abandoned owner operation must be cancelled");
+    assert!(matches!(result, Err(HumanPresenceError::Denied(_))));
+    assert!(released.load(Ordering::SeqCst));
+    assert!(current(call.owner_uid).is_err());
 }

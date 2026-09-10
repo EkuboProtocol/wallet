@@ -72,6 +72,10 @@ inside the protected service remain outside this boundary.
   the existing fresh `auth_self` challenge. Installer provisioning must use the
   matching `ekubo-wallet` service principal. Legacy desktop authentication still
   uses its existing process subject.
+- Owner calls subscribe to connection departure before checking identity, and
+  cancel their operation future if the caller or pinned bus disconnects. This
+  releases pending review reservations without moving native authentication to
+  a worker task. Cancellation does not undo already committed mutations.
 - The private-bus identity test passes for matching/wrong UIDs, disconnected
   callers, and task-local isolation. It does not demonstrate real polkit
   authentication across OS identities; that native integration test remains
@@ -124,6 +128,8 @@ inside the protected service remain outside this boundary.
   desktop activity watch without receiving Unix identities or bus handles.
   Windows must supply its own protected service identity/storage, authenticated
   transport, native owner-authentication context, and desktop lease tracking.
+  Its transport must also cancel pending owner operations on peer disconnect,
+  preserving the initiating caller's identity throughout review/authentication.
   It must reuse the same typed operations and core authorization checks, without
   accepting a caller-supplied approval flag. The client operation methods should
   likewise be reused when a Windows transport implements the existing contract.
@@ -307,12 +313,17 @@ before the at-rest requirement is resolved.
 - Full workspace all-feature tests pass: 1658 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-display-workspace-tests.log`.
+  `~/Documents/wallet-cancellation-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.
   These tests launch and stop only their own temporary daemons. The core
   library suite is included in the current workspace result above.
+- The extended private-bus owner-context tests pass explicitly: caller departure
+  and bus termination drop a waiting operation's reservation, a dead caller
+  cannot enter another operation, and a replacement uses a distinct identity.
+  Native authentication is not invoked by these tests. Log:
+  `~/Documents/wallet-owner-cancellation-tests.log`.
 - The standalone service build passes without test hooks after adding signature
   decisions. Its early startup guard previously refused desktop-UID execution
   before opening authority. No live wallet credentials were read. Native
@@ -323,6 +334,7 @@ provisioning, migration, and packaged UX verification remain unproven. Windows
 is not an installed Rust target on this development machine. No installation or
 security completion is claimed by the Linux unit and compile results.
 
-CI run `34519753381` tests commit `1695b3d` (before the simulation-display
-change). Its lint and execution-plan jobs passed; native platform jobs were still
-running at the latest check. Re-query the run before relying on its status.
+CI run `34519753381` tests commit `1695b3d` (before simulation-display and
+owner-call cancellation). Its lint, execution-plan, and macOS jobs passed;
+Linux and Windows were still running at the latest check. Re-query the run
+before relying on its status.

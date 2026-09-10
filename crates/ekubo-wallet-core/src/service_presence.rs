@@ -5,6 +5,7 @@
 //! requests cannot borrow each other's identity and spawned tasks inherit none.
 
 use crate::human_presence::HumanPresenceError;
+use futures::StreamExt as _;
 use std::{collections::HashMap, future::Future, time::Duration};
 use zbus::{Connection, fdo::DBusProxy, message::Header, names::OwnedUniqueName};
 use zbus_polkit::policykit1::Subject;
@@ -21,6 +22,45 @@ struct OwnerCall {
 }
 
 impl OwnerCall {
+    async fn execute<F: Future>(&self, operation: F) -> Result<F::Output, HumanPresenceError> {
+        let registry = DBusProxy::new(&self.bus)
+            .await
+            .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
+        // Install the departure watch before checking identity. Unique names
+        // cannot be reused on this pinned connection's bus lifetime.
+        let mut departed = tokio::time::timeout(
+            Duration::from_secs(10),
+            registry.receive_name_owner_changed_with_args(&[(0, self.sender.as_str())]),
+        )
+        .await
+        .map_err(|_| HumanPresenceError::Unavailable("owner connection watch timed out".into()))?
+        .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
+        self.verify().await?;
+        let disconnected = async {
+            while let Some(signal) = departed.next().await {
+                let args = signal
+                    .args()
+                    .map_err(|error| HumanPresenceError::Unavailable(error.to_string()))?;
+                if args.name().as_str() == self.sender.as_str()
+                    && args.new_owner().as_ref().is_none()
+                {
+                    break;
+                }
+            }
+            Err(HumanPresenceError::Denied(
+                "the owner connection is no longer available".into(),
+            ))
+        };
+        // Keep the operation on the receiving task, including native owner
+        // authentication. Dropping it releases pending review reservations;
+        // this does not roll back mutations that have already committed.
+        tokio::select! {
+            biased;
+            result = disconnected => result,
+            result = OWNER_CALL.scope(self.clone(), operation) => Ok(result),
+        }
+    }
+
     async fn verify(&self) -> Result<(), HumanPresenceError> {
         let uid = tokio::time::timeout(Duration::from_secs(10), async {
             DBusProxy::new(&self.bus)
@@ -63,6 +103,7 @@ impl OwnerCall {
 /// could resolve the same textual unique name in a different bus lifetime.
 /// This establishes caller identity only. Every protected operation must still
 /// invoke core's human-presence checks, which call polkit for this exact sender.
+/// The operation is cancelled when its caller or the pinned bus disconnects.
 pub async fn with_owner_call<F: Future>(
     bus: &Connection,
     header: &Header<'_>,
@@ -80,8 +121,7 @@ pub async fn with_owner_call<F: Future>(
         sender: sender.into(),
         owner_uid,
     };
-    call.verify().await?;
-    Ok(OWNER_CALL.scope(call, operation).await)
+    call.execute(operation).await
 }
 
 fn current(owner_uid: u32) -> Result<OwnerCall, HumanPresenceError> {
