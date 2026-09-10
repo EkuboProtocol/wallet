@@ -96,13 +96,23 @@ pub async fn run(owner_uid: u32) -> Result<()> {
     drop(automations);
     drop(dapp_supervisor);
     events.publish(DomainEventKind::McpStatusChanged { online: false });
+    let reviews_closed = close_owner_reviews(&owner_bus).await;
     let owner_closed = owner_bus.close().await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     let dapps_closed = dapps.shutdown().await;
+    reviews_closed.context("cannot close service transaction reviews")?;
     owner_closed.context("cannot close service owner endpoint")?;
     dapps_closed.context("cannot stop dapp sessions")?;
     result
+}
+
+async fn close_owner_reviews(bus: &zbus::Connection) -> Result<()> {
+    let interface = bus
+        .object_server()
+        .interface::<_, crate::owner_rpc::LinuxOwnerInterface>(crate::owner_rpc::OBJECT_PATH)
+        .await?;
+    interface.get().await.shutdown()
 }
 
 fn bind_listener(runtime: &File) -> Result<UnixListener> {

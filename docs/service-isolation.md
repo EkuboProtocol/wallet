@@ -200,8 +200,10 @@ inside the protected service remain outside this boundary.
   operations, including preparation before a frame exists. Review events follow
   frame insertion/removal. The core legal-store borrow is exclusive across
   awaits so the service can poll the future without sharing SQLite connections.
-  Desktop adoption, service lifecycle shutdown integration, large-frame handling,
-  and native successful signing validation are still required. Dropping a client
+  The Linux host explicitly closes reviews through the shared dispatcher before
+  disconnecting its owner endpoint; Windows must invoke the same lifecycle hook.
+  Desktop adoption, large-frame handling, and native successful signing validation
+  are still required. Dropping a client
   method future does not itself disconnect D-Bus: the desktop adapter must own
   and close the review connection when cancelling its operation.
 
@@ -332,7 +334,7 @@ before the at-rest requirement is resolved.
 - Full workspace all-feature tests pass: 1666 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-review-broker-workspace-tests.log`.
+  `~/Documents/wallet-review-shutdown-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.

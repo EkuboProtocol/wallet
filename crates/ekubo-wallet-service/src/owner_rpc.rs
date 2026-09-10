@@ -19,11 +19,17 @@ pub(crate) struct OwnerDispatcher {
 
 impl Drop for OwnerDispatcher {
     fn drop(&mut self) {
-        let _ = self.transactions.shutdown();
+        let _ = self.shutdown();
     }
 }
 
 impl OwnerDispatcher {
+    /// Platform hosts close pending reviews before tearing down their owner
+    /// transport. This also cancels preparation before any frame is published.
+    pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
+        self.transactions.shutdown()
+    }
+
     // Platform adapters establish caller identity and native authentication
     // context before entering this shared dispatcher. No transport handle or
     // Linux UID is part of the wallet operation protocol.

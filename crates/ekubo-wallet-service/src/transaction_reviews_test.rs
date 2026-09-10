@@ -293,4 +293,15 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
         request["params"][field] = serde_json::json!(true);
         assert!(serde_json::from_value::<Request>(request).is_err());
     }
+    dispatcher.shutdown().unwrap();
+    dispatcher.shutdown().unwrap();
+    let error = dispatcher
+        .dispatch(Request::ReviewTransaction { request_id })
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("transaction review broker is closed")
+    );
 }

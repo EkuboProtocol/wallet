@@ -10,6 +10,11 @@ pub(crate) struct LinuxOwnerInterface {
 }
 
 impl LinuxOwnerInterface {
+    // Host lifecycle only; deliberately outside the exported D-Bus interface.
+    pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
+        self.dispatcher.shutdown()
+    }
+
     pub(crate) fn new(
         owner: OwnerApi,
         sessions: crate::desktop_sessions::DesktopSessions,
