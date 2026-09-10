@@ -214,7 +214,7 @@ impl Bridge {
 enum Frame {
     Client(Option<Vec<u8>>),
     Wallet(Result<Option<Vec<u8>>>),
-    Connected(Result<WalletSession<Stream>>),
+    Connected(Result<Box<WalletSession<Stream>>>),
 }
 
 pub(super) async fn run(
@@ -282,7 +282,7 @@ pub(super) async fn run(
             });
             tokio::select! {
                 frame = read_frame_into(&mut stdin, &mut stdin_partial) => Frame::Client(frame?),
-                session = attempt, if bridge.initialized.is_some() => Frame::Connected(session),
+                session = attempt, if bridge.initialized.is_some() => Frame::Connected(session.map(Box::new)),
             }
         };
         match frame {
@@ -292,7 +292,7 @@ pub(super) async fn run(
             Frame::Connected(session) => {
                 connecting = None;
                 bridge
-                    .connected(session?, initialized_replayed, &mut stdout)
+                    .connected(*session?, initialized_replayed, &mut stdout)
                     .await?;
             }
         }
