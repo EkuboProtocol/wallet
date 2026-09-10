@@ -9,6 +9,24 @@ use windows::{
 const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 
 #[test]
+fn native_profile_lock_excludes_competitors_and_prevents_lock_file_replacement() {
+    let dir = Directory::new();
+    let path = dir.0.join("service.lock");
+    std::fs::write(&path, b"").unwrap();
+    let parent = directory_handle(&dir.0);
+    let first = open_relative(parent.as_handle(), "service.lock", StorageKind::File).unwrap();
+    let guard = ProfileLock::acquire(first).unwrap();
+    let second = open_relative(parent.as_handle(), "service.lock", StorageKind::File).unwrap();
+    assert!(ProfileLock::acquire(second).is_err());
+    assert!(std::fs::remove_file(&path).is_err());
+    drop(guard);
+    let next = open_relative(parent.as_handle(), "service.lock", StorageKind::File).unwrap();
+    let guard = ProfileLock::acquire(next).unwrap();
+    drop(guard);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn native_program_data_ancestors_pass_machine_directory_checks() {
     // Read only OS directory metadata. No Ekubo directory or credential is
     // opened, installed, or modified by this test.

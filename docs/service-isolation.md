@@ -396,6 +396,30 @@ passed and 12 ignored. Formatting, workspace Clippy, Ruff, generated licenses,
 vulnerability scanning, and license policy passed.
 Log: `~/Documents/wallet-win-root-gate.log`.
 
+Linux and Windows now share a non-cloneable `ProfileLock` guard around the
+existing `fs2` nonblocking exclusive lock. Windows root bootstrap opens and
+validates the fixed `service.lock` file before returning the profile object,
+then retains the lock for the root's lifetime. The installer must provision that
+file with service ownership and a private ACL; missing or unsafe files fail
+startup without creating or repairing them. Linux retains its existing checked
+lock-file creation path. Neither platform uses lock-file contents or a PID as
+an authority claim. Drop explicitly unlocks before closing the owned handle.
+
+The shared test runs an actual child process against a synthetic read-only
+lock file, proving exclusion while held and acquisition after release. Its
+ignored child helper is explicitly invoked by the parent test. A native
+Windows test also covers the handle-relative open flags and refusal to delete
+the locked file. The shared test passed locally and the Windows-target Clippy
+harness compiled the native test; native execution of this checkpoint remains
+pending. Logs: `~/Documents/wallet-profile-lock-tests.log` and
+`~/Documents/wallet-profile-lock-cross.log`. The active native validation run
+`34541694739` covers `41c9a81` and predates this lock checkpoint.
+The lock checkpoint passed the full local gate: 1,711 tests passed and 13
+ignored. The process-lock parent test explicitly ran its ignored helper twice
+in separate processes. Formatting, workspace Clippy, Ruff, generated licenses,
+vulnerability scanning, and license policy passed.
+Log: `~/Documents/wallet-profile-lock-gate.log`.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,

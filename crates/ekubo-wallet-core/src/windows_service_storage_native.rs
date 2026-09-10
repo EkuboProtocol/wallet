@@ -6,6 +6,7 @@ use super::{
     StorageKind, machine_path, validate_component, validate_machine_security, validate_metadata,
     validate_security,
 };
+use crate::service_profile_lock::ProfileLock;
 use crate::windows_service_config::InstalledServiceIdentity;
 use anyhow::{Result, ensure};
 use std::{
@@ -51,6 +52,7 @@ pub struct PrivateStorageRoot {
     directory: File,
     _ancestors: Vec<File>,
     identity: InstalledServiceIdentity,
+    _lock: ProfileLock,
 }
 
 impl PrivateStorageRoot {
@@ -74,10 +76,18 @@ impl PrivateStorageRoot {
             StorageKind::Directory,
         )?;
         validate_private_handle(directory.as_handle(), &identity, StorageKind::Directory)?;
+        let lock_file = open_private_child(
+            directory.as_handle(),
+            "service.lock",
+            &identity,
+            StorageKind::File,
+        )?;
+        let lock = ProfileLock::acquire(lock_file)?;
         Ok(Self {
             directory,
             _ancestors: ancestors,
             identity,
+            _lock: lock,
         })
     }
 

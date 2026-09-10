@@ -17,6 +17,8 @@ use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+use crate::service_profile_lock::ProfileLock;
+
 static STORAGE: OnceLock<Storage> = OnceLock::new();
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
@@ -105,7 +107,7 @@ fn decode_configuration(bytes: &[u8], owner_uid: u32) -> Result<OwnerConfigurati
 }
 
 struct Storage {
-    _lock: File,
+    _lock: ProfileLock,
     owner_uid: u32,
     directory: Arc<File>,
     data_dir: PathBuf,
@@ -200,7 +202,7 @@ pub fn runtime_directory() -> Result<File> {
     )
 }
 
-fn lock_profile(parent: &File, uid: u32) -> Result<File> {
+fn lock_profile(parent: &File, uid: u32) -> Result<ProfileLock> {
     let lock = File::from(openat(
         parent,
         "service.lock",
@@ -208,8 +210,7 @@ fn lock_profile(parent: &File, uid: u32) -> Result<File> {
         Mode::from_raw_mode(PRIVATE_FILE_MODE),
     )?);
     validate_file(&lock, uid, true)?;
-    fs2::FileExt::try_lock_exclusive(&lock).context("wallet service profile is already running")?;
-    Ok(lock)
+    ProfileLock::acquire(lock)
 }
 
 pub(crate) fn owner_uid() -> Option<u32> {

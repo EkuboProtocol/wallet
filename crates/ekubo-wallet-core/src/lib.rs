@@ -70,3 +70,6 @@ pub mod windows_service_identity;
 mod windows_security;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_service_storage;
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod service_profile_lock;
