@@ -39,6 +39,46 @@ fn wallet(owner: &OwnerApi) -> WalletMetadata {
 }
 
 #[tokio::test]
+async fn export_uses_the_direct_encoder_and_cannot_accept_an_authorization_flag() {
+    use crate::{dapp_runtime::DappRuntime, owner_rpc::OwnerDispatcher};
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let (_active, activity) = tokio::sync::watch::channel(0);
+    let dapps = Arc::new(DappRuntime::new(
+        owner.clone(),
+        DappReviews::default(),
+        activity,
+    ));
+    let dispatcher = OwnerDispatcher::new(owner, dapps);
+    assert!(
+        dispatcher
+            .dispatch(Request::BeginPrivateKeyExport {
+                wallet_id: "missing".into()
+            })
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("direct reply encoder")
+    );
+    // An absent account fails before native authentication or credential access.
+    assert!(
+        dispatcher
+            .encode(Request::BeginPrivateKeyExport {
+                wallet_id: "missing".into()
+            })
+            .await
+            .is_err()
+    );
+    let accounts = dispatcher.encode(Request::Accounts).await.unwrap();
+    assert_eq!(accounts.as_str(), "[]");
+    for field in ["authorization", "approved", "key", "lease_id", "owner_uid"] {
+        let mut request = serde_json::json!({"method": "begin_private_key_export", "params": {"wallet_id": "missing"}});
+        request["params"][field] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+}
+
+#[tokio::test]
 async fn imports_cannot_replace_an_account_or_select_policy_and_storage() {
     use ekubo_wallet_client::import_key::ImportKey;
     let directory = tempfile::tempdir().unwrap();

@@ -225,8 +225,22 @@ text, redacts debug output, and reports validation errors without key contents.
 Client-owned JSON request/response text also zeroizes on drop. These measures do
 not erase all transport-library message copies. The core key type gains no
 serialization or public key-export method. Tests use a public synthetic scalar
-and invalid/duplicate names; successful installed-service import, private-key
-export RPCs, and desktop import/export adoption remain required.
+and invalid/duplicate names; successful installed-service import and desktop
+import/export adoption remain required.
+
+Private-key export now has a typed owner request that invokes existing core
+custody and native authentication on the initiating caller's task. Each export
+requires authentication; no approval flag, proof, or reusable export handle is
+accepted. The direct reply encoder serializes the resulting reveal lease without
+putting key material in an ordinary JSON Value tree. Service/client owned reply
+text zeroizes on drop; zbus still owns separate message-buffer copies. The shared
+lease retains the existing local 30-second reveal behavior and erases expired
+values before serializing. Remote decoding starts the remaining display interval
+on receipt and rejects intervals beyond 30 seconds. This interval governs UI
+visibility, not revocation of bytes already delivered. The desktop still uses
+its local authority; adopting this RPC and testing native export under installed
+service identities remain required. Windows must use the same direct encoder
+inside its authenticated call context.
 
 ## Work still required before completion
 
@@ -317,7 +331,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 209 service tests and ten client tests,
+- Service and client library suites pass: 210 service tests and fourteen client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -352,10 +366,16 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1671 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1675 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
-  library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-import-rpc-workspace-tests.log`.
+  library: 450 passed, two ignored. Log:
+  `~/Documents/wallet-export-workspace-tests.log`.
+- Export tests preserve countdown/expiry, serialize no expired key, reject
+  malformed reveal windows, preserve the D-Bus string signature, and keep
+  export out of the ordinary JSON Value dispatch path. The existing countdown
+  test moved from the duplicated authority module to the shared lease module.
+  Service export tests fail before native authentication; installed-service
+  export remains untested.
 - The private-bus client identity/pinning/no-replay test passes explicitly after
   changing the owned JSON buffers to zeroize on drop. Log:
   `~/Documents/wallet-import-private-bus.log`.
@@ -382,3 +402,7 @@ security completion is claimed by the Linux unit and compile results.
 CI run `34519753381` passed all jobs, including Linux, macOS, and Windows,
 for commit `1695b3d`. It predates simulation-display, owner-call cancellation,
 transaction review, and custody RPC additions; it does not validate latest HEAD.
+
+CI run `34525034188` covers `9b3bc57`, including account import but preceding
+export RPCs. Its lint and execution-plan jobs passed; platform jobs were still
+running at the latest check. Re-query before relying on its result.

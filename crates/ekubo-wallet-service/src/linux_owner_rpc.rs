@@ -4,6 +4,18 @@ use crate::{authority::OwnerApi, dapp_runtime::DappRuntime, owner_rpc::OwnerDisp
 use ekubo_wallet_client::owner_protocol::Request;
 use std::sync::Arc;
 
+/// Serialize as the same D-Bus string while erasing our owned reply on drop.
+/// zbus owns separate encoded buffers; this does not erase those copies.
+#[derive(zbus::zvariant::Type)]
+#[zvariant(signature = "s")]
+pub(crate) struct OwnerResponse(zeroize::Zeroizing<String>);
+
+impl serde::Serialize for OwnerResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 pub(crate) struct LinuxOwnerInterface {
     dispatcher: OwnerDispatcher,
     sessions: crate::desktop_sessions::DesktopSessions,
@@ -59,7 +71,7 @@ impl LinuxOwnerInterface {
         request: &str,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> zbus::fdo::Result<String> {
+    ) -> zbus::fdo::Result<OwnerResponse> {
         if request.len() > crate::framing::MAX_FRAME_BYTES {
             return Err(zbus::fdo::Error::InvalidArgs(
                 "owner request exceeds its size limit".into(),
@@ -70,7 +82,7 @@ impl LinuxOwnerInterface {
         let result = ekubo_wallet_core::service_presence::with_owner_call(
             connection,
             &header,
-            Box::pin(self.dispatcher.dispatch(request)),
+            Box::pin(self.dispatcher.encode(request)),
         )
         .await
         .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?
@@ -80,13 +92,15 @@ impl LinuxOwnerInterface {
                 2048,
             ))
         })?;
-        let response = serde_json::to_string(&result)
-            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
-        if response.len() > crate::framing::MAX_FRAME_BYTES {
+        if result.len() > crate::framing::MAX_FRAME_BYTES {
             return Err(zbus::fdo::Error::Failed(
                 "owner response exceeds its size limit".into(),
             ));
         }
-        Ok(response)
+        Ok(OwnerResponse(result))
     }
 }
+
+#[cfg(test)]
+#[path = "linux_owner_rpc_test.rs"]
+mod tests;

@@ -24,6 +24,22 @@ impl Drop for OwnerDispatcher {
 }
 
 impl OwnerDispatcher {
+    /// Encode authenticated replies directly. Exported material never enters
+    /// the ordinary JSON Value tree, where its strings would not erase on drop.
+    pub(crate) async fn encode(
+        &self,
+        request: Request,
+    ) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        let encoded = match request {
+            Request::BeginPrivateKeyExport { wallet_id } => {
+                let lease = self.owner.begin_private_key_export(&wallet_id).await?;
+                serde_json::to_string(&lease)?
+            }
+            request => serde_json::to_string(&self.dispatch(request).await?)?,
+        };
+        Ok(zeroize::Zeroizing::new(encoded))
+    }
+
     /// Platform hosts close pending reviews before tearing down their owner
     /// transport. This also cancels preparation before any frame is published.
     pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
@@ -56,6 +72,9 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::BeginPrivateKeyExport { .. } => {
+                anyhow::bail!("private-key export requires the direct reply encoder")
+            }
             Request::ImportAccount { wallet_id, key } => {
                 serde_json::to_value(owner.import_account(&wallet_id, key.into_material()?)?)?
             }

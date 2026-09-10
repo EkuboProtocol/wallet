@@ -51,7 +51,6 @@ use ekubo_wallet_core::{
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -2668,58 +2667,7 @@ fn ensure_reviewed_digest(reviewed: &str, current: &str) -> Result<()> {
     Ok(())
 }
 
-pub const PRIVATE_KEY_REVEAL_DURATION: Duration = Duration::from_secs(30);
-
-pub struct ExportLease {
-    value: Mutex<zeroize::Zeroizing<String>>,
-    expires_at: Instant,
-}
-
-impl ExportLease {
-    fn new(value: zeroize::Zeroizing<String>) -> Self {
-        Self::new_for_duration(value, PRIVATE_KEY_REVEAL_DURATION)
-    }
-
-    fn new_for_duration(value: zeroize::Zeroizing<String>, duration: Duration) -> Self {
-        Self {
-            value: Mutex::new(value),
-            expires_at: Instant::now() + duration,
-        }
-    }
-
-    #[must_use]
-    pub fn concealed(&self) -> bool {
-        self.value.lock().map_or(true, |mut value| {
-            if Instant::now() >= self.expires_at {
-                use zeroize::Zeroize as _;
-                value.zeroize();
-            }
-            value.is_empty()
-        })
-    }
-
-    /// How much longer the key stays visible. A reveal that vanishes without
-    /// warning reads as a bug; a countdown makes the deadline the user's to
-    /// plan around.
-    #[must_use]
-    pub fn remaining(&self) -> Duration {
-        if self.concealed() {
-            return Duration::ZERO;
-        }
-        self.expires_at.saturating_duration_since(Instant::now())
-    }
-
-    #[must_use]
-    pub fn visible_value(&self) -> Option<zeroize::Zeroizing<String>> {
-        self.value.lock().ok().and_then(|mut value| {
-            if Instant::now() >= self.expires_at {
-                use zeroize::Zeroize as _;
-                value.zeroize();
-            }
-            (!value.is_empty()).then(|| zeroize::Zeroizing::new(value.to_string()))
-        })
-    }
-}
+pub use ekubo_wallet_client::export_lease::{ExportLease, PRIVATE_KEY_REVEAL_DURATION};
 
 pub struct ApplicationAuthority {
     owner: OwnerApi,

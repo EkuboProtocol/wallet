@@ -19,6 +19,9 @@ pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
     deny_unknown_fields
 )]
 pub enum Request {
+    BeginPrivateKeyExport {
+        wallet_id: String,
+    },
     ImportAccount {
         wallet_id: String,
         key: crate::import_key::ImportKey,

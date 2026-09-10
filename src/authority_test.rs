@@ -102,24 +102,6 @@ fn trusted_token_label_renders_the_address_in_eip55_checksum_case() {
     );
 }
 
-#[test]
-fn export_lease_counts_down_to_zero_and_stays_there() {
-    let lease = ExportLease::new_for_duration(
-        zeroize::Zeroizing::new("secret".to_owned()),
-        Duration::from_millis(200),
-    );
-    let remaining = lease.remaining();
-    assert!(remaining > Duration::ZERO && remaining <= Duration::from_millis(200));
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !lease.concealed() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    // A concealed lease reports no time left rather than a duration the
-    // countdown would render as a key that is still on screen.
-    assert!(lease.concealed());
-    assert_eq!(lease.remaining(), Duration::ZERO);
-}
-
 #[tokio::test]
 async fn notification_previews_default_to_detailed_and_private_mode_round_trips() {
     let directory = tempfile::tempdir().unwrap();
