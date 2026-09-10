@@ -2,16 +2,14 @@
 //! machine keys. Unsafe code is confined to the Windows API ownership boundary.
 #![allow(unsafe_code)]
 
-use std::{ffi::c_void, mem::size_of};
+use std::mem::size_of;
 
 use anyhow::{Result, ensure};
 use windows::{
     Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
         Security::{
-            ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
-            GetAclInformation, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, IsValidAcl,
-            IsValidSecurityDescriptor, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
             PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE,
         },
         System::Registry::{
@@ -19,11 +17,11 @@ use windows::{
             REG_VALUE_TYPE, RegCloseKey, RegGetKeySecurity, RegOpenKeyExW, RegQueryValueExW,
         },
     },
-    core::{BOOL, PCWSTR, PWSTR},
+    core::{PCWSTR, PWSTR},
 };
 
 use super::{
-    InstalledServiceIdentity, MAX_CONFIG_BYTES, RegistryAce, decode, validate_owner_component,
+    InstalledServiceIdentity, MAX_CONFIG_BYTES, decode, validate_owner_component,
     validate_registry_security,
 };
 use crate::windows_service_identity::{
@@ -209,79 +207,9 @@ fn validate_key(key: &Key, trusted: &[String]) -> Result<()> {
 }
 
 unsafe fn validate_descriptor(descriptor: PSECURITY_DESCRIPTOR, trusted: &[String]) -> Result<()> {
-    ensure!(
-        unsafe { IsValidSecurityDescriptor(descriptor) }.as_bool(),
-        "invalid registry security descriptor"
-    );
-    let mut owner = PSID::default();
-    let mut defaulted = BOOL::default();
-    unsafe { GetSecurityDescriptorOwner(descriptor, &raw mut owner, &raw mut defaulted) }?;
-    ensure!(
-        !owner.0.is_null(),
-        "registry security descriptor has no owner"
-    );
-    let owner = unsafe { sid_string(owner) }?;
-    let mut present = BOOL::default();
-    let mut acl = std::ptr::null_mut();
-    unsafe {
-        GetSecurityDescriptorDacl(
-            descriptor,
-            &raw mut present,
-            &raw mut acl,
-            &raw mut defaulted,
-        )
-    }?;
-    ensure!(
-        present.as_bool() && !acl.is_null(),
-        "registry key has an unrestricted DACL"
-    );
-    ensure!(unsafe { IsValidAcl(acl) }.as_bool(), "invalid registry ACL");
-    let mut information = ACL_SIZE_INFORMATION::default();
-    unsafe {
-        GetAclInformation(
-            acl,
-            (&raw mut information).cast(),
-            u32::try_from(size_of::<ACL_SIZE_INFORMATION>())?,
-            AclSizeInformation,
-        )
-    }?;
-    ensure!(
-        information.AceCount <= 4096,
-        "registry ACL has too many entries"
-    );
-    let mut entries = Vec::new();
-    for index in 0..information.AceCount {
-        let mut ace: *mut c_void = std::ptr::null_mut();
-        unsafe { GetAce(acl, index, &raw mut ace) }?;
-        entries.push(unsafe { read_ace(ace.cast()) }?);
-    }
+    // SAFETY: the caller holds the complete OS-provided descriptor buffer.
+    let (owner, entries) = unsafe { crate::windows_security::read_descriptor(descriptor) }?;
     validate_registry_security(&owner, Some(&entries), trusted)
-}
-
-unsafe fn read_ace(ace: *const u8) -> Result<RegistryAce> {
-    // GetAce and IsValidAcl establish a complete ACE header in an OS buffer.
-    let header = unsafe { std::slice::from_raw_parts(ace, 4) };
-    let length = usize::from(u16::from_le_bytes([header[2], header[3]]));
-    ensure!(length >= 4, "invalid ACE length");
-    if header[0] == 1 {
-        return Ok(RegistryAce::Deny);
-    }
-    if header[0] != 0 || header[1] & !0x1f != 0 {
-        return Ok(RegistryAce::Unsupported);
-    }
-    ensure!(length >= 16, "invalid allow ACE length");
-    let bytes = unsafe { std::slice::from_raw_parts(ace, length) };
-    ensure!(
-        bytes[8] == 1 && bytes[9] <= 15 && 16 + usize::from(bytes[9]) * 4 == length,
-        "invalid allow ACE SID"
-    );
-    let mask = u32::from_le_bytes(bytes[4..8].try_into()?);
-    let sid = unsafe { sid_string(PSID(ace.add(8).cast_mut().cast())) }?;
-    Ok(RegistryAce::Allow {
-        sid,
-        mask,
-        inherit_only: header[1] & 8 != 0,
-    })
 }
 
 #[cfg(test)]

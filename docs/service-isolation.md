@@ -310,9 +310,40 @@ The service name is derived from that UUID and resolved through Windows to
 verify the configured SID. The client derives its owner from the primary token;
 the service additionally verifies its dedicated primary account and session.
 These checks return public identity metadata, not custody access or owner
-authorization. No installer writes this configuration yet. Windows storage
-ACL/reparse validation, service hosting, transport authentication, and native
+authorization. No installer writes this configuration yet. Windows protected
+storage traversal, service hosting, transport authentication, and native
 owner authorization remain unimplemented.
+
+Windows private-storage handle validation now checks a disk object's actual
+attributes, rejects reparse points and multiply linked files, requires the
+dedicated service SID as owner, and rejects access grants to principals other
+than that service, SYSTEM, or Administrators. Registry metadata can be publicly
+readable; private state cannot, so their policies remain separate while sharing
+one native security-descriptor decoder. Null/missing DACLs and unsupported ACEs
+fail closed. Inherit-only entries do not grant access to the current object;
+every opened descendant must be checked independently. An empty DACL grants
+no access and is accepted by the confidentiality check; operational access is
+still required when opening the object.
+
+The validator receives a borrowed live handle and protected installed identity.
+It does not establish how the object was reached: protected ancestor traversal,
+no-follow opens, retained handles, atomic writes, and migration are still
+required before custody activation. It neither repairs permissions nor reads
+wallet contents. Native tests exercise SDDL descriptors and synthetic ordinary
+files/hard links; pure tests exercise ACL and metadata rejection. Native Windows
+execution of the new tests remains required. The standalone Windows GNU Clippy
+harness compiled them successfully, but is not full workspace or runtime proof.
+Log: `~/Documents/wallet-win-storage-cross.log`.
+The full local gate passed with 1,707 tests passed and 12 ignored, including
+the new portable storage-policy tests. Formatting, workspace Clippy, Ruff,
+generated licenses, vulnerability scanning, and license policy passed.
+Log: `~/Documents/wallet-win-storage-gate.log`.
+
+The native implementation follows Microsoft's handle-based
+[GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+and [GetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileinformationbyhandle)
+contracts. These APIs inspect the open object; they do not establish safe path
+traversal or eliminate the need to protect its ancestors.
 
 ## Work still required before completion
 

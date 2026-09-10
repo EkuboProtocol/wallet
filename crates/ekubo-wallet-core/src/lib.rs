@@ -65,3 +65,8 @@ pub mod update_trust;
 pub mod windows_service_config;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_service_identity;
+
+#[cfg(any(target_os = "windows", test))]
+mod windows_security;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_service_storage;

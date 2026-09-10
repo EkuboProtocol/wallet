@@ -82,15 +82,7 @@ fn decode(bytes: &[u8], expected_owner: &str) -> Result<InstalledServiceIdentity
     Ok(InstalledServiceIdentity(config))
 }
 
-enum RegistryAce {
-    Allow {
-        sid: String,
-        mask: u32,
-        inherit_only: bool,
-    },
-    Deny,
-    Unsupported,
-}
+use crate::windows_security::AccessEntry as RegistryAce;
 
 fn validate_registry_security(
     owner: &str,
