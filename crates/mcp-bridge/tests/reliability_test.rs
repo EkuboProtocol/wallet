@@ -304,7 +304,16 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
         ready_tx.send(()).unwrap();
         let (second, _) = listener.accept().unwrap();
         let (mut reader, mut writer2) = initialize(second, Duration::ZERO, true);
-        ready_tx.send(()).unwrap();
+        // Finishing our handshake writes does not mean the bridge has polled
+        // them yet. A tools/list probe can still be answered from its cache.
+        // This upstream notification is forwarded only after it accepts the
+        // reconnected session, providing a deterministic readiness barrier.
+        write(
+            &mut writer2,
+            &json!({"jsonrpc":"2.0","method":"notifications/message","params":{
+                "level":"info","data":"test reconnect ready"
+            }}),
+        );
         let request = read(&mut reader);
         assert_eq!(
             request["id"], "after-reconnect",
@@ -331,7 +340,9 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
             .unwrap()
             .contains("may have executed")
     );
-    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ready = harness.receive();
+    assert_eq!(ready["method"], "notifications/message");
+    assert_eq!(ready["params"]["data"], "test reconnect ready");
     harness.send(&json!({"jsonrpc":"2.0","id":"after-reconnect","method":"tools/list"}));
     assert_eq!(harness.receive()["result"], catalog());
     harness.finish();

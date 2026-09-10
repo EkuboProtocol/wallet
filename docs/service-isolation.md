@@ -381,7 +381,7 @@ before the at-rest requirement is resolved.
 - Full workspace all-feature tests pass: 1677 passed, 11 ignored across
   30 suites (including doc tests). Core: 703 passed, six ignored; desktop
   library: 450 passed, two ignored. Log:
-  `~/Documents/wallet-windows-identity-tests.log`.
+  `~/Documents/wallet-reconnect-barrier-workspace-tests.log`.
 - Export tests preserve countdown/expiry, serialize no expired key, reject
   malformed reveal windows, preserve the D-Bus string signature, and keep
   export out of the ordinary JSON Value dispatch path. The existing countdown
@@ -425,3 +425,10 @@ the test's `tools/list` probe can receive cached discovery before the bridge
 finishes accepting the reconnect, then stdin closes before the fake server sees
 the probe. macOS and Windows were still running at the latest check. Re-query
 before relying on their results.
+
+The reconnect test now waits for an upstream notification forwarded by the
+bridge after reconnection, rather than treating completion of the fake server's
+handshake writes as proof the bridge accepted them. Its no-replay assertion is
+unchanged. The repaired test passed 30 consecutive runs and the full local gate;
+CI on a commit containing the fix remains required. Repetition log:
+`~/Documents/wallet-reconnect-barrier-repeat.log`.
