@@ -3058,13 +3058,6 @@ pub struct WalletWindow {
     update_data_dir: PathBuf,
 }
 
-/// How many of an automation's runs the tab shows.
-///
-/// The store keeps thousands; this screen answers "what has it been doing
-/// lately", and a page rendering a per-second automation's whole history is a
-/// page nobody scrolls to the end of.
-const AUTOMATION_RUNS_SHOWN: usize = 20;
-
 /// Runs read as a table only when their columns line up, and a fixed width is
 /// what lines them up when every cell holds a different length of text.
 ///
@@ -3123,105 +3116,45 @@ struct DesktopSnapshot {
 }
 
 impl DesktopSnapshot {
-    fn capture(owner: &OwnerApi) -> Self {
-        let reviews = cache_result(owner.reviews(None));
-        let automations = cache_result(owner.automations());
-        let automation_runs = automations.as_ref().map_or_else(
-            |_| BTreeMap::new(),
-            |automations| {
-                automations
-                    .iter()
-                    .filter_map(|automation| {
-                        owner
-                            .automation_runs(automation.id, AUTOMATION_RUNS_SHOWN)
-                            .ok()
-                            .map(|runs| (automation.id, runs))
-                    })
-                    .collect()
-            },
-        );
-        let activity =
-            cache_result(owner.activity(None, 200)).map(Arc::<[OwnerActivityRecord]>::from);
-        let activity_sources = owner
-            .activity_sources()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(request_id, name)| {
-                // The name an agent chose for itself. Registration already
-                // holds it to a terminal-safe line, and this holds it again at
-                // the surface that draws it, where the bound on its width is
-                // also a bound on how much of the row it can take over.
-                (
-                    request_id,
-                    SharedString::from(ekubo_wallet_core::sanitize::stripped_capped(&name, 64)),
-                )
-            })
-            .collect();
-        let accounts = cache_result(owner.accounts());
-        let legal_status = cache_result(owner.legal_status());
-        let networks = cache_result(owner.networks());
-        let mut policies = BTreeMap::new();
-        if let Ok(accounts) = &accounts {
-            for account in accounts {
-                policies.insert(account.id.clone(), cache_result(owner.policy(&account.id)));
-            }
-        }
-        let mut message_documents = BTreeMap::new();
-        let mut typed_data_documents = BTreeMap::new();
-        if let Ok(activity) = &activity {
-            for record in activity.iter() {
-                match record {
-                    OwnerActivityRecord::Message(record) => {
-                        message_documents.insert(
-                            record.request_id,
-                            cache_result(owner.message_review_document(record.request_id)),
-                        );
-                    }
-                    OwnerActivityRecord::TypedData(record) => {
-                        typed_data_documents.insert(
-                            record.request_id,
-                            cache_result(owner.typed_data_review_document(record.request_id)),
-                        );
-                    }
-                    OwnerActivityRecord::Transaction(_) => {}
-                }
-            }
-        }
-        let records = transaction_records(&reviews, &activity);
-        let transaction_previews = owner
-            .saved_transaction_summaries(&records)
-            .unwrap_or_default();
-        let missing = records
-            .into_iter()
-            .filter(|record| !transaction_previews.contains_key(&record.request_id))
-            .collect::<Vec<_>>();
-        let transaction_headlines = owner
-            .transaction_headlines(&missing)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(id, text)| (id, SharedString::from(text)))
-            .collect();
+    async fn capture(owner: &impl ekubo_wallet_client::desktop_snapshot::SnapshotReader) -> Self {
+        let snapshot = ekubo_wallet_client::desktop_snapshot::DesktopSnapshot::capture(owner).await;
         Self {
-            reviews,
-            activity,
-            activity_sources,
-            transaction_headlines,
-            transaction_previews,
-            accounts,
-            policies,
-            legal_status,
-            networks,
-            automations,
-            automation_runs,
-            message_documents,
-            typed_data_documents,
-            native_token_prices: owner.native_token_prices().unwrap_or_default(),
+            reviews: snapshot.reviews.map_err(SharedString::from),
+            activity: snapshot.activity.map_err(SharedString::from),
+            activity_sources: snapshot
+                .activity_sources
+                .into_iter()
+                .map(|(key, text)| (key, SharedString::from(text)))
+                .collect(),
+            transaction_headlines: snapshot
+                .transaction_headlines
+                .into_iter()
+                .map(|(key, text)| (key, SharedString::from(text)))
+                .collect(),
+            transaction_previews: snapshot.transaction_previews,
+            accounts: snapshot.accounts.map_err(SharedString::from),
+            policies: snapshot
+                .policies
+                .into_iter()
+                .map(|(key, result)| (key, result.map_err(SharedString::from)))
+                .collect(),
+            legal_status: snapshot.legal_status.map_err(SharedString::from),
+            networks: snapshot.networks.map_err(SharedString::from),
+            automations: snapshot.automations.map_err(SharedString::from),
+            automation_runs: snapshot.automation_runs,
+            message_documents: snapshot
+                .message_documents
+                .into_iter()
+                .map(|(key, result)| (key, result.map_err(SharedString::from)))
+                .collect(),
+            typed_data_documents: snapshot
+                .typed_data_documents
+                .into_iter()
+                .map(|(key, result)| (key, result.map_err(SharedString::from)))
+                .collect(),
+            native_token_prices: snapshot.native_token_prices,
         }
     }
-}
-
-fn cache_result<T>(result: Result<T>) -> std::result::Result<T, SharedString> {
-    result.map_err(|error| format!("{error:#}").into())
 }
 
 /// Pending requests first; history follows without duplicating an inbox row.
@@ -7652,9 +7585,7 @@ impl WalletWindow {
         self.desktop_snapshot_error = None;
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || DesktopSnapshot::capture(&owner))
-                .await
-                .context("desktop snapshot task failed")
+            Ok(DesktopSnapshot::capture(&owner).await)
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;

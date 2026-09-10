@@ -6,6 +6,7 @@ pub mod activity;
 pub mod automation_report;
 pub mod dapp_review;
 pub mod dapp_session;
+pub mod desktop_snapshot;
 pub mod events;
 pub mod export_lease;
 pub mod framing;

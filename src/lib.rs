@@ -22,6 +22,7 @@ pub mod ipc_server;
 pub mod mcp;
 mod mcp_transport;
 pub mod notifications;
+mod owner_snapshot;
 pub mod preview;
 pub mod release_check;
 pub mod review;

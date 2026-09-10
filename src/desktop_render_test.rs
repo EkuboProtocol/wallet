@@ -230,8 +230,8 @@ fn release(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
 
 /// Wait for whatever snapshot read is in flight to land.
 ///
-/// `DesktopSnapshot::capture` runs on a blocking thread this scheduler does not
-/// drive, so a test that acts while one is in flight is racing it.
+/// Snapshot capture performs local reads on blocking workers this scheduler
+/// does not drive, so a test that acts while a read is in flight is racing it.
 fn settle_snapshot(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
     for _ in 0..200 {
         cx.run_until_parked();

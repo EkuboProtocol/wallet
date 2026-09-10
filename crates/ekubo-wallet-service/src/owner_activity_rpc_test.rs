@@ -486,3 +486,31 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn shared_snapshot_capture_uses_local_async_reads_and_preserves_saved_summaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let wallet = register(&owner, "primary").await;
+    let mut pending = PendingStore::production(directory.path()).unwrap();
+    let record = pending
+        .create(&wallet.id, "ethereum", &plan(), None, 1)
+        .unwrap();
+    let summary = pending
+        .save_transaction_summary(&record, "Saved display text")
+        .unwrap();
+    let snapshot = ekubo_wallet_client::desktop_snapshot::DesktopSnapshot::capture(&owner).await;
+    assert_eq!(snapshot.accounts.unwrap(), vec![wallet]);
+    assert_eq!(snapshot.reviews.unwrap().transactions, vec![record.clone()]);
+    assert_eq!(snapshot.activity.unwrap().len(), 1);
+    assert_eq!(
+        snapshot.transaction_previews.get(&record.request_id),
+        Some(&summary)
+    );
+    assert!(
+        !snapshot
+            .transaction_headlines
+            .contains_key(&record.request_id)
+    );
+    assert_eq!(pending.get(record.request_id).unwrap(), record);
+}

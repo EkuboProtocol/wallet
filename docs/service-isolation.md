@@ -489,8 +489,8 @@ socket to verify filtering and failure handling without public RPC access.
 Desktop adoption and transport chunking for oversized snapshots remain required.
 
 CI run `34530629466` covers `967c2ef`, including the Windows identity/configuration
-checks and owner transaction actions. At the latest check lint and execution-plan
-jobs passed; Linux, macOS, and Windows tests remained in progress. It predates
+checks and owner transaction actions. At the latest check lint, execution-plan, Linux, and macOS
+jobs passed; Windows was still compiling application and integration tests. It predates
 the portfolio RPC checkpoint. Re-query that exact run before relying on results.
 
 The portfolio checkpoint passed the full local gate: 1,687 tests passed,
@@ -539,3 +539,23 @@ The preview-worker checkpoint passed the full local gate: 1,694 tests passed,
 vulnerability scanning, and license policy passed. Logs use the prefix
 `~/Documents/wallet-previews-` with `workspace-tests.log`, `clippy.log`,
 `osv.log`, and `licenses.log`. Native CI for this checkpoint remains required.
+
+Desktop snapshot loading now uses a shared asynchronous `SnapshotReader`
+interface and capture implementation. The production desktop calls that async
+capture; its local compatibility reader dispatches SQL/decoding reads to
+blocking workers. The Linux owner client implements the same interface through
+typed RPCs, with no storage path or platform identity in the capture contract.
+The desktop still owns local authority at startup: this is reader adoption,
+not completed remote custody. The GPUI snapshot projection preserves existing
+field-level failures, attribution sanitization, cached summaries, and refresh
+state handling. Recent activity remains 200 rows and automation history 20;
+transaction summary/headline lookups split inventories into 1000-ID requests
+without truncating them. Oversized individual records and other inventory
+pagination remain outstanding. Tests cover asynchronous partial failures,
+batch completeness, and the local worker-backed reader over synthetic records.
+
+The async snapshot checkpoint passed the full local gate: 1,697 tests passed,
+11 ignored, including the existing desktop render suite. Formatting,
+workspace Clippy, Ruff, generated licenses, vulnerability scanning, and license
+policy passed. Logs use the prefix `~/Documents/wallet-snapshot-` with
+`workspace-tests.log`, `clippy.log`, `osv.log`, and `licenses.log`.
