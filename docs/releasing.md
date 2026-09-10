@@ -83,7 +83,7 @@ also fails it whenever Authenticode is enabled.
 Packaging verifies that every native package contains a runnable
 `ekubo-wallet-mcp-bridge` that initializes over stdio, reports the computed
 build version, advertises dynamic tool and resource refresh, and returns the
-deterministic offline tool and resource catalogs. The capability check is not
+availability errors for unknown offline tool and resource catalogs. The capability check is not
 a formality: a harness records the handshake once and keeps it for the whole
 session, so a bridge that fails to claim a capability there makes it
 unreachable for that session however the wallet answers afterwards. The helper
