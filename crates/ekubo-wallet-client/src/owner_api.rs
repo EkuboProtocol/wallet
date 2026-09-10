@@ -14,6 +14,18 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    pub async fn import_account(
+        &self,
+        wallet_id: &str,
+        key: crate::import_key::ImportKey,
+    ) -> Result<WalletMetadata> {
+        self.call(&Request::ImportAccount {
+            wallet_id: wallet_id.into(),
+            key,
+        })
+        .await
+    }
+
     pub async fn create_account(&self, wallet_id: &str) -> Result<WalletMetadata> {
         self.call(&Request::CreateAccount {
             wallet_id: wallet_id.into(),

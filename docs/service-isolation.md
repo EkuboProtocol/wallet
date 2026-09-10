@@ -215,8 +215,18 @@ their identity and the exact reviewed account instance/address before calling
 core's native-authenticated removal, which rechecks under its lifecycle lock.
 Tests use synthetic account metadata and verify invalid/duplicate names, forged
 documents, and replaced account instances fail before credential access or native
-authentication. Successful service credential creation/removal, import/export
-RPCs, and desktop adoption remain unverified or unfinished.
+authentication. Successful service credential creation/removal and desktop
+adoption remain unverified or unfinished.
+
+Account import now has a typed owner RPC carrying an account name and a validated
+import key. Existing custody fixes imported accounts to the approval-required
+policy and rejects name/address replacement. The import wrapper owns zeroizing
+text, redacts debug output, and reports validation errors without key contents.
+Client-owned JSON request/response text also zeroizes on drop. These measures do
+not erase all transport-library message copies. The core key type gains no
+serialization or public key-export method. Tests use a public synthetic scalar
+and invalid/duplicate names; successful installed-service import, private-key
+export RPCs, and desktop import/export adoption remain required.
 
 ## Work still required before completion
 
@@ -307,7 +317,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 208 service tests and eight client tests,
+- Service and client library suites pass: 209 service tests and ten client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -342,10 +352,13 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1668 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1671 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-account-rpc-workspace-tests.log`.
+  `~/Documents/wallet-import-rpc-workspace-tests.log`.
+- The private-bus client identity/pinning/no-replay test passes explicitly after
+  changing the owned JSON buffers to zeroize on drop. Log:
+  `~/Documents/wallet-import-private-bus.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.
@@ -361,12 +374,11 @@ before the at-rest requirement is resolved.
   before opening authority. No live wallet credentials were read. Native
   authentication and live-key signing were not exercised by this build.
 
-Full native multi-identity integration, Windows compilation/authentication,
+Full native multi-identity integration, latest-head Windows compilation/authentication,
 provisioning, migration, and packaged UX verification remain unproven. Windows
 is not an installed Rust target on this development machine. No installation or
 security completion is claimed by the Linux unit and compile results.
 
-CI run `34519753381` tests commit `1695b3d` (before simulation-display,
-owner-call cancellation, and the transaction broker). Its lint, execution-plan,
-Linux, and macOS jobs passed; Windows was still running at the latest check.
-Re-query the run before relying on its status.
+CI run `34519753381` passed all jobs, including Linux, macOS, and Windows,
+for commit `1695b3d`. It predates simulation-display, owner-call cancellation,
+transaction review, and custody RPC additions; it does not validate latest HEAD.

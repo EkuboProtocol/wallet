@@ -56,6 +56,9 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::ImportAccount { wallet_id, key } => {
+                serde_json::to_value(owner.import_account(&wallet_id, key.into_material()?)?)?
+            }
             Request::CreateAccount { wallet_id } => {
                 // Preserve the desktop's initial policy. Creating an account
                 // must not become a way to install caller-selected permissions.

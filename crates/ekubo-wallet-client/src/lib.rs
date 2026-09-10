@@ -8,6 +8,7 @@ pub mod dapp_review;
 pub mod dapp_session;
 pub mod events;
 pub mod framing;
+pub mod import_key;
 #[cfg(target_os = "linux")]
 mod owner_client;
 pub mod owner_protocol;

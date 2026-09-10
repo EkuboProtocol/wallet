@@ -75,17 +75,17 @@ impl OwnerClient {
         &self,
         request: &Request,
     ) -> Result<T> {
-        let request = serde_json::to_string(request)?;
+        let request = zeroize::Zeroizing::new(serde_json::to_string(request)?);
         ensure!(
             request.len() <= crate::framing::MAX_FRAME_BYTES,
             "owner request exceeds its size limit"
         );
-        let message = self.proxy.call_method("Call", &(request,)).await?;
+        let message = self.proxy.call_method("Call", &(request.as_str(),)).await?;
         ensure!(
             message.header().sender() == Some(self.service.inner()),
             "owner response came from an unexpected service"
         );
-        let response: String = message.body().deserialize()?;
+        let response = zeroize::Zeroizing::new(message.body().deserialize::<String>()?);
         ensure!(
             response.len() <= crate::framing::MAX_FRAME_BYTES,
             "owner response exceeds its size limit"

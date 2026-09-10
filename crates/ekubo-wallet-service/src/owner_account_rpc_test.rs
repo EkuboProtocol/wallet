@@ -39,6 +39,37 @@ fn wallet(owner: &OwnerApi) -> WalletMetadata {
 }
 
 #[tokio::test]
+async fn imports_cannot_replace_an_account_or_select_policy_and_storage() {
+    use ekubo_wallet_client::import_key::ImportKey;
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let wallet = wallet(&owner);
+    // Synthetic scalar used only to reach name validation. Neither request
+    // reaches the platform credential store.
+    let scalar = format!("{:064x}", 1);
+    for wallet_id in ["../escape", "primary"] {
+        let error = call::<WalletMetadata>(
+            &owner,
+            Request::ImportAccount {
+                wallet_id: wallet_id.into(),
+                key: ImportKey::from_hex(scalar.clone()).unwrap(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.to_string().contains(&scalar));
+        assert_eq!(owner.accounts().unwrap(), vec![wallet.clone()]);
+    }
+    for field in ["policy", "database_path", "owner_uid", "authorization"] {
+        let mut request = serde_json::json!({"method": "import_account", "params": {
+            "wallet_id": "new", "key": scalar
+        }});
+        request["params"][field] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+}
+
+#[tokio::test]
 async fn removal_checks_the_document_and_account_instance_before_native_authentication() {
     let directory = tempfile::tempdir().unwrap();
     let owner = OwnerApi::for_test(directory.path()).unwrap();

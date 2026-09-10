@@ -14,6 +14,7 @@ anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 uuid = { version = "1.18.1", features = ["serde"] }
+zeroize = "1.8.2"
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

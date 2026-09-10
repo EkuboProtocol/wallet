@@ -4592,6 +4592,7 @@ dependencies = [
  "tokio",
  "uuid 1.26.0",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
