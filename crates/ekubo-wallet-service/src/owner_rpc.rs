@@ -146,6 +146,12 @@ impl OwnerDispatcher {
             Request::TransactionInspection { request_id } => {
                 serde_json::to_value(Box::pin(owner.transaction_inspection(request_id)).await?)?
             }
+            Request::RebroadcastTransaction { request_id } => {
+                serde_json::to_value(owner.rebroadcast_transaction(request_id).await?)?
+            }
+            Request::AttemptTransactionCancellation { request_id } => {
+                serde_json::to_value(owner.attempt_transaction_cancellation(request_id).await?)?
+            }
             Request::RefreshTransaction { request_id } => {
                 serde_json::to_value(owner.refresh_transaction(request_id).await?)?
             }

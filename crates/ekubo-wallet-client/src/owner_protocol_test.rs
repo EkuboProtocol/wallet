@@ -27,3 +27,27 @@ fn protocol_rejects_authority_claims_and_unimplemented_operations() {
         );
     }
 }
+
+#[test]
+fn transaction_actions_accept_only_stored_request_ids() {
+    for method in [
+        "rebroadcast_transaction",
+        "attempt_transaction_cancellation",
+    ] {
+        let mut request = serde_json::json!({"method": method, "params": {"request_id": "00000000-0000-0000-0000-000000000001"}});
+        assert!(serde_json::from_value::<Request>(request.clone()).is_ok());
+        for field in [
+            "signed_bytes",
+            "nonce",
+            "max_fee_per_gas",
+            "to",
+            "value",
+            "approved",
+            "wallet_id",
+        ] {
+            request["params"][field] = serde_json::json!(true);
+            assert!(serde_json::from_value::<Request>(request.clone()).is_err());
+            request["params"].as_object_mut().unwrap().remove(field);
+        }
+    }
+}

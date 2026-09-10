@@ -68,6 +68,12 @@ pub enum Request {
     TransactionInspection {
         request_id: uuid::Uuid,
     },
+    RebroadcastTransaction {
+        request_id: uuid::Uuid,
+    },
+    AttemptTransactionCancellation {
+        request_id: uuid::Uuid,
+    },
     RefreshTransaction {
         request_id: uuid::Uuid,
     },

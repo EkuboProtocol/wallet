@@ -435,8 +435,9 @@ export and Windows identity work. Lint and execution-plan jobs passed. The Linux
 job failed in `broken_write_fails_the_request_without_replay_and_reconnects`:
 the test's `tools/list` probe can receive cached discovery before the bridge
 finishes accepting the reconnect, then stdin closes before the fake server sees
-the probe. macOS passed; Windows was still running at the latest check. Re-query
-before relying on their results.
+the probe. The run is now terminal: macOS and Windows passed; the overall
+result is failure because of that Linux test. A newer run must cover the fix
+and the later changes.
 
 The reconnect test now waits for an upstream notification forwarded by the
 bridge after reconnection, rather than treating completion of the fake server's
@@ -459,3 +460,19 @@ consistency, vulnerability scanning, and license policy passed. Logs:
 `~/Documents/wallet-windows-config-osv.log`, and
 `~/Documents/wallet-windows-config-licenses.log`. The native Windows module
 Clippy/type-check log is `~/Documents/wallet-windows-config-cross-check.log`.
+
+Owner rebroadcast and bounded cancellation now have typed service/client calls
+accepting only the stored request UUID. Both reuse existing OwnerApi/core paths,
+including legal prerequisites, state reconciliation, submission claims, exact
+stored bytes for rebroadcast, and core-derived bounded cancellation envelopes.
+The shared action result contains display facts; core's broadcast-absence
+provenance has no wire field or reverse conversion. Desktop adoption remains
+outstanding. RPC tests reject unapproved records before and after legal
+acceptance without changing the row; protocol tests reject replacement signing
+fields and approval flags. These tests do not exercise live-key broadcasting.
+
+The transaction-action checkpoint passed the full local gate: 1,684 tests
+passed, 11 ignored, with formatting, workspace Clippy, Ruff, generated
+licenses, vulnerability scanning, and license policy passing. Logs use the
+`~/Documents/wallet-actions-` prefix (`workspace-tests.log`, `clippy.log`,
+`osv.log`, and `licenses.log`). Native multi-platform CI remains required.

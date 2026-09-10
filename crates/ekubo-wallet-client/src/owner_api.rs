@@ -149,6 +149,20 @@ impl OwnerClient {
         self.call(&Request::TransactionInspection { request_id })
             .await
     }
+    pub async fn rebroadcast_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerTransactionAction> {
+        self.call(&Request::RebroadcastTransaction { request_id })
+            .await
+    }
+    pub async fn attempt_transaction_cancellation(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerTransactionAction> {
+        self.call(&Request::AttemptTransactionCancellation { request_id })
+            .await
+    }
     pub async fn refresh_transaction(
         &self,
         request_id: uuid::Uuid,

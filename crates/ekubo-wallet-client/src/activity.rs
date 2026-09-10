@@ -59,3 +59,51 @@ pub struct OwnerTransactionInspection {
     pub receipt_loaded: bool,
     pub receipt_error: Option<String>,
 }
+
+/// Display-only result of an owner transaction action. Never accepted as input
+/// to submission or reconciliation; observation provenance stays in core.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerTransactionAction {
+    pub record: PendingTransaction,
+    pub broadcast: Option<BroadcastDisplay>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BroadcastDisplay {
+    pub transaction_hash: String,
+    pub receipt_status: ReceiptDisplayStatus,
+    pub block_number: Option<String>,
+    pub mined_fee: Option<ekubo_wallet_core::rpc::MinedFee>,
+    pub broadcast_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptDisplayStatus {
+    Success,
+    Reverted,
+    Pending,
+}
+
+impl From<ekubo_wallet_core::execution::BroadcastResult> for BroadcastDisplay {
+    fn from(result: ekubo_wallet_core::execution::BroadcastResult) -> Self {
+        use ekubo_wallet_core::execution::ReceiptStatus;
+        Self {
+            transaction_hash: result.transaction_hash,
+            receipt_status: match result.receipt_status {
+                ReceiptStatus::Success => ReceiptDisplayStatus::Success,
+                ReceiptStatus::Reverted => ReceiptDisplayStatus::Reverted,
+                ReceiptStatus::Pending => ReceiptDisplayStatus::Pending,
+            },
+            block_number: result.block_number,
+            mined_fee: result.mined_fee,
+            broadcast_error: result.broadcast_error,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "activity_test.rs"]
+mod tests;

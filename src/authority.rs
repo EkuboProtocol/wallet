@@ -23,7 +23,6 @@ use ekubo_wallet_core::{
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{AgentKind, AppearancePreference, DesktopStore, GuidedSetupState},
-    execution::BroadcastResult,
     human_presence::{
         DappAuthorization, OwnerAuthorizationScope, PlatformHumanPresence, authorize_dapp_access,
         authorize_owner,
@@ -87,11 +86,7 @@ pub use ekubo_wallet_client::token_import::OwnerTokenListImport;
 
 pub use ekubo_wallet_client::transaction_review::ReviewedTransaction;
 
-#[derive(Clone, Debug)]
-pub struct OwnerTransactionAction {
-    pub record: PendingTransaction,
-    pub broadcast: Option<BroadcastResult>,
-}
+pub use ekubo_wallet_client::activity::OwnerTransactionAction;
 
 pub use ekubo_wallet_client::activity::OwnerTransactionInspection;
 
@@ -1795,7 +1790,7 @@ impl OwnerApi {
         }
         Ok(OwnerTransactionAction {
             record,
-            broadcast: Some(broadcast),
+            broadcast: Some(broadcast.into()),
         })
     }
 
@@ -1847,7 +1842,7 @@ impl OwnerApi {
         }
         Ok(OwnerTransactionAction {
             record,
-            broadcast: Some(broadcast),
+            broadcast: Some(broadcast.into()),
         })
     }
 

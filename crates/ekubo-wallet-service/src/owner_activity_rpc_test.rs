@@ -293,3 +293,46 @@ async fn hidden_activity_remains_addressable_and_presentations_use_stored_record
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn transaction_actions_cannot_send_or_cancel_an_unapproved_record() {
+    use ekubo_wallet_core::legal::LegalDocument;
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let wallet = register(&owner, "primary").await;
+    let mut pending = PendingStore::production(directory.path()).unwrap();
+    let record = pending
+        .create(&wallet.id, "ethereum", &plan(), None, 1)
+        .unwrap();
+    for accepted in [false, true] {
+        if accepted {
+            for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
+                let (_, digest) = owner.legal_document(document);
+                owner.accept_legal(document, &digest).unwrap();
+            }
+        }
+        for request in [
+            Request::RebroadcastTransaction {
+                request_id: record.request_id,
+            },
+            Request::AttemptTransactionCancellation {
+                request_id: record.request_id,
+            },
+        ] {
+            let expected = match &request {
+                Request::RebroadcastTransaction { .. } => "only one that is signed but unsent",
+                Request::AttemptTransactionCancellation { .. } => "nothing to cancel on chain",
+                _ => unreachable!(),
+            };
+            let error = call::<serde_json::Value>(&owner, request)
+                .await
+                .unwrap_err();
+            if accepted {
+                assert!(error.to_string().contains(expected), "{error:#}");
+            } else {
+                assert!(error.to_string().contains("Terms of Service"));
+            }
+            assert_eq!(pending.get(record.request_id).unwrap(), record);
+        }
+    }
+}
