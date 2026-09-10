@@ -476,3 +476,25 @@ passed, 11 ignored, with formatting, workspace Clippy, Ruff, generated
 licenses, vulnerability scanning, and license policy passing. Logs use the
 `~/Documents/wallet-actions-` prefix (`workspace-tests.log`, `clippy.log`,
 `osv.log`, and `licenses.log`). Native multi-platform CI remains required.
+
+Owner portfolio loading now has a shared response model and typed service/client
+call. The request contains only an optional account ID; the existing owner
+implementation reads enabled networks, testnet visibility, and trusted token
+rows from protected stores. Its concurrency limit and per-network error
+handling are retained. Core portfolio results gain deserialization as read-only
+display facts; no owner request accepts them as authority. Wire tests preserve
+full-width balance strings, missing metadata, skipped-token counts, and partial
+failures. A service test uses synthetic accounts and a bound non-listening local
+socket to verify filtering and failure handling without public RPC access.
+Desktop adoption and transport chunking for oversized snapshots remain required.
+
+CI run `34530629466` covers `967c2ef`, including the Windows identity/configuration
+checks and owner transaction actions. At the latest check lint and execution-plan
+jobs passed; Linux, macOS, and Windows tests remained in progress. It predates
+the portfolio RPC checkpoint. Re-query that exact run before relying on results.
+
+The portfolio checkpoint passed the full local gate: 1,687 tests passed,
+11 ignored; formatting, workspace Clippy, Ruff, generated licenses,
+vulnerability scanning, and license policy passed. Evidence logs use the prefix
+`~/Documents/wallet-portfolio-` with `workspace-tests.log`, `clippy.log`,
+`osv.log`, and `licenses.log`.

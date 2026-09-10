@@ -152,6 +152,9 @@ impl OwnerDispatcher {
             Request::AttemptTransactionCancellation { request_id } => {
                 serde_json::to_value(owner.attempt_transaction_cancellation(request_id).await?)?
             }
+            Request::Portfolio { wallet_id } => {
+                serde_json::to_value(owner.portfolio(wallet_id.as_deref()).await?)?
+            }
             Request::RefreshTransaction { request_id } => {
                 serde_json::to_value(owner.refresh_transaction(request_id).await?)?
             }
@@ -417,3 +420,7 @@ mod signature_tests;
 #[cfg(test)]
 #[path = "owner_account_rpc_test.rs"]
 mod account_tests;
+
+#[cfg(test)]
+#[path = "owner_portfolio_rpc_test.rs"]
+mod portfolio_tests;

@@ -51,3 +51,20 @@ fn transaction_actions_accept_only_stored_request_ids() {
         }
     }
 }
+
+#[test]
+fn portfolio_read_cannot_replace_authoritative_inputs() {
+    for field in [
+        "networks",
+        "rpc_urls",
+        "known_tokens",
+        "address",
+        "data_dir",
+        "testnet_mode",
+    ] {
+        let mut request =
+            serde_json::json!({"method": "portfolio", "params": {"wallet_id": "primary"}});
+        request["params"][field] = serde_json::json!("replacement");
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+}

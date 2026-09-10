@@ -1184,7 +1184,7 @@ fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredToken> {
 }
 
 /// One token balance line in a portfolio.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct PortfolioToken {
     pub address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1203,7 +1203,7 @@ pub struct PortfolioToken {
 }
 
 /// Balances for one address across the tokens known to the database.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct Portfolio {
     pub address: String,
     pub chain_id: String,

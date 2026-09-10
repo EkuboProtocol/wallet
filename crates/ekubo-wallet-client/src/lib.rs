@@ -13,6 +13,7 @@ pub mod import_key;
 #[cfg(target_os = "linux")]
 mod owner_client;
 pub mod owner_protocol;
+pub mod portfolio;
 pub mod simulation_display;
 pub mod token_import;
 pub mod transaction_review;

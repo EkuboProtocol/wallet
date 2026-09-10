@@ -42,8 +42,8 @@ use ekubo_wallet_core::{
     signature_review,
     simulation::{SimulationResult, simulate_external_execution},
     token_store::{
-        ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, StoredToken, TokenProposal,
-        TokenStore, read_portfolio,
+        ListedToken, MAX_PORTFOLIO_TOKENS, ProposalSource, StoredToken, TokenProposal, TokenStore,
+        read_portfolio,
     },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
@@ -62,25 +62,9 @@ fn contains_configured_chain(config: &WalletConfig, chain_id: u64) -> bool {
 
 pub use ekubo_wallet_client::automation_report::{AutomationDryRun, AutomationDryRunVerdict};
 
-/// One owner account's balances across every configured network.
-#[derive(Clone, Debug)]
-pub struct OwnerPortfolioAccount {
-    pub wallet: WalletMetadata,
-    pub networks: Vec<OwnerPortfolioNetwork>,
-}
-
-/// A network read is isolated so one unavailable public RPC does not hide the
-/// rest of the portfolio.
-#[derive(Clone, Debug)]
-pub struct OwnerPortfolioNetwork {
-    pub network: NetworkConfig,
-    pub result: std::result::Result<Portfolio, String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnerPortfolioSnapshot {
-    pub accounts: Vec<OwnerPortfolioAccount>,
-}
+pub use ekubo_wallet_client::portfolio::{
+    OwnerPortfolioAccount, OwnerPortfolioNetwork, OwnerPortfolioSnapshot,
+};
 
 pub use ekubo_wallet_client::token_import::OwnerTokenListImport;
 

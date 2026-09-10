@@ -14,6 +14,16 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    pub async fn portfolio(
+        &self,
+        wallet_id: Option<&str>,
+    ) -> Result<crate::portfolio::OwnerPortfolioSnapshot> {
+        self.call(&Request::Portfolio {
+            wallet_id: wallet_id.map(str::to_owned),
+        })
+        .await
+    }
+
     /// Each call requires fresh service-side native authentication. The returned
     /// lease only controls the UI reveal interval; it grants no further access.
     pub async fn begin_private_key_export(
