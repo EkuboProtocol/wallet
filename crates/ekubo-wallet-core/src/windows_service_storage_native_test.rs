@@ -1,5 +1,4 @@
 use super::*;
-use std::os::windows::io::AsHandle as _;
 use windows::{
     Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -8,6 +7,68 @@ use windows::{
 };
 
 const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
+
+struct Directory(std::path::PathBuf);
+impl Directory {
+    fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("ekubo-relative-open-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for Directory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn directory_handle(path: &std::path::Path) -> File {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_WRITE,
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .open(path)
+        .unwrap()
+}
+
+#[test]
+fn native_child_open_stays_bound_to_the_directory_handle_after_rename() {
+    use std::io::Read as _;
+    let dir = Directory::new();
+    let original = dir.0.join("original");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("state"), b"original").unwrap();
+    let parent = directory_handle(&original);
+    std::fs::rename(&original, dir.0.join("moved")).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("state"), b"replacement").unwrap();
+    let mut child = open_relative(parent.as_handle(), "state", StorageKind::File).unwrap();
+    let mut contents = String::new();
+    child.read_to_string(&mut contents).unwrap();
+    assert_eq!(contents, "original");
+    assert!(open_relative(parent.as_handle(), "missing", StorageKind::File).is_err());
+    assert!(!dir.0.join("moved/missing").exists());
+    assert!(open_relative(parent.as_handle(), "state", StorageKind::Directory).is_err());
+}
+
+#[test]
+fn native_child_open_rejects_a_concurrent_writer() {
+    let dir = Directory::new();
+    let parent = directory_handle(&dir.0);
+    let writer = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(dir.0.join("state"))
+        .unwrap();
+    assert!(open_relative(parent.as_handle(), "state", StorageKind::File).is_err());
+    drop(writer);
+    assert!(open_relative(parent.as_handle(), "state", StorageKind::File).is_ok());
+}
 
 fn validate_sddl(sddl: &str) -> Result<()> {
     let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();

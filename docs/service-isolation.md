@@ -345,6 +345,26 @@ and [GetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32
 contracts. These APIs inspect the open object; they do not establish safe path
 traversal or eliminate the need to protect its ancestors.
 
+Windows now also has a read-only child opener using `NtCreateFile` with a live
+directory handle as `RootDirectory`. It verifies the actual dedicated service
+process and the parent directory, opens exactly one bounded ASCII component,
+then validates the returned handle before exposing it for I/O. Separators,
+alternate streams, trailing dots/spaces, and DOS device names are rejected.
+The open cannot create or truncate files and does not follow a leaf reparse
+point. Handles permit read sharing only, preventing incompatible data-write/delete
+opens while retained. The kernel primitive has native tests for an ancestor
+rename/replacement, missing children, wrong file type, and concurrent writers.
+Those tests do not stand in for a provisioned service-account test.
+
+Protected root bootstrap and retained ancestor validation are still required;
+this API accepts an existing directory handle and does not establish its path
+provenance. It is not connected to production custody or exposed through RPC.
+See Microsoft's [NtCreateFile contract](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile).
+The relative-open checkpoint passed the full local gate (1,708 tests passed,
+12 ignored) and the standalone Windows GNU Clippy check including native tests.
+Native execution is still pending. Logs: `~/Documents/wallet-win-path-gate.log`
+and `~/Documents/wallet-win-path-cross.log`.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,

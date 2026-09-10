@@ -1,6 +1,40 @@
 use super::*;
 const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 
+#[test]
+fn child_names_cannot_select_paths_streams_or_dos_devices() {
+    for name in [
+        "",
+        ".",
+        "..",
+        "../key",
+        "a\\key",
+        "C:key",
+        "key:stream",
+        "key.",
+        "key ",
+        "a\0b",
+        "CON",
+        "nul.key",
+        "com1",
+        "LPT9.db",
+        "é",
+    ] {
+        assert!(validate_component(name).is_err(), "{name:?}");
+    }
+    assert!(validate_component(&"a".repeat(129)).is_err());
+    for name in [
+        "database.key",
+        ".lock",
+        "profile-01",
+        "account_123",
+        "com10",
+        "a",
+    ] {
+        assert!(validate_component(name).is_ok(), "{name:?}");
+    }
+}
+
 fn allow(sid: &str, mask: u32, inherit_only: bool) -> AccessEntry {
     AccessEntry::Allow {
         sid: sid.into(),
