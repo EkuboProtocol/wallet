@@ -68,3 +68,22 @@ fn portfolio_read_cannot_replace_authoritative_inputs() {
         assert!(serde_json::from_value::<Request>(request).is_err());
     }
 }
+
+#[test]
+fn history_clear_has_no_caller_selected_deletion_scope() {
+    assert!(
+        serde_json::from_value::<Request>(serde_json::json!({"method":"clear_activity_history"}))
+            .is_ok()
+    );
+    for field in [
+        "include_pending",
+        "include_unsettled",
+        "delete_transactions",
+        "request_ids",
+        "data_dir",
+    ] {
+        let mut request = serde_json::json!({"method":"clear_activity_history", "params":{}});
+        request["params"][field] = true.into();
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+}

@@ -161,6 +161,7 @@ impl OwnerDispatcher {
             Request::Transactions { wallet_id, limit } => {
                 serde_json::to_value(owner.transactions(wallet_id.as_deref(), limit)?)?
             }
+            Request::ClearActivityHistory => serde_json::to_value(owner.clear_activity_history()?)?,
             Request::Activity { wallet_id, limit } => {
                 serde_json::to_value(owner.activity(wallet_id.as_deref(), limit)?)?
             }

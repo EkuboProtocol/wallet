@@ -498,3 +498,20 @@ The portfolio checkpoint passed the full local gate: 1,687 tests passed,
 vulnerability scanning, and license policy passed. Evidence logs use the prefix
 `~/Documents/wallet-portfolio-` with `workspace-tests.log`, `clippy.log`,
 `osv.log`, and `licenses.log`.
+
+Owner history clearing now has a typed service/client operation with no
+caller-selected deletion scope. It delegates to the existing core stores:
+finished transactions are hidden but remain directly addressable, decided
+message/typed-data records are removed, and live records remain. MCP and
+AgentApi gain no history-clearing operation. The wire test rejects attempts to
+include pending/unsettled state or replace the storage path. The service test
+uses synthetic records to verify deletion, hiding, preservation, and a no-op
+second call. Existing core tests cover unsettled transaction retention.
+This does not add transactional atomicity across the existing three store
+operations; after any error the desktop must refresh authoritative activity.
+
+The history RPC checkpoint passed the full local gate: 1,689 tests passed,
+11 ignored; formatting, workspace Clippy, Ruff, generated licenses,
+vulnerability scanning, and license policy passed. Logs use the prefix
+`~/Documents/wallet-history-` with `workspace-tests.log`, `clippy.log`,
+`osv.log`, and `licenses.log`.

@@ -49,12 +49,16 @@ async fn register(owner: &OwnerApi, id: &str) -> WalletMetadata {
 }
 
 fn plan() -> ExecutionPlan {
+    plan_with_value("1")
+}
+
+fn plan_with_value(value: &str) -> ExecutionPlan {
     ExecutionPlan::parse(serde_json::json!({
         "schema_version": "1", "chain_id": "1", "caip2_chain_id": "eip155:1",
         "sender": "0x1111111111111111111111111111111111111111",
         "ordered_steps": [{ "step": 1, "kind": "execution", "transaction": {
             "chain_id": "1", "from": "0x1111111111111111111111111111111111111111",
-            "to": "0x2222222222222222222222222222222222222222", "data": "0x", "value": "1"
+            "to": "0x2222222222222222222222222222222222222222", "data": "0x", "value": value
         }}]
     }))
     .unwrap()
@@ -335,4 +339,116 @@ async fn transaction_actions_cannot_send_or_cancel_an_unapproved_record() {
             assert_eq!(pending.get(record.request_id).unwrap(), record);
         }
     }
+}
+
+#[tokio::test]
+async fn clearing_owner_history_keeps_live_records_and_hides_finished_transactions() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let wallet = register(&owner, "primary").await;
+    let mut pending = PendingStore::production(directory.path()).unwrap();
+    let live_transaction = pending
+        .create(&wallet.id, "ethereum", &plan(), None, 1)
+        .unwrap();
+    let finished = pending
+        .create(&wallet.id, "ethereum", &plan_with_value("2"), None, 1)
+        .unwrap();
+    let finished = pending.reject(finished.request_id).unwrap();
+    let live_message = owner
+        .queue_message(
+            &wallet.id,
+            1,
+            b"waiting",
+            MessageEncoding::Text,
+            "synthetic",
+            &RequestSource::Unknown,
+        )
+        .unwrap();
+    let decided_message = owner
+        .queue_message(
+            &wallet.id,
+            1,
+            b"decided",
+            MessageEncoding::Text,
+            "synthetic",
+            &RequestSource::Unknown,
+        )
+        .unwrap();
+    owner.reject_message(decided_message.request_id).unwrap();
+    let payload = |note: &str| {
+        serde_json::json!({
+            "types": {
+                "EIP712Domain": [{"name":"chainId","type":"uint256"}],
+                "Test": [{"name":"note","type":"string"}]
+            }, "primaryType": "Test", "domain": {"chainId":1}, "message": {"note":note}
+        })
+    };
+    let live_typed = owner
+        .queue_typed_data(
+            &wallet.id,
+            1,
+            &payload("waiting"),
+            "synthetic",
+            &RequestSource::Unknown,
+        )
+        .unwrap();
+    let decided_typed = owner
+        .queue_typed_data(
+            &wallet.id,
+            1,
+            &payload("decided"),
+            "synthetic",
+            &RequestSource::Unknown,
+        )
+        .unwrap();
+    owner.reject_typed_data(decided_typed.request_id).unwrap();
+    assert_eq!(
+        call::<usize>(&owner, Request::ClearActivityHistory)
+            .await
+            .unwrap(),
+        3
+    );
+    let activity: Vec<OwnerActivityRecord> = call(
+        &owner,
+        Request::Activity {
+            wallet_id: None,
+            limit: 20,
+        },
+    )
+    .await
+    .unwrap();
+    let ids: std::collections::BTreeSet<_> = activity
+        .iter()
+        .map(OwnerActivityRecord::request_id)
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            live_transaction.request_id,
+            live_message.request_id,
+            live_typed.request_id
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        owner.transaction(live_transaction.request_id).unwrap(),
+        live_transaction
+    );
+    assert_eq!(
+        owner.message(live_message.request_id).unwrap(),
+        live_message
+    );
+    assert_eq!(owner.typed_data(live_typed.request_id).unwrap(), live_typed);
+    let hidden = owner.transaction(finished.request_id).unwrap();
+    assert_eq!(hidden.status, PendingStatus::Rejected);
+    assert_eq!(hidden.execution_plan, finished.execution_plan);
+    assert!(owner.message(decided_message.request_id).is_err());
+    assert!(owner.typed_data(decided_typed.request_id).is_err());
+    assert_eq!(
+        call::<usize>(&owner, Request::ClearActivityHistory)
+            .await
+            .unwrap(),
+        0
+    );
 }

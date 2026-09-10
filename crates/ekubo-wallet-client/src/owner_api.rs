@@ -191,6 +191,12 @@ impl OwnerClient {
         })
         .await
     }
+    /// Clear decided history through the service. Refresh activity afterwards,
+    /// including after an ambiguous transport failure; never replay implicitly.
+    pub async fn clear_activity_history(&self) -> Result<usize> {
+        self.call(&Request::ClearActivityHistory).await
+    }
+
     pub async fn activity(
         &self,
         wallet_id: Option<&str>,
