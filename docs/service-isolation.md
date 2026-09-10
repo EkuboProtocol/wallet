@@ -19,6 +19,35 @@ inside the protected service remain outside this boundary.
 
 ## Implementation and evidence
 
+Cross-platform separation is a requirement for this change. The request/response
+protocol, policy evaluation, transaction review, desktop snapshots, and session
+lifecycle must remain shared. Platform adapters establish the following OS
+properties before exposing that shared runtime:
+
+| Property | Linux adapter | Windows adapter |
+| --- | --- | --- |
+| Service identity | Dedicated service UID | Dedicated virtual service account SID in session 0 |
+| Protected installation and owner binding | Root-owned executable and configuration | Administrator-protected executable and HKLM configuration |
+| Private authoritative state | Checked ownership, modes, and no-follow traversal | Checked ACLs and reparse-point-safe traversal |
+| Authenticated client identity | System-bus sender credentials / Unix socket peer credentials | Kernel-verified named-pipe peer identity |
+| Fresh owner authorization | Polkit bound to the actual desktop caller | Native owner-session authentication bound to the actual caller and operation |
+| Service lifecycle | systemd provisioning and shutdown | SCM provisioning and shutdown |
+
+This table is a required contract, not a claim that both adapters are complete.
+Neither platform may accept caller-supplied identity or an approval boolean as
+proof. Both must support unattended policy-authorized signing without exposing
+raw keys to the agent. Platform-specific packaging must not leak into wallet
+screens or introduce a second policy implementation.
+
+The uninstalled assets in `contrib/linux-service/` provide a systemd unit,
+D-Bus name-ownership policy, service-account declaration, and common directory
+declarations. Per-owner provisioning, activation, migration, and protected
+updates remain unfinished. The unit deliberately requires existing validated
+state rather than recursively repairing its ownership. An isolated-root
+systemd verification and private-bus positive/negative name-ownership checks
+passed; these are asset checks, not a packaged-service or Windows test.
+Log: `~/Documents/wallet-service-assets-verify.log`.
+
 - `ekubo-wallet-client` now owns the shared closed request protocol, framing,
   authenticated Linux transport, and typed owner methods. It depends on core's
   data types and identity validation, not on the headless authority runtime.

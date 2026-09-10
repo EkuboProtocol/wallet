@@ -1,0 +1,6 @@
+# Only common, root-owned parents. Per-owner directories need validated
+# provisioning and must never be recursively repaired over existing profiles.
+d /etc/ekubo-wallet 0755 root root -
+d /etc/ekubo-wallet/owners 0755 root root -
+d /var/lib/ekubo-wallet 0755 root root -
+d /run/ekubo-wallet 0755 root root -

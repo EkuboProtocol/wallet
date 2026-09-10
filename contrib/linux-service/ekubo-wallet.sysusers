@@ -1,0 +1,2 @@
+# The stable dedicated account also matches the polkit action's owner annotation.
+u ekubo-wallet - "Ekubo Wallet authority" /var/empty

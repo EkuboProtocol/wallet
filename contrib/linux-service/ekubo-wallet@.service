@@ -1,0 +1,35 @@
+[Unit]
+Description=Ekubo Wallet authority for owner UID %i
+Requires=dbus.socket
+After=dbus.socket network.target
+ConditionPathExists=/etc/ekubo-wallet/owners/%i.json
+
+[Service]
+Type=dbus
+BusName=org.ekubo.Wallet.Owner.u%i
+User=ekubo-wallet
+Group=ekubo-wallet
+ExecStart=/usr/lib/ekubo-wallet/ekubo-wallet-service --owner-uid %i
+WorkingDirectory=/
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+KillMode=control-group
+
+# Provision these exact directories before starting the unit. Do not use
+# StateDirectory: its recursive ownership repair could mask unsafe storage.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ekubo-wallet/%i /run/ekubo-wallet/%i
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+LimitCORE=0
