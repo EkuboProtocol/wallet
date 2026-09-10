@@ -39,6 +39,25 @@ proof. Both must support unattended policy-authorized signing without exposing
 raw keys to the agent. Platform-specific packaging must not leak into wallet
 screens or introduce a second policy implementation.
 
+`OwnerConnection<T>` now owns typed RPC serialization, response bounds, and
+zeroizing JSON buffers on every platform. Its sealed transport contract keeps
+construction inside authenticated adapters. Linux `OwnerClient` is an alias
+using the D-Bus adapter; Windows can supply its authenticated pipe adapter
+without duplicating the owner API, snapshot reader, or session supervisor.
+The shared layer never retries a failed exchange. Platform adapters remain
+responsible for authenticating and pinning service identity, validating reply
+provenance, and closing all connection clones. Tests cover ambiguous mutation
+failure without replay, oversized requests before dispatch, oversized replies
+before decoding, and snapshot reads over the same typed API. The two Linux
+private-bus identity/close tests also passed explicitly after this extraction.
+Windows hosting, storage, and transport are still unimplemented.
+The transport extraction passed the full local gate with 1,704 tests passed,
+12 ignored, plus both explicitly run private-bus tests. Formatting, workspace
+Clippy, Ruff, generated licenses, vulnerability scanning, and license policy
+passed. Logs: `~/Documents/wallet-transport-gate.log` and
+`~/Documents/wallet-transport-private-bus.log`. Native CI for this extraction
+remains required; the earlier session-checkpoint run was still active.
+
 The uninstalled assets in `contrib/linux-service/` provide a systemd unit,
 D-Bus name-ownership policy, service-account declaration, and common directory
 declarations. Per-owner provisioning, activation, migration, and protected

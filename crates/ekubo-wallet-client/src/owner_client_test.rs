@@ -23,6 +23,7 @@ fn private_bus() -> (Bus, String) {
 }
 
 use super::*;
+use crate::owner_protocol::Request;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},

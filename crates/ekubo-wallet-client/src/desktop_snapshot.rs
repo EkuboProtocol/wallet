@@ -104,52 +104,59 @@ pub struct DesktopSnapshot {
     pub native_token_prices: BTreeMap<u64, f64>,
 }
 
-#[cfg(target_os = "linux")]
-impl SnapshotReader for crate::OwnerClient {
+impl<T: crate::owner_connection::OwnerTransport> SnapshotReader
+    for crate::owner_connection::OwnerConnection<T>
+{
     async fn reviews(&self) -> Result<OwnerReviewQueues> {
-        crate::OwnerClient::reviews(self, None).await
+        crate::owner_connection::OwnerConnection::reviews(self, None).await
     }
     async fn automations(&self) -> Result<Vec<Automation>> {
-        crate::OwnerClient::automations(self).await
+        crate::owner_connection::OwnerConnection::automations(self).await
     }
     async fn automation_runs(&self, automation_id: Uuid) -> Result<Vec<AutomationRun>> {
-        crate::OwnerClient::automation_runs(self, automation_id, AUTOMATION_RUN_LIMIT).await
+        crate::owner_connection::OwnerConnection::automation_runs(
+            self,
+            automation_id,
+            AUTOMATION_RUN_LIMIT,
+        )
+        .await
     }
     async fn activity(&self) -> Result<Vec<OwnerActivityRecord>> {
-        crate::OwnerClient::activity(self, None, ACTIVITY_LIMIT).await
+        crate::owner_connection::OwnerConnection::activity(self, None, ACTIVITY_LIMIT).await
     }
     async fn activity_sources(&self) -> Result<BTreeMap<Uuid, String>> {
-        crate::OwnerClient::activity_sources(self).await
+        crate::owner_connection::OwnerConnection::activity_sources(self).await
     }
     async fn accounts(&self) -> Result<Vec<WalletMetadata>> {
-        crate::OwnerClient::accounts(self).await
+        crate::owner_connection::OwnerConnection::accounts(self).await
     }
     async fn legal_status(&self) -> Result<LegalStatus> {
-        crate::OwnerClient::legal_status(self).await
+        crate::owner_connection::OwnerConnection::legal_status(self).await
     }
     async fn networks(&self) -> Result<Vec<NetworkConfig>> {
-        crate::OwnerClient::networks(self).await
+        crate::owner_connection::OwnerConnection::networks(self).await
     }
     async fn policy(&self, wallet_id: &str) -> Result<Option<StoredPolicy>> {
-        crate::OwnerClient::policy(self, wallet_id).await
+        crate::owner_connection::OwnerConnection::policy(self, wallet_id).await
     }
     async fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
-        crate::OwnerClient::message_review_document(self, request_id).await
+        crate::owner_connection::OwnerConnection::message_review_document(self, request_id).await
     }
     async fn typed_data_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
-        crate::OwnerClient::typed_data_review_document(self, request_id).await
+        crate::owner_connection::OwnerConnection::typed_data_review_document(self, request_id).await
     }
     async fn saved_transaction_summaries(
         &self,
         request_ids: &[Uuid],
     ) -> Result<BTreeMap<Uuid, String>> {
-        crate::OwnerClient::saved_transaction_summaries(self, request_ids).await
+        crate::owner_connection::OwnerConnection::saved_transaction_summaries(self, request_ids)
+            .await
     }
     async fn transaction_headlines(&self, request_ids: &[Uuid]) -> Result<BTreeMap<Uuid, String>> {
-        crate::OwnerClient::transaction_headlines(self, request_ids).await
+        crate::owner_connection::OwnerConnection::transaction_headlines(self, request_ids).await
     }
     async fn native_token_prices(&self) -> Result<BTreeMap<u64, f64>> {
-        crate::OwnerClient::native_token_prices(self).await
+        crate::owner_connection::OwnerConnection::native_token_prices(self).await
     }
 }
 

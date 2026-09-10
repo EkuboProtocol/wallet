@@ -14,6 +14,7 @@ pub mod framing;
 pub mod import_key;
 #[cfg(target_os = "linux")]
 mod owner_client;
+pub mod owner_connection;
 pub mod owner_protocol;
 pub mod portfolio;
 pub mod simulation_display;
@@ -21,9 +22,4 @@ pub mod token_import;
 pub mod transaction_review;
 #[cfg(target_os = "linux")]
 pub use owner_client::OwnerClient;
-#[cfg(target_os = "linux")]
 mod owner_api;
-
-// owner_api is transport-independent. Windows should provide an owner_client
-// module with the same connect/call/close/session contract and enable this same
-// implementation, rather than duplicating the protocol or wallet operations.

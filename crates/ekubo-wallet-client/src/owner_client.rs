@@ -1,42 +1,18 @@
 //! Desktop-side Linux owner transport. This never opens wallet storage.
 
-use crate::owner_protocol::{OBJECT_PATH, Request};
+use crate::owner_connection::{OwnerConnection, OwnerTransport};
+use crate::owner_protocol::OBJECT_PATH;
 use anyhow::{Context as _, Result, ensure};
 use std::time::Duration;
 use zbus::{Connection, Proxy, fdo::DBusProxy, names::OwnedUniqueName};
 
 #[derive(Clone)]
-pub struct OwnerClient {
+pub struct LinuxOwnerTransport {
     proxy: Proxy<'static>,
     service: OwnedUniqueName,
 }
 
-impl OwnerClient {
-    /// Supervise the desktop lease and close all connection clones on shutdown.
-    /// Keep the returned lifetime in application state and await close on Quit.
-    #[must_use]
-    pub fn start_desktop_session(&self) -> crate::desktop_session::DesktopSession {
-        crate::desktop_session::DesktopSession::start(self.clone())
-    }
-
-    /// Keep automatic execution active for this desktop connection. Spawn this
-    /// once for the application lifetime; closing the connection ends the lease.
-    /// Cancelling just this method's future does not disconnect a D-Bus peer.
-    pub async fn hold_desktop_session(&self) -> Result<()> {
-        let response = self.proxy.call_method("HoldDesktopSession", &()).await?;
-        ensure!(
-            response.header().sender() == Some(self.service.inner()),
-            "desktop session response came from an unexpected service"
-        );
-        Ok(response.body().deserialize()?)
-    }
-
-    /// Close this connection, including all clones and pending owner requests.
-    /// The application must do this on Quit to release its desktop session.
-    pub async fn close(&self) -> Result<()> {
-        Ok(self.proxy.connection().clone().close().await?)
-    }
-
+impl OwnerConnection<LinuxOwnerTransport> {
     /// Authenticate the installed service using protected installer metadata
     /// and the real system bus. No caller-provided UID, bus address, or service
     /// name is accepted at this boundary.
@@ -73,33 +49,44 @@ impl OwnerClient {
         // name. A restart requires a new explicitly authenticated connection.
         let proxy =
             Proxy::new_owned(bus, service.clone(), OBJECT_PATH, "org.ekubo.Wallet.Owner1").await?;
-        Ok(Self { proxy, service })
+        Ok(Self::from_transport(LinuxOwnerTransport { proxy, service }))
     }
+}
 
-    /// Dispatch once. A lost reply does not justify replaying a mutation.
-    /// Callers must refresh authoritative state after an ambiguous failure.
-    pub(crate) async fn call<T: serde::de::DeserializeOwned>(
-        &self,
-        request: &Request,
-    ) -> Result<T> {
-        let request = zeroize::Zeroizing::new(serde_json::to_string(request)?);
-        ensure!(
-            request.len() <= crate::framing::MAX_FRAME_BYTES,
-            "owner request exceeds its size limit"
-        );
-        let message = self.proxy.call_method("Call", &(request.as_str(),)).await?;
+impl crate::owner_connection::sealed::Sealed for LinuxOwnerTransport {}
+
+impl OwnerTransport for LinuxOwnerTransport {
+    async fn exchange(&self, request: &str) -> Result<zeroize::Zeroizing<String>> {
+        let message = self.proxy.call_method("Call", &(request,)).await?;
         ensure!(
             message.header().sender() == Some(self.service.inner()),
             "owner response came from an unexpected service"
         );
-        let response = zeroize::Zeroizing::new(message.body().deserialize::<String>()?);
+        Ok(zeroize::Zeroizing::new(
+            message.body().deserialize::<String>()?,
+        ))
+    }
+
+    /// Keep automatic execution active for this desktop connection. Spawn this
+    /// once for the application lifetime; closing the connection ends the lease.
+    /// Cancelling just this method's future does not disconnect a D-Bus peer.
+    async fn hold(&self) -> Result<()> {
+        let response = self.proxy.call_method("HoldDesktopSession", &()).await?;
         ensure!(
-            response.len() <= crate::framing::MAX_FRAME_BYTES,
-            "owner response exceeds its size limit"
+            response.header().sender() == Some(self.service.inner()),
+            "desktop session response came from an unexpected service"
         );
-        Ok(serde_json::from_str(&response)?)
+        Ok(response.body().deserialize()?)
+    }
+
+    /// Close this connection, including all clones and pending owner requests.
+    /// The application must do this on Quit to release its desktop session.
+    async fn close(&self) -> Result<()> {
+        Ok(self.proxy.connection().clone().close().await?)
     }
 }
+
+pub type OwnerClient = OwnerConnection<LinuxOwnerTransport>;
 
 #[cfg(test)]
 #[path = "owner_client_test.rs"]

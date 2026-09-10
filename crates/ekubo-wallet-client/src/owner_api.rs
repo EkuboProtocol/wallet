@@ -1,7 +1,10 @@
 //! Typed desktop operations over authenticated transport. All validation and
 //! mutations execute in the service; this layer only carries intent and results.
 
-use crate::{OwnerClient, owner_protocol::Request};
+use crate::{
+    owner_connection::{OwnerConnection, OwnerTransport},
+    owner_protocol::Request,
+};
 use anyhow::{Context as _, Result};
 use ekubo_wallet_core::{
     config::{NetworkConfig, WalletConfig, WalletMetadata},
@@ -13,7 +16,7 @@ use ekubo_wallet_core::{
     token_store::{ListedToken, StoredToken, TokenProposal},
 };
 
-impl OwnerClient {
+impl<T: OwnerTransport> OwnerConnection<T> {
     pub async fn portfolio(
         &self,
         wallet_id: Option<&str>,

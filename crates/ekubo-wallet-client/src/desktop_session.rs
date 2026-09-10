@@ -97,13 +97,14 @@ async fn supervise(
     result
 }
 
-#[cfg(target_os = "linux")]
-impl SessionTransport for crate::OwnerClient {
+impl<T: crate::owner_connection::OwnerTransport> SessionTransport
+    for crate::owner_connection::OwnerConnection<T>
+{
     async fn hold(&self) -> Result<()> {
         self.hold_desktop_session().await
     }
     async fn close(&self) -> Result<()> {
-        crate::OwnerClient::close(self).await
+        crate::owner_connection::OwnerConnection::close(self).await
     }
 }
 
