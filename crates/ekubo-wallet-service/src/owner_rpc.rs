@@ -14,6 +14,13 @@ pub use ekubo_wallet_client::owner_protocol::Request;
 pub(crate) struct OwnerDispatcher {
     owner: OwnerApi,
     dapps: Arc<DappRuntime>,
+    transactions: crate::transaction_reviews::TransactionReviews,
+}
+
+impl Drop for OwnerDispatcher {
+    fn drop(&mut self) {
+        let _ = self.transactions.shutdown();
+    }
 }
 
 impl OwnerDispatcher {
@@ -21,7 +28,11 @@ impl OwnerDispatcher {
     // context before entering this shared dispatcher. No transport handle or
     // Linux UID is part of the wallet operation protocol.
     pub(crate) fn new(owner: OwnerApi, dapps: Arc<DappRuntime>) -> Self {
-        Self { owner, dapps }
+        Self {
+            owner,
+            dapps,
+            transactions: crate::transaction_reviews::TransactionReviews::default(),
+        }
     }
 
     fn transaction_records(
@@ -39,6 +50,27 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::ReviewTransaction { request_id } => {
+                serde_json::to_value(Box::pin(self.transactions.review(owner, request_id)).await?)?
+            }
+            Request::TransactionReviewFrame { request_id } => {
+                serde_json::to_value(self.transactions.frame(request_id)?)?
+            }
+            Request::DecideTransactionReview {
+                request_id,
+                frame_id,
+                reviewed_identity,
+                choice,
+            } => {
+                self.transactions.decide(
+                    request_id,
+                    frame_id,
+                    &reviewed_identity,
+                    choice,
+                    &owner.event_bus(),
+                )?;
+                Value::Null
+            }
             Request::SignMessage {
                 request_id,
                 reviewed_digest,

@@ -360,7 +360,7 @@ pub async fn approve_transaction(
     config: &ConfigStore,
     pending: PendingStore,
     tokens: crate::token_store::TokenStore,
-    legal: &LegalStore,
+    legal: &mut LegalStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
     presenter: &dyn ReviewPresenter,

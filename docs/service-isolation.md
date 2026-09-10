@@ -186,12 +186,24 @@ inside the protected service remain outside this boundary.
   handing frames to the view, preserving all visible facts while excluding
   `PreparedExecution` and the simulation-consumption handle. Its decoder rejects
   those authority/handle fields. The core simulation itself remains non-deserializable.
-- Transaction reviews still require a frame broker. Keep the existing core
-  orchestrator and its refresh callback in the initiating authenticated owner
-  task; relay only display documents/simulation data and single-use frame
-  decisions. Never serialize `PreparedExecution` or transfer the owner's task
-  context to an agent/session worker. Refresh must retire the previous frame,
-  and disconnect/shutdown must close pending decisions without rejecting a row.
+- Transaction review now has a shared service broker and typed start/frame/choice
+  RPCs. The start call stays pending through the existing core orchestrator and
+  exact-byte submission on the initiating authenticated owner task. A bounded
+  reservation lasts through preparation, refresh, native authentication, and
+  sending; duplicate reviews cannot enter while a decision is authenticating.
+  The broker reuses the existing GUI presenter, relays only display documents
+  and simulation facts, and requires the exact single-use frame ID and document
+  identity for each choice. Refresh retires the previous frame, even when its
+  document is unchanged. Close and cancellation abort without recording a
+  rejection; only an explicit Reject choice follows core's rejection path.
+  Cancellation drops the reservation, and broker shutdown cancels pending
+  operations, including preparation before a frame exists. Review events follow
+  frame insertion/removal. The core legal-store borrow is exclusive across
+  awaits so the service can poll the future without sharing SQLite connections.
+  Desktop adoption, service lifecycle shutdown integration, large-frame handling,
+  and native successful signing validation are still required. Dropping a client
+  method future does not itself disconnect D-Bus: the desktop adapter must own
+  and close the review connection when cancelling its operation.
 
 ## Work still required before completion
 
@@ -282,7 +294,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 198 service tests and eight client tests,
+- Service and client library suites pass: 206 service tests and eight client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -302,6 +314,13 @@ before the at-rest requirement is resolved.
   access; successful native service signing remains untested. Simulation-display
   tests preserve every serialized display fact while rejecting preparation
   authority and simulation-consumption handle fields.
+  Transaction broker tests cover exact single-use frames, unchanged-document
+  refresh, bounded reservations, retention during a simulated authentication
+  wait, cancellation/shutdown, Close versus Reject, failed RPC cleanup, and
+  rejection of caller-supplied authority fields. They do not perform native
+  authentication or live signing; existing core pipeline tests still cover
+  authoring, refresh, authentication, revalidation, and exact-byte submission
+  using their synthetic chain and test presence.
 - These tests use temporary encrypted state, synthetic metadata, and fake owner
   authentication. Session cancellation uses a local worker, not a live relay.
   They do not prove native polkit/Windows authentication or process isolation.
@@ -310,10 +329,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1658 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1666 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-cancellation-workspace-tests.log`.
+  `~/Documents/wallet-review-broker-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.
@@ -334,7 +353,7 @@ provisioning, migration, and packaged UX verification remain unproven. Windows
 is not an installed Rust target on this development machine. No installation or
 security completion is claimed by the Linux unit and compile results.
 
-CI run `34519753381` tests commit `1695b3d` (before simulation-display and
-owner-call cancellation). Its lint, execution-plan, and macOS jobs passed;
-Linux and Windows were still running at the latest check. Re-query the run
-before relying on its status.
+CI run `34519753381` tests commit `1695b3d` (before simulation-display,
+owner-call cancellation, and the transaction broker). Its lint, execution-plan,
+Linux, and macOS jobs passed; Windows was still running at the latest check.
+Re-query the run before relying on its status.

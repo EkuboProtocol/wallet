@@ -12,6 +12,7 @@ mod owner_client;
 pub mod owner_protocol;
 pub mod simulation_display;
 pub mod token_import;
+pub mod transaction_review;
 #[cfg(target_os = "linux")]
 pub use owner_client::OwnerClient;
 #[cfg(target_os = "linux")]

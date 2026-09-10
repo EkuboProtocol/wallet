@@ -86,17 +86,7 @@ pub struct OwnerPortfolioSnapshot {
 
 pub use ekubo_wallet_client::token_import::OwnerTokenListImport;
 
-/// How one native transaction review ended.
-///
-/// `record` is the row as it stands after the review: rejected, or signed and
-/// handed to the network. `send_error` is set only when the owner approved and
-/// every endpoint refused the exact bytes — the row is still `signed`, so the
-/// activity list's "Send now" can try again.
-#[derive(Clone, Debug)]
-pub struct ReviewedTransaction {
-    pub record: PendingTransaction,
-    pub send_error: Option<String>,
-}
+pub use ekubo_wallet_client::transaction_review::ReviewedTransaction;
 
 #[derive(Clone, Debug)]
 pub struct OwnerTransactionAction {
@@ -1954,12 +1944,12 @@ impl OwnerApi {
                 .context("wallet has no installed policy")
         };
         let tokens = TokenStore::production(self.config.data_dir())?;
-        let legal = LegalStore::production(self.config.data_dir())?;
+        let mut legal = LegalStore::production(self.config.data_dir())?;
         let result = approve_transaction(
             &self.config,
             pending,
             tokens,
-            &legal,
+            &mut legal,
             &read_policy,
             request,
             presenter,

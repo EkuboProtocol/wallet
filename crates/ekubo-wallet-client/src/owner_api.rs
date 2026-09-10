@@ -14,6 +14,37 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    /// Long-running review on this authenticated connection. Read display frames
+    /// and submit choices concurrently; closing the connection cancels review.
+    pub async fn review_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::transaction_review::ReviewedTransaction> {
+        self.call(&Request::ReviewTransaction { request_id }).await
+    }
+
+    pub async fn transaction_review_frame(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<crate::transaction_review::TransactionReviewFrame>> {
+        self.call(&Request::TransactionReviewFrame { request_id })
+            .await
+    }
+
+    pub async fn decide_transaction_review(
+        &self,
+        frame: &crate::transaction_review::TransactionReviewFrame,
+        choice: crate::transaction_review::TransactionReviewChoice,
+    ) -> Result<()> {
+        self.call(&Request::DecideTransactionReview {
+            request_id: frame.request_id,
+            frame_id: frame.frame_id,
+            reviewed_identity: frame.document.identity.clone(),
+            choice,
+        })
+        .await
+    }
+
     /// Request native owner authentication for the exact stored message. The
     /// digest names what was reviewed; it is not an authorization proof.
     pub async fn sign_message(
