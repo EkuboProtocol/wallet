@@ -4660,6 +4660,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekubo-wallet-service"
+version = "1.8.2"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "ekubo-wallet-core",
+ "ekubo-wallet-preview",
+ "futures",
+ "hex",
+ "reqwest 0.13.4",
+ "rmcp",
+ "schemars 1.2.2",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid 1.26.0",
+ "zeroize",
+]
+
+[[package]]
 name = "ekubo_sdk"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

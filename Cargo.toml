@@ -15,6 +15,7 @@ members = [
     "crates/erc8410",
     "crates/erc8410-wasm",
     "crates/ekubo-wallet-core",
+    "crates/ekubo-wallet-service",
     "crates/ekubo-wallet-preview",
     "crates/ekubo-wallet-preview-wasm",
     "crates/mcp-bridge",
