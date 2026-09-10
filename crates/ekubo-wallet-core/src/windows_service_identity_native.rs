@@ -114,10 +114,19 @@ fn user_sid(token: &Token) -> Result<String> {
         sid.len() >= 8 + usize::from(sid[1]) * 4,
         "truncated token SID"
     );
-    let mut text = PWSTR::null();
     // SAFETY: the SID is wholly inside the live token buffer and has a valid
     // revision/count. The API validates its contents before allocating text.
-    unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut text) }?;
+    unsafe { sid_string(user.User.Sid) }
+}
+
+/// Convert an OS-provided SID without leaking its allocated text.
+///
+/// # Safety
+/// `sid` must point to a complete valid SID for the duration of this call.
+pub(crate) unsafe fn sid_string(sid: windows::Win32::Security::PSID) -> Result<String> {
+    let mut text = PWSTR::null();
+    // SAFETY: the caller guarantees a complete live SID.
+    unsafe { ConvertSidToStringSidW(sid, &raw mut text) }?;
     let text = SidText(text);
     // SAFETY: the successful conversion returned an allocated NUL-terminated string.
     Ok(unsafe { text.0.to_string() }?)

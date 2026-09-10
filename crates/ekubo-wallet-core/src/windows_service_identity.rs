@@ -10,6 +10,8 @@ use anyhow::{Result, ensure};
 #[path = "windows_service_identity_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
+pub(crate) use native::sid_string;
+#[cfg(target_os = "windows")]
 pub use native::{current_process_identity, verify_service_process};
 
 /// Identity read from the current process's primary token, never an IPC field.
@@ -47,7 +49,7 @@ impl ProcessIdentity {
     }
 }
 
-fn is_virtual_service_sid(value: &str) -> bool {
+pub(crate) fn is_virtual_service_sid(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix("S-1-5-80-") else {
         return false;
     };

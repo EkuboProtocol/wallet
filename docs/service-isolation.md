@@ -133,7 +133,8 @@ inside the protected service remain outside this boundary.
   It must reuse the same typed operations and core authorization checks, without
   accepting a caller-supplied approval flag. The client operation methods should
   likewise be reused when a Windows transport implements the existing contract.
-  No Windows transport or native Windows validation is implemented yet.
+  No Windows transport is implemented yet, and Windows-native execution
+  of the identity/configuration tests remains required.
 
 - Token management now has shared typed owner operations: inventory, manual
   addition, price display settings, exact reviewed removal, token-list fetching
@@ -249,10 +250,20 @@ accounts, and nonzero sessions. A service SID in the token's groups is never use
 as proof of account separation. Microsoft documents the distinction between
 [service account tokens](https://learn.microsoft.com/en-us/windows/win32/services/service-user-accounts)
 and [service SID membership](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_sid_info).
-The expected SID must eventually come from protected installer configuration;
-this primitive does not attest that configuration or grant custody access.
-Windows registry configuration, storage ACL/reparse validation, service hosting,
-transport authentication, and native owner authorization remain unimplemented.
+The Windows configuration reader obtains the binding from the fixed 64-bit
+`HKLM\SOFTWARE\EkuboWallet\Owners\<owner SID>` registry path. Each opened
+component rejects registry links and requires a SYSTEM, Administrators, or
+TrustedInstaller owner and no active write grants to other principals. Unknown
+ACE types fail closed. Public read permissions and inherit-only entries are
+allowed; every child is independently checked. A bounded binary `Profile` JSON
+value binds the owner SID, dedicated service SID, and nonzero profile UUID.
+The service name is derived from that UUID and resolved through Windows to
+verify the configured SID. The client derives its owner from the primary token;
+the service additionally verifies its dedicated primary account and session.
+These checks return public identity metadata, not custody access or owner
+authorization. No installer writes this configuration yet. Windows storage
+ACL/reparse validation, service hosting, transport authentication, and native
+owner authorization remain unimplemented.
 
 ## Work still required before completion
 
@@ -409,7 +420,8 @@ before the at-rest requirement is resolved.
 Full native multi-identity integration, latest-head Windows compilation/authentication,
 provisioning, migration, and packaged UX verification remain unproven. The
 Windows GNU Rust target is now installed locally. A minimal standalone harness
-type-checks and lints the native identity module and its tests for that target;
+type-checks and lints the native identity and registry configuration modules
+and their tests for that target;
 it does not compile the full Windows workspace or execute Windows code. Log:
 `~/Documents/wallet-windows-identity-check.log`. No installation or security
 completion is claimed by these results.
@@ -423,7 +435,7 @@ export and Windows identity work. Lint and execution-plan jobs passed. The Linux
 job failed in `broken_write_fails_the_request_without_replay_and_reconnects`:
 the test's `tools/list` probe can receive cached discovery before the bridge
 finishes accepting the reconnect, then stdin closes before the fake server sees
-the probe. macOS and Windows were still running at the latest check. Re-query
+the probe. macOS passed; Windows was still running at the latest check. Re-query
 before relying on their results.
 
 The reconnect test now waits for an upstream notification forwarded by the
@@ -432,3 +444,18 @@ handshake writes as proof the bridge accepted them. Its no-replay assertion is
 unchanged. The repaired test passed 30 consecutive runs and the full local gate;
 CI on a commit containing the fix remains required. Repetition log:
 `~/Documents/wallet-reconnect-barrier-repeat.log`.
+
+The Windows configuration policy tests reject mismatched owners, invalid service
+identities, unknown fields, oversized values, unsafe registry components, null
+DACLs, untrusted owners, and public write grants even when accompanied by deny
+entries. Native SDDL fixtures cover descriptor decoding and inheritance, but
+have only been cross-compiled here; actual Windows execution remains required.
+
+The configuration checkpoint passed the full local repository gate: 1,681 tests
+passed, 11 ignored; formatting, workspace Clippy, Ruff, generated-license
+consistency, vulnerability scanning, and license policy passed. Logs:
+`~/Documents/wallet-windows-config-workspace-tests.log`,
+`~/Documents/wallet-windows-config-clippy.log`,
+`~/Documents/wallet-windows-config-osv.log`, and
+`~/Documents/wallet-windows-config-licenses.log`. The native Windows module
+Clippy/type-check log is `~/Documents/wallet-windows-config-cross-check.log`.

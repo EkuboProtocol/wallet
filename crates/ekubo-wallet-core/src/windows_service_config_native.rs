@@ -1,0 +1,289 @@
+//! The registry handles and security descriptors here come only from fixed
+//! machine keys. Unsafe code is confined to the Windows API ownership boundary.
+#![allow(unsafe_code)]
+
+use std::{ffi::c_void, mem::size_of};
+
+use anyhow::{Result, ensure};
+use windows::{
+    Win32::{
+        Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
+        Security::{
+            ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
+            GetAclInformation, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, IsValidAcl,
+            IsValidSecurityDescriptor, LookupAccountNameW, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SID_NAME_USE,
+        },
+        System::Registry::{
+            HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, REG_BINARY, REG_OPTION_OPEN_LINK,
+            REG_VALUE_TYPE, RegCloseKey, RegGetKeySecurity, RegOpenKeyExW, RegQueryValueExW,
+        },
+    },
+    core::{BOOL, PCWSTR, PWSTR},
+};
+
+use super::{
+    InstalledServiceIdentity, MAX_CONFIG_BYTES, RegistryAce, decode, validate_owner_component,
+    validate_registry_security,
+};
+use crate::windows_service_identity::{
+    current_process_identity, sid_string, verify_service_process,
+};
+
+struct Key(HKEY);
+impl Drop for Key {
+    fn drop(&mut self) {
+        // This wrapper owns a successful RegOpenKeyExW result.
+        let _ = unsafe { RegCloseKey(self.0) };
+    }
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
+pub fn installed_service_identity() -> Result<InstalledServiceIdentity> {
+    read_configuration(current_process_identity()?.user_sid())
+}
+
+pub fn service_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
+    let identity = read_configuration(owner_sid)?;
+    verify_service_process(identity.service_sid())?;
+    Ok(identity)
+}
+
+fn account_sid(account: &str) -> Result<String> {
+    let account = wide(account);
+    let mut bytes = 0;
+    let mut domain_chars = 0;
+    let mut kind = SID_NAME_USE::default();
+    let result = unsafe {
+        LookupAccountNameW(
+            None,
+            PCWSTR(account.as_ptr()),
+            None,
+            &raw mut bytes,
+            None,
+            &raw mut domain_chars,
+            &raw mut kind,
+        )
+    };
+    ensure!(
+        result.is_err_and(|error| error.code() == ERROR_INSUFFICIENT_BUFFER.to_hresult()),
+        "cannot size service account SID"
+    );
+    ensure!(
+        (8..=68).contains(&bytes) && domain_chars <= 32768,
+        "invalid account identity size"
+    );
+    let mut sid = vec![0u32; (bytes as usize).div_ceil(size_of::<u32>())];
+    let mut domain = vec![0u16; domain_chars as usize];
+    let pointer = PSID(sid.as_mut_ptr().cast());
+    unsafe {
+        LookupAccountNameW(
+            None,
+            PCWSTR(account.as_ptr()),
+            Some(pointer),
+            &raw mut bytes,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &raw mut domain_chars,
+            &raw mut kind,
+        )
+    }?;
+    // LookupAccountNameW populated this owned, aligned SID buffer.
+    unsafe { sid_string(pointer) }
+}
+
+fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<Key> {
+    let name = wide(component);
+    let mut handle = HKEY::default();
+    unsafe {
+        RegOpenKeyExW(
+            parent,
+            PCWSTR(name.as_ptr()),
+            Some(REG_OPTION_OPEN_LINK.0),
+            KEY_READ | KEY_WOW64_64KEY,
+            &raw mut handle,
+        )
+    }
+    .ok()?;
+    let key = Key(handle);
+    let link = wide("SymbolicLinkValue");
+    let mut size = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            PCWSTR(link.as_ptr()),
+            None,
+            None,
+            None,
+            Some(&raw mut size),
+        )
+    };
+    ensure!(
+        status == ERROR_FILE_NOT_FOUND,
+        "registry links are not supported"
+    );
+    validate_key(&key, trusted)?;
+    Ok(key)
+}
+
+fn read_configuration(owner: &str) -> Result<InstalledServiceIdentity> {
+    validate_owner_component(owner)?;
+    let trusted = vec![
+        "S-1-5-18".to_owned(),
+        "S-1-5-32-544".to_owned(),
+        account_sid("NT SERVICE\\TrustedInstaller")?,
+    ];
+    let mut keys = Vec::new();
+    let mut parent = HKEY_LOCAL_MACHINE;
+    for component in ["SOFTWARE", "EkuboWallet", "Owners", owner] {
+        let key = open_component(parent, component, &trusted)?;
+        parent = key.0;
+        keys.push(key);
+    }
+    let name = wide("Profile");
+    let mut kind = REG_VALUE_TYPE::default();
+    let mut length = 0;
+    unsafe {
+        RegQueryValueExW(
+            parent,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&raw mut kind),
+            None,
+            Some(&raw mut length),
+        )
+    }
+    .ok()?;
+    ensure!(
+        kind == REG_BINARY && length as usize <= MAX_CONFIG_BYTES,
+        "invalid registry profile value"
+    );
+    let mut bytes = vec![0u8; length as usize];
+    unsafe {
+        RegQueryValueExW(
+            parent,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&raw mut kind),
+            Some(bytes.as_mut_ptr()),
+            Some(&raw mut length),
+        )
+    }
+    .ok()?;
+    ensure!(
+        kind == REG_BINARY && length as usize <= bytes.len(),
+        "registry profile changed while reading"
+    );
+    bytes.truncate(length as usize);
+    let identity = decode(&bytes, owner)?;
+    ensure!(
+        account_sid(&format!("NT SERVICE\\{}", identity.service_name()))? == identity.service_sid(),
+        "configured service SID does not match its installed name"
+    );
+    // Keep every validated ancestor open until all metadata has been checked.
+    drop(keys);
+    Ok(identity)
+}
+
+fn validate_key(key: &Key, trusted: &[String]) -> Result<()> {
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut length = 0;
+    let status = unsafe { RegGetKeySecurity(key.0, information, None, &raw mut length) };
+    ensure!(
+        status == ERROR_INSUFFICIENT_BUFFER && (20..=131_072).contains(&length),
+        "invalid registry security descriptor size"
+    );
+    let mut buffer = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
+    let descriptor = PSECURITY_DESCRIPTOR(buffer.as_mut_ptr().cast());
+    let capacity = length;
+    let status =
+        unsafe { RegGetKeySecurity(key.0, information, Some(descriptor), &raw mut length) };
+    ensure!(
+        status == ERROR_SUCCESS && length <= capacity,
+        "cannot read registry security descriptor"
+    );
+    // RegGetKeySecurity wrote a self-relative descriptor in the owned buffer.
+    unsafe { validate_descriptor(descriptor, trusted) }
+}
+
+unsafe fn validate_descriptor(descriptor: PSECURITY_DESCRIPTOR, trusted: &[String]) -> Result<()> {
+    ensure!(
+        unsafe { IsValidSecurityDescriptor(descriptor) }.as_bool(),
+        "invalid registry security descriptor"
+    );
+    let mut owner = PSID::default();
+    let mut defaulted = BOOL::default();
+    unsafe { GetSecurityDescriptorOwner(descriptor, &raw mut owner, &raw mut defaulted) }?;
+    ensure!(
+        !owner.0.is_null(),
+        "registry security descriptor has no owner"
+    );
+    let owner = unsafe { sid_string(owner) }?;
+    let mut present = BOOL::default();
+    let mut acl = std::ptr::null_mut();
+    unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &raw mut present,
+            &raw mut acl,
+            &raw mut defaulted,
+        )
+    }?;
+    ensure!(
+        present.as_bool() && !acl.is_null(),
+        "registry key has an unrestricted DACL"
+    );
+    ensure!(unsafe { IsValidAcl(acl) }.as_bool(), "invalid registry ACL");
+    let mut information = ACL_SIZE_INFORMATION::default();
+    unsafe {
+        GetAclInformation(
+            acl,
+            (&raw mut information).cast(),
+            u32::try_from(size_of::<ACL_SIZE_INFORMATION>())?,
+            AclSizeInformation,
+        )
+    }?;
+    ensure!(
+        information.AceCount <= 4096,
+        "registry ACL has too many entries"
+    );
+    let mut entries = Vec::new();
+    for index in 0..information.AceCount {
+        let mut ace: *mut c_void = std::ptr::null_mut();
+        unsafe { GetAce(acl, index, &raw mut ace) }?;
+        entries.push(unsafe { read_ace(ace.cast()) }?);
+    }
+    validate_registry_security(&owner, Some(&entries), trusted)
+}
+
+unsafe fn read_ace(ace: *const u8) -> Result<RegistryAce> {
+    // GetAce and IsValidAcl establish a complete ACE header in an OS buffer.
+    let header = unsafe { std::slice::from_raw_parts(ace, 4) };
+    let length = usize::from(u16::from_le_bytes([header[2], header[3]]));
+    ensure!(length >= 4, "invalid ACE length");
+    if header[0] == 1 {
+        return Ok(RegistryAce::Deny);
+    }
+    if header[0] != 0 || header[1] & !0x1f != 0 {
+        return Ok(RegistryAce::Unsupported);
+    }
+    ensure!(length >= 16, "invalid allow ACE length");
+    let bytes = unsafe { std::slice::from_raw_parts(ace, length) };
+    ensure!(
+        bytes[8] == 1 && bytes[9] <= 15 && 16 + usize::from(bytes[9]) * 4 == length,
+        "invalid allow ACE SID"
+    );
+    let mask = u32::from_le_bytes(bytes[4..8].try_into()?);
+    let sid = unsafe { sid_string(PSID(ace.add(8).cast_mut().cast())) }?;
+    Ok(RegistryAce::Allow {
+        sid,
+        mask,
+        inherit_only: header[1] & 8 != 0,
+    })
+}
+
+#[cfg(test)]
+#[path = "windows_service_config_native_test.rs"]
+mod tests;

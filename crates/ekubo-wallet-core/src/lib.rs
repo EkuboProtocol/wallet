@@ -62,4 +62,6 @@ pub mod token_store;
 pub mod typed_data;
 pub mod update_trust;
 #[cfg(any(target_os = "windows", test))]
+pub mod windows_service_config;
+#[cfg(any(target_os = "windows", test))]
 pub mod windows_service_identity;
