@@ -929,7 +929,10 @@ fn selectable_error_alert(id: impl Into<SharedString>, message: impl Into<Shared
     let message = message.into();
     Alert::error(
         id.clone(),
-        selectable_text(format!("{id}-message"), &message),
+        selectable_text(format!("{id}-message"), &message)
+            .w_full()
+            .min_w_0()
+            .whitespace_normal(),
     )
 }
 
@@ -3100,15 +3103,8 @@ struct DesktopSnapshot {
     /// Absent for a plan nothing recognized, which is what leaves such a row
     /// titled by its kind alone.
     transaction_headlines: BTreeMap<uuid::Uuid, SharedString>,
-    /// What the embedded preview model made of each *waiting* transaction: a
-    /// category, a risk band, and one sentence.
-    ///
-    /// Only waiting requests, because a preview exists to help somebody decide
-    /// and a history row's outcome is already known. Absent for every request
-    /// when no model is loaded, which the rows render as no preview rather
-    /// than as any particular verdict -- and absent is the ordinary state on a
-    /// machine with no usable GPU.
-    transaction_previews: BTreeMap<uuid::Uuid, ekubo_wallet_preview::TransactionPreview>,
+    /// Persisted, call-data-only AI summaries for pending and past transactions.
+    transaction_previews: BTreeMap<uuid::Uuid, String>,
     accounts: std::result::Result<Vec<WalletMetadata>, SharedString>,
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
     legal_status: std::result::Result<LegalStatus, SharedString>,
@@ -3191,9 +3187,20 @@ impl DesktopSnapshot {
                 }
             }
         }
-        let transaction_headlines = capture_transaction_headlines(owner, &reviews, &activity);
-        // Publish the decoded review before loading or running the model.
-        let transaction_previews = BTreeMap::new();
+        let records = transaction_records(&reviews, &activity);
+        let transaction_previews = owner
+            .saved_transaction_summaries(&records)
+            .unwrap_or_default();
+        let missing = records
+            .into_iter()
+            .filter(|record| !transaction_previews.contains_key(&record.request_id))
+            .collect::<Vec<_>>();
+        let transaction_headlines = owner
+            .transaction_headlines(&missing)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, text)| (id, SharedString::from(text)))
+            .collect();
         Self {
             reviews,
             activity,
@@ -3217,59 +3224,24 @@ fn cache_result<T>(result: Result<T>) -> std::result::Result<T, SharedString> {
     result.map_err(|error| format!("{error:#}").into())
 }
 
-/// Decode a headline for every transaction record either list can draw.
-///
-/// The inbox and the history are separate reads, and neither is a subset of
-/// the other: a request leaves the inbox the moment it is decided, and the
-/// history is capped. Both are collected, and a request that appears in both
-/// is decoded once.
-///
-/// A failed batch leaves the map empty rather than failing the snapshot. A
-/// headline is what a row is titled, never what it means — the review behind
-/// it is unaffected — so a list that draws with its rows named by kind is
-/// worth more than a wallet that will not show its history at all.
-fn capture_transaction_headlines(
-    owner: &OwnerApi,
-    reviews: &std::result::Result<OwnerReviewQueues, SharedString>,
-    activity: &std::result::Result<Arc<[OwnerActivityRecord]>, SharedString>,
-) -> BTreeMap<uuid::Uuid, SharedString> {
-    let mut records: Vec<&PendingTransaction> = Vec::new();
+/// Pending requests first; history follows without duplicating an inbox row.
+fn transaction_records<'a>(
+    reviews: &'a std::result::Result<OwnerReviewQueues, SharedString>,
+    activity: &'a std::result::Result<Arc<[OwnerActivityRecord]>, SharedString>,
+) -> Vec<&'a PendingTransaction> {
+    let mut records = Vec::new();
     if let Ok(queues) = reviews {
         records.extend(queues.transactions.iter());
     }
     if let Ok(activity) = activity {
         records.extend(activity.iter().filter_map(|record| match record {
             OwnerActivityRecord::Transaction(record) => Some(record.as_ref()),
-            OwnerActivityRecord::Message(_) | OwnerActivityRecord::TypedData(_) => None,
+            _ => None,
         }));
     }
-    records.sort_unstable_by_key(|record| record.request_id);
-    records.dedup_by_key(|record| record.request_id);
-    owner
-        .transaction_headlines(&records)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(request_id, headline)| (request_id, SharedString::from(headline)))
-        .collect()
-}
-
-/// The preview for each waiting transaction.
-///
-/// Waiting requests only. `capture_transaction_headlines` also covers history
-/// because a history row still wants naming; a preview is there to help
-/// somebody decide, and nothing about a settled request is still a decision.
-fn capture_transaction_previews(
-    owner: &OwnerApi,
-    reviews: &std::result::Result<OwnerReviewQueues, SharedString>,
-) -> BTreeMap<uuid::Uuid, ekubo_wallet_preview::TransactionPreview> {
-    let Ok(queues) = reviews else {
-        return BTreeMap::new();
-    };
-    let waiting: Vec<&PendingTransaction> = queues.transactions.iter().collect();
-    if waiting.is_empty() {
-        return crate::preview::previews(Vec::new());
-    }
-    owner.transaction_previews(&waiting).unwrap_or_default()
+    let mut seen = std::collections::BTreeSet::new();
+    records.retain(|record| seen.insert(record.request_id));
+    records
 }
 
 enum ReleaseDisplayState {
@@ -3370,7 +3342,7 @@ struct InboxWaitingCard {
     action: InboxWaitingAction,
     /// The model's reading of this request, when there is one. Never present
     /// for anything but a waiting transaction.
-    preview: Option<ekubo_wallet_preview::TransactionPreview>,
+    preview: Option<String>,
 }
 
 /// What the single button on a waiting card does.
@@ -4720,7 +4692,7 @@ fn render_inbox_waiting_card(
             &card.id,
             &card.title,
             &card.subtitle,
-            card.preview.as_ref(),
+            card.preview.as_deref(),
             button,
             cx,
         ))
@@ -7662,7 +7634,7 @@ impl WalletWindow {
             if self.desktop_snapshot_loading {
                 return Some("Updating requests");
             }
-            if self.transaction_previews_loading && self.inbox_tab == InboxTab::Waiting {
+            if self.transaction_previews_loading {
                 return Some("Summarizing transactions");
             }
         }
@@ -7741,27 +7713,72 @@ impl WalletWindow {
         .detach();
     }
 
-    /// Model work is a second stage: a slow CPU or GPU startup must not delay
-    /// the review controls. Generation matching prevents old results from
-    /// being attached after the owner changes metadata or the queue refreshes.
+    /// Publish small batches as they finish, with pending requests ahead of
+    /// history. Cached summaries were already loaded with the snapshot.
     fn reload_transaction_previews(&mut self, generation: u64, cx: &mut Context<Self>) {
         let Some(snapshot) = self.desktop_snapshot.clone() else {
             return;
         };
-        self.transaction_previews_loading = true;
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                capture_transaction_previews(&owner, &snapshot.reviews)
+        let records = transaction_records(&snapshot.reviews, &snapshot.activity)
+            .into_iter()
+            .filter(|record| {
+                !snapshot
+                    .transaction_previews
+                    .contains_key(&record.request_id)
             })
-            .await
-            .context("transaction preview task failed")
+            .cloned()
+            .collect::<Vec<_>>();
+        self.transaction_previews_loading = !records.is_empty();
+        if records.is_empty() {
+            return;
+        }
+        let owner = self.owner.clone();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let (pending, history): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .partition(|record| record.status == PendingStatus::AwaitingApproval);
+            for batch in pending.chunks(8).chain(history.chunks(8)) {
+                if sender.is_closed() {
+                    break;
+                }
+                let owner = owner.clone();
+                let batch = batch.to_vec();
+                let summaries = tokio::task::spawn_blocking(move || {
+                    owner.transaction_previews(&batch.iter().collect::<Vec<_>>())
+                })
+                .await
+                .context("transaction summary task failed")??;
+                if sender.send(summaries).await.is_err() {
+                    break;
+                }
+            }
+            Ok(())
         });
         cx.spawn(async move |view, cx| {
-            let previews = task.await.unwrap_or_default();
+            while let Some(previews) = receiver.recv().await {
+                let current = view
+                    .update(cx, |view, cx| {
+                        if generation != view.desktop_snapshot_generation {
+                            return false;
+                        }
+                        view.apply_transaction_previews(generation, previews);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return;
+                }
+            }
+            if let Err(error) = task.await {
+                tracing::warn!("transaction summaries unavailable: {error:#}");
+            }
             let _ = view.update(cx, |view, cx| {
-                view.apply_transaction_previews(generation, previews);
-                cx.notify();
+                if generation == view.desktop_snapshot_generation {
+                    view.transaction_previews_loading = false;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -7770,14 +7787,15 @@ impl WalletWindow {
     fn apply_transaction_previews(
         &mut self,
         generation: u64,
-        previews: BTreeMap<uuid::Uuid, ekubo_wallet_preview::TransactionPreview>,
+        previews: BTreeMap<uuid::Uuid, String>,
     ) {
         if generation != self.desktop_snapshot_generation {
             return;
         }
-        self.transaction_previews_loading = false;
         if let Some(snapshot) = &mut self.desktop_snapshot {
-            Arc::make_mut(snapshot).transaction_previews = previews;
+            Arc::make_mut(snapshot)
+                .transaction_previews
+                .extend(previews);
             self.desktop_snapshot_revision = self.desktop_snapshot_revision.wrapping_add(1);
         }
     }
@@ -12377,28 +12395,14 @@ impl WalletWindow {
         id: &SharedString,
         title: &str,
         subtitle: &str,
-        preview: Option<&ekubo_wallet_preview::TransactionPreview>,
+        preview: Option<&str>,
         button: Button,
         cx: &App,
     ) -> gpui::Div {
-        let ai_summary = preview
-            .map(|p| p.summary.as_str())
-            .filter(|text| !text.trim().is_empty());
+        let ai_summary = preview.filter(|text| !text.trim().is_empty());
         let title = ai_summary.unwrap_or(title);
         let subtitle = if ai_summary.is_some() {
-            let source = match preview.map(|preview| preview.basis) {
-                Some(ekubo_wallet_preview::SummaryBasis::BalanceChanges) => {
-                    "AI summary · Simulation"
-                }
-                Some(ekubo_wallet_preview::SummaryBasis::TransferLogs) => {
-                    "AI summary · Simulated transfers"
-                }
-                Some(ekubo_wallet_preview::SummaryBasis::InferredIntent) => {
-                    "AI summary · Inferred intent"
-                }
-                _ => "AI summary",
-            };
-            format!("{source} · {subtitle}")
+            format!("AI summary · {subtitle}")
         } else {
             subtitle.to_owned()
         };
@@ -13578,7 +13582,16 @@ impl WalletWindow {
         );
         let headlines = Arc::new(
             self.snapshot()
-                .map(|snapshot| snapshot.transaction_headlines.clone())
+                .map(|snapshot| {
+                    let mut headlines = snapshot.transaction_headlines.clone();
+                    headlines.extend(
+                        snapshot
+                            .transaction_previews
+                            .iter()
+                            .map(|(id, text)| (*id, SharedString::from(text.clone()))),
+                    );
+                    headlines
+                })
                 .unwrap_or_default(),
         );
         let networks = Arc::new(self.network_display_names());
@@ -14811,6 +14824,10 @@ impl WalletWindow {
         // leaving `secondary` to mean "an item in a list" is what keeps the
         // session cards under it reading as items rather than as more frame.
         let mut panel = div()
+            .w_full()
+            .min_w_0()
+            .max_w_full()
+            .debug_selector(|| "walletconnect-connect-panel".to_owned())
             .p_5()
             .pb_6()
             .rounded(cx.theme().radius_lg)
@@ -14830,7 +14847,9 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("Copy the link from the dapp's connect dialog, then press the button. Connecting still asks you to pick an account and authenticate. Pairings stay in memory and disconnect when you explicitly Quit.")),
+                    .w_full().min_w_0()
+                    .debug_selector(|| "walletconnect-instructions".to_owned())
+                    .child(selectable_label("Copy the link from the dapp's connect dialog, then press the button. Connecting still asks you to pick an account and authenticate. Pairings stay in memory and disconnect when you explicitly Quit.").w_full().min_w_0().whitespace_normal()),
             )
             // The whole handoff in one press.
             //
@@ -14895,7 +14914,14 @@ impl WalletWindow {
                     .items_center()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(walletconnect_pairing_status(status))),
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        selectable_label(walletconnect_pairing_status(status))
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal(),
+                    ),
             );
         }
         if let Some(error) = account_error {
@@ -14913,9 +14939,10 @@ impl WalletWindow {
             .cloned()
             .collect::<Vec<_>>();
         if approved.is_empty() {
-            return div().flex().flex_col().gap_4().child(panel).child(
+            return div().w_full().min_w_0().flex().flex_col().gap_4().child(panel).child(
                 sessions.child(
                     div()
+                        .w_full().min_w_0()
                         .p_4()
                         .rounded(cx.theme().radius_lg)
                         .border_1()
@@ -14933,7 +14960,7 @@ impl WalletWindow {
                         )
                         .child(selectable_label(
                             "Pair one above. A session lives only as long as this wallet runs — quitting drops every pairing.",
-                        )),
+                        ).w_full().min_w_0().whitespace_normal()),
                 ),
             );
         }
@@ -14958,16 +14985,21 @@ impl WalletWindow {
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .child(div().w_full().min_w_0().truncate().font_medium().child(
-                            selectable_text(
-                                format!("walletconnect-session-title-{session_id}"),
-                                &format!(
-                                    "{} · {}",
-                                    session.dapp_name.as_deref().unwrap_or("Unnamed dapp"),
-                                    session.status.label()
-                                ),
+                        .child(
+                            div().w_full().min_w_0().font_medium().child(
+                                selectable_text(
+                                    format!("walletconnect-session-title-{session_id}"),
+                                    &format!(
+                                        "{} · {}",
+                                        session.dapp_name.as_deref().unwrap_or("Unnamed dapp"),
+                                        session.status.label()
+                                    ),
+                                )
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_normal(),
                             ),
-                        ))
+                        )
                         .child(
                             div()
                                 .min_w_0()
@@ -15000,13 +15032,21 @@ impl WalletWindow {
                         .when_some(session.last_error, |column, error| {
                             column.child(
                                 div()
+                                    .w_full()
+                                    .min_w_0()
                                     .whitespace_normal()
+                                    .debug_selector(|| "walletconnect-session-error".to_owned())
                                     .text_sm()
                                     .text_color(cx.theme().danger)
-                                    .child(selectable_text(
-                                        format!("walletconnect-error-{session_id}"),
-                                        &format!("Connection error: {error}"),
-                                    )),
+                                    .child(
+                                        selectable_text(
+                                            format!("walletconnect-error-{session_id}"),
+                                            &format!("Connection error: {error}"),
+                                        )
+                                        .w_full()
+                                        .min_w_0()
+                                        .whitespace_normal(),
+                                    ),
                             )
                         }),
                 )
@@ -15020,7 +15060,14 @@ impl WalletWindow {
                         })),
                 )
         }));
-        div().flex().flex_col().gap_4().child(panel).child(sessions)
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(panel)
+            .child(sessions)
     }
 
     fn render_network_editor_form(&self, view: &WeakEntity<Self>, cx: &App) -> gpui::Div {

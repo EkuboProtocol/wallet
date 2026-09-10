@@ -986,7 +986,7 @@ fn waiting_card_bounds_with_preview(
     window: gpui::AnyWindowHandle,
     view: &Entity<WalletWindow>,
     headline: &str,
-    preview: Option<ekubo_wallet_preview::TransactionPreview>,
+    preview: Option<String>,
 ) -> gpui::Bounds<gpui::Pixels> {
     let headline = SharedString::from(headline.to_owned());
     cx.update_entity(view, |wallet, cx| {
@@ -1022,12 +1022,7 @@ fn a_preview_replaces_the_decoded_headline(cx: &mut gpui::TestAppContext) {
         window,
         &view,
         TWO_LINE_HEADLINE,
-        Some(ekubo_wallet_preview::TransactionPreview {
-            basis: ekubo_wallet_preview::SummaryBasis::Interpretation,
-            class: ekubo_wallet_preview::TransactionClass::Approval,
-            risk: ekubo_wallet_preview::RiskBand::Critical,
-            summary: "Unlimited approve and swap USDC for ETH".into(),
-        }),
+        Some("Unlimited approve and swap USDC for ETH".into()),
     );
     assert!(
         with.size.height <= without.size.height,
@@ -4574,10 +4569,7 @@ fn stale_preview_results_cannot_attach_to_a_new_snapshot(cx: &mut gpui::TestAppC
         wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
         wallet.desktop_snapshot_generation = 100;
         let revision = wallet.desktop_snapshot_revision;
-        let previews = BTreeMap::from([(
-            HEADLINE_ROW,
-            ekubo_wallet_preview::TransactionPreview::unrecognized(),
-        )]);
+        let previews = BTreeMap::from([(HEADLINE_ROW, "Unknown call".to_owned())]);
         wallet.apply_transaction_previews(99, previews.clone());
         assert!(wallet.snapshot().unwrap().transaction_previews.is_empty());
         assert_eq!(wallet.desktop_snapshot_revision, revision);
@@ -4682,6 +4674,94 @@ fn confirmed_rejection_removes_the_waiting_card_before_snapshot_refresh(
         wallet.desktop_snapshot_loading = false;
         wallet.desktop_snapshot_dirty = false;
         wallet.desktop_snapshot_invalidated = false;
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn walletconnect_messages_wrap_inside_a_narrow_window(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::WalletConnect);
+        wallet.walletconnect_sessions = vec![SessionSummary {
+            id: uuid::Uuid::new_v4(),
+            status: crate::walletconnect::SessionStatus::Connected,
+            active_requests: 0,
+            dapp_name: Some("A dapp with a long descriptive application name".into()),
+            last_error: Some(format!(
+                "Could not connect to https://example.com/{}",
+                "a".repeat(160)
+            )),
+            expires_at: None,
+            settled: true,
+        }];
+    });
+    let viewport = gpui::Size {
+        width: px(760.0),
+        height: px(900.0),
+    };
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    visual.simulate_resize(viewport);
+    let drawn = view.clone();
+    visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
+        gpui::AnyView::from(drawn).into_any_element()
+    });
+    let panel = visual.debug_bounds("walletconnect-connect-panel").unwrap();
+    let instructions = visual.debug_bounds("walletconnect-instructions").unwrap();
+    let error = visual.debug_bounds("walletconnect-session-error").unwrap();
+    assert!(panel.right() <= viewport.width);
+    assert!(instructions.right() < panel.right());
+    assert!(
+        instructions.size.height > px(40.0),
+        "instructions must wrap: {instructions:?}"
+    );
+    assert!(error.right() <= panel.right());
+    assert!(
+        error.size.height > px(40.0),
+        "long error URLs must wrap: {error:?}"
+    );
+    visual.run_until_parked();
+    drop(visual);
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn summary_batches_preserve_saved_text_and_cover_history(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_entity(&view, |wallet, _| {
+        let history_id = uuid::Uuid::new_v4();
+        let mut snapshot = quiet_snapshot();
+        let mut waiting = cleared_transaction_fixture(HEADLINE_ROW);
+        waiting.status = PendingStatus::AwaitingApproval;
+        snapshot
+            .reviews
+            .as_mut()
+            .unwrap()
+            .transactions
+            .push(waiting.clone());
+        snapshot.activity = Ok(Arc::from(vec![
+            OwnerActivityRecord::Transaction(Box::new(cleared_transaction_fixture(history_id))),
+            OwnerActivityRecord::Transaction(Box::new(waiting)),
+        ]));
+        let records = transaction_records(&snapshot.reviews, &snapshot.activity);
+        assert_eq!(
+            records.iter().map(|r| r.request_id).collect::<Vec<_>>(),
+            [HEADLINE_ROW, history_id]
+        );
+        snapshot
+            .transaction_previews
+            .insert(HEADLINE_ROW, "Send 1 ETH".into());
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        let generation = wallet.desktop_snapshot_generation;
+        wallet.apply_transaction_previews(
+            generation,
+            BTreeMap::from([(history_id, "Approve USDC".into())]),
+        );
+        let summaries = &wallet.snapshot().unwrap().transaction_previews;
+        assert_eq!(summaries[&HEADLINE_ROW], "Send 1 ETH");
+        assert_eq!(summaries[&history_id], "Approve USDC");
     });
     release(cx, &view);
 }

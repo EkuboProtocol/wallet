@@ -1672,3 +1672,103 @@ fn withdrawal_refuses_a_request_that_already_left_the_queue() {
 
     assert!(store.withdraw(Uuid::new_v4()).is_err());
 }
+
+#[test]
+fn transaction_summaries_survive_reopen_and_decisions_without_moving_the_lease() {
+    let (directory, mut store) = store();
+    let request = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    assert_eq!(store.transaction_summary(&request).unwrap(), None);
+    assert_eq!(
+        store
+            .save_transaction_summary(&request, "Send 1 wei")
+            .unwrap(),
+        "Send 1 wei"
+    );
+    assert_eq!(store.get(request.request_id).unwrap(), request);
+    let rejected = store.reject(request.request_id).unwrap();
+    drop(store);
+    let database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([9; 32]),
+    )
+    .unwrap();
+    let mut reopened = PendingStore::new(database);
+    assert_eq!(
+        reopened.transaction_summary(&rejected).unwrap().as_deref(),
+        Some("Send 1 wei")
+    );
+    assert_eq!(
+        reopened
+            .save_transaction_summary(&rejected, "Different interpretation")
+            .unwrap(),
+        "Send 1 wei"
+    );
+    assert_eq!(reopened.get(request.request_id).unwrap(), rejected);
+}
+
+#[test]
+fn transaction_summaries_reject_wrong_plans_incarnations_and_oversized_text() {
+    let (_directory, mut store) = store();
+    let request = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    let mut wrong = request.clone();
+    wrong.execution_plan = plan_with_value("2");
+    assert!(
+        store
+            .save_transaction_summary(&wrong, "Send 2 wei")
+            .is_err()
+    );
+    assert!(store.transaction_summary(&wrong).unwrap().is_none());
+    wrong = request.clone();
+    wrong.wallet_instance_id = Uuid::new_v4();
+    assert!(
+        store
+            .save_transaction_summary(&wrong, "Send 1 wei")
+            .is_err()
+    );
+    for text in [
+        String::new(),
+        " ".into(),
+        "a".repeat(101),
+        "Send\nETH".into(),
+    ] {
+        assert!(store.save_transaction_summary(&request, &text).is_err());
+    }
+    assert!(store.transaction_summary(&request).unwrap().is_none());
+    let historical = store.reject(request.request_id).unwrap();
+    assert_eq!(
+        store
+            .save_transaction_summary(&historical, "Send 1 wei")
+            .unwrap(),
+        "Send 1 wei"
+    );
+}
+
+#[test]
+fn version_twelve_history_is_preserved_and_can_be_backfilled() {
+    let (directory, mut store) = store();
+    let request = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    let history = store.reject(request.request_id).unwrap();
+    store.database.connection.execute_batch("ALTER TABLE pending_transactions DROP COLUMN transaction_summary; UPDATE schema_metadata SET version = 12").unwrap();
+    drop(store);
+    let database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([9; 32]),
+    )
+    .unwrap();
+    let mut migrated = PendingStore::new(database);
+    assert_eq!(migrated.get(request.request_id).unwrap(), history);
+    assert_eq!(migrated.transaction_summary(&history).unwrap(), None);
+    assert_eq!(
+        migrated
+            .save_transaction_summary(&history, "Send 1 wei")
+            .unwrap(),
+        "Send 1 wei"
+    );
+    assert_eq!(migrated.get(request.request_id).unwrap(), history);
+}

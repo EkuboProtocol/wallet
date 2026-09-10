@@ -681,6 +681,64 @@ impl PendingStore {
         self.read(request_id)
     }
 
+    /// Saved advisory text for the exact stored plan. This is display data;
+    /// signing, policy evaluation and lifecycle transitions never consult it.
+    pub fn transaction_summary(&self, record: &PendingTransaction) -> Result<Option<String>> {
+        Ok(self
+            .database
+            .connection
+            .query_row(
+                "SELECT transaction_summary FROM pending_transactions
+             WHERE request_id = ?1 AND wallet_instance_id = ?2 AND plan_digest = ?3",
+                params![
+                    record.request_id,
+                    record.wallet_instance_id.to_string(),
+                    Blob(record.execution_plan.digest())
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Freeze the first generated summary, including for historical records.
+    /// Re-read the plan under the write transaction: a stale worker must never
+    /// label different call bytes. Do not move lifecycle timestamps or leases.
+    pub fn save_transaction_summary(
+        &mut self,
+        record: &PendingTransaction,
+        summary: &str,
+    ) -> Result<String> {
+        ensure!(
+            !summary.trim().is_empty() && summary.chars().count() <= 100,
+            "transaction summary must contain 1 to 100 characters"
+        );
+        ensure!(
+            !summary.chars().any(char::is_control),
+            "transaction summary contains control characters"
+        );
+        let transaction = self
+            .database
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let stored: (String, String, Option<String>) = transaction.query_row(
+            "SELECT wallet_instance_id, plan_json, transaction_summary FROM pending_transactions WHERE request_id = ?1",
+            [record.request_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        ensure!(
+            stored.0 == record.wallet_instance_id.to_string()
+                && serde_json::from_str::<ExecutionPlan>(&stored.1)? == record.execution_plan,
+            "transaction summary no longer matches the stored plan"
+        );
+        let text = stored.2.unwrap_or_else(|| summary.to_owned());
+        transaction.execute(
+            "UPDATE pending_transactions SET transaction_summary = ?2 WHERE request_id = ?1 AND transaction_summary IS NULL",
+            params![record.request_id, text],
+        )?;
+        transaction.commit()?;
+        Ok(text)
+    }
+
     /// Withdraw an agent's own queued request, freeing the plan digest and
     /// the wallet's awaiting-approval capacity.
     ///

@@ -262,55 +262,50 @@ async fn owner_network_reset_persists_defaults_and_publishes_the_change() {
 }
 
 #[test]
-fn preview_effects_use_trusted_units_and_distinguish_transfer_logs() {
-    use ekubo_wallet_core::simulation::{BalanceChanges, NativeBalanceChange, TokenBalanceChange};
+fn summaries_are_generated_for_history_and_reused_without_current_chain_context() {
+    use ekubo_wallet_core::{core::execution_plan::ExecutionPlan, policy_store::PolicyStore};
     let directory = tempfile::tempdir().unwrap();
-    let config = ConfigStore::new(directory.path()).load().unwrap();
-    let network = config
-        .networks
-        .iter()
-        .find(|network| network.chain_id == 1)
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let plan = ExecutionPlan::parse(serde_json::json!({
+        "schema_version": "1", "chain_id": "1", "caip2_chain_id": "eip155:1",
+        "sender": "0x1111111111111111111111111111111111111111",
+        "ordered_steps": [{"step": 1, "kind": "execution", "transaction": {
+            "chain_id": "1", "from": "0x1111111111111111111111111111111111111111",
+            "to": "0x2222222222222222222222222222222222222222", "data": "0x", "value": "1000000000000000000"
+        }}]
+    })).unwrap();
+    let mut database = PolicyStore::production(directory.path()).unwrap();
+    database
+        .put_for_wallet(
+            "primary",
+            plan.sender,
+            &WalletPolicy::allow_anything(),
+            None,
+        )
         .unwrap();
-    let token = Address::repeat_byte(0x33);
-    let mut changes = BalanceChanges {
-        native: NativeBalanceChange {
-            before: "1000000000000000000".into(),
-            after: "0".into(),
-            delta: "-1000000000000000000".into(),
-        },
-        tokens: BTreeMap::from([(
-            token.to_checksum(None),
-            TokenBalanceChange {
-                before: Some("0".into()),
-                after: Some("2400000000".into()),
-                delta: Some("2400000000".into()),
-                incoming_transfers: "2400000000".into(),
-                outgoing_transfers: "0".into(),
-            },
-        )]),
-    };
-    assert!(preview_flows(&changes, network, &TokenMetadataMap::new()).is_none());
-    let metadata = TokenMetadataMap::from([(
-        token,
-        TokenMetadata {
-            symbol: Some("USDG".into()),
-            decimals: Some(6),
-        },
-    )]);
-    let flows = preview_flows(&changes, network, &metadata).unwrap();
-    assert_eq!(flows.sent, ["1 ETH"]);
-    assert_eq!(flows.received, ["2400 USDG"]);
-    assert!(!flows.from_logs);
-    changes
-        .tokens
-        .get_mut(&token.to_checksum(None))
-        .unwrap()
-        .delta = None;
+    let mut store = PendingStore::new(database);
+    let pending = store.create("primary", "ethereum", &plan, None, 1).unwrap();
+    let history = store.reject(pending.request_id).unwrap();
+    let summaries = owner.transaction_previews(&[&history]).unwrap();
     assert!(
-        preview_flows(&changes, network, &metadata)
-            .unwrap()
-            .from_logs
+        summaries[&history.request_id].contains("1 ETH"),
+        "{summaries:?}"
     );
-    changes.native.delta = "garbage".into();
-    assert!(preview_flows(&changes, network, &metadata).is_none());
+    drop(owner);
+    let reopened = OwnerApi::for_test(directory.path()).unwrap();
+    reopened
+        .config
+        .update_for_test(|config| {
+            config.networks.clear();
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        reopened.saved_transaction_summaries(&[&history]).unwrap(),
+        summaries
+    );
+    assert_eq!(
+        reopened.transaction_previews(&[&history]).unwrap(),
+        summaries
+    );
 }

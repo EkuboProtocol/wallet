@@ -261,64 +261,6 @@ fn native_value_label(
     )
 }
 
-/// Amounts retain their units before the model sees them. Only owner-trusted
-/// token identities can turn simulation transfers into named assets.
-fn preview_flows(
-    changes: &ekubo_wallet_core::simulation::BalanceChanges,
-    network: &NetworkConfig,
-    metadata: &TokenMetadataMap,
-) -> Option<ekubo_wallet_preview::slots::SimulatedFlows> {
-    let mut flows = ekubo_wallet_preview::slots::SimulatedFlows::default();
-    let native = changes
-        .native
-        .delta
-        .strip_prefix('-')
-        .unwrap_or(&changes.native.delta)
-        .parse::<U256>()
-        .ok()?;
-    if native != U256::ZERO {
-        let values = if changes.native.delta.starts_with('-') {
-            &mut flows.sent
-        } else {
-            &mut flows.received
-        };
-        values.push(native_amount(native, network));
-    }
-    for (address, change) in &changes.tokens {
-        let (negative, amount) = if let Some(delta) = &change.delta {
-            (
-                delta.starts_with('-'),
-                delta
-                    .strip_prefix('-')
-                    .unwrap_or(delta)
-                    .parse::<U256>()
-                    .ok()?,
-            )
-        } else {
-            let incoming = change.incoming_transfers.parse::<U256>().ok()?;
-            let outgoing = change.outgoing_transfers.parse::<U256>().ok()?;
-            flows.from_logs = true;
-            (outgoing > incoming, incoming.abs_diff(outgoing))
-        };
-        if amount == U256::ZERO {
-            continue;
-        }
-        let token = metadata.get(&address.parse::<Address>().ok()?)?;
-        let symbol = token.symbol.as_deref().filter(|s| !s.trim().is_empty())?;
-        let amount = format!(
-            "{} {}",
-            format_fixed_point(&amount.to_string(), token.decimals?),
-            symbol
-        );
-        if negative {
-            flows.sent.push(amount);
-        } else {
-            flows.received.push(amount);
-        }
-    }
-    Some(flows)
-}
-
 /// A target labeled by symbol when the token database names it.
 fn trusted_token_label_from(
     address: Address,
@@ -2258,24 +2200,37 @@ impl OwnerApi {
         Ok(headlines)
     }
 
-    /// A machine-written preview per waiting transaction: a category, a risk
-    /// band, and one sentence.
-    ///
-    /// Built from the same `interpret_steps` reading the review itself
-    /// displays, so nothing is decoded twice and nothing new is fetched.
-    /// Grouped by chain for the same reason [`Self::transaction_headlines`]
-    /// is: the token database answers once per chain rather than once per row.
-    ///
-    /// Only ever called for *waiting* requests. A history list is hundreds of
-    /// rows whose outcome is already known, and a preview is there to help
-    /// somebody decide.
-    ///
-    /// An unavailable model answers an empty map. Callers render that as no
-    /// preview, never as a verdict.
+    /// Read saved summaries without running the model or consulting the chain.
+    pub fn saved_transaction_summaries(
+        &self,
+        transactions: &[&PendingTransaction],
+    ) -> Result<BTreeMap<Uuid, String>> {
+        let store = PendingStore::production(self.config.data_dir())?;
+        let mut summaries = BTreeMap::new();
+        for record in transactions {
+            if let Some(summary) = store.transaction_summary(record)? {
+                summaries.insert(record.request_id, summary);
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// Generate and persist missing summaries from immutable call data and
+    /// local decoding only. Pending and historical records use the same path.
+    /// No simulation, receipt, RPC, or current blockchain state is an input.
     pub fn transaction_previews(
         &self,
         transactions: &[&PendingTransaction],
-    ) -> Result<BTreeMap<Uuid, ekubo_wallet_preview::TransactionPreview>> {
+    ) -> Result<BTreeMap<Uuid, String>> {
+        let mut summaries = self.saved_transaction_summaries(transactions)?;
+        let transactions = transactions
+            .iter()
+            .copied()
+            .filter(|record| !summaries.contains_key(&record.request_id))
+            .collect::<Vec<_>>();
+        if transactions.is_empty() {
+            return Ok(summaries);
+        }
         let own_accounts = self
             .config
             .load()?
@@ -2286,7 +2241,7 @@ impl OwnerApi {
         let networks = self.networks().unwrap_or_default();
         let store = TokenStore::production(self.config.data_dir())?;
         let mut by_chain: BTreeMap<u64, Vec<&PendingTransaction>> = BTreeMap::new();
-        for pending in transactions {
+        for pending in &transactions {
             if let Ok(chain_id) = pending.chain_id.parse::<u64>() {
                 by_chain.entry(chain_id).or_default().push(pending);
             }
@@ -2297,20 +2252,7 @@ impl OwnerApi {
             let network = networks.iter().find(|network| network.chain_id == chain_id);
             for pending in records {
                 let steps = &pending.execution_plan.ordered_steps;
-                let effects = ekubo_wallet_core::simulation_preview::balance_changes(
-                    pending.wallet_instance_id,
-                    chain_id,
-                    &pending.digest,
-                );
                 let mut addresses = futures::executor::block_on(plan_token_targets(steps));
-                if let Some(effects) = &effects {
-                    addresses.extend(
-                        effects
-                            .tokens
-                            .keys()
-                            .filter_map(|address| address.parse::<Address>().ok()),
-                    );
-                }
                 // Canonical address words are candidates for metadata lookup,
                 // never a claim that this unknown function uses them as tokens.
                 let mut remaining_words = 2048;
@@ -2336,10 +2278,6 @@ impl OwnerApi {
                 let metadata = store
                     .display_metadata(chain_id, &addresses)
                     .unwrap_or_default();
-                let simulation = effects
-                    .as_ref()
-                    .zip(network)
-                    .and_then(|(effects, network)| preview_flows(effects, network, &metadata));
                 let interpretations =
                     futures::executor::block_on(interpret_steps(steps, &metadata, &own_accounts));
                 let calls = steps
@@ -2398,11 +2336,24 @@ impl OwnerApi {
                     .collect();
                 plans.push((
                     pending.request_id,
-                    ekubo_wallet_preview::PlanDocument { simulation, calls },
+                    ekubo_wallet_preview::PlanDocument {
+                        simulation: None,
+                        calls,
+                    },
                 ));
             }
         }
-        Ok(crate::preview::previews(plans))
+        let generated = crate::preview::previews(plans);
+        let mut store = PendingStore::production(self.config.data_dir())?;
+        for record in transactions {
+            if let Some(preview) = generated.get(&record.request_id)
+                && !preview.summary.trim().is_empty()
+            {
+                let text = store.save_transaction_summary(record, &preview.summary)?;
+                summaries.insert(record.request_id, text);
+            }
+        }
+        Ok(summaries)
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {

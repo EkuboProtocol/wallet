@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1747,6 +1747,13 @@ const MIGRATIONS: &[Migration] = &[
         ],
         seed: Some(widen_signature_status_vocabulary),
     },
+    Migration {
+        to_version: 13,
+        statements: &[
+            "ALTER TABLE pending_transactions ADD COLUMN transaction_summary TEXT CHECK (transaction_summary IS NULL OR length(transaction_summary) BETWEEN 1 AND 100)",
+        ],
+        seed: None,
+    },
 ];
 
 /// The harness-kind vocabulary as the six attribution columns were first
@@ -2066,6 +2073,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  plan_json TEXT NOT NULL,
                  plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
                  plan_source TEXT,
+                 transaction_summary TEXT CHECK (transaction_summary IS NULL OR length(transaction_summary) BETWEEN 1 AND 100),
                  requesting_harness_kind TEXT CHECK (requesting_harness_kind IS NULL OR requesting_harness_kind IN ('codex','claude_code','claude_desktop','gemini_cli','cursor','opencode','grok_build','other')),
                  request_source TEXT,
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),

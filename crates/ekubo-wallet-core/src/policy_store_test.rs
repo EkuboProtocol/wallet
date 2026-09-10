@@ -368,7 +368,8 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                "ALTER TABLE pending_transactions DROP COLUMN transaction_summary;
+                 ALTER TABLE pending_typed_data DROP COLUMN request_source;
                  ALTER TABLE pending_messages DROP COLUMN request_source;
                  ALTER TABLE pending_transactions DROP COLUMN request_source;
                  ALTER TABLE tokens DROP COLUMN approximate_usd_price;
@@ -499,7 +500,8 @@ fn seeding_approximate_values_never_overwrites_one_the_owner_recorded() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                "ALTER TABLE pending_transactions DROP COLUMN transaction_summary;
+                 ALTER TABLE pending_typed_data DROP COLUMN request_source;
                  ALTER TABLE pending_messages DROP COLUMN request_source;
                  ALTER TABLE pending_transactions DROP COLUMN request_source;
                  UPDATE schema_metadata SET version = 7 WHERE singleton = 1",
@@ -1418,7 +1420,8 @@ fn widening_the_harness_vocabulary_moves_no_rows_and_keeps_every_index() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                "ALTER TABLE pending_transactions DROP COLUMN transaction_summary;
+                 ALTER TABLE pending_typed_data DROP COLUMN request_source;
                  ALTER TABLE pending_messages DROP COLUMN request_source;",
             )
             .unwrap();
@@ -1594,7 +1597,8 @@ fn widening_the_signature_constraints_moves_no_rows_and_keeps_every_index() {
         store
             .connection
             .execute_batch(
-                "ALTER TABLE pending_typed_data DROP COLUMN request_source;
+                "ALTER TABLE pending_transactions DROP COLUMN transaction_summary;
+                 ALTER TABLE pending_typed_data DROP COLUMN request_source;
                  ALTER TABLE pending_messages DROP COLUMN request_source;",
             )
             .unwrap();
