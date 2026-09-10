@@ -4535,6 +4535,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "directories",
+ "ekubo-wallet-client",
  "ekubo-wallet-core",
  "ekubo-wallet-preview",
  "embed-resource",
@@ -4576,6 +4577,20 @@ dependencies = [
  "windows-sys 0.61.2",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "ekubo-wallet-client"
+version = "1.8.2"
+dependencies = [
+ "anyhow",
+ "ekubo-wallet-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid 1.26.0",
+ "zbus",
 ]
 
 [[package]]
@@ -4669,6 +4684,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "chrono",
+ "ekubo-wallet-client",
  "ekubo-wallet-core",
  "ekubo-wallet-preview",
  "futures",
@@ -4682,9 +4698,12 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
  "uuid 1.26.0",
+ "walletconnect-session",
+ "zbus",
  "zeroize",
 ]
 

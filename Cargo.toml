@@ -15,6 +15,7 @@ members = [
     "crates/erc8410",
     "crates/erc8410-wasm",
     "crates/ekubo-wallet-core",
+    "crates/ekubo-wallet-client",
     "crates/ekubo-wallet-service",
     "crates/ekubo-wallet-preview",
     "crates/ekubo-wallet-preview-wasm",
@@ -40,6 +41,7 @@ test = false
 
 [dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }
+ekubo-wallet-client = { path = "crates/ekubo-wallet-client" }
 ekubo-wallet-preview = { path = "crates/ekubo-wallet-preview", default-features = false }
 walletconnect-session = { path = "crates/walletconnect-session" }
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }

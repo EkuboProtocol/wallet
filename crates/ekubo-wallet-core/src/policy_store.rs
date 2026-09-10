@@ -123,7 +123,7 @@ impl DatabaseKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredPolicy {
     pub wallet_instance_id: Uuid,
     pub wallet_id: String,
@@ -137,7 +137,7 @@ pub struct StoredPolicy {
 /// proposal exists per wallet — a newer proposal replaces the previous one —
 /// and it binds the exact policy revision it was written against, so it can
 /// never apply over a policy the agent has not seen.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolicyProposal {
     pub wallet_instance_id: Uuid,
     pub wallet_id: String,

@@ -43,8 +43,8 @@ use ekubo_wallet_core::{
     signature_review,
     simulation::{SimulationResult, simulate_external_execution},
     token_store::{
-        ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
-        TokenProposal, TokenStore, read_portfolio,
+        ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, StoredToken, TokenProposal,
+        TokenStore, read_portfolio,
     },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
@@ -117,18 +117,7 @@ pub struct OwnerPortfolioSnapshot {
     pub accounts: Vec<OwnerPortfolioAccount>,
 }
 
-#[derive(Clone, Debug)]
-pub struct OwnerTokenListImport {
-    pub source: String,
-    pub host: String,
-    pub declared_version: Option<String>,
-    pub declared_timestamp: Option<String>,
-    pub chains_selected: Vec<u64>,
-    pub skipped_non_evm: usize,
-    pub skipped_other_chain: usize,
-    pub summary: ProposalSummary,
-    pub proposals: Vec<TokenProposal>,
-}
+pub use ekubo_wallet_client::token_import::OwnerTokenListImport;
 
 /// How one native transaction review ended.
 ///

@@ -7,14 +7,31 @@
 
 pub use ekubo_wallet_core::*;
 
-pub mod framing;
+pub use ekubo_wallet_client::framing;
+#[path = "../../../src/dapp_identity.rs"]
+pub mod dapp_identity;
+pub mod dapp_reviews;
+pub mod dapp_runtime;
+#[cfg(target_os = "linux")]
+mod desktop_sessions;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+mod linux_owner_rpc;
 #[path = "../../../src/mcp_transport.rs"]
 mod mcp_transport;
+pub mod owner_rpc;
+#[path = "../../../src/walletconnect.rs"]
+pub mod walletconnect;
+#[path = "../../../src/walletconnect_handler.rs"]
+mod walletconnect_handler;
+#[path = "../../../src/walletconnect_review.rs"]
+mod walletconnect_review;
 
 #[path = "../../../src/authority.rs"]
 pub mod authority;
+#[path = "../../../src/automation_runtime.rs"]
+pub mod automation_runtime;
 #[path = "../../../src/batch_read.rs"]
 pub mod batch_read;
 #[path = "../../../bridge_protocol.rs"]

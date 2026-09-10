@@ -9,6 +9,7 @@ pub use ekubo_wallet_core::{
 pub mod agent_config;
 pub mod assets;
 pub mod authority;
+pub mod automation_runtime;
 pub mod batch_read;
 /// Shared verbatim with the stdio bridge, which includes the same file.
 #[path = "../bridge_protocol.rs"]
@@ -28,6 +29,7 @@ pub mod single_instance;
 pub mod tray;
 pub mod walletconnect;
 mod walletconnect_handler;
+mod walletconnect_review;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");

@@ -1,4 +1,22 @@
 use super::*;
+
+#[test]
+fn installer_configuration_requires_distinct_nonroot_matching_identities() {
+    let valid = br#"{"owner_uid":1000,"service_uid":2000}"#;
+    assert_eq!(decode_configuration(valid, 1000).unwrap().service_uid, 2000);
+    assert!(decode_configuration(valid, 1001).is_err());
+    for invalid in [
+        br#"{"owner_uid":1000,"service_uid":0}"#.as_slice(),
+        br#"{"owner_uid":1000,"service_uid":1000}"#.as_slice(),
+        br#"{"owner_uid":0,"service_uid":2000}"#.as_slice(),
+        br#"{"owner_uid":1000,"service_uid":2000,"bus_address":"/tmp/fake"}"#.as_slice(),
+    ] {
+        assert!(decode_configuration(invalid, 1000).is_err());
+    }
+    let mut oversized = valid.to_vec();
+    oversized.resize(usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1, b' ');
+    assert!(decode_configuration(&oversized, 1000).is_err());
+}
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 fn fixture() -> (tempfile::TempDir, Entry) {

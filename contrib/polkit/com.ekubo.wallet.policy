@@ -9,6 +9,9 @@
   <action id="com.ekubo.wallet.human-presence">
     <description>Confirm a sensitive Ekubo Wallet operation</description>
     <message>Authentication is required to confirm a sensitive Ekubo Wallet operation</message>
+    <!-- This permits the dedicated service to query this action for a desktop
+         subject. It grants no authorization; auth_self is still required. -->
+    <annotate key="org.freedesktop.policykit.owner">unix-user:ekubo-wallet</annotate>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

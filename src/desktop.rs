@@ -20843,51 +20843,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 let automation_config = owner.config().clone();
                 let automation_events = events.clone();
                 gpui_tokio::Tokio::spawn(cx, async move {
-                    let data_dir = automation_config.data_dir().to_path_buf();
-                    let stores = (|| {
-                        Ok::<_, anyhow::Error>((
-                            ekubo_wallet_core::automation_store::AutomationStore::production(
-                                &data_dir,
-                            )?,
-                            ekubo_wallet_core::pending::PendingStore::production(&data_dir)?,
-                            ekubo_wallet_core::policy_store::PolicyStore::production(&data_dir)?,
-                        ))
-                    })();
-                    let Ok((automations, pending, policies)) = stores else {
-                        // Nothing to run against. The wallet is fully usable
-                        // without automations, so this must not take the
-                        // application down with it.
-                        return;
-                    };
-                    let policies = Arc::new(Mutex::new(policies));
-                    let scheduler =
-                        ekubo_wallet_core::automation_scheduler::AutomationScheduler::new(
-                            ekubo_wallet_core::agent_authority::AgentExecutionAuthority::production(
-                                Arc::clone(&policies),
-                            ),
-                        );
-                    let automations = Mutex::new(automations);
-                    let pending = Mutex::new(pending);
-                    ekubo_wallet_core::automation_scheduler::drive(
-                        &scheduler,
-                        &automation_config,
-                        &automations,
-                        &pending,
-                        &policies,
-                        |outcome| {
-                            // Every pass that did something redraws the tab.
-                            // Publishing only on change keeps an idle wallet
-                            // from waking the UI on a timer.
-                            if outcome.is_ok() {
-                                automation_events.publish(
-                                    crate::events::DomainEventKind::AutomationsChanged {
-                                        wallet_id: String::new(),
-                                    },
-                                );
-                            }
-                        },
-                    )
-                    .await;
+                    if let Err(error) =
+                        crate::automation_runtime::run(automation_config, automation_events).await
+                    {
+                        // Preserve desktop startup when automations cannot open.
+                        tracing::warn!(%error, "automation supervisor could not start");
+                    }
                 })
                 .detach();
             }

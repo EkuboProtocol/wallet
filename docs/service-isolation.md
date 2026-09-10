@@ -19,6 +19,20 @@ inside the protected service remain outside this boundary.
 
 ## Implementation and evidence
 
+- `ekubo-wallet-client` now owns the shared closed request protocol, framing,
+  authenticated Linux transport, and typed owner methods. It depends on core's
+  data types and identity validation, not on the headless authority runtime.
+  The raw JSON call is crate-private. The service dispatches the same protocol
+  into its existing `OwnerApi`; there is no parallel policy implementation.
+  The available methods cover account/policy/network reads and edits, legal
+  review, notification privacy, appearance, setup progress, testnet display,
+  and companion-server selection. Account custody, signing reviews, automation,
+  activity, tokens, updates, dapp access, and events still need their RPC flows.
+  Network reset and proposal review, plus policy proposal listing/application/
+  rejection, now use typed requests carrying the exact reviewed records. The
+  service delegates them to existing owner methods, including core's native
+  authentication and atomic stale-review checks. The older broad network
+  install operation is not exposed; desktop forms use add/replace operations.
 - The `ekubo-wallet-service` library compiles the existing authority, MCP,
   event, batch-read, and preview implementation without GPUI. Shared source
   paths are transitional: do not fork the policy implementation. Once desktop
@@ -43,6 +57,85 @@ inside the protected service remain outside this boundary.
 - IPC framing bounds allocations, rejects mismatched protocol versions and
   truncated responses, and does not replay interrupted operations. The frame
   codec does not authenticate peers or grant capabilities.
+- The Linux host now registers an initial closed owner interface on the system
+  bus. It covers account/policy reads, policy installation, network edits,
+  notification privacy, and legal review. Requests cannot supply an identity,
+  authorization proof, database path, SQL statement, or raw signing operation.
+  This endpoint is not yet connected to the desktop, and its system-bus policy
+  still needs installer provisioning.
+- Core binds service owner authentication to the message's actual D-Bus unique
+  sender and checks its UID against the protected profile. The receiving bus
+  connection remains pinned through polkit authentication; disconnected callers
+  are rejected before issuing an authorization proof. Request identity is
+  task-local and is not inherited by spawned tasks. The polkit action grants the
+  dedicated service permission to query for a desktop subject while retaining
+  the existing fresh `auth_self` challenge. Installer provisioning must use the
+  matching `ekubo-wallet` service principal. Legacy desktop authentication still
+  uses its existing process subject.
+- The private-bus identity test passes for matching/wrong UIDs, disconnected
+  callers, and task-local isolation. It does not demonstrate real polkit
+  authentication across OS identities; that native integration test remains
+  required. Owner RPC tests exercise the existing persistence checks, not a
+  complete service deployment or desktop flow.
+- The Linux owner client reads the current user's root-owned installer identity
+  without activating custody. Both client and host connect through the pinned,
+  root-controlled `/run/dbus` directory and ignore bus-address environment
+  overrides. The client resolves the service's public name, checks its unique
+  connection's UID, then addresses only that verified unique connection and
+  checks response senders. A disconnect is an error, never an automatic mutation
+  replay or switch to a new service. A private-bus test verifies wrong-UID
+  rejection, name replacement, and disconnect behavior. The desktop facade still
+  needs to adopt this transport; this code alone does not alter shipped custody.
+- `automation_runtime` now shares the desktop's existing core scheduler setup
+  with the headless service. It still uses `AgentExecutionAuthority`, re-resolves
+  current accounts/networks/policies in core, and emits the same change events.
+  The desktop's Tokio task invokes this shared code with its existing lifetime.
+- Linux service scheduling is gated by live desktop sessions. `HoldDesktopSession`
+  authenticates the actual caller through core before acquiring a bounded session
+  lease; it subscribes to that unique bus name's departure before checking that
+  the name is still live. The service runs one scheduler while any desktop is
+  active and cancels it when the last session leaves. Client `close()` closes all
+  clones of that connection and releases its session on Quit; cancelling only
+  the pending D-Bus call is not equivalent to disconnecting. The desktop still
+  needs to adopt these client methods. MCP enable/disable and Quit behavior need
+  separate lifecycle integration before the no-UX-change requirement is met.
+- The WalletConnect proposal channel is extracted verbatim into a shared
+  headless module; the desktop continues to use its original public reexports.
+  A new service review broker retains actual choices, scopes, and response
+  channels. Client DTOs contain account metadata and review documents only.
+  Approval consumes an exact stored choice, reserves the review against concurrent
+  replacement, authenticates through core, and rechecks the account instance and
+  address after authentication. Only the internal session receives the proof.
+  Replays, stale identities, bad indices, and retired/reimported accounts are
+  rejected. The authenticated owner endpoint now lists broker reviews and routes
+  approve/reject/close requests to it. Client approval carries only a session ID,
+  choice index, and reviewed identity; the response is null, with the proof sent
+  only over the internal session channel. A channel collector now ingests handler
+  proposals and publishes refresh events after insertion. Cancelling the
+  collector closes pending decisions and serializes shutdown against delivery
+  of any approval still being authenticated. The Linux host now runs the
+  collector and shared headless WalletConnect runtime. Typed owner operations
+  start, list, wait for, and disconnect sessions; workers receive restricted
+  dapp authority. Losing the last desktop session cancels active connections,
+  including connection setup. Desktop adoption and live relay validation remain.
+- The owner dispatcher, session/review DTOs, review broker, and WalletConnect
+  runtime are shared across platforms. Linux D-Bus authentication and dispatch
+  adaptation live in `linux_owner_rpc.rs`; the runtime observes an authenticated
+  desktop activity watch without receiving Unix identities or bus handles.
+  Windows must supply its own protected service identity/storage, authenticated
+  transport, native owner-authentication context, and desktop lease tracking.
+  It must reuse the same typed operations and core authorization checks, without
+  accepting a caller-supplied approval flag. The client operation methods should
+  likewise be reused when a Windows transport implements the existing contract.
+  No Windows transport or native Windows validation is implemented yet.
+
+- Token management now has shared typed owner operations: inventory, manual
+  addition, price display settings, exact reviewed removal, token-list fetching
+  for review, and proposal listing/acceptance/rejection. The service calls the
+  existing owner/core methods, retaining native authentication for trusted
+  metadata and exact stored-row checks. Import result DTOs are shared with the
+  desktop; no storage or authorization capability crosses the wire. The desktop
+  still needs to adopt the client methods.
 
 ## Work still required before completion
 
@@ -60,6 +153,12 @@ inside the protected service remain outside this boundary.
    operations. Derive peer identity from the OS transport, not request fields.
    Keep policy evaluation and exact authorization binding within core/service.
    Never expose a raw-signing endpoint or trust a frontend `approved` boolean.
+   The existing `walletconnect` manager and `walletconnect_handler` are headless.
+   Reuse them in the service with a proposal broker: keep `DappAuthorization`
+   and the stored scope/choice there, relay review documents to the desktop,
+   and authenticate the selected stored document inside the owner RPC context.
+   Preserve session cancellation/farewells; its non-Send session future currently
+   runs through a blocking worker with a Tokio handle and must retain that model.
 4. Preserve native owner authentication across sessions. Linux polkit must bind
    the actual desktop peer and exact operation; Windows must prove fresh owner
    authentication to the service despite its noninteractive service session.
@@ -67,6 +166,11 @@ inside the protected service remain outside this boundary.
 5. Convert desktop authority and WalletConnect to remote facades without screen
    or review-flow changes. Preserve notification attribution, export expiry,
    owner review semantics, automation lifecycle, and MCP reconnection behavior.
+   The existing `DesktopSnapshot::capture` already separates cached render data
+   from authority reads. Keep that presentation model while making capture use
+   remote reads; do not block the UI on synchronous D-Bus calls. Startup still
+   constructs local authority and launches automation against local stores, so
+   adding the client crate has not changed the custody path yet.
 6. Integrate installation, authenticated updates, upgrades, rollback behavior,
    and removal. Keep the service binary and configuration unwritable by the
    desktop user. Per-user Windows installation currently needs no service;
@@ -120,19 +224,35 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- `cargo test --locked -p ekubo-wallet-core -p ekubo-wallet-service --lib`:
-  697 core and 139 service tests passed; six ignored tests remain separate.
-- The ignored isolated Secret Service startup/restart regression passed separately.
-- `cargo clippy --locked -p ekubo-wallet-core --all-targets --all-features -- -D warnings` passed.
-- `cargo check --locked -p ekubo-wallet --lib` passed after MCP session extraction.
-- `cargo build --locked -p ekubo-wallet-service --bin ekubo-wallet-service` passed
-  without test hooks. Running that binary with the desktop's actual UID refused
-  execution before opening authority. No live wallet credentials were read.
-- Workspace formatting and diff whitespace checks passed.
+- Service and client library suites pass: 186 service tests and six client tests,
+  with three integration tests ignored. Token RPC tests round-trip serialized
+  requests and cover stale removal/repricing, changed proposals, forged metadata,
+  replay, and network/price validation. Dapp tests cover exact stored review
+  identity, account replacement, replay, collector cancellation, and shutdown
+  during authentication. The approval test keeps its runtime alive across replay
+  and verifies the RPC response contains no authorization proof.
+- These tests use temporary encrypted state, synthetic metadata, and fake owner
+  authentication. Session cancellation uses a local worker, not a live relay.
+  They do not prove native polkit/Windows authentication or process isolation.
+- Full workspace strict Clippy passes with all targets and features. Desktop
+  library checking passes after shared session/import DTOs and connection setup
+  cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
+- OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
+  Linux, Windows, and macOS lockfiles under the existing repository policy.
+- Full workspace all-feature tests pass: 1636 passed, 11 ignored across
+  30 suites (including doc tests). Core: 699 passed, six ignored; desktop
+  library: 445 passed, two ignored. Log:
+  `~/Documents/wallet-service-workspace-tests.log`.
+- Earlier targeted evidence: all 11 service-storage tests passed; private-bus
+  caller identity, client identity/replacement, desktop disconnection, and the
+  isolated Secret Service startup/restart regression passed when explicitly run.
+  These tests launch and stop only their own temporary daemons. The core
+  library suite is included in the current workspace result above.
+- A prior standalone service build passed without test hooks; its early startup
+  guard refused desktop-UID execution before opening authority. No live wallet
+  credentials were read. Repeat production build before packaging.
 
-Full CI, service-crate strict Clippy, native multi-identity integration, and
-packaged UX verification have not passed. The service crate still has unused
-Dapp/owner methods until remote dispatch is wired. Build the standalone binary
-without test hooks as well as running tests: the test feature initially masked
-an incorrect use of `ConfigStore::new`, now replaced by production configuration
-bound to activated service storage before user environment overrides.
+Full native multi-identity integration, Windows compilation/authentication,
+provisioning, migration, and packaged UX verification remain unproven. Windows
+is not an installed Rust target on this development machine. No installation or
+security completion is claimed by the Linux unit and compile results.

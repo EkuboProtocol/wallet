@@ -434,7 +434,7 @@ pub struct AcceptanceRecord {
 }
 
 /// Acceptance state of one document, as reported to the desktop and MCP.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DocumentStatus {
     /// Whether the current revision of the document has been accepted.
     pub accepted: bool,
@@ -446,7 +446,7 @@ pub struct DocumentStatus {
     pub superseded_digest: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct LegalStatus {
     /// Whether signing is currently allowed by legal acceptance state.
     pub signing_allowed: bool,

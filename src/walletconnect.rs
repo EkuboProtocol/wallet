@@ -1,71 +1,22 @@
 //! In-memory multi-session `WalletConnect` coordination.
 
+pub use crate::walletconnect_review::{
+    ProposalChoice, ProposalCommand, ProposalPresenter, ProposalPrompt,
+};
 use crate::{authority::DappApi, events::EventBus};
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
-use ekubo_wallet_core::{
-    approval::ReviewDocument, config::WalletMetadata, human_presence::DappAuthorization,
-};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-use walletconnect_session::{ApprovedScope, PairingUri};
+use walletconnect_session::PairingUri;
 
 pub const MAX_WALLETCONNECT_SESSIONS: usize = 16;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionStatus {
-    Pairing,
-    AwaitingProposal,
-    Connected,
-    /// The relay connection dropped and the session is dialing again.
-    ///
-    /// A distinct state rather than a silent one, because the session is still
-    /// the owner's and the dapp still believes in it — what has gone away is
-    /// the socket in between, and a row that went on saying "Connected"
-    /// through an outage would be the wallet asserting something it cannot
-    /// currently do.
-    Reconnecting,
-    Disconnecting,
-}
-
-impl SessionStatus {
-    /// Owner-facing wording for the state of one dapp connection.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Pairing => "Connecting",
-            Self::AwaitingProposal => "Waiting for the dapp",
-            Self::Connected => "Connected",
-            Self::Reconnecting => "Reconnecting",
-            Self::Disconnecting => "Disconnecting",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionSummary {
-    pub id: Uuid,
-    pub status: SessionStatus,
-    pub active_requests: usize,
-    pub dapp_name: Option<String>,
-    pub last_error: Option<String>,
-    /// The controller-selected settlement deadline. Peers cannot extend it.
-    pub expires_at: Option<i64>,
-    /// Whether the owner has approved this dapp and the session settled.
-    ///
-    /// Everything before that point is a pairing with a stranger: the relay
-    /// carries nothing but a proposal, and the only thing the wallet knows
-    /// about the peer is whatever the proposal will claim. A connection list
-    /// that draws those rows invites the reader to treat "it is in the list"
-    /// as "I let it in". The review window is where a dapp is met; the list is
-    /// what came out of that decision.
-    pub settled: bool,
-}
+pub use ekubo_wallet_client::dapp_session::{SessionStatus, SessionSummary};
 
 #[derive(Default)]
 pub struct WalletConnectManager {
@@ -230,69 +181,6 @@ impl WalletConnectManager {
 
     pub fn finish(&mut self, id: Uuid) {
         self.sessions.remove(&id);
-    }
-}
-
-pub struct ProposalChoice {
-    pub account: WalletMetadata,
-    pub scope: ApprovedScope,
-    pub document: ReviewDocument,
-}
-
-pub struct ProposalPrompt {
-    pub session_id: Uuid,
-    /// The same review with the account left blank, for the state the window
-    /// opens in. Drawing one of the `choices` instead would name an account the
-    /// owner has not chosen, on the screen whose entire question is which
-    /// account to expose.
-    pub unselected_document: ReviewDocument,
-    pub choices: Vec<ProposalChoice>,
-    pub response: oneshot::Sender<ProposalCommand>,
-}
-
-pub enum ProposalCommand {
-    Approve {
-        index: usize,
-        authorization: DappAuthorization,
-    },
-    Reject,
-    Close,
-}
-
-#[derive(Clone)]
-pub struct ProposalPresenter {
-    sender: mpsc::UnboundedSender<ProposalPrompt>,
-}
-
-impl ProposalPresenter {
-    #[must_use]
-    pub fn channel() -> (Self, mpsc::UnboundedReceiver<ProposalPrompt>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        (Self { sender }, receiver)
-    }
-
-    pub async fn review(
-        &self,
-        session_id: Uuid,
-        unselected_document: ReviewDocument,
-        choices: Vec<ProposalChoice>,
-    ) -> Result<ProposalCommand> {
-        ensure!(
-            !choices.is_empty(),
-            "connection review has no account choices"
-        );
-        let (response, decision) = oneshot::channel();
-        self.sender
-            .send(ProposalPrompt {
-                session_id,
-                unselected_document,
-                choices,
-                response,
-            })
-            .map_err(|_| anyhow::anyhow!("the WalletConnect review UI is unavailable"))?;
-        decision
-            .await
-            .context("the WalletConnect review window closed")
     }
 }
 

@@ -30,6 +30,80 @@ struct OwnerConfiguration {
     service_uid: u32,
 }
 
+/// Installer-attested identity for the current desktop user's service.
+/// Construction is restricted to the root-owned configuration reader.
+pub struct InstalledServiceIdentity {
+    owner_uid: u32,
+    service_uid: u32,
+}
+
+impl InstalledServiceIdentity {
+    #[must_use]
+    pub const fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
+    #[must_use]
+    pub const fn service_uid(&self) -> u32 {
+        self.service_uid
+    }
+}
+
+/// Read only public installer configuration, without activating custody or
+/// touching credentials. Clients cannot choose another owner or a config path.
+pub fn installed_service_identity() -> Result<InstalledServiceIdentity> {
+    let owner_uid = rustix::process::geteuid().as_raw();
+    ensure!(
+        rustix::process::getuid().as_raw() == owner_uid,
+        "wallet client cannot run as a set-user-ID process"
+    );
+    let configured = owner_configuration(&root_directory()?, owner_uid)?;
+    Ok(InstalledServiceIdentity {
+        owner_uid,
+        service_uid: configured.service_uid,
+    })
+}
+
+fn root_directory() -> Result<File> {
+    let root = File::from(rustix::fs::open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?);
+    validate_directory(&root, 0, false)?;
+    Ok(root)
+}
+
+fn owner_configuration(root: &File, owner_uid: u32) -> Result<OwnerConfiguration> {
+    let etc = directory(root, "etc", 0, false)?;
+    let config_root = directory(&etc, "ekubo-wallet", 0, false)?;
+    let owners = directory(&config_root, "owners", 0, false)?;
+    let config = open_regular(&owners, &format!("{owner_uid}.json"), 0, false)?;
+    ensure!(
+        config.metadata()?.len() <= MAX_CONFIG_BYTES,
+        "service configuration is oversized"
+    );
+    let mut bytes = Vec::new();
+    config.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
+    decode_configuration(&bytes, owner_uid)
+}
+
+fn decode_configuration(bytes: &[u8], owner_uid: u32) -> Result<OwnerConfiguration> {
+    ensure!(
+        bytes.len() as u64 <= MAX_CONFIG_BYTES,
+        "service configuration is oversized"
+    );
+    let configured: OwnerConfiguration = serde_json::from_slice(bytes)?;
+    ensure!(
+        configured.owner_uid == owner_uid
+            && owner_uid != 0
+            && configured.service_uid != 0
+            && configured.service_uid != owner_uid,
+        "wallet service identity does not match installer configuration"
+    );
+    Ok(configured)
+}
+
 struct Storage {
     _lock: File,
     owner_uid: u32,
@@ -56,27 +130,8 @@ pub fn initialize(owner_uid: u32) -> Result<PathBuf> {
         rustix::process::getuid().as_raw() == service_uid,
         "wallet service cannot run as a set-user-ID process"
     );
-    let root = File::from(rustix::fs::open(
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?);
-    validate_directory(&root, 0, false)?;
-    let etc = directory(&root, "etc", 0, false)?;
-    let config_root = directory(&etc, "ekubo-wallet", 0, false)?;
-    let owners = directory(&config_root, "owners", 0, false)?;
-    let config = open_regular(&owners, &format!("{owner_uid}.json"), 0, false)?;
-    ensure!(
-        config.metadata()?.len() <= MAX_CONFIG_BYTES,
-        "service configuration is oversized"
-    );
-    let mut bytes = Vec::new();
-    config.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= MAX_CONFIG_BYTES,
-        "service configuration is oversized"
-    );
-    let configured: OwnerConfiguration = serde_json::from_slice(&bytes)?;
+    let root = root_directory()?;
+    let configured = owner_configuration(&root, owner_uid)?;
     ensure!(
         configured.owner_uid == owner_uid && configured.service_uid == service_uid,
         "wallet service identity does not match installer configuration"
@@ -102,6 +157,25 @@ pub fn initialize(owner_uid: u32) -> Result<PathBuf> {
         })
         .map_err(|_| anyhow::anyhow!("wallet service storage was already initialized"))?;
     Ok(data_dir)
+}
+
+/// Connect only through the root-controlled system bus directory. Environment
+/// overrides could select a hostile bus that lies about peer UIDs, so they are
+/// deliberately not consulted by either side of the service boundary.
+pub async fn system_bus_stream() -> Result<tokio::net::UnixStream> {
+    use std::os::{fd::AsRawFd as _, unix::fs::FileTypeExt as _};
+
+    let run = directory(&root_directory()?, "run", 0, false)?;
+    let bus = directory(&run, "dbus", 0, false)?;
+    let path = format!("/proc/self/fd/{}/system_bus_socket", bus.as_raw_fd());
+    ensure!(
+        std::fs::symlink_metadata(&path)?.file_type().is_socket(),
+        "system bus endpoint is not a socket"
+    );
+    // Keep the pinned parent descriptor alive until connect has finished.
+    let stream = tokio::net::UnixStream::connect(path).await?;
+    drop(bus);
+    Ok(stream)
 }
 
 /// Pinned runtime directory provisioned by the installer, accessible to clients
@@ -136,6 +210,10 @@ fn lock_profile(parent: &File, uid: u32) -> Result<File> {
     validate_file(&lock, uid, true)?;
     fs2::FileExt::try_lock_exclusive(&lock).context("wallet service profile is already running")?;
     Ok(lock)
+}
+
+pub(crate) fn owner_uid() -> Option<u32> {
+    STORAGE.get().map(|storage| storage.owner_uid)
 }
 
 pub(crate) fn data_dir() -> Option<&'static Path> {

@@ -376,9 +376,13 @@ impl HumanPresence for PlatformHumanPresence {
 
         // The same probe the Settings pane runs, so the two never disagree
         // about what a polkit failure is called.
-        let authority = crate::polkit::connect().await.map_err(|detail| {
-            HumanPresenceError::Unavailable(format!("polkit is not reachable ({detail})"))
-        })?;
+        let authority = if let Some(authority) = crate::service_presence::authority().await? {
+            authority
+        } else {
+            crate::polkit::connect().await.map_err(|detail| {
+                HumanPresenceError::Unavailable(format!("polkit is not reachable ({detail})"))
+            })?
+        };
         match crate::polkit::probe(&authority).await {
             Readiness::Ready => {}
             // The desktop's Settings pane installs the definition through
@@ -398,36 +402,40 @@ impl HumanPresence for PlatformHumanPresence {
             }
         }
 
-        // State the uid rather than leave polkit to find it.
-        //
-        // This is the call RUSTSEC-2026-0278 is about. Given `None`,
-        // `new_for_owner` falls back to the crate's own `pid_uid_racy`, which
-        // reads `/proc/<pid>/status` — a lookup that answers about whichever
-        // process holds that PID when it runs, not necessarily the one that
-        // asked. Before zbus_polkit 5.1.0 passing a uid did not help either:
-        // it was encoded as D-Bus `u` where the PolicyKit1 interface specifies
-        // `i`, so polkit discarded it and resolved the owner itself. The fixed
-        // encoding is what makes stating it worth doing.
-        //
-        // `/proc/self` is what closes the window: the kernel resolves it to
-        // whoever is doing the reading, so no PID travels from here to there
-        // to be looked up a moment later. `getuid` would answer the same and
-        // this crate denies `unsafe`.
-        //
-        // This process authenticating itself is the narrow case, since it
-        // stays alive across the call and its own PID cannot be recycled
-        // underneath it. The subject it hands polkit should still be the one
-        // it means rather than one reconstructed from a directory that any
-        // number of things could be true of by the time it is read.
-        let uid = std::fs::metadata("/proc/self")
-            .map(|metadata| metadata.uid())
-            .map_err(|error| {
-                HumanPresenceError::Backend(format!(
-                    "could not read this process's own user ID: {error}"
-                ))
-            })?;
-        let subject = Subject::new_for_owner(std::process::id(), None, Some(uid))
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
+        let subject = if let Some(subject) = crate::service_presence::subject().await? {
+            subject
+        } else {
+            // State the uid rather than leave polkit to find it.
+            //
+            // This is the call RUSTSEC-2026-0278 is about. Given `None`,
+            // `new_for_owner` falls back to the crate's own `pid_uid_racy`, which
+            // reads `/proc/<pid>/status` — a lookup that answers about whichever
+            // process holds that PID when it runs, not necessarily the one that
+            // asked. Before zbus_polkit 5.1.0 passing a uid did not help either:
+            // it was encoded as D-Bus `u` where the PolicyKit1 interface specifies
+            // `i`, so polkit discarded it and resolved the owner itself. The fixed
+            // encoding is what makes stating it worth doing.
+            //
+            // `/proc/self` is what closes the window: the kernel resolves it to
+            // whoever is doing the reading, so no PID travels from here to there
+            // to be looked up a moment later. `getuid` would answer the same and
+            // this crate denies `unsafe`.
+            //
+            // This process authenticating itself is the narrow case, since it
+            // stays alive across the call and its own PID cannot be recycled
+            // underneath it. The subject it hands polkit should still be the one
+            // it means rather than one reconstructed from a directory that any
+            // number of things could be true of by the time it is read.
+            let uid = std::fs::metadata("/proc/self")
+                .map(|metadata| metadata.uid())
+                .map_err(|error| {
+                    HumanPresenceError::Backend(format!(
+                        "could not read this process's own user ID: {error}"
+                    ))
+                })?;
+            Subject::new_for_owner(std::process::id(), None, Some(uid))
+                .map_err(|error| HumanPresenceError::Backend(error.to_string()))?
+        };
         let result = authority
             .check_authorization(
                 &subject,
@@ -439,6 +447,7 @@ impl HumanPresence for PlatformHumanPresence {
             .await
             .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
         if result.is_authorized {
+            crate::service_presence::verify_after_authentication().await?;
             Ok(())
         } else if result
             .details

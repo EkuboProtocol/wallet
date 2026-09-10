@@ -27,7 +27,31 @@ pub async fn run(owner_uid: u32) -> Result<()> {
         "service configuration escaped its protected profile"
     );
     let authority = ApplicationAuthority::open(config)?;
+    let sessions = crate::desktop_sessions::DesktopSessions::default();
+    let dapp_reviews = crate::dapp_reviews::DappReviews::default();
+    let dapps = Arc::new(crate::dapp_runtime::DappRuntime::new(
+        authority.owner_api(),
+        dapp_reviews,
+        sessions.activity(),
+    ));
+    let owner_bus = zbus::connection::Builder::unix_stream(
+        ekubo_wallet_core::service_storage::system_bus_stream().await?,
+    )
+    .name(format!("org.ekubo.Wallet.Owner.u{owner_uid}"))?
+    .serve_at(
+        crate::owner_rpc::OBJECT_PATH,
+        crate::owner_rpc::LinuxOwnerInterface::new(
+            authority.owner_api(),
+            sessions.clone(),
+            dapps.clone(),
+        ),
+    )?
+    .build()
+    .await?;
     let events = authority.events();
+    let mut automations =
+        Box::pin(sessions.supervise(authority.owner_api().config().clone(), events.clone()));
+    let mut dapp_supervisor = Box::pin(dapps.supervise());
     events.publish(DomainEventKind::McpStatusChanged { online: true });
     let active = Arc::new(AtomicUsize::new(0));
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -35,6 +59,12 @@ pub async fn run(owner_uid: u32) -> Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = loop {
         tokio::select! {
+            finished = &mut dapp_supervisor => break Err(finished.err().unwrap_or_else(|| {
+                anyhow::anyhow!("dapp supervisor unexpectedly stopped")
+            })),
+            finished = &mut automations => break Err(finished.err().unwrap_or_else(|| {
+                anyhow::anyhow!("automation supervisor unexpectedly stopped")
+            })),
             _ = terminate.recv() => break Ok(()),
             signal = tokio::signal::ctrl_c() => break signal.map_err(anyhow::Error::from),
             accepted = listener.accept() => {
@@ -61,9 +91,17 @@ pub async fn run(owner_uid: u32) -> Result<()> {
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
         }
     };
+    // Cancellation drops the same core execution future used by the desktop.
+    // Persisted transaction lifecycle records remain available for recovery.
+    drop(automations);
+    drop(dapp_supervisor);
     events.publish(DomainEventKind::McpStatusChanged { online: false });
+    let owner_closed = owner_bus.close().await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
+    let dapps_closed = dapps.shutdown().await;
+    owner_closed.context("cannot close service owner endpoint")?;
+    dapps_closed.context("cannot stop dapp sessions")?;
     result
 }
 
