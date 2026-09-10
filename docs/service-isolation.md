@@ -207,6 +207,17 @@ inside the protected service remain outside this boundary.
   method future does not itself disconnect D-Bus: the desktop adapter must own
   and close the review connection when cancelling its operation.
 
+Account creation and removal now have shared typed owner RPCs. Creation accepts
+only an account name and invokes existing custody with the desktop's policy that
+requires approval for every transaction. It accepts no key, policy, storage path,
+or owner identity. Removal documents are authored in the service; removal checks
+their identity and the exact reviewed account instance/address before calling
+core's native-authenticated removal, which rechecks under its lifecycle lock.
+Tests use synthetic account metadata and verify invalid/duplicate names, forged
+documents, and replaced account instances fail before credential access or native
+authentication. Successful service credential creation/removal, import/export
+RPCs, and desktop adoption remain unverified or unfinished.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
@@ -296,7 +307,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 206 service tests and eight client tests,
+- Service and client library suites pass: 208 service tests and eight client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -331,10 +342,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1666 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1668 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-review-shutdown-tests.log`.
+  `~/Documents/wallet-account-rpc-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.

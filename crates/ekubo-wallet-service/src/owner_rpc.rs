@@ -56,6 +56,33 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::CreateAccount { wallet_id } => {
+                // Preserve the desktop's initial policy. Creating an account
+                // must not become a way to install caller-selected permissions.
+                serde_json::to_value(owner.create_account(
+                    &wallet_id,
+                    &ekubo_wallet_core::core::policy::WalletPolicy::require_approval_for_everything(
+                    ),
+                )?)?
+            }
+            Request::AccountRemovalDocument { wallet_id } => {
+                serde_json::to_value(owner.account_removal_document(&wallet_id)?)?
+            }
+            Request::RemoveAccount {
+                reviewed,
+                reviewed_identity,
+            } => {
+                let current = owner.account_removal_document(&reviewed.id)?;
+                anyhow::ensure!(
+                    current.wallet.instance_id == reviewed.instance_id
+                        && current.wallet.address == reviewed.address
+                        && current.document.identity == reviewed_identity,
+                    "account changed; review its removal again"
+                );
+                // Core still authenticates natively and rechecks the exact
+                // account under its lifecycle lock after authentication.
+                serde_json::to_value(owner.remove_account(&current.wallet).await?)?
+            }
             Request::ReviewTransaction { request_id } => {
                 serde_json::to_value(Box::pin(self.transactions.review(owner, request_id)).await?)?
             }
@@ -358,3 +385,7 @@ mod activity_tests;
 #[cfg(test)]
 #[path = "owner_signature_rpc_test.rs"]
 mod signature_tests;
+
+#[cfg(test)]
+#[path = "owner_account_rpc_test.rs"]
+mod account_tests;

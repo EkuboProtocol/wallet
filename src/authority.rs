@@ -817,10 +817,7 @@ pub struct OwnerApi {
     events: EventBus,
 }
 
-pub struct OwnerAccountRemovalReview {
-    pub document: ReviewDocument,
-    pub wallet: WalletMetadata,
-}
+pub use ekubo_wallet_client::account::OwnerAccountRemovalReview;
 
 fn transaction_observation_changed(
     before: &PendingTransaction,

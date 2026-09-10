@@ -14,6 +14,34 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    pub async fn create_account(&self, wallet_id: &str) -> Result<WalletMetadata> {
+        self.call(&Request::CreateAccount {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn account_removal_document(
+        &self,
+        wallet_id: &str,
+    ) -> Result<crate::account::OwnerAccountRemovalReview> {
+        self.call(&Request::AccountRemovalDocument {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn remove_account(
+        &self,
+        reviewed: &crate::account::OwnerAccountRemovalReview,
+    ) -> Result<WalletMetadata> {
+        self.call(&Request::RemoveAccount {
+            reviewed: reviewed.wallet.clone(),
+            reviewed_identity: reviewed.document.identity.clone(),
+        })
+        .await
+    }
+
     /// Long-running review on this authenticated connection. Read display frames
     /// and submit choices concurrently; closing the connection cancels review.
     pub async fn review_transaction(

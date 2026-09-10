@@ -19,6 +19,16 @@ pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
     deny_unknown_fields
 )]
 pub enum Request {
+    CreateAccount {
+        wallet_id: String,
+    },
+    AccountRemovalDocument {
+        wallet_id: String,
+    },
+    RemoveAccount {
+        reviewed: ekubo_wallet_core::config::WalletMetadata,
+        reviewed_identity: String,
+    },
     ReviewTransaction {
         request_id: uuid::Uuid,
     },
