@@ -12,6 +12,13 @@ pub struct OwnerClient {
 }
 
 impl OwnerClient {
+    /// Supervise the desktop lease and close all connection clones on shutdown.
+    /// Keep the returned lifetime in application state and await close on Quit.
+    #[must_use]
+    pub fn start_desktop_session(&self) -> crate::desktop_session::DesktopSession {
+        crate::desktop_session::DesktopSession::start(self.clone())
+    }
+
     /// Keep automatic execution active for this desktop connection. Spawn this
     /// once for the application lifetime; closing the connection ends the lease.
     /// Cancelling just this method's future does not disconnect a D-Bus peer.

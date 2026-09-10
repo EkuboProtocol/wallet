@@ -133,8 +133,9 @@ inside the protected service remain outside this boundary.
   It must reuse the same typed operations and core authorization checks, without
   accepting a caller-supplied approval flag. The client operation methods should
   likewise be reused when a Windows transport implements the existing contract.
-  No Windows transport is implemented yet, and Windows-native execution
-  of the identity/configuration tests remains required.
+  No Windows transport is implemented yet. Native Windows identity and
+  descriptor unit tests passed in CI run `34530629466`; installed-service
+  transport and owner-authentication validation remain required.
 
 - Token management now has shared typed owner operations: inventory, manual
   addition, price display settings, exact reviewed removal, token-list fetching
@@ -449,8 +450,10 @@ CI on a commit containing the fix remains required. Repetition log:
 The Windows configuration policy tests reject mismatched owners, invalid service
 identities, unknown fields, oversized values, unsafe registry components, null
 DACLs, untrusted owners, and public write grants even when accompanied by deny
-entries. Native SDDL fixtures cover descriptor decoding and inheritance, but
-have only been cross-compiled here; actual Windows execution remains required.
+entries. Native SDDL fixtures cover descriptor decoding and inheritance.
+Those fixtures and the primary-token/thread-impersonation tests executed and
+passed on Windows in CI run `34530629466`. This does not validate an installed
+service or actual installer registry provisioning.
 
 The configuration checkpoint passed the full local repository gate: 1,681 tests
 passed, 11 ignored; formatting, workspace Clippy, Ruff, generated-license
@@ -489,9 +492,12 @@ socket to verify filtering and failure handling without public RPC access.
 Desktop adoption and transport chunking for oversized snapshots remain required.
 
 CI run `34530629466` covers `967c2ef`, including the Windows identity/configuration
-checks and owner transaction actions. At the latest check lint, execution-plan, Linux, and macOS
-jobs passed; Windows was still compiling application and integration tests. It predates
-the portfolio RPC checkpoint. Re-query that exact run before relying on results.
+checks and owner transaction actions. All jobs completed successfully, including
+Linux, macOS, Windows, lint, and execution-plan checks. It predates the portfolio,
+history, preview-worker, async-snapshot, and client-session checkpoints. The
+Windows job log explicitly records successful native descriptor, primary-token,
+and thread-impersonation tests:
+`~/Documents/wallet-ci-34530629466-windows.log`.
 
 The portfolio checkpoint passed the full local gate: 1,687 tests passed,
 11 ignored; formatting, workspace Clippy, Ruff, generated licenses,
@@ -559,3 +565,23 @@ The async snapshot checkpoint passed the full local gate: 1,697 tests passed,
 workspace Clippy, Ruff, generated licenses, vulnerability scanning, and license
 policy passed. Logs use the prefix `~/Documents/wallet-snapshot-` with
 `workspace-tests.log`, `clippy.log`, `osv.log`, and `licenses.log`.
+
+The client now has a transport-independent desktop-session supervisor and an
+OwnerClient entry point for it. The supervisor holds the long-running desktop
+lease, closes the underlying connection on explicit Quit, dropped lifetime, or
+unexpected lease completion, and reports closure failures. It never reconnects
+or replays requests. `Connected` describes supervision of the authenticated
+connection, not an acknowledgement of lease acceptance. The application must
+await close before stopping its runtime; Drop requests closure without waiting.
+Tests cover explicit close, Drop, unexpected successful/error lease completion,
+and closure errors. An explicitly executed private-bus test confirms that close
+invalidates retained OwnerClient clones and removes the desktop's unique bus
+name. Log: `~/Documents/wallet-session-private-bus.log`. No installed service or
+real wallet credentials were involved. Desktop startup adoption remains pending.
+
+The client-session checkpoint passed the full local gate: 1,700 tests passed,
+12 ignored. The private-bus clone-invalidation test was explicitly run and
+passed in addition to that suite. Formatting, workspace Clippy, Ruff, generated
+licenses, vulnerability scanning, and license policy passed. Logs use the
+`~/Documents/wallet-session-` prefix with `workspace-tests.log`, `clippy.log`,
+`private-bus.log`, `osv.log`, and `licenses.log`; `gate-exit.txt` records exit 0.
