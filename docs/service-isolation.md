@@ -420,6 +420,34 @@ in separate processes. Formatting, workspace Clippy, Ruff, generated licenses,
 vulnerability scanning, and license policy passed.
 Log: `~/Documents/wallet-profile-lock-gate.log`.
 
+CI now also has an independent `Windows service primitives` job. Its temporary
+harness includes the production Windows identity, registry, storage, and profile
+lock modules and their adjacent tests by source path. It avoids the unrelated
+wallet/desktop dependency graph while retaining the full workspace matrix and
+core integration checks. This is native primitive coverage, not an installed
+service, migration, owner-authentication, or packaged-UX test.
+
+`contrib/check-windows-service.py` derives direct dependency versions from the
+core package's actual lockfile references, retains core dependency features and
+lint settings, and verifies all resolved dependency versions, sources, and
+checksums against the repository lock before compilation. Native execution is
+refused on non-Windows hosts. Local preparation, deliberate dependency-mismatch
+rejection, the non-Windows guard, and Windows GNU Clippy compilation passed.
+Logs: `~/Documents/wallet-native-harness-prepare.log` and
+`~/Documents/wallet-native-harness-cross.log`. Runtime results for the new job
+are still pending.
+
+The earlier full CI run `34537601260` completed successfully on the desktop
+session checkpoint `11054cb`. It predates the shared owner-transport extraction
+and recent Windows storage work; those changes still need their own native
+results.
+
+The focused native-job checkpoint passed the full local gate: 1,711 tests
+passed, 13 ignored, plus formatting, workspace Clippy, Ruff, generated licenses,
+vulnerability scanning, and license policy. The generated harness also passed
+Windows GNU Clippy with the exact repository-locked dependency versions.
+Log: `~/Documents/wallet-native-harness-gate.log`.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
