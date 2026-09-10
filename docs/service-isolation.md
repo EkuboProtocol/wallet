@@ -157,6 +157,14 @@ inside the protected service remain outside this boundary.
   subscribers continue to receive the original events in journal order. No
   event or cursor conveys authority. Desktop adoption remains required.
 
+- Activity and review inventory now have shared typed read RPCs, including
+  individual transaction/message/typed-data records, owner attribution, review
+  documents, transaction inspection, and receipt/status refresh. Headline and
+  saved-summary batches carry bounded lists of transaction IDs; the service
+  reloads the stored records instead of accepting caller-authored plans. Activity
+  records and review queues are shared DTOs, not authorization capabilities.
+  Desktop adoption remains required.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
@@ -188,7 +196,9 @@ inside the protected service remain outside this boundary.
    owner review semantics, automation lifecycle, and MCP reconnection behavior.
    The existing `DesktopSnapshot::capture` already separates cached render data
    from authority reads. Keep that presentation model while making capture use
-   remote reads; do not block the UI on synchronous D-Bus calls. Startup still
+   remote reads; do not block the UI on synchronous D-Bus calls. Large inventories
+   and payloads need pagination/chunking so transport bounds cannot hide records
+   or break existing large-payload screens. Startup still
    constructs local authority and launches automation against local stores, so
    adding the client crate has not changed the custody path yet.
 6. Integrate installation, authenticated updates, upgrades, rollback behavior,
@@ -244,7 +254,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 194 service tests and six client tests,
+- Service and client library suites pass: 196 service tests and six client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -256,6 +266,9 @@ before the at-rest requirement is resolved.
   Event tests cover independent cursors, changes during snapshot capture, bounded
   history/batches, restart and eviction gaps, wake-ups, and cancelled waiter
   capacity. Owner RPC tests also round-trip configuration invalidations.
+  Activity RPC tests retain terminal requests outside review queues, preserve
+  hidden history lookup, enforce read limits, and inspect synthetic unsigned
+  records without making network calls or reading account keys.
 - These tests use temporary encrypted state, synthetic metadata, and fake owner
   authentication. Session cancellation uses a local worker, not a live relay.
   They do not prove native polkit/Windows authentication or process isolation.
@@ -264,10 +277,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1652 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1654 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-event-workspace-tests.log`.
+  `~/Documents/wallet-activity-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.

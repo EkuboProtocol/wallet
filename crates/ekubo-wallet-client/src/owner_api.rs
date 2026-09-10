@@ -14,6 +14,111 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    pub async fn transaction_inspection(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerTransactionInspection> {
+        self.call(&Request::TransactionInspection { request_id })
+            .await
+    }
+    pub async fn refresh_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
+        self.call(&Request::RefreshTransaction { request_id }).await
+    }
+
+    pub async fn transactions(
+        &self,
+        wallet_id: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<ekubo_wallet_core::pending::PendingTransaction>> {
+        self.call(&Request::Transactions {
+            wallet_id: wallet_id.map(str::to_owned),
+            limit,
+        })
+        .await
+    }
+    pub async fn activity(
+        &self,
+        wallet_id: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<crate::activity::OwnerActivityRecord>> {
+        self.call(&Request::Activity {
+            wallet_id: wallet_id.map(str::to_owned),
+            limit,
+        })
+        .await
+    }
+    pub async fn activity_record(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerActivityRecord> {
+        self.call(&Request::ActivityRecord { request_id }).await
+    }
+    pub async fn activity_sources(&self) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::ActivitySources).await
+    }
+    pub async fn transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
+        self.call(&Request::Transaction { request_id }).await
+    }
+    pub async fn message(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::message::PendingMessage> {
+        self.call(&Request::Message { request_id }).await
+    }
+    pub async fn typed_data(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
+        self.call(&Request::TypedData { request_id }).await
+    }
+    pub async fn reviews(
+        &self,
+        wallet_id: Option<&str>,
+    ) -> Result<crate::activity::OwnerReviewQueues> {
+        self.call(&Request::Reviews {
+            wallet_id: wallet_id.map(str::to_owned),
+        })
+        .await
+    }
+    pub async fn message_review_document(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::approval::ReviewDocument> {
+        self.call(&Request::MessageReviewDocument { request_id })
+            .await
+    }
+    pub async fn typed_data_review_document(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::approval::ReviewDocument> {
+        self.call(&Request::TypedDataReviewDocument { request_id })
+            .await
+    }
+    pub async fn transaction_headlines(
+        &self,
+        request_ids: &[uuid::Uuid],
+    ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::TransactionHeadlines {
+            request_ids: request_ids.to_vec(),
+        })
+        .await
+    }
+    pub async fn saved_transaction_summaries(
+        &self,
+        request_ids: &[uuid::Uuid],
+    ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::SavedTransactionSummaries {
+            request_ids: request_ids.to_vec(),
+        })
+        .await
+    }
+
     /// Poll once. On initial connection or a history gap, refresh authoritative
     /// state before polling again from the returned cursor. Never use events as
     /// authorization or replay an ambiguous mutation when reconnecting.

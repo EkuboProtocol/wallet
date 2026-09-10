@@ -1,6 +1,7 @@
 //! Client-side wallet IPC and the shared wire protocol. This crate does not
 //! depend on the service runtime or open authoritative wallet storage.
 
+pub mod activity;
 pub mod automation_report;
 pub mod dapp_review;
 pub mod dapp_session;

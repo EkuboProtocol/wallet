@@ -6,7 +6,7 @@ use crate::{
 };
 use alloy::primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ekubo_wallet_core::core::source::RequestSource;
 use ekubo_wallet_core::{
     agent_authority::AgentExecutionAuthority,
@@ -104,17 +104,7 @@ pub struct OwnerTransactionAction {
     pub broadcast: Option<BroadcastResult>,
 }
 
-/// A human-readable, read-only inspection of one transaction lifecycle row.
-///
-/// The document is authored from the encrypted execution plan, owner-confirmed
-/// token metadata, and (when available) the mined receipt. Receipt lookup does
-/// not mutate wallet state or grant any capability.
-#[derive(Clone, Debug)]
-pub struct OwnerTransactionInspection {
-    pub document: ReviewDocument,
-    pub receipt_loaded: bool,
-    pub receipt_error: Option<String>,
-}
+pub use ekubo_wallet_client::activity::OwnerTransactionInspection;
 
 const MAX_DISPLAYED_RECEIPT_EVENTS: usize = 32;
 
@@ -585,33 +575,7 @@ async fn transaction_inspection_document(
     Ok(ReviewDocument::from_request(request, vec![exact_plan]))
 }
 
-/// One durable owner-visible activity record. Signature requests remain in
-/// the audit trail after approval or rejection just like transactions do.
-#[derive(Clone, Debug)]
-pub enum OwnerActivityRecord {
-    Transaction(Box<PendingTransaction>),
-    Message(PendingMessage),
-    TypedData(PendingTypedData),
-}
-
-impl OwnerActivityRecord {
-    #[must_use]
-    pub const fn request_id(&self) -> Uuid {
-        match self {
-            Self::Transaction(record) => record.request_id,
-            Self::Message(record) => record.request_id,
-            Self::TypedData(record) => record.request_id,
-        }
-    }
-
-    fn created_at(&self) -> DateTime<Utc> {
-        match self {
-            Self::Transaction(record) => record.created_at,
-            Self::Message(record) => record.created_at,
-            Self::TypedData(record) => record.created_at,
-        }
-    }
-}
+pub use ekubo_wallet_client::activity::{OwnerActivityRecord, OwnerReviewQueues};
 
 /// The restricted capability cloned into authenticated MCP sessions.
 ///
@@ -854,22 +818,13 @@ impl DappApi {
     }
 }
 
-/// Owner-only operations. Only GPUI owner flows receive this value.
+/// Owner-only operations. Held by the service dispatcher and legacy local UI.
+/// Agent and dapp sessions never receive this capability.
 #[derive(Clone)]
 pub struct OwnerApi {
     config: ConfigStore,
     desktop: Arc<Mutex<DesktopStore>>,
     events: EventBus,
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnerReviewQueues {
-    pub transactions: Vec<PendingTransaction>,
-    pub typed_data: Vec<PendingTypedData>,
-    pub messages: Vec<PendingMessage>,
-    pub policy_proposals: Vec<PolicyProposal>,
-    pub network_proposals: Vec<NetworkConfig>,
-    pub token_proposals: Vec<TokenProposal>,
 }
 
 pub struct OwnerAccountRemovalReview {

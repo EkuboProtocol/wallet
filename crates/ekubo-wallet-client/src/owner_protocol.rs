@@ -19,6 +19,48 @@ pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
     deny_unknown_fields
 )]
 pub enum Request {
+    TransactionInspection {
+        request_id: uuid::Uuid,
+    },
+    RefreshTransaction {
+        request_id: uuid::Uuid,
+    },
+    Transactions {
+        wallet_id: Option<String>,
+        limit: u16,
+    },
+    Activity {
+        wallet_id: Option<String>,
+        limit: u16,
+    },
+    ActivityRecord {
+        request_id: uuid::Uuid,
+    },
+    ActivitySources,
+    Transaction {
+        request_id: uuid::Uuid,
+    },
+    Message {
+        request_id: uuid::Uuid,
+    },
+    TypedData {
+        request_id: uuid::Uuid,
+    },
+    Reviews {
+        wallet_id: Option<String>,
+    },
+    MessageReviewDocument {
+        request_id: uuid::Uuid,
+    },
+    TypedDataReviewDocument {
+        request_id: uuid::Uuid,
+    },
+    TransactionHeadlines {
+        request_ids: Vec<uuid::Uuid>,
+    },
+    SavedTransactionSummaries {
+        request_ids: Vec<uuid::Uuid>,
+    },
     WaitForEvents {
         after: Option<crate::events::EventCursor>,
     },

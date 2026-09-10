@@ -24,10 +24,65 @@ impl OwnerDispatcher {
         Self { owner, dapps }
     }
 
+    fn transaction_records(
+        &self,
+        ids: &[uuid::Uuid],
+    ) -> anyhow::Result<Vec<ekubo_wallet_core::pending::PendingTransaction>> {
+        anyhow::ensure!(
+            ids.len() <= 1000,
+            "at most 1000 transaction records can be read at once"
+        );
+        ids.iter().map(|id| self.owner.transaction(*id)).collect()
+    }
+
     pub(crate) async fn dispatch(&self, request: Request) -> anyhow::Result<Value> {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::TransactionInspection { request_id } => {
+                serde_json::to_value(Box::pin(owner.transaction_inspection(request_id)).await?)?
+            }
+            Request::RefreshTransaction { request_id } => {
+                serde_json::to_value(owner.refresh_transaction(request_id).await?)?
+            }
+            Request::Transactions { wallet_id, limit } => {
+                serde_json::to_value(owner.transactions(wallet_id.as_deref(), limit)?)?
+            }
+            Request::Activity { wallet_id, limit } => {
+                serde_json::to_value(owner.activity(wallet_id.as_deref(), limit)?)?
+            }
+            Request::ActivityRecord { request_id } => {
+                serde_json::to_value(owner.activity_record(request_id)?)?
+            }
+            Request::ActivitySources => serde_json::to_value(owner.activity_sources()?)?,
+            Request::Transaction { request_id } => {
+                serde_json::to_value(owner.transaction(request_id)?)?
+            }
+            Request::Message { request_id } => serde_json::to_value(owner.message(request_id)?)?,
+            Request::TypedData { request_id } => {
+                serde_json::to_value(owner.typed_data(request_id)?)?
+            }
+            Request::Reviews { wallet_id } => {
+                serde_json::to_value(owner.reviews(wallet_id.as_deref())?)?
+            }
+            Request::MessageReviewDocument { request_id } => {
+                serde_json::to_value(owner.message_review_document(request_id)?)?
+            }
+            Request::TypedDataReviewDocument { request_id } => {
+                serde_json::to_value(owner.typed_data_review_document(request_id)?)?
+            }
+            Request::TransactionHeadlines { request_ids } => {
+                let records = self.transaction_records(&request_ids)?;
+                serde_json::to_value(
+                    owner.transaction_headlines(&records.iter().collect::<Vec<_>>())?,
+                )?
+            }
+            Request::SavedTransactionSummaries { request_ids } => {
+                let records = self.transaction_records(&request_ids)?;
+                serde_json::to_value(
+                    owner.saved_transaction_summaries(&records.iter().collect::<Vec<_>>())?,
+                )?
+            }
             Request::WaitForEvents { after } => {
                 serde_json::to_value(owner.event_bus().wait_since(after).await?)?
             }
@@ -240,3 +295,7 @@ mod token_tests;
 #[cfg(test)]
 #[path = "owner_automation_rpc_test.rs"]
 mod automation_tests;
+
+#[cfg(test)]
+#[path = "owner_activity_rpc_test.rs"]
+mod activity_tests;
