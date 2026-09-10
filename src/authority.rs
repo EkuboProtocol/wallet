@@ -2393,12 +2393,12 @@ impl OwnerApi {
         ensure_reviewed_digest(reviewed_digest, &request.digest)?;
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
-        let policies = PolicyStore::production(self.config.data_dir())?;
-        let legal = LegalStore::production(self.config.data_dir())?;
+        let mut policies = PolicyStore::production(self.config.data_dir())?;
+        let mut legal = LegalStore::production(self.config.data_dir())?;
         let signed = sign_reviewed_message(
             &self.config,
-            &policies,
-            &legal,
+            &mut policies,
+            &mut legal,
             &mut store,
             &request,
             &wallet,
@@ -2427,12 +2427,12 @@ impl OwnerApi {
         ensure_reviewed_digest(reviewed_digest, &request.digest)?;
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
-        let policies = PolicyStore::production(self.config.data_dir())?;
-        let legal = LegalStore::production(self.config.data_dir())?;
+        let mut policies = PolicyStore::production(self.config.data_dir())?;
+        let mut legal = LegalStore::production(self.config.data_dir())?;
         let signed = sign_reviewed_typed_data(
             &self.config,
-            &policies,
-            &legal,
+            &mut policies,
+            &mut legal,
             &mut store,
             &request,
             &wallet,

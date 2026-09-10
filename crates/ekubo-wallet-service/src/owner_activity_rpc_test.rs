@@ -178,7 +178,31 @@ async fn hidden_activity_remains_addressable_and_presentations_use_stored_record
     let transaction = pending
         .create(&wallet.id, "ethereum", &plan(), None, 1)
         .unwrap();
+    assert!(
+        call::<PendingTransaction>(
+            &owner,
+            Request::DiscardUnsentTransaction {
+                request_id: transaction.request_id
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        pending.get(transaction.request_id).unwrap().status,
+        PendingStatus::AwaitingApproval
+    );
     pending.reject(transaction.request_id).unwrap();
+    assert!(
+        call::<PendingTransaction>(
+            &owner,
+            Request::DiscardUnsentTransaction {
+                request_id: transaction.request_id
+            }
+        )
+        .await
+        .is_err()
+    );
     pending.clear_terminal_history(None).unwrap();
     let list: Vec<PendingTransaction> = call(
         &owner,

@@ -19,6 +19,23 @@ pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
     deny_unknown_fields
 )]
 pub enum Request {
+    SignMessage {
+        request_id: uuid::Uuid,
+        reviewed_digest: String,
+    },
+    RejectMessage {
+        request_id: uuid::Uuid,
+    },
+    SignTypedData {
+        request_id: uuid::Uuid,
+        reviewed_digest: String,
+    },
+    RejectTypedData {
+        request_id: uuid::Uuid,
+    },
+    DiscardUnsentTransaction {
+        request_id: uuid::Uuid,
+    },
     TransactionInspection {
         request_id: uuid::Uuid,
     },

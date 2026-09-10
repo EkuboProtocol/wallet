@@ -39,6 +39,23 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::SignMessage {
+                request_id,
+                reviewed_digest,
+            } => serde_json::to_value(owner.sign_message(request_id, &reviewed_digest).await?)?,
+            Request::RejectMessage { request_id } => {
+                serde_json::to_value(owner.reject_message(request_id)?)?
+            }
+            Request::SignTypedData {
+                request_id,
+                reviewed_digest,
+            } => serde_json::to_value(owner.sign_typed_data(request_id, &reviewed_digest).await?)?,
+            Request::RejectTypedData { request_id } => {
+                serde_json::to_value(owner.reject_typed_data(request_id)?)?
+            }
+            Request::DiscardUnsentTransaction { request_id } => {
+                serde_json::to_value(owner.discard_unsent_transaction(request_id)?)?
+            }
             Request::TransactionInspection { request_id } => {
                 serde_json::to_value(Box::pin(owner.transaction_inspection(request_id)).await?)?
             }
@@ -299,3 +316,7 @@ mod automation_tests;
 #[cfg(test)]
 #[path = "owner_activity_rpc_test.rs"]
 mod activity_tests;
+
+#[cfg(test)]
+#[path = "owner_signature_rpc_test.rs"]
+mod signature_tests;

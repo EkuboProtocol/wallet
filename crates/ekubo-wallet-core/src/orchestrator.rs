@@ -984,10 +984,13 @@ fn require_provisioned_wallet(
 /// it, so a request edited or a wallet re-pointed mid-review is refused rather
 /// than signed under an approval given for something else. The final write
 /// repeats the digest and status checks inside its own transaction.
+// SQLite connections are Send but not Sync. Borrow them exclusively across
+// native authentication so this future can remain in its authenticated IPC task
+// without moving owner authorization to a separately spawned worker.
 pub async fn sign_reviewed_message(
     config: &ConfigStore,
-    policies: &PolicyStore,
-    legal: &LegalStore,
+    policies: &mut PolicyStore,
+    legal: &mut LegalStore,
     store: &mut MessageStore,
     request: &PendingMessage,
     wallet: &WalletMetadata,
@@ -1052,8 +1055,8 @@ pub async fn sign_reviewed_message(
 /// the same reasons; only the queue and the presence reason differ.
 pub async fn sign_reviewed_typed_data(
     config: &ConfigStore,
-    policies: &PolicyStore,
-    legal: &LegalStore,
+    policies: &mut PolicyStore,
+    legal: &mut LegalStore,
     store: &mut TypedDataStore,
     request: &PendingTypedData,
     wallet: &WalletMetadata,

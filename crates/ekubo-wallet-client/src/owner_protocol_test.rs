@@ -3,6 +3,9 @@ use super::*;
 #[test]
 fn protocol_rejects_authority_claims_and_unimplemented_operations() {
     for request in [
+        r#"{"method":"sign_message","params":{"request_id":"00000000-0000-0000-0000-000000000001","reviewed_digest":"0x00","approved":true}}"#,
+        r#"{"method":"sign_typed_data","params":{"request_id":"00000000-0000-0000-0000-000000000001","reviewed_digest":"0x00","private_key":"0x00"}}"#,
+        r#"{"method":"sign_message","params":{"request_id":"00000000-0000-0000-0000-000000000001","reviewed_digest":"0x00","message":"replacement"}}"#,
         r#"{"method":"transaction_headlines","params":{"request_ids":[],"transactions":[{"approval_required":false}]}}"#,
         r#"{"method":"activity","params":{"wallet_id":null,"limit":10,"include_private_keys":true}}"#,
         r#"{"method":"relink_automation","params":{"automation_id":"00000000-0000-0000-0000-000000000001","policy_revision":999}}"#,

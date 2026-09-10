@@ -173,7 +173,7 @@ fn a_wallet_with_no_policy_is_not_provisioned() {
 /// saw it.
 #[tokio::test]
 async fn a_policyless_wallet_cannot_have_a_message_signed() {
-    let fixture = half_provisioned(false);
+    let mut fixture = half_provisioned(false);
     let mut store = MessageStore::new(fixture.handle());
     let request = store
         .create("primary", None, b"hello", MessageEncoding::Text, None)
@@ -181,13 +181,13 @@ async fn a_policyless_wallet_cannot_have_a_message_signed() {
     let digest = crate::message::message_digest(b"hello");
 
     let presence = RecordingPresence(AtomicBool::new(false));
-    let legal = fixture.legal();
+    let mut legal = fixture.legal();
     let error = format!(
         "{:#}",
         sign_reviewed_message(
             &fixture.config,
-            &fixture.policies,
-            &legal,
+            &mut fixture.policies,
+            &mut legal,
             &mut store,
             &request,
             &fixture.wallet,
@@ -218,7 +218,7 @@ async fn a_policyless_wallet_cannot_have_a_message_signed() {
 /// whole gate, and the human was told this wallet was inert.
 #[tokio::test]
 async fn a_policyless_wallet_cannot_have_typed_data_signed() {
-    let fixture = half_provisioned(false);
+    let mut fixture = half_provisioned(false);
     let mut store = TypedDataStore::new(fixture.handle());
     let typed = serde_json::json!({
         "types": {
@@ -238,13 +238,13 @@ async fn a_policyless_wallet_cannot_have_typed_data_signed() {
         .unwrap();
 
     let presence = RecordingPresence(AtomicBool::new(false));
-    let legal = fixture.legal();
+    let mut legal = fixture.legal();
     let error = format!(
         "{:#}",
         sign_reviewed_typed_data(
             &fixture.config,
-            &fixture.policies,
-            &legal,
+            &mut fixture.policies,
+            &mut legal,
             &mut store,
             &request,
             &fixture.wallet,
@@ -267,7 +267,7 @@ async fn a_policyless_wallet_cannot_have_typed_data_signed() {
 /// owner authentication, which is where it is supposed to stop.
 #[tokio::test]
 async fn a_provisioned_wallet_still_reaches_owner_authentication() {
-    let fixture = half_provisioned(true);
+    let mut fixture = half_provisioned(true);
     let mut store = MessageStore::new(fixture.handle());
     let request = store
         .create("primary", None, b"hello", MessageEncoding::Text, None)
@@ -275,13 +275,13 @@ async fn a_provisioned_wallet_still_reaches_owner_authentication() {
     let digest = crate::message::message_digest(b"hello");
 
     let presence = RecordingPresence(AtomicBool::new(false));
-    let legal = fixture.legal();
+    let mut legal = fixture.legal();
     let error = format!(
         "{:#}",
         sign_reviewed_message(
             &fixture.config,
-            &fixture.policies,
-            &legal,
+            &mut fixture.policies,
+            &mut legal,
             &mut store,
             &request,
             &fixture.wallet,
@@ -301,13 +301,13 @@ async fn a_provisioned_wallet_still_reaches_owner_authentication() {
 
 #[tokio::test]
 async fn legal_acceptance_is_rechecked_after_owner_authentication() {
-    let fixture = half_provisioned(true);
+    let mut fixture = half_provisioned(true);
     let mut store = MessageStore::new(fixture.handle());
     let request = store
         .create("primary", None, b"hello", MessageEncoding::Text, None)
         .unwrap();
     let digest = crate::message::message_digest(b"hello");
-    let legal = fixture.legal();
+    let mut legal = fixture.legal();
     let database_path = fixture.directory.path().join("policies.db");
     let presence = PresenceThen(move || {
         PolicyStore::open(&database_path, &KEY)
@@ -324,8 +324,8 @@ async fn legal_acceptance_is_rechecked_after_owner_authentication() {
         "{:#}",
         sign_reviewed_message(
             &fixture.config,
-            &fixture.policies,
-            &legal,
+            &mut fixture.policies,
+            &mut legal,
             &mut store,
             &request,
             &fixture.wallet,

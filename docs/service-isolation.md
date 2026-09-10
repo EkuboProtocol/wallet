@@ -165,6 +165,23 @@ inside the protected service remain outside this boundary.
   records and review queues are shared DTOs, not authorization capabilities.
   Desktop adoption remains required.
 
+- Message and typed-data review decisions now have typed owner RPCs. Signing
+  takes only a stored request ID and its reviewed digest; the existing owner/core
+  path rechecks the payload, account, policy provisioning, and legal state and
+  performs native owner authentication. Rejection preserves terminal records.
+  The discard RPC delegates to core's signed-but-never-submitted state predicate.
+  No caller-supplied payload, key, or approval boolean is accepted. Desktop
+  adoption and native service signing validation remain required. Core signing
+  borrows SQLite connections exclusively across native authentication, making
+  its future transferable without sharing connections or spawning away from
+  the initiating owner's task-local authentication context.
+- Transaction reviews still require a frame broker. Keep the existing core
+  orchestrator and its refresh callback in the initiating authenticated owner
+  task; relay only display documents/simulation data and single-use frame
+  decisions. Never serialize `PreparedExecution` or transfer the owner's task
+  context to an agent/session worker. Refresh must retire the previous frame,
+  and disconnect/shutdown must close pending decisions without rejecting a row.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
@@ -254,7 +271,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 196 service tests and six client tests,
+- Service and client library suites pass: 198 service tests and six client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -268,7 +285,10 @@ before the at-rest requirement is resolved.
   capacity. Owner RPC tests also round-trip configuration invalidations.
   Activity RPC tests retain terminal requests outside review queues, preserve
   hidden history lookup, enforce read limits, and inspect synthetic unsigned
-  records without making network calls or reading account keys.
+  records without making network calls or reading account keys. Signature RPC
+  tests reject mismatched digests, retain core legal prerequisites, and reject
+  repeated rejection decisions. They stop before native authentication or key
+  access; successful native service signing remains untested.
 - These tests use temporary encrypted state, synthetic metadata, and fake owner
   authentication. Session cancellation uses a local worker, not a live relay.
   They do not prove native polkit/Windows authentication or process isolation.
@@ -277,18 +297,19 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1654 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1656 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-activity-workspace-tests.log`.
+  `~/Documents/wallet-signature-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.
   These tests launch and stop only their own temporary daemons. The core
   library suite is included in the current workspace result above.
-- A prior standalone service build passed without test hooks; its early startup
-  guard refused desktop-UID execution before opening authority. No live wallet
-  credentials were read. Repeat production build before packaging.
+- The standalone service build passes without test hooks after adding signature
+  decisions. Its early startup guard previously refused desktop-UID execution
+  before opening authority. No live wallet credentials were read. Native
+  authentication and live-key signing were not exercised by this build.
 
 Full native multi-identity integration, Windows compilation/authentication,
 provisioning, migration, and packaged UX verification remain unproven. Windows

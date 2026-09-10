@@ -14,6 +14,51 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    /// Request native owner authentication for the exact stored message. The
+    /// digest names what was reviewed; it is not an authorization proof.
+    pub async fn sign_message(
+        &self,
+        request_id: uuid::Uuid,
+        reviewed_digest: &str,
+    ) -> Result<ekubo_wallet_core::message::PendingMessage> {
+        self.call(&Request::SignMessage {
+            request_id,
+            reviewed_digest: reviewed_digest.into(),
+        })
+        .await
+    }
+    pub async fn reject_message(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::message::PendingMessage> {
+        self.call(&Request::RejectMessage { request_id }).await
+    }
+    /// Request native owner authentication for the exact stored typed data.
+    pub async fn sign_typed_data(
+        &self,
+        request_id: uuid::Uuid,
+        reviewed_digest: &str,
+    ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
+        self.call(&Request::SignTypedData {
+            request_id,
+            reviewed_digest: reviewed_digest.into(),
+        })
+        .await
+    }
+    pub async fn reject_typed_data(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
+        self.call(&Request::RejectTypedData { request_id }).await
+    }
+    pub async fn discard_unsent_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
+        self.call(&Request::DiscardUnsentTransaction { request_id })
+            .await
+    }
+
     pub async fn transaction_inspection(
         &self,
         request_id: uuid::Uuid,
