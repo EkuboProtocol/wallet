@@ -8,6 +8,10 @@
 pub use ekubo_wallet_core::*;
 
 pub mod framing;
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[path = "../../../src/mcp_transport.rs"]
+mod mcp_transport;
 
 #[path = "../../../src/authority.rs"]
 pub mod authority;

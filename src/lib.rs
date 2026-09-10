@@ -19,6 +19,7 @@ pub mod events;
 pub mod gui_review;
 pub mod ipc_server;
 pub mod mcp;
+mod mcp_transport;
 pub mod notifications;
 pub mod preview;
 pub mod release_check;

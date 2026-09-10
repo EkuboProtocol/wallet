@@ -2585,6 +2585,8 @@ fn verify_integrity(connection: &Connection) -> Result<()> {
 }
 
 fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result<DatabaseKey> {
+    #[cfg(target_os = "linux")]
+    crate::service_storage::require_data_dir(data_dir)?;
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(key) = registered_test_database_key(data_dir)? {
         return Ok(key);

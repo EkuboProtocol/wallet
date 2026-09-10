@@ -47,6 +47,8 @@ pub mod reconcile;
 pub mod rpc;
 pub mod sanitize;
 mod sealed;
+#[cfg(target_os = "linux")]
+pub mod service_storage;
 pub(crate) mod signature_requests;
 pub mod signature_review;
 pub mod simulation;

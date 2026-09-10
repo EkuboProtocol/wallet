@@ -1,4 +1,5 @@
 use crate::core::policy::WalletPolicy;
+use crate::credential_store::Entry;
 use crate::{
     config::{ConfigStore, WalletMetadata, WalletSource, validate_wallet_id},
     human_presence::{HumanPresence, PresenceRequest},
@@ -6,7 +7,7 @@ use crate::{
 use alloy::{primitives::Address, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use keyring::{Entry, Error as KeyringError};
+use keyring::Error as KeyringError;
 use rand::TryRng as _;
 use std::{fmt, sync::Arc};
 use uuid::Uuid;

@@ -711,6 +711,12 @@ impl ConfigStore {
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(service) = crate::service_storage::data_dir() {
+        // Activated authority is bound to installer-controlled state; inherited
+        // user HOME/XDG/EKUBO_WALLET_HOME values cannot redirect it.
+        return Ok(service.to_path_buf());
+    }
     if let Some(explicit) = env::var_os("EKUBO_WALLET_HOME") {
         ensure!(!explicit.is_empty(), "EKUBO_WALLET_HOME cannot be empty");
         return Ok(PathBuf::from(explicit));

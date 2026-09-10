@@ -26,6 +26,20 @@ inside the protected service remain outside this boundary.
   and remove direct desktop compilation of it.
 - Its tests include the existing MCP policy and simulated transaction pipeline.
   These demonstrate runtime behavior, not process isolation.
+- Linux core storage now requires root-owned owner configuration, a distinct
+  non-root service UID, protected directory ownership/modes, and a process-long
+  exclusive profile lock. Key files are published atomically without replacement,
+  read through pinned directory descriptors, and rejected for unsafe permissions,
+  symlinks, hard links, wrong lengths, or wrong owners. Activating this backend
+  disables desktop-keyring fallback and rejects another profile's database path.
+- The Linux host activates storage before opening authority and accepts MCP only
+  from the configured kernel-reported peer UID. It uses the existing MCP session
+  implementation, limits concurrent connections, and drains tasks on shutdown.
+  This host is not installed or connected to the desktop yet.
+- Current service key files provide OS access isolation, not encryption against
+  offline disk access. Before deployment, resolve protected unattended key wrapping
+  and document the actual at-rest guarantee. Do not silently replace the old
+  encrypted credential store with plaintext files and claim equivalent protection.
 - IPC framing bounds allocations, rejects mismatched protocol versions and
   truncated responses, and does not replay interrupted operations. The frame
   codec does not authenticate peers or grant capabilities.
@@ -34,6 +48,8 @@ inside the protected service remain outside this boundary.
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
    private per-owner storage, authenticated endpoints, and lifecycle handling.
+   Linux primitives and MCP hosting are implemented but not provisioned; Windows
+   hosting and custody are not implemented.
    Reject desktop-user execution and insecure ownership/ACLs. Do not fall back
    to the desktop user's credential store if service startup fails.
 2. Move raw-key and database-key persistence behind that boundary. Verify parent
@@ -65,6 +81,8 @@ inside the protected service remain outside this boundary.
    throwaway accounts: key/DB reads denied, policy writes denied, spoofed peer and
    approval claims rejected, denied transactions never signed, allowed signing
    works unattended, and upgrades/migration/restarts recover correctly.
+   Current unit tests validate storage rejection cases and kernel peer lookup;
+   they do not yet run a fully provisioned service and hostile sibling identity.
 9. Verify desktop flows and packaged release behavior on Linux, Windows, macOS;
    run complete CI and packaging checks. Update security documentation only to
    the guarantees demonstrated by those tests. Do not close #112 before that.
@@ -73,3 +91,48 @@ A local service with protected software keys is sufficient for the stated
 ordinary-process threat model; hardware-backed keys are not a prerequisite.
 Keeping policy in the desktop while moving only signing would leave an
 arbitrary-signing oracle and does not satisfy this objective.
+
+## At-rest wrapping design to implement
+
+A possible way to preserve the login-keyring at-rest property without giving
+its user raw key access is to split protection across the two OS identities:
+
+- The service owns an asymmetric unwrapping key in its private directory.
+- The desktop credential store contains only an authenticated envelope of the
+  wallet data key encrypted to the service public key. The service must not
+  also persist that envelope as an ordinary disk file; that would defeat the
+  offline protection supplied by the login keyring.
+- A desktop relay supplies that ciphertext when the already-unlocked credential
+  store makes it available. The service unwraps it in memory and opens its
+  encrypted database/credentials. Relaying ciphertext grants no signing rights.
+- Bind the enrolled envelope to the configured owner, service identity, profile,
+  protocol version, and a pinned digest in protected state. Reject substitutions
+  and rollbacks; changes require authenticated migration/rotation.
+- The service exposes no general unwrap operation. Only the internal custody
+  bootstrap consumes the envelope; neither the data key nor private unwrapping
+  key crosses IPC. Use an audited envelope encryption implementation, not a new
+  cryptographic construction.
+
+This is an unimplemented design requiring review and tests, not a current
+security guarantee. The current protected-file backend is an intermediate
+storage/identity implementation and must not be deployed with real accounts
+before the at-rest requirement is resolved.
+
+## Latest checkpoint verification
+
+- `cargo test --locked -p ekubo-wallet-core -p ekubo-wallet-service --lib`:
+  697 core and 139 service tests passed; six ignored tests remain separate.
+- The ignored isolated Secret Service startup/restart regression passed separately.
+- `cargo clippy --locked -p ekubo-wallet-core --all-targets --all-features -- -D warnings` passed.
+- `cargo check --locked -p ekubo-wallet --lib` passed after MCP session extraction.
+- `cargo build --locked -p ekubo-wallet-service --bin ekubo-wallet-service` passed
+  without test hooks. Running that binary with the desktop's actual UID refused
+  execution before opening authority. No live wallet credentials were read.
+- Workspace formatting and diff whitespace checks passed.
+
+Full CI, service-crate strict Clippy, native multi-identity integration, and
+packaged UX verification have not passed. The service crate still has unused
+Dapp/owner methods until remote dispatch is wired. Build the standalone binary
+without test hooks as well as running tests: the test feature initially masked
+an incorrect use of `ConfigStore::new`, now replaced by production configuration
+bound to activated service storage before user environment overrides.
