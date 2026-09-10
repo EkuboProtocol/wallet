@@ -226,7 +226,7 @@ impl ForkPreface {
 }
 
 /// The fork provenance attached to every fork-backed tool result.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct ForkContext {
     pub fork_id: Uuid,
     /// Always true. Present so a consumer cannot mistake fork output for

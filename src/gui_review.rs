@@ -21,7 +21,7 @@ pub enum GuiReviewCommand {
 /// a refresh produces a new frame and makes every old UI event stale.
 pub struct GuiReviewPrompt {
     pub document: ReviewDocument,
-    pub simulation: SimulationResult,
+    pub simulation: ekubo_wallet_client::simulation_display::SimulationDisplay,
     pub response: oneshot::Sender<GuiReviewCommand>,
 }
 
@@ -53,7 +53,7 @@ impl ReviewPresenter for GuiReviewPresenter {
             self.prompts
                 .send(GuiReviewPrompt {
                     document: document.clone(),
-                    simulation: simulation.clone(),
+                    simulation: (&simulation).into(),
                     response: respond,
                 })
                 .map_err(|_| anyhow::anyhow!("the wallet review window is unavailable"))?;

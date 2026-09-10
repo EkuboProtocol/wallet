@@ -3582,7 +3582,7 @@ struct PolicyEditor {
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveReview {
     state: ReviewState,
-    simulation: Option<Arc<ekubo_wallet_core::simulation::SimulationResult>>,
+    simulation: Option<Arc<ekubo_wallet_client::simulation_display::SimulationDisplay>>,
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
     detail_rows: Arc<[SecurityReviewDetailRow]>,
@@ -3599,7 +3599,7 @@ struct ActiveReview {
 impl ActiveReview {
     fn new(
         document: ReviewDocument,
-        simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
+        simulation: Option<ekubo_wallet_client::simulation_display::SimulationDisplay>,
         completion: Option<ActiveReviewCompletion>,
     ) -> Self {
         let state = ReviewState::new(document);
@@ -17819,7 +17819,7 @@ impl WalletWindow {
     }
 
     fn render_review_simulation(
-        simulation: &ekubo_wallet_core::simulation::SimulationResult,
+        simulation: &ekubo_wallet_client::simulation_display::SimulationDisplay,
         cx: &App,
     ) -> gpui::Div {
         let (icon, color, title) = if simulation.simulation.success {

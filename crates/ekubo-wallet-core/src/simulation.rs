@@ -100,14 +100,14 @@ sol! {
     error TargetFailure(uint256 amount);
 }
 
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     Direct,
     CaliburBatch,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SimulationFailureCategory {
     RpcError,
@@ -115,7 +115,7 @@ pub enum SimulationFailureCategory {
     SimulationSetupError,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct SimulationFailure {
     pub category: SimulationFailureCategory,
     pub message: String,
@@ -137,7 +137,7 @@ pub struct SimulationFailure {
     pub decoded_error: Option<DecodedSimulationError>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct WrappedSimulationError {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,7 +145,7 @@ pub struct WrappedSimulationError {
     pub args: Option<Value>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DecodedSimulationError {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +159,7 @@ pub struct DecodedSimulationError {
     pub target: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct SimulationExecution {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,14 +174,14 @@ pub struct SimulationExecution {
     pub failure: Option<SimulationFailure>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct NativeBalanceChange {
     pub before: String,
     pub after: String,
     pub delta: String,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct TokenBalanceChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
@@ -193,7 +193,7 @@ pub struct TokenBalanceChange {
     pub outgoing_transfers: String,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct BalanceChanges {
     pub native: NativeBalanceChange,
     pub tokens: BTreeMap<String, TokenBalanceChange>,

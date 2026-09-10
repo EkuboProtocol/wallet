@@ -175,6 +175,11 @@ inside the protected service remain outside this boundary.
   borrows SQLite connections exclusively across native authentication, making
   its future transferable without sharing connections or spawning away from
   the initiating owner's task-local authentication context.
+- Transaction review rendering now receives `SimulationDisplay`, a shared
+  display-only DTO. The existing GUI presenter converts core simulations before
+  handing frames to the view, preserving all visible facts while excluding
+  `PreparedExecution` and the simulation-consumption handle. Its decoder rejects
+  those authority/handle fields. The core simulation itself remains non-deserializable.
 - Transaction reviews still require a frame broker. Keep the existing core
   orchestrator and its refresh callback in the initiating authenticated owner
   task; relay only display documents/simulation data and single-use frame
@@ -271,7 +276,7 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 198 service tests and six client tests,
+- Service and client library suites pass: 198 service tests and eight client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
@@ -288,7 +293,9 @@ before the at-rest requirement is resolved.
   records without making network calls or reading account keys. Signature RPC
   tests reject mismatched digests, retain core legal prerequisites, and reject
   repeated rejection decisions. They stop before native authentication or key
-  access; successful native service signing remains untested.
+  access; successful native service signing remains untested. Simulation-display
+  tests preserve every serialized display fact while rejecting preparation
+  authority and simulation-consumption handle fields.
 - These tests use temporary encrypted state, synthetic metadata, and fake owner
   authentication. Session cancellation uses a local worker, not a live relay.
   They do not prove native polkit/Windows authentication or process isolation.
@@ -297,10 +304,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1656 passed, 11 ignored across
+- Full workspace all-feature tests pass: 1658 passed, 11 ignored across
   30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 451 passed, two ignored. Log:
-  `~/Documents/wallet-signature-workspace-tests.log`.
+  `~/Documents/wallet-display-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.
@@ -315,3 +322,7 @@ Full native multi-identity integration, Windows compilation/authentication,
 provisioning, migration, and packaged UX verification remain unproven. Windows
 is not an installed Rust target on this development machine. No installation or
 security completion is claimed by the Linux unit and compile results.
+
+CI run `34519753381` tests commit `1695b3d` (before the simulation-display
+change). Its lint and execution-plan jobs passed; native platform jobs were still
+running at the latest check. Re-query the run before relying on its status.
