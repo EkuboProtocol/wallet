@@ -157,6 +157,19 @@ pub struct CronSchedule {
     schedule: cron::Schedule,
 }
 
+impl Serialize for CronSchedule {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.expression())
+    }
+}
+
+impl<'de> Deserialize<'de> for CronSchedule {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let expression = String::deserialize(deserializer)?;
+        Self::parse(&expression).map_err(serde::de::Error::custom)
+    }
+}
+
 impl CronSchedule {
     /// Parses a six-field expression, seconds first.
     ///
@@ -454,7 +467,7 @@ impl fmt::Display for CronSchedule {
 }
 
 /// One installed automation, exactly as the store holds it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Automation {
     pub id: Uuid,
     pub wallet_instance_id: Uuid,
@@ -667,7 +680,7 @@ pub struct PollOutcome {
     pub block_number: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PolledCall {
     pub to: Address,
     pub value: U256,

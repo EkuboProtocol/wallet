@@ -8,6 +8,7 @@ license = "FSL-1.1-MIT"
 description = "Authenticated IPC client and shared wallet service protocol"
 
 [dependencies]
+chrono = { version = "0.4.42", features = ["serde"] }
 ekubo-wallet-core = { path = "../ekubo-wallet-core" }
 anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive"] }

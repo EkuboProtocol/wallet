@@ -14,6 +14,46 @@ use ekubo_wallet_core::{
 };
 
 impl OwnerClient {
+    pub async fn automations(&self) -> Result<Vec<ekubo_wallet_core::automation::Automation>> {
+        self.call(&Request::Automations).await
+    }
+    pub async fn automation_runs(
+        &self,
+        automation_id: uuid::Uuid,
+        limit: usize,
+    ) -> Result<Vec<ekubo_wallet_core::automation_store::AutomationRun>> {
+        self.call(&Request::AutomationRuns {
+            automation_id,
+            limit,
+        })
+        .await
+    }
+    pub async fn disable_automation(
+        &self,
+        automation_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::automation::Automation> {
+        self.call(&Request::DisableAutomation { automation_id })
+            .await
+    }
+    pub async fn relink_automation(
+        &self,
+        automation_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::automation::Automation> {
+        self.call(&Request::RelinkAutomation { automation_id })
+            .await
+    }
+    pub async fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
+        self.call(&Request::DeleteAutomation { automation_id })
+            .await
+    }
+    pub async fn dry_run_automation(
+        &self,
+        automation_id: uuid::Uuid,
+    ) -> Result<crate::automation_report::AutomationDryRun> {
+        self.call(&Request::DryRunAutomation { automation_id })
+            .await
+    }
+
     pub async fn tokens(
         &self,
         chain_id: Option<u64>,

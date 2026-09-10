@@ -28,6 +28,25 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::Automations => serde_json::to_value(owner.automations()?)?,
+            Request::AutomationRuns {
+                automation_id,
+                limit,
+            } => serde_json::to_value(owner.automation_runs(automation_id, limit)?)?,
+            Request::DisableAutomation { automation_id } => {
+                serde_json::to_value(owner.disable_automation(automation_id)?)?
+            }
+            Request::RelinkAutomation { automation_id } => {
+                serde_json::to_value(owner.relink_automation(automation_id)?)?
+            }
+            Request::DeleteAutomation { automation_id } => {
+                owner.delete_automation(automation_id)?;
+                Value::Null
+            }
+            Request::DryRunAutomation { automation_id } => {
+                // The simulation future is large; keep it off every owner call frame.
+                serde_json::to_value(Box::pin(owner.dry_run_automation(automation_id)).await?)?
+            }
             Request::Tokens {
                 chain_id,
                 limit,
@@ -214,3 +233,7 @@ mod tests;
 #[cfg(test)]
 #[path = "owner_token_rpc_test.rs"]
 mod token_tests;
+
+#[cfg(test)]
+#[path = "owner_automation_rpc_test.rs"]
+mod automation_tests;

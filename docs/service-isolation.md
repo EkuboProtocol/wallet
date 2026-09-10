@@ -137,6 +137,17 @@ inside the protected service remain outside this boundary.
   desktop; no storage or authorization capability crosses the wire. The desktop
   still needs to adopt the client methods.
 
+- Automation inventory, run history, stop, restart/relink, delete, and dry-run
+  operations now have shared typed owner RPCs. The request identifies an installed
+  automation; it cannot supply bytecode, policy revision, or an approval claim.
+  Restart resolves the current policy in the service. Dry-run reports contain
+  display data only. Cron schedules serialize as their exact expression and
+  deserialize through the existing parser. Desktop adoption remains required.
+- Owner automation deletion now checks the stopped state in the SQL delete, so
+  a restart between the owner's state read and deletion cannot erase an enabled
+  automation. The unconditional removal API was removed; store tests use the
+  production stopped-only operation.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
@@ -224,13 +235,15 @@ before the at-rest requirement is resolved.
 
 ## Latest checkpoint verification
 
-- Service and client library suites pass: 186 service tests and six client tests,
+- Service and client library suites pass: 187 service tests and six client tests,
   with three integration tests ignored. Token RPC tests round-trip serialized
   requests and cover stale removal/repricing, changed proposals, forged metadata,
   replay, and network/price validation. Dapp tests cover exact stored review
   identity, account replacement, replay, collector cancellation, and shutdown
   during authentication. The approval test keeps its runtime alive across replay
-  and verifies the RPC response contains no authorization proof.
+  and verifies the RPC response contains no authorization proof. Automation RPC
+  tests preserve lifecycle/history and resolve restart against a newer policy;
+  the core tests cover restart-before-delete and exact schedule wire round trips.
 - These tests use temporary encrypted state, synthetic metadata, and fake owner
   authentication. Session cancellation uses a local worker, not a live relay.
   They do not prove native polkit/Windows authentication or process isolation.
@@ -239,10 +252,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1636 passed, 11 ignored across
-  30 suites (including doc tests). Core: 699 passed, six ignored; desktop
+- Full workspace all-feature tests pass: 1639 passed, 11 ignored across
+  30 suites (including doc tests). Core: 701 passed, six ignored; desktop
   library: 445 passed, two ignored. Log:
-  `~/Documents/wallet-service-workspace-tests.log`.
+  `~/Documents/wallet-automation-workspace-tests.log`.
 - Earlier targeted evidence: all 11 service-storage tests passed; private-bus
   caller identity, client identity/replacement, desktop disconnection, and the
   isolated Secret Service startup/restart regression passed when explicitly run.

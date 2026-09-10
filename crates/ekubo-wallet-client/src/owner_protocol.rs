@@ -19,6 +19,23 @@ pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
     deny_unknown_fields
 )]
 pub enum Request {
+    Automations,
+    AutomationRuns {
+        automation_id: uuid::Uuid,
+        limit: usize,
+    },
+    DisableAutomation {
+        automation_id: uuid::Uuid,
+    },
+    RelinkAutomation {
+        automation_id: uuid::Uuid,
+    },
+    DeleteAutomation {
+        automation_id: uuid::Uuid,
+    },
+    DryRunAutomation {
+        automation_id: uuid::Uuid,
+    },
     Tokens {
         chain_id: Option<u64>,
         limit: usize,

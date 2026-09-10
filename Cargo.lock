@@ -4584,6 +4584,7 @@ name = "ekubo-wallet-client"
 version = "1.8.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "ekubo-wallet-core",
  "rustix",
  "serde",

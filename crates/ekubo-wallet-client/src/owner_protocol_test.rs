@@ -3,6 +3,8 @@ use super::*;
 #[test]
 fn protocol_rejects_authority_claims_and_unimplemented_operations() {
     for request in [
+        r#"{"method":"relink_automation","params":{"automation_id":"00000000-0000-0000-0000-000000000001","policy_revision":999}}"#,
+        r#"{"method":"dry_run_automation","params":{"automation_id":"00000000-0000-0000-0000-000000000001","approved":true}}"#,
         r#"{"method":"accept_token_proposals","params":{"proposals":[],"approved":true}}"#,
         r#"{"method":"tokens","params":{"chain_id":null,"limit":10,"offset":0,"data_dir":"/tmp/other"}}"#,
         r#"{"method":"accounts","owner_uid":1000}"#,

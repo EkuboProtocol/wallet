@@ -51,7 +51,7 @@ enum ClearFailures {
 /// working right now". This answers the question a person actually has about
 /// something that runs unattended: what has it been doing, and which
 /// transactions did it make.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AutomationRun {
     pub run_id: Uuid,
     pub automation_id: Uuid,
@@ -66,7 +66,7 @@ pub struct AutomationRun {
     pub calls: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunOutcome {
     Skipped,
     Idle,
@@ -601,9 +601,11 @@ impl AutomationStore {
         self.get(id)?.context("automation vanished mid-update")
     }
 
-    pub fn remove(&mut self, id: Uuid) -> Result<bool> {
+    /// Delete only a stopped automation. The state predicate and deletion are
+    /// one statement so a concurrent restart cannot be deleted by stale UI intent.
+    pub fn remove_stopped(&mut self, id: Uuid) -> Result<bool> {
         let changed = self.database.connection.execute(
-            "DELETE FROM automations WHERE automation_id = ?1",
+            "DELETE FROM automations WHERE automation_id = ?1 AND state != 'enabled'",
             params![Blob(*id.as_bytes())],
         )?;
         Ok(changed == 1)
