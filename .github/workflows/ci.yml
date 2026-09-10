@@ -127,7 +127,7 @@ jobs:
 
       - name: Install GPUI and tray dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus gnome-keyring
 
       - name: Refuse GTK tray dependencies on Linux
         if: runner.os == 'Linux'
@@ -156,6 +156,13 @@ jobs:
           # not test behavior or optimization.
           CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
         run: cargo test --locked --workspace --all-features --jobs ${{ matrix.test_jobs }}
+
+      - name: Test Secret Service startup and restart recovery
+        if: runner.os == 'Linux'
+        env:
+          RUST_MIN_STACK: 67108864
+          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
+        run: cargo test --locked -p ekubo-wallet-core --all-features --lib credential_store::tests::recovers_after_secret_service_startup_and_restart -- --ignored
 
       - name: Compile application and integration tests
         if: runner.os != 'Linux'

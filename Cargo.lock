@@ -4601,6 +4601,7 @@ dependencies = [
  "futures",
  "hex",
  "keyring",
+ "keyring-core",
  "libc",
  "minisign",
  "minisign-verify",
@@ -4627,6 +4628,7 @@ dependencies = [
  "uuid 1.26.0",
  "windows 0.62.2",
  "zbus",
+ "zbus-secret-service-keyring-store",
  "zbus_polkit",
  "zeroize",
 ]

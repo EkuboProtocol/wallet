@@ -221,7 +221,7 @@ impl OsKeyStore {
             "this is an ephemeral session, which never touches the platform credential store; \
 account operations need an ordinary session, so drop --ephemeral"
         );
-        Entry::new(KEYRING_SERVICE, &instance_id.to_string())
+        crate::credential_store::entry(KEYRING_SERVICE, &instance_id.to_string())
             .context("platform credential store is unavailable")
     }
 }

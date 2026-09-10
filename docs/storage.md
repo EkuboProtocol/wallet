@@ -16,9 +16,15 @@ are not sources of wallet authority and contain no wallet-managed credential.
 Desktop private keys use `org.ekubo.wallet.private-key.instance`, keyed by the
 wallet instance UUID rather than the reusable display ID.
 
-The `keyring` crate's default `v1` platform mapping is the macOS User keychain,
-Windows generic Credential Manager, and the Secret Service default collection
-on other Unix desktops. The service and user strings above are lookup
+Credentials use the macOS User keychain, Windows generic Credential Manager,
+and the Secret Service default collection on Linux. On Linux, core opens a
+fresh Secret Service session for each credential entry instead of using the
+`keyring` v1 facade's process-wide cached session. A daemon restart or failed
+first connection can therefore recover on the next operation without a wallet
+restart. Keys are not cached, credential writes are not automatically retried,
+and a missing database key still fails closed rather than replacing it.
+
+The service and user strings above are lookup
 identifiers, not access controls. Microsoft documents that
 [Windows generic credentials are readable by user processes](https://learn.microsoft.com/en-us/windows/win32/secauthn/kinds-of-credentials),
 the [Secret Service specification does not mandate access control](https://specifications.freedesktop.org/secret-service/latest/ch10.html),

@@ -118,12 +118,13 @@ fn initializes_and_stays_useful_before_wallet_startup() {
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
     );
     let tools = receive(&mut stdout);
-    assert_eq!(tools["result"], json!({"tools":[]}));
+    assert_eq!(tools["error"]["code"], -32001);
+    assert!(tools.get("result").is_none());
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}),
     );
-    assert_eq!(receive(&mut stdout)["result"], json!({"resources":[]}));
+    assert_eq!(receive(&mut stdout)["error"]["code"], -32001);
     send(
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":4,"method":"resources/templates/list","params":{}}),
@@ -146,7 +147,7 @@ fn initializes_and_stays_useful_before_wallet_startup() {
         call["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not running")
+            .contains("unavailable")
     );
     send(
         &mut stdin,
@@ -158,7 +159,7 @@ fn initializes_and_stays_useful_before_wallet_startup() {
         read["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not running")
+            .contains("unavailable")
     );
     std::thread::sleep(Duration::from_millis(50));
     assert!(child.try_wait().unwrap().is_none());
@@ -226,7 +227,7 @@ fn malformed_json_returns_a_protocol_error_without_stopping() {
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
     );
-    assert_eq!(receive(&mut stdout)["result"], json!({"tools":[]}));
+    assert_eq!(receive(&mut stdout)["error"]["code"], -32001);
     drop(stdin);
     assert!(child.wait().unwrap().success());
 }

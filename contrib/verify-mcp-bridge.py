@@ -36,14 +36,17 @@ def check_initialize(initialized: dict, expected_version: str) -> None:
             fail(f"initialize response does not advertise {capability}.listChanged")
 
 
-def check_empty_catalog(response: dict, kind: str) -> None:
-    """Offline, both list methods must answer with the deterministic empty catalog."""
-    if response != {
-        "jsonrpc": "2.0",
-        "id": f"package-{kind}",
-        "result": {kind: []},
-    }:
-        fail(f"offline {kind}/list response is not the deterministic empty catalog")
+def check_unavailable_catalog(response: dict, kind: str) -> None:
+    """Unknown catalogs must not look like successful, cacheable empty lists."""
+    error = response.get("error", {})
+    if (
+        response.get("jsonrpc") != "2.0"
+        or response.get("id") != f"package-{kind}"
+        or "result" in response
+        or error.get("code") != -32001
+        or "unavailable" not in error.get("message", "")
+    ):
+        fail(f"offline {kind}/list response is not an availability error")
 
 
 def main() -> None:
@@ -107,8 +110,8 @@ def main() -> None:
 
     initialized, tools, resources = responses
     check_initialize(initialized, expected_version)
-    check_empty_catalog(tools, "tools")
-    check_empty_catalog(resources, "resources")
+    check_unavailable_catalog(tools, "tools")
+    check_unavailable_catalog(resources, "resources")
 
 
 if __name__ == "__main__":

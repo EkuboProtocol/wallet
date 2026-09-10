@@ -21,6 +21,7 @@ pub mod chain_client;
 pub mod clear_signing;
 pub mod config;
 pub mod core;
+mod credential_store;
 pub mod custody;
 pub mod default_tokens;
 pub mod desktop_store;

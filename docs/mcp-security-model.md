@@ -77,12 +77,23 @@ only through core's guarded transaction paths. The bridge-provided harness
 kind is stored only as untrusted activity attribution such as “via Claude
 Desktop”; it never authorizes an operation.
 
-Before its first wallet connection the bridge advertises an empty tool list.
+Before its first wallet connection the legacy bridge returns an availability
+error for tool and resource catalogs; it never invents a successful empty list
+that a harness could cache. Startup waits up to two seconds for the wallet's
+own initialization result, then continues the same connection attempt in the
+background while answering harness requests. Each handshake has a ten-second
+deadline, including reconnects; transient failures retry with exponential
+backoff capped at five seconds. Stdin remains responsive during those attempts,
+and closing it cancels the reconnect. Distinct connection failures are reported
+to stderr without repeating the same failure on every retry.
+
 After connection it replays the harness initialization parameters, refreshes
 the catalog, and emits `notifications/tools/list_changed` when the catalog
-changes. If the same-version wallet stops, in-flight requests fail clearly,
-the last catalog is retained for useful offline errors, and the bridge
-reconnects without a harness restart. A version mismatch is terminal.
+changes. Clients that do not consume catalog-change notifications may need an
+MCP refresh. If a compatible wallet stops or a transport write fails, in-flight
+requests fail clearly and are never replayed: they may already have executed.
+The last real catalog is retained for useful offline errors, and the bridge
+reconnects without a harness restart. A protocol mismatch is terminal.
 
 Managed agent configuration contains the absolute installed helper path and
 exact fixed harness argument under `ekubo_wallet`. Harnesses that support

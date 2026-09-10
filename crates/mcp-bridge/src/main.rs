@@ -13,7 +13,13 @@ use std::{collections::BTreeSet, env, fmt, time::Duration};
 mod bridge_protocol;
 use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+mod legacy;
 mod modern;
+
+#[cfg(unix)]
+type Stream = tokio::net::UnixStream;
+#[cfg(windows)]
+type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
 
 const MAX_FRAME_BYTES: usize = 24 * 1024 * 1024;
 const OFFLINE_CODE: i64 = -32_001;
@@ -466,7 +472,7 @@ fn offline_initialize_result(protocol: &Value) -> Value {
         "capabilities": serde_json::from_str::<Value>(OFFLINE_CAPABILITIES)
             .expect("offline capabilities are valid JSON"),
         "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":BUILD_VERSION},
-        "instructions":"Ekubo Wallet tools appear automatically whenever the wallet application is running."
+        "instructions":"Ekubo Wallet is temporarily unavailable. The bridge reconnects automatically and announces catalog changes. Retry discovery after starting or unlocking the wallet; if your client does not refresh tools, refresh its MCP connection."
     })
 }
 
@@ -507,251 +513,16 @@ async fn opening_request(
     Ok(None)
 }
 
-// The bridge's whole stdio lifecycle in one place: read the initialize frame,
-// hand it to the client, then pump frames in both directions until stdin
-// closes, translating every transport and protocol error into a response the
-// caller can still parse. Splitting it means passing the reader, the writer and
-// the client through every piece, and the sequence is the thing worth reading.
-#[allow(clippy::cognitive_complexity)]
 async fn run() -> Result<()> {
     let client = arguments()?;
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    let Some((initialize_frame, initialize)) = opening_request(&mut stdin, &mut stdout).await?
-    else {
+    let Some((first, message)) = opening_request(&mut stdin, &mut stdout).await? else {
         return Ok(());
     };
-    if initialize.get("method").and_then(Value::as_str) != Some("initialize") {
-        return modern::run(client, stdin, stdout, initialize_frame).await;
-    }
-    let initialize_id = initialize
-        .get("id")
-        .cloned()
-        .context("initialize request has no id")?;
-    let protocol = initialize
-        .pointer("/params/protocolVersion")
-        .cloned()
-        .unwrap_or_else(|| json!("2025-11-25"));
-
-    let mut initialized: Option<Vec<u8>> = None;
-    let mut upstream = None;
-    let mut last_tools = json!({"tools":[]});
-    let mut last_resources = json!({"resources":[]});
-    let mut in_flight = BTreeSet::<String>::new();
-    let mut tools_refresh_pending = false;
-    let mut resources_refresh_pending = false;
-    let mut backoff = Duration::from_millis(250);
-    // Frame bytes already taken from each side but not yet terminated by a
-    // newline. They outlive the reads that collected them because those reads
-    // are cancelled routinely; see [`read_frame_into`]. The upstream half is
-    // cleared whenever a connection is dropped, so a half-frame from a wallet
-    // that went away is never prepended to the next wallet's first frame.
-    let mut stdin_partial = Vec::<u8>::new();
-    let mut upstream_partial = Vec::<u8>::new();
-
-    // Ask the wallet for the handshake before answering the harness, because
-    // a harness records what it is told here for the whole session and never
-    // asks again. Anything the bridge invents instead — capabilities, the
-    // server instructions — is what the model is stuck with even after the
-    // wallet comes up, so the invented answer is the fallback and not the
-    // rule. A wallet that is down, hung, or version-mismatched simply misses
-    // its turn; the reconnect below applies the ordinary policy to it.
-    let wallet_handshake = match tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        let stream = connect(client).await?;
-        handshake(stream, &initialize_frame, None).await
-    })
-    .await
-    {
-        Ok(Ok(session)) => Some(session),
-        // A bridge that does not match the wallet may not serve this session
-        // at all, and saying so before the harness has recorded a handshake
-        // is the earliest the user can be told to restart the agent.
-        Ok(Err(error)) if error.downcast_ref::<VersionMismatch>().is_some() => {
-            return Err(error);
-        }
-        Ok(Err(_)) | Err(_) => None,
-    };
-    let initialize_result = match wallet_handshake {
-        Some(session) => {
-            last_tools = session.tools;
-            last_resources = session.resources;
-            upstream = Some((session.read, session.write));
-            session.initialize_result
-        }
-        None => offline_initialize_result(&protocol),
-    };
-    emit(&mut stdout, &response(&initialize_id, &initialize_result)).await?;
-
-    loop {
-        if upstream.is_none()
-            && initialized.is_some()
-            && let Ok(stream) = connect(client).await
-        {
-            match handshake(stream, &initialize_frame, initialized.as_deref()).await {
-                Ok(session) => {
-                    if session.tools != last_tools {
-                        last_tools = session.tools;
-                        emit(
-                            &mut stdout,
-                            br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
-                        )
-                        .await?;
-                    }
-                    if session.resources != last_resources {
-                        last_resources = session.resources;
-                        emit(
-                            &mut stdout,
-                            br#"{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}"#,
-                        )
-                        .await?;
-                    }
-                    upstream = Some((session.read, session.write));
-                    tools_refresh_pending = false;
-                    resources_refresh_pending = false;
-                    backoff = Duration::from_millis(250);
-                }
-                Err(error) => {
-                    if error.downcast_ref::<VersionMismatch>().is_some() {
-                        return Err(error);
-                    }
-                }
-            }
-            // The offline branch below waits for either harness input or
-            // the backoff when this connection attempt fails, so requests
-            // stay responsive while a quiet harness reconnects.
-        }
-
-        if let Some((up_read, up_write)) = upstream.as_mut() {
-            tokio::select! {
-                frame = read_frame_into(&mut stdin, &mut stdin_partial) => {
-                    let Some(frame) = frame? else { return Ok(()); };
-                    let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
-                        emit(&mut stdout, &parse_error()).await?;
-                        continue;
-                    };
-                    if initialized.is_none() && message.get("method").and_then(Value::as_str) == Some("notifications/initialized") { initialized = Some(frame.clone()); }
-                    if let Some(id) = request_id(&message) { in_flight.insert(id.to_string()); }
-                    up_write.write_all(&frame).await?;
-                }
-                frame = read_frame_into(up_read, &mut upstream_partial) => {
-                    let Ok(Some(frame)) = frame else {
-                        for id in std::mem::take(&mut in_flight) {
-                            if let Ok(id) = serde_json::from_str(&id) { emit(&mut stdout, &error(&id, "Ekubo Wallet stopped while the request was in flight; the bridge will reconnect automatically" )).await?; }
-                        }
-                        upstream = None;
-                        upstream_partial.clear();
-                        tools_refresh_pending = false;
-                        resources_refresh_pending = false;
-                        continue;
-                    };
-                            let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
-                                for id in std::mem::take(&mut in_flight) {
-                                    if let Ok(id) = serde_json::from_str(&id) {
-                                        emit(&mut stdout, &error(&id, "Ekubo Wallet sent an invalid frame; the bridge will reconnect automatically")).await?;
-                                    }
-                                }
-                                upstream = None;
-                                upstream_partial.clear();
-                                tools_refresh_pending = false;
-                                resources_refresh_pending = false;
-                                continue;
-                            };
-                            let sentinel = message.get("id").and_then(Value::as_str);
-                            if tools_refresh_pending && sentinel == Some(TOOLS_SENTINEL) {
-                                tools_refresh_pending = false;
-                                if message.get("result").and_then(|result| result.get("tools")).is_some() {
-                                    last_tools = message["result"].clone();
-                                }
-                                continue;
-                            }
-                            if resources_refresh_pending && sentinel == Some(RESOURCES_SENTINEL) {
-                                resources_refresh_pending = false;
-                                if message.get("result").and_then(|result| result.get("resources")).is_some() {
-                                    last_resources = message["result"].clone();
-                                }
-                                continue;
-                            }
-                            if let Some(id) = message.get("id") { in_flight.remove(&id.to_string()); }
-                            if message.get("result").and_then(|r| r.get("tools")).is_some() { last_tools = message["result"].clone(); }
-                            if message.get("result").and_then(|r| r.get("resources")).is_some() { last_resources = message["result"].clone(); }
-                            emit(&mut stdout, frame.strip_suffix(b"\n").unwrap_or(&frame)).await?;
-                            match message.get("method").and_then(Value::as_str) {
-                                Some("notifications/tools/list_changed") if !tools_refresh_pending => {
-                                    up_write.write_all(&catalog_request(TOOLS_SENTINEL, "tools/list")).await?;
-                                    tools_refresh_pending = true;
-                                }
-                                Some("notifications/resources/list_changed") if !resources_refresh_pending => {
-                                    up_write.write_all(&catalog_request(RESOURCES_SENTINEL, "resources/list")).await?;
-                                    resources_refresh_pending = true;
-                                }
-                                _ => {}
-                            }
-                }
-            }
-        } else {
-            let frame = if initialized.is_some() {
-                // The backoff expiring here is the ordinary case, not an
-                // error, so this read is abandoned on most passes through the
-                // loop; a harness frame split across writes must survive that.
-                let Ok(frame) =
-                    tokio::time::timeout(backoff, read_frame_into(&mut stdin, &mut stdin_partial))
-                        .await
-                else {
-                    backoff = (backoff * 2).min(Duration::from_secs(5));
-                    continue;
-                };
-                frame?
-            } else {
-                read_frame_into(&mut stdin, &mut stdin_partial).await?
-            };
-            let Some(frame) = frame else {
-                return Ok(());
-            };
-            let Ok(message) = serde_json::from_slice::<Value>(&frame) else {
-                emit(&mut stdout, &parse_error()).await?;
-                continue;
-            };
-            match message.get("method").and_then(Value::as_str) {
-                Some("notifications/initialized") => initialized = Some(frame),
-                // A harness that pings a stopped wallet is checking on the
-                // bridge, which is answering — so this is not an outage.
-                Some("ping") => {
-                    if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &response(&id, &json!({}))).await?;
-                    }
-                }
-                Some("tools/list") => {
-                    if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &response(&id, &last_tools)).await?;
-                    }
-                }
-                Some("resources/list") => {
-                    if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &response(&id, &last_resources)).await?;
-                    }
-                }
-                // The wallet publishes fixed URIs rather than templates, so
-                // the empty answer is the true one and not a stand-in.
-                Some("resources/templates/list") => {
-                    if let Some(id) = request_id(&message) {
-                        emit(
-                            &mut stdout,
-                            &response(&id, &json!({"resourceTemplates":[]})),
-                        )
-                        .await?;
-                    }
-                }
-                Some("tools/call" | "resources/read") => {
-                    if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &error(&id, "Ekubo Wallet is not running; the bridge is still active and will reconnect automatically")).await?;
-                    }
-                }
-                _ => {
-                    if let Some(id) = request_id(&message) {
-                        emit(&mut stdout, &error(&id, "Ekubo Wallet is not running")).await?;
-                    }
-                }
-            }
-        }
+    if message["method"] == "initialize" {
+        legacy::run(client, stdin, stdout, first, message).await
+    } else {
+        modern::run(client, stdin, stdout, first).await
     }
 }

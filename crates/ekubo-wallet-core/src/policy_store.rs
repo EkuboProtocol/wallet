@@ -18,7 +18,7 @@ use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use keyring::{Entry, Error as KeyringError};
+use keyring::Error as KeyringError;
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 #[cfg(any(test, feature = "test-hooks"))]
@@ -2610,7 +2610,7 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
     // blocking for the rest of this call, which is exactly what lets the
     // nested runtime inside `keyring` run without Tokio refusing.
     tokio::task::block_in_place(|| {
-        let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        let entry = crate::credential_store::entry(KEYRING_SERVICE, KEYRING_USER)
             .context("platform credential store is unavailable")?;
         match entry.get_secret() {
             Ok(mut bytes) => {
