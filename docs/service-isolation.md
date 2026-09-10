@@ -242,6 +242,18 @@ its local authority; adopting this RPC and testing native export under installed
 service identities remain required. Windows must use the same direct encoder
 inside its authenticated call context.
 
+Windows now has native primary-token identity reads and a dedicated virtual
+service-account check. It rejects thread impersonation, LocalSystem/shared
+service accounts, ordinary owner accounts, noncanonical service SIDs, mismatched
+accounts, and nonzero sessions. A service SID in the token's groups is never used
+as proof of account separation. Microsoft documents the distinction between
+[service account tokens](https://learn.microsoft.com/en-us/windows/win32/services/service-user-accounts)
+and [service SID membership](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_sid_info).
+The expected SID must eventually come from protected installer configuration;
+this primitive does not attest that configuration or grant custody access.
+Windows registry configuration, storage ACL/reparse validation, service hosting,
+transport authentication, and native owner authorization remain unimplemented.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,
@@ -366,10 +378,10 @@ before the at-rest requirement is resolved.
   cancellation. Formatting, diff whitespace, Ruff, and license freshness pass.
 - OSV-Scanner 2.5.1 vulnerability and license checks pass against the generated
   Linux, Windows, and macOS lockfiles under the existing repository policy.
-- Full workspace all-feature tests pass: 1675 passed, 11 ignored across
-  30 suites (including doc tests). Core: 701 passed, six ignored; desktop
+- Full workspace all-feature tests pass: 1677 passed, 11 ignored across
+  30 suites (including doc tests). Core: 703 passed, six ignored; desktop
   library: 450 passed, two ignored. Log:
-  `~/Documents/wallet-export-workspace-tests.log`.
+  `~/Documents/wallet-windows-identity-tests.log`.
 - Export tests preserve countdown/expiry, serialize no expired key, reject
   malformed reveal windows, preserve the D-Bus string signature, and keep
   export out of the ordinary JSON Value dispatch path. The existing countdown
@@ -395,14 +407,21 @@ before the at-rest requirement is resolved.
   authentication and live-key signing were not exercised by this build.
 
 Full native multi-identity integration, latest-head Windows compilation/authentication,
-provisioning, migration, and packaged UX verification remain unproven. Windows
-is not an installed Rust target on this development machine. No installation or
-security completion is claimed by the Linux unit and compile results.
+provisioning, migration, and packaged UX verification remain unproven. The
+Windows GNU Rust target is now installed locally. A minimal standalone harness
+type-checks and lints the native identity module and its tests for that target;
+it does not compile the full Windows workspace or execute Windows code. Log:
+`~/Documents/wallet-windows-identity-check.log`. No installation or security
+completion is claimed by these results.
 
 CI run `34519753381` passed all jobs, including Linux, macOS, and Windows,
 for commit `1695b3d`. It predates simulation-display, owner-call cancellation,
 transaction review, and custody RPC additions; it does not validate latest HEAD.
 
 CI run `34525034188` covers `9b3bc57`, including account import but preceding
-export RPCs. Its lint and execution-plan jobs passed; platform jobs were still
-running at the latest check. Re-query before relying on its result.
+export and Windows identity work. Lint and execution-plan jobs passed. The Linux
+job failed in `broken_write_fails_the_request_without_replay_and_reconnects`:
+the test's `tools/list` probe can receive cached discovery before the bridge
+finishes accepting the reconnect, then stdin closes before the fake server sees
+the probe. macOS and Windows were still running at the latest check. Re-query
+before relying on their results.
