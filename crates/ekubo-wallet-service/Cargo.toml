@@ -7,6 +7,15 @@ publish = false
 license = "FSL-1.1-MIT"
 description = "Headless wallet authority for the isolated custody service"
 
+[features]
+migration-fixture = ["ekubo-wallet-core/test-hooks"]
+
+[[example]]
+name = "windows-migration-scm"
+path = "src/windows_migration_scm_test.rs"
+required-features = ["migration-fixture"]
+test = false
+
 [dependencies]
 ekubo-wallet-core = { path = "../ekubo-wallet-core" }
 ekubo-wallet-client = { path = "../ekubo-wallet-client" }

@@ -1,5 +1,5 @@
 # Synthetic cross-account fixture for disposable GitHub Windows runners only.
-param([Parameter(Mandatory = $true)][string]$FixtureBinary)
+param([Parameter(Mandatory = $true)][string]$FixtureBinary, [switch]$StopAfterClient)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') {
@@ -94,6 +94,7 @@ try {
     $serviceProcess = Get-Process -Id $processId
     & $binary client $owner
     if ($LASTEXITCODE -ne 0) { throw "Native cross-account exchange failed ($LASTEXITCODE)." }
+    if ($StopAfterClient) { Stop-Service -Name $serviceName }
     $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
     $status = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($status.ExitCode -ne 0 -or $status.ServiceSpecificExitCode -ne 0) {
