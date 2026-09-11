@@ -1037,6 +1037,20 @@ After reading a bounded request, the server adapter must authenticate the last
 read's kernel client context. That synchronous check uses identification-level
 impersonation, reads the actual token SID, and always reverts before returning.
 A failed revert aborts rather than allowing later service work in client context.
-This proves OS account identity only. The owner dispatcher, bounded request
-protocol, desktop lifetime management, and fresh owner proofs still need wiring
-to these endpoints; no service is installed by this change.
+This proves OS account identity only. `WindowsOwnerEndpoint` now activates
+locked protected custody, binds the first endpoint, and accepts at most 32
+connections while retaining a pipe instance across listener replacement. The
+host retains a publisher while the listener runs, opens authority after unlock,
+publishes that runtime, then acknowledges readiness. SCM hosting and fresh owner
+proofs remain separate; no service is installed by this code.
+
+The stream protocol starts with an instance UUID from the authenticated service.
+Clients must pin it across their lifetime and compare each call connection before
+sending a request. Calls use the shared owner dispatcher and close after one
+result. A separate authenticated connection relays the enrollment ciphertext,
+waits for runtime readiness, then may hold a desktop lease until disconnect.
+Unlock alone grants no lease. Each request is authenticated immediately after
+its last read. EOF or unexpected input cancels a pending call/readiness wait;
+those monitors use cancellation-safe one-byte reads. No mutation is replayed.
+Secret-bearing frame readers erase partial payloads when an I/O failure occurs.
+The Windows desktop client and SCM host still need to use this protocol.

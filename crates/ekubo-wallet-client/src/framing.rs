@@ -17,6 +17,27 @@ const HEADER_BYTES: usize = 12;
 /// Clean EOF is returned only between frames. A partial header or payload is
 /// an error, so an interrupted operation cannot be mistaken for a response.
 pub async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<Vec<u8>>> {
+    let Some(length) = read_length(reader).await? else {
+        return Ok(None);
+    };
+    let mut payload = vec![0; length];
+    reader.read_exact(&mut payload).await?;
+    Ok(Some(payload))
+}
+
+/// Secret-bearing owner traffic erases partial reads as well as complete frames.
+pub async fn read_sensitive_frame(
+    reader: &mut (impl AsyncRead + Unpin),
+) -> io::Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    let Some(length) = read_length(reader).await? else {
+        return Ok(None);
+    };
+    let mut payload = zeroize::Zeroizing::new(vec![0; length]);
+    reader.read_exact(&mut payload).await?;
+    Ok(Some(payload))
+}
+
+async fn read_length(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<usize>> {
     let mut header = [0_u8; HEADER_BYTES];
     if reader.read(&mut header[..1]).await? == 0 {
         return Ok(None);
@@ -36,9 +57,7 @@ pub async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Opt
             "wallet service frame length is outside the permitted range",
         ));
     }
-    let mut payload = vec![0; length];
-    reader.read_exact(&mut payload).await?;
-    Ok(Some(payload))
+    Ok(Some(length))
 }
 
 pub async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), payload: &[u8]) -> io::Result<()> {

@@ -16,6 +16,7 @@ pub mod import_key;
 mod owner_client;
 pub mod owner_connection;
 pub mod owner_protocol;
+pub mod owner_stream_protocol;
 pub mod portfolio;
 pub mod simulation_display;
 pub mod token_import;

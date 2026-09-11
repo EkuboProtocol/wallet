@@ -21,6 +21,8 @@ use fs2::FileExt;
 use keyring::Error as KeyringError;
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+#[cfg(target_os = "windows")]
+use std::fs::File;
 #[cfg(any(test, feature = "test-hooks"))]
 use std::{
     collections::HashMap,
