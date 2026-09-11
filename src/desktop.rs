@@ -3972,7 +3972,7 @@ struct RouteListDelegate {
 }
 
 struct TokenListDelegate {
-    owner: OwnerApi,
+    owner: crate::desktop_owner::DesktopOwner,
     /// The window, so a row can open the small dialog that records what a
     /// token is roughly worth. Rows live in a virtualized list and cannot
     /// hold an input of their own.
@@ -5420,9 +5420,12 @@ impl TokenProposalListDelegate {
 }
 
 impl TokenListDelegate {
-    fn new(owner: OwnerApi, wallet: WeakEntity<WalletWindow>) -> Self {
+    fn new(
+        owner: impl Into<crate::desktop_owner::DesktopOwner>,
+        wallet: WeakEntity<WalletWindow>,
+    ) -> Self {
         Self {
-            owner,
+            owner: owner.into(),
             wallet,
             all_tokens: Vec::new(),
             visible_tokens: Vec::new(),
@@ -6097,12 +6100,12 @@ const RPC_URLS_PLACEHOLDER: &str =
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
 const MAX_DESKTOP_TOKEN_INVENTORY: usize = 100_000;
 
-fn collect_token_inventory(
-    mut fetch: impl FnMut(usize, usize) -> Result<Vec<StoredToken>>,
+async fn collect_token_inventory<F: std::future::Future<Output = Result<Vec<StoredToken>>>>(
+    mut fetch: impl FnMut(usize, usize) -> F,
 ) -> Result<Vec<StoredToken>> {
     let mut tokens = Vec::new();
     loop {
-        let page = fetch(TOKEN_INVENTORY_PAGE_SIZE, tokens.len())?;
+        let page = fetch(TOKEN_INVENTORY_PAGE_SIZE, tokens.len()).await?;
         ensure!(
             tokens.len().saturating_add(page.len()) <= MAX_DESKTOP_TOKEN_INVENTORY,
             "token inventory exceeds the desktop limit of {MAX_DESKTOP_TOKEN_INVENTORY} rows"
@@ -6329,7 +6332,7 @@ impl ListDelegate for TokenListDelegate {
             .and_then(|identity| self.action_errors.get(&identity).cloned());
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
         let address_text_id = SharedString::from(format!("{row_id}-address"));
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let price_token = token.clone();
         let price_wallet = self.wallet.clone();
         let value_action = app_button(("set-token-value", index.row))
@@ -7911,13 +7914,9 @@ impl WalletWindow {
             cx.notify();
         });
         let list = list.downgrade();
-        let owner = self.owner.clone();
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                collect_token_inventory(|limit, offset| owner.tokens(None, limit, offset))
-            })
-            .await
-            .context("token inventory task failed")?
+            collect_token_inventory(|limit, offset| owner.tokens(None, limit, offset)).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;

@@ -1395,8 +1395,8 @@ fn token_editor_allows_an_omitted_full_name() {
     assert_eq!(token.unwrap().name, None);
 }
 
-#[test]
-fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
+#[tokio::test]
+async fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let token = StoredToken {
         chain_id: "1".into(),
         address: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".into(),
@@ -1411,8 +1411,13 @@ fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let mut offsets = Vec::new();
     let loaded = collect_token_inventory(|limit, offset| {
         offsets.push(offset);
-        Ok(source.iter().skip(offset).take(limit).cloned().collect())
+        let page = source.iter().skip(offset).take(limit).cloned().collect();
+        async move {
+            tokio::task::yield_now().await;
+            Ok(page)
+        }
     })
+    .await
     .unwrap();
 
     assert_eq!(loaded.len(), 17_286);
