@@ -39,6 +39,79 @@ fn native_descriptor_checks_readers_writers_and_inheritance() {
     assert!(validate_sddl("O:SYD:").is_ok());
 }
 
+#[test]
+fn native_creator_owner_placeholder_does_not_grant_registry_write_access() {
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{
+            AccessCheck, DuplicateToken, GENERIC_MAPPING, PRIVILEGE_SET, SecurityIdentification,
+            TOKEN_DUPLICATE, TOKEN_QUERY,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    struct Token(HANDLE);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+    let mut primary = HANDLE::default();
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &raw mut primary,
+        )
+    }
+    .unwrap();
+    let primary = Token(primary);
+    let mut token = HANDLE::default();
+    unsafe { DuplicateToken(primary.0, SecurityIdentification, &raw mut token) }.unwrap();
+    let token = Token(token);
+    let user = current_process_identity().unwrap().user_sid().to_owned();
+    for (trustee, expected) in [("CO", false), (user.as_str(), true)] {
+        // The real token can write only when a concrete SID is granted access.
+        // Use KEY_SET_VALUE: this does not exercise implicit owner WRITE_DAC.
+        let sddl = wide(&format!("O:SYG:SYD:(A;CI;KA;;;{trustee})"));
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                None,
+            )
+        }
+        .unwrap();
+        let descriptor = Descriptor(descriptor);
+        let mapping = GENERIC_MAPPING {
+            GenericRead: 0x0002_0019,
+            GenericWrite: 0x0002_0006,
+            GenericExecute: 0x0002_0019,
+            GenericAll: 0x000f_003f,
+        };
+        let mut privileges = PRIVILEGE_SET::default();
+        let mut length = u32::try_from(size_of::<PRIVILEGE_SET>()).unwrap();
+        let mut granted = 0;
+        let mut allowed = windows::core::BOOL::default();
+        unsafe {
+            AccessCheck(
+                descriptor.0,
+                token.0,
+                2,
+                &raw const mapping,
+                Some(&raw mut privileges),
+                &raw mut length,
+                &raw mut granted,
+                &raw mut allowed,
+            )
+        }
+        .unwrap();
+        assert_eq!(allowed.as_bool(), expected);
+        assert_eq!(granted & 2 != 0, expected);
+    }
+}
+
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_NON_VOLATILE, REG_SZ, RegCreateKeyExW,
     RegDeleteTreeW, RegSetValueExW,

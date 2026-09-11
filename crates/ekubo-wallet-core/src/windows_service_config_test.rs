@@ -69,6 +69,44 @@ fn registry_requires_trusted_owner_and_restricted_dacl() {
 }
 
 #[test]
+fn creator_owner_placeholder_does_not_trust_a_resolved_untrusted_child() {
+    let trusted = vec!["S-1-5-18".to_owned()];
+    let placeholder = RegistryAce::Allow {
+        sid: "S-1-3-0".into(),
+        mask: 0x000f_003f,
+        inherit_only: false,
+        object_inherit: false,
+    };
+    assert!(
+        validate_registry_security(
+            &trusted[0],
+            Some(std::slice::from_ref(&placeholder)),
+            &trusted
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_registry_security(OWNER, Some(std::slice::from_ref(&placeholder)), &trusted)
+            .is_err()
+    );
+    // Inheritance resolves the placeholder to a concrete creator. Neither a
+    // changed owner nor an ordinary creator's effective write ACE is trusted.
+    assert!(
+        validate_registry_security(&trusted[0], Some(&[allow(0x000f_003f, false)]), &trusted)
+            .is_err()
+    );
+    for sid in ["S-1-3-1", "S-1-3-4", "S-1-1-0"] {
+        let entry = RegistryAce::Allow {
+            sid: sid.into(),
+            mask: 0x000f_003f,
+            inherit_only: false,
+            object_inherit: false,
+        };
+        assert!(validate_registry_security(&trusted[0], Some(&[entry]), &trusted).is_err());
+    }
+}
+
+#[test]
 fn public_write_grants_fail_even_with_deny_entries() {
     let trusted = vec!["S-1-5-18".to_owned()];
     for mask in [

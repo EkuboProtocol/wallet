@@ -309,6 +309,17 @@ Its native result is still required: same-user pipe fixtures and cross-compilati
 do not prove cross-identity token access. This fixture does not exercise database
 migration, active custody, desktop owner presence or packaged installation.
 
+The SCM fixture exposed a `CREATOR OWNER` (`S-1-3-0`) ACE on the Windows runner's
+machine `SOFTWARE` key without the inherit-only flag. Registry validation now
+recognizes this exact inheritance placeholder, while still requiring a trusted
+actual owner and independently checking each child's resolved ACEs. It does not
+add creator groups, owner-rights SIDs or concrete creators to the trusted list.
+A native `AccessCheck` test compares the unresolved placeholder with an explicit
+grant to the actual client token. Microsoft's
+[well-known SID specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/81d92bba-d22b-4a8c-908a-554ab29148ab)
+defines the placeholder replacement on inheritance. The real SCM fixture must
+still pass before cross-account provisioning is considered verified.
+
 The Linux privileged client is now implemented in core's
 `linux_provisioning_client::transfer`. A root-only pending-identity reader checks
 protected configuration and rejects existing or damaged active metadata without

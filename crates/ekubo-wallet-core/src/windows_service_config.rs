@@ -133,6 +133,11 @@ fn validate_registry_security(
                 ..
             } => ensure!(
                 *inherit_only
+                    // CREATOR OWNER is an inheritance placeholder, not a
+                    // principal in an access token. Its resolved child ACE is
+                    // checked independently when we open that child. The key's
+                    // actual owner must still be a machine trustee above.
+                    || sid == "S-1-3-0"
                     || mask & !READ_ONLY == 0
                     || trusted.iter().any(|writer| writer == sid),
                 "registry key grants mutation rights to untrusted principal {sid} (mask {mask:#010x})"
