@@ -87,5 +87,6 @@ unsafe fn read_ace(ace: *const u8) -> Result<AccessEntry> {
         sid,
         mask,
         inherit_only: header[1] & 8 != 0,
+        object_inherit: header[1] & 1 != 0,
     })
 }

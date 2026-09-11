@@ -107,6 +107,7 @@ fn validate_registry_security(
                 sid,
                 mask,
                 inherit_only,
+                ..
             } => ensure!(
                 *inherit_only
                     || mask & !READ_ONLY == 0

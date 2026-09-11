@@ -423,6 +423,16 @@ no permissions, and does not yet activate custody or replace desktop startup.
 The installer must provision new protected directories and quiesce migration;
 this is not permission repair for a previously exposed profile.
 
+Private profile directories also require a full-access `OBJECT_INHERIT` grant
+for the configured service SID, so database-created child files inherit a
+service grant. Untrusted grants are rejected even when marked inherit-only;
+the sole placeholder exception is inherit-only CREATOR OWNER inside the
+already-private directory. SYSTEM and Administrators remain trusted. Provision
+protected directory ACLs such as
+`O:<service SID>D:P(A;OICI;FA;;;<service SID>)(A;OICI;FA;;;SY)`.
+File validation does not require inheritance flags. This check is a prerequisite
+for Windows database activation; it does not activate the service backend.
+
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData
 ancestry. The Windows GNU harness compiles all native tests, but their latest

@@ -63,6 +63,7 @@ fn validate_machine_security(
                 sid,
                 mask,
                 inherit_only,
+                ..
             } => ensure!(
                 *inherit_only
                     || mask & !permitted == 0
@@ -118,8 +119,9 @@ fn validate_security(owner: &str, entries: &[AccessEntry], service_sid: &str) ->
                 sid,
                 mask,
                 inherit_only,
+                ..
             } => ensure!(
-                *inherit_only
+                (*inherit_only && sid == "S-1-3-0")
                     || *mask == 0
                     || sid == service_sid
                     || matches!(sid.as_str(), "S-1-5-18" | "S-1-5-32-544"),
@@ -131,6 +133,23 @@ fn validate_security(owner: &str, entries: &[AccessEntry], service_sid: &str) ->
             }
         }
     }
+    Ok(())
+}
+
+// SQLite creates transient files using inherited directory permissions. Require
+// an explicit service grant for those files; a token's default DACL is not a
+// custody policy. validate_security also checks inheritance-only trustees.
+fn validate_directory_inheritance(entries: &[AccessEntry], service_sid: &str) -> Result<()> {
+    const GENERIC_ALL: u32 = 0x1000_0000;
+    const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
+    ensure!(
+        entries.iter().any(|entry| matches!(entry,
+            AccessEntry::Allow { sid, mask, object_inherit: true, .. }
+                if sid == service_sid
+                    && (mask & GENERIC_ALL != 0 || mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS)
+        )),
+        "private directory lacks an inheritable service file grant"
+    );
     Ok(())
 }
 

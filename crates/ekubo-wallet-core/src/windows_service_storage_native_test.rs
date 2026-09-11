@@ -189,6 +189,10 @@ fn native_attribute_writer_cannot_redirect_a_directory_with_a_pinned_child() {
 }
 
 fn validate_sddl(sddl: &str) -> Result<()> {
+    validate_sddl_kind(sddl, StorageKind::File)
+}
+
+fn validate_sddl_kind(sddl: &str, kind: StorageKind) -> Result<()> {
     let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     unsafe {
@@ -201,7 +205,11 @@ fn validate_sddl(sddl: &str) -> Result<()> {
     }?;
     let descriptor = Descriptor(descriptor);
     let (owner, entries) = unsafe { crate::windows_security::read_descriptor(descriptor.0) }?;
-    validate_security(&owner, &entries, SERVICE)
+    validate_security(&owner, &entries, SERVICE)?;
+    if matches!(kind, StorageKind::Directory) {
+        validate_directory_inheritance(&entries, SERVICE)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -234,4 +242,35 @@ fn native_file_checks_reject_desktop_owned_and_hard_linked_state() {
     std::fs::remove_file(link).unwrap();
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn native_directory_descriptor_requires_private_file_inheritance() {
+    for flags in ["OI", "OICI", "OIIO"] {
+        assert!(
+            validate_sddl_kind(
+                &format!("O:{SERVICE}D:P(A;{flags};FA;;;{SERVICE})(A;;FA;;;SY)"),
+                StorageKind::Directory,
+            )
+            .is_ok()
+        );
+    }
+    for flags in ["", "CI", "CIIO"] {
+        assert!(
+            validate_sddl_kind(
+                &format!("O:{SERVICE}D:P(A;{flags};FA;;;{SERVICE})"),
+                StorageKind::Directory,
+            )
+            .is_err()
+        );
+    }
+    for trustee in ["BU", "WD", "CG"] {
+        assert!(
+            validate_sddl_kind(
+                &format!("O:{SERVICE}D:P(A;OICI;FA;;;{SERVICE})(A;OIIO;FR;;;{trustee})"),
+                StorageKind::Directory,
+            )
+            .is_err()
+        );
+    }
 }

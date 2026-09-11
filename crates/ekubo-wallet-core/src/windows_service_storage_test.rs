@@ -93,6 +93,7 @@ fn allow(sid: &str, mask: u32, inherit_only: bool) -> AccessEntry {
         sid: sid.into(),
         mask,
         inherit_only,
+        object_inherit: false,
     }
 }
 
@@ -150,4 +151,46 @@ fn rejects_reparse_points_wrong_types_and_linked_files() {
     }
     assert!(validate_metadata(0x10, 1, StorageKind::File).is_err());
     assert!(validate_metadata(0, 1, StorageKind::Directory).is_err());
+}
+
+#[test]
+fn private_state_rejects_untrusted_grants_even_when_only_inherited() {
+    for sid in ["S-1-1-0", "S-1-5-32-545", "S-1-3-1"] {
+        for object_inherit in [false, true] {
+            let grant = AccessEntry::Allow {
+                sid: sid.into(),
+                mask: 1,
+                inherit_only: true,
+                object_inherit,
+            };
+            assert!(validate_security(SERVICE, &[grant], SERVICE).is_err());
+        }
+    }
+    // CREATOR OWNER is safe only as a placeholder on children created inside
+    // this already-private directory, never as an effective parent grant.
+    assert!(validate_security(SERVICE, &[allow("S-1-3-0", 1, false)], SERVICE).is_err());
+}
+
+#[test]
+fn directory_requires_full_service_grant_inherited_by_files() {
+    assert!(validate_directory_inheritance(&[], SERVICE).is_err());
+    for (sid, mask, object_inherit, valid) in [
+        (SERVICE, 0x001f_01ff, true, true),
+        (SERVICE, 0x1000_0000, true, true),
+        (SERVICE, 0x001f_01ff, false, false),
+        (SERVICE, 0x0012_0089, true, false),
+        ("S-1-5-18", 0x001f_01ff, true, false),
+        ("S-1-3-0", 0x001f_01ff, true, false),
+    ] {
+        let grant = AccessEntry::Allow {
+            sid: sid.into(),
+            mask,
+            inherit_only: true,
+            object_inherit,
+        };
+        assert_eq!(
+            validate_directory_inheritance(&[grant], SERVICE).is_ok(),
+            valid
+        );
+    }
 }

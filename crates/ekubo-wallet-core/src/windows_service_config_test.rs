@@ -48,6 +48,7 @@ fn allow(mask: u32, inherit_only: bool) -> RegistryAce {
         sid: OWNER.into(),
         mask,
         inherit_only,
+        object_inherit: false,
     }
 }
 
@@ -96,6 +97,7 @@ fn public_write_grants_fail_even_with_deny_entries() {
         sid: trusted[0].clone(),
         mask: u32::MAX,
         inherit_only: false,
+        object_inherit: false,
     };
     assert!(validate_registry_security(&trusted[0], Some(&[system]), &trusted).is_ok());
 }

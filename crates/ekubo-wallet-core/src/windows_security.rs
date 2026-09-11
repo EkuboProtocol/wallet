@@ -11,6 +11,7 @@ pub(crate) enum AccessEntry {
         sid: String,
         mask: u32,
         inherit_only: bool,
+        object_inherit: bool,
     },
     Deny,
     Unsupported,

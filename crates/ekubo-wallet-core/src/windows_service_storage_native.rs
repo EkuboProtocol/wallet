@@ -3,8 +3,8 @@
 #![allow(unsafe_code)]
 
 use super::{
-    StorageKind, machine_path, validate_component, validate_machine_security, validate_metadata,
-    validate_security,
+    StorageKind, machine_path, validate_component, validate_directory_inheritance,
+    validate_machine_security, validate_metadata, validate_security,
 };
 use crate::service_profile_lock::ProfileLock;
 use crate::windows_service_config::InstalledServiceIdentity;
@@ -345,7 +345,11 @@ fn open_native(parent: Option<BorrowedHandle<'_>>, name: &str, kind: StorageKind
 
 fn validate_handle(handle: BorrowedHandle<'_>, service_sid: &str, kind: StorageKind) -> Result<()> {
     let (owner, entries) = read_security(handle, kind)?;
-    validate_security(&owner, &entries, service_sid)
+    validate_security(&owner, &entries, service_sid)?;
+    if matches!(kind, StorageKind::Directory) {
+        validate_directory_inheritance(&entries, service_sid)?;
+    }
+    Ok(())
 }
 
 fn read_security(
