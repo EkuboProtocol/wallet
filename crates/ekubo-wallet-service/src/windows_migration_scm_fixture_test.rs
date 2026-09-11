@@ -9,16 +9,18 @@ use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[path = "windows_source_scm_fixture_test.rs"]
+mod source;
+
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    ensure!(
-        args.len() == 2,
-        "expected service|client|relay-owner <owner SID>"
-    );
+    ensure!(args.len() == 2, "expected fixture mode and owner SID");
     let result = match args[0].as_str() {
         "service" => windows_service_manager::run_pending(&args[1], host),
         "client" => client(&args[1]),
         "relay-owner" => runtime()?.block_on(relay_owner(&args[1])),
+        "source-client" => runtime()?.block_on(source::client(&args[1])),
+        "source-owner" => source::owner(&args[1]),
         _ => anyhow::bail!("unknown fixture mode"),
     };
     if args[0] == "service" {

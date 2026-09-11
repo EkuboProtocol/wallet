@@ -4696,6 +4696,7 @@ dependencies = [
  "ekubo-wallet-core",
  "futures",
  "hex",
+ "keyring",
  "keyring-core",
  "reqwest 0.13.4",
  "rmcp",

@@ -214,6 +214,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -StopAfterClient
 
+      - name: Test Windows migration from the owner keyring
+        if: runner.os == 'Windows'
+        run: pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -StopAfterClient -SourceFromOwner
+
       - name: Test encrypted migration across Linux service identities
         if: runner.os == 'Linux'
         env:
