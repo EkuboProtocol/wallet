@@ -320,6 +320,16 @@ grant to the actual client token. Microsoft's
 defines the placeholder replacement on inheritance. The real SCM fixture must
 still pass before cross-account provisioning is considered verified.
 
+Owner and provisioning pipes now explicitly use a medium mandatory integrity
+label with no-write-up policy. This lets the normal desktop and elevated installer
+reach IPC created by a system-integrity service. The service/desktop or
+service/administrator DACL is unchanged, including the exclusion of client
+server-instance creation rights. Low-integrity writers remain excluded; the label
+provides neither owner presence nor custody access. Native tests inspect the
+actual kernel pipe label. Microsoft's
+[mandatory integrity control documentation](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control)
+explains why a permitted DACL alone does not establish client write access.
+
 The Linux privileged client is now implemented in core's
 `linux_provisioning_client::transfer`. A root-only pending-identity reader checks
 protected configuration and rejects existing or damaged active metadata without

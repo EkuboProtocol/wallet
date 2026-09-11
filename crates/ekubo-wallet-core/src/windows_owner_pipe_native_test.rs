@@ -215,3 +215,62 @@ async fn provisioning_client_rejects_a_squatted_pipe_without_sending_a_preface()
         .unwrap();
     assert!(matches!(result, Ok(0)) || result.is_err());
 }
+
+#[tokio::test]
+async fn native_pipe_has_medium_integrity_and_no_write_up_policy() {
+    use windows::Win32::Security::{
+        GetAce, GetSecurityDescriptorSacl, LABEL_SECURITY_INFORMATION, PSID,
+        SYSTEM_MANDATORY_LABEL_ACE,
+    };
+    let identity = crate::windows_service_identity::current_process_identity().unwrap();
+    let server = create(
+        &name(uuid::Uuid::new_v4()).unwrap(),
+        identity.user_sid(),
+        identity.user_sid(),
+        true,
+    )
+    .unwrap();
+    let mut security = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        GetSecurityInfo(
+            HANDLE(server.as_raw_handle()),
+            SE_KERNEL_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            Some(&raw mut security),
+        )
+    }
+    .ok()
+    .unwrap();
+    let security = Descriptor(security);
+    let mut present = windows::core::BOOL::default();
+    let mut defaulted = windows::core::BOOL::default();
+    let mut sacl = std::ptr::null_mut();
+    unsafe {
+        GetSecurityDescriptorSacl(
+            security.0,
+            &raw mut present,
+            &raw mut sacl,
+            &raw mut defaulted,
+        )
+    }
+    .unwrap();
+    assert!(present.as_bool() && !sacl.is_null());
+    // GetSecurityInfo returned the actual kernel object's label descriptor.
+    assert_eq!(unsafe { (*sacl).AceCount }, 1);
+    let mut ace = std::ptr::null_mut();
+    unsafe { GetAce(sacl, 0, &raw mut ace) }.unwrap();
+    let label = unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
+    assert_eq!(label.Header.AceType, 0x11);
+    assert_eq!(label.Mask, 1); // SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+    let sid = unsafe {
+        crate::windows_service_identity::sid_string(PSID(
+            (&raw const label.SidStart).cast_mut().cast(),
+        ))
+    }
+    .unwrap();
+    assert_eq!(sid, "S-1-16-8192");
+}

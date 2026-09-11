@@ -53,8 +53,12 @@ fn descriptor(service: &str, desktop: &str) -> Result<Descriptor> {
             "invalid pipe trustee SID"
         );
     }
+    // IPC must accept the normal medium-integrity desktop. A service-created
+    // pipe otherwise inherits system integrity and rejects client writes before
+    // its DACL is considered. This label grants no SID access or owner proof;
+    // the fixed DACL and kernel client-token checks still govern every request.
     let sddl: Vec<u16> = format!(
-        "O:{service}D:P(A;;FA;;;{service})(A;;FA;;;SY)(A;;0x{CLIENT_ACCESS:08x};;;{desktop})"
+        "O:{service}D:P(A;;FA;;;{service})(A;;FA;;;SY)(A;;0x{CLIENT_ACCESS:08x};;;{desktop})S:(ML;;NW;;;ME)"
     )
     .encode_utf16()
     .chain(Some(0))
