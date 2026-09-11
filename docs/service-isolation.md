@@ -360,6 +360,20 @@ activation still require integration. Tests cover malformed
 admission without storage access, metadata preflight and repeated recovery of a
 real encrypted Linux stage through the shared production receiver.
 
+The Linux matrix also builds a test-only `linux-migration-service` example and
+runs `contrib/check-linux-provisioning.py` as the disposable runner's privileged
+installer. The harness refuses existing wallet service paths, creates a unique
+unprivileged service account, installs the production provisioning bus policy for
+that account, and prepares root-owned metadata plus service-only pending storage.
+It launches the actual host on the real system bus and runs the actual root client
+against explicit synthetic keys and a one-account encrypted database, including
+reconnection/recovery while the source fence is held. It then requires raw read
+and write opens by the original non-root runner owner to fail with `EACCES`.
+Cleanup targets only the account, process group, policy and paths it created;
+the system bus is reloaded, never restarted. This fixture must pass natively
+before claiming Linux cross-user provisioning evidence. It does not install the
+packaged systemd units or activate a profile.
+
 The full Windows matrix also builds the service's `windows-migration-scm` example
 with the test-only `migration-fixture` feature. The disposable SCM setup runs the
 actual `windows_provisioning::run` host and `windows_provisioning_client::transfer`

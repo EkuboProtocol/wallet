@@ -16,6 +16,12 @@ path = "src/windows_migration_scm_test.rs"
 required-features = ["migration-fixture"]
 test = false
 
+[[example]]
+name = "linux-migration-service"
+path = "src/linux_migration_service_test.rs"
+required-features = ["migration-fixture"]
+test = false
+
 [dependencies]
 ekubo-wallet-core = { path = "../ekubo-wallet-core" }
 ekubo-wallet-client = { path = "../ekubo-wallet-client" }

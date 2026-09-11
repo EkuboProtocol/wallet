@@ -1,33 +1,28 @@
+//! Disposable CI fixture: explicit synthetic keys, never login keyring reads.
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::{
     config::{ConfigStore, WalletMetadata, WalletSource},
     custody_provisioning::MigrationAccount,
+    linux_provisioning_client,
     policy_store::{DatabaseKey, PolicyStore, migration_database::MigrationDatabaseSnapshot},
-    windows_provisioning_client, windows_service_manager,
 };
-use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub fn run() -> Result<()> {
+    ensure!(
+        std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+            && std::env::var("RUNNER_OS").as_deref() == Ok("Linux"),
+        "disposable Linux CI only"
+    );
     let args: Vec<_> = std::env::args().skip(1).collect();
-    ensure!(args.len() == 2, "expected service|client <owner SID>");
-    let result = match args[0].as_str() {
-        "service" => windows_service_manager::run_pending(&args[1], host),
-        "client" => client(&args[1]),
+    ensure!(args.len() == 2, "expected service|client <owner UID>");
+    let owner = args[1].parse()?;
+    match args[0].as_str() {
+        "service" => runtime()?.block_on(ekubo_wallet_service::linux_provisioning::run(owner)),
+        "client" => client(owner),
         _ => anyhow::bail!("unknown fixture mode"),
-    };
-    if args[0] == "service" {
-        let executable = std::env::current_exe()?;
-        std::fs::write(
-            executable
-                .parent()
-                .context("missing fixture parent")?
-                .join("service-result.txt"),
-            format!("{result:?}\n"),
-        )?;
     }
-    result
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -36,19 +31,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-fn host(
-    owner: &str,
-    running: windows_service_manager::Running,
-    stop: watch::Receiver<bool>,
-) -> Result<()> {
-    runtime()?.block_on(ekubo_wallet_service::windows_provisioning::run(
-        owner,
-        move || running.ready(),
-        stop,
-    ))
-}
-
-fn client(owner: &str) -> Result<()> {
+fn client(owner: u32) -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let source = temporary.path().canonicalize()?;
     let database = source.join("wallet.db");
@@ -76,7 +59,7 @@ fn client(owner: &str) -> Result<()> {
     let runtime = runtime()?;
     config.with_lifecycle_lock(|| {
         let snapshot = MigrationDatabaseSnapshot::freeze(&database, Zeroizing::new(key))?;
-        let staged = runtime.block_on(windows_provisioning_client::transfer(
+        let staged = runtime.block_on(linux_provisioning_client::transfer(
             owner,
             Zeroizing::new(key),
             vec![wallet.clone()],
@@ -91,7 +74,6 @@ fn client(owner: &str) -> Result<()> {
             staged.reply().canonical().bytes > 0,
             "missing canonical database"
         );
-        restart_fixture_service(owner)?;
         let staged = runtime.block_on(staged.recover(owner, vec![wallet.clone()]))?;
         // Keep the source fence and lifecycle lock through reply validation.
         // No activation or deletion is performed by this fixture.
@@ -103,35 +85,7 @@ fn client(owner: &str) -> Result<()> {
         "source wallet metadata changed"
     );
     println!(
-        "Full encrypted Windows migration staged, rebuilt and recovered after service process restart"
+        "Full encrypted Linux migration staged, rebuilt and recovered across service identities"
     );
-    Ok(())
-}
-
-fn restart_fixture_service(owner: &str) -> Result<()> {
-    let identity = ekubo_wallet_core::windows_service_config::pending_installer_identity(owner)?;
-    let executable = std::env::current_exe()?;
-    let helper = executable
-        .parent()
-        .context("missing fixture parent")?
-        .join("restart-windows-provisioning-fixture.ps1");
-    let system = std::env::var_os("SystemRoot").context("missing fixture SystemRoot")?;
-    let powershell =
-        std::path::PathBuf::from(system).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let status = std::process::Command::new(powershell)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(helper)
-        .arg("-ServiceName")
-        .arg(format!("EkuboWallet-{}", identity.profile_id().simple()))
-        .arg("-OwnerSid")
-        .arg(owner)
-        .status()?;
-    ensure!(status.success(), "synthetic service restart failed");
     Ok(())
 }

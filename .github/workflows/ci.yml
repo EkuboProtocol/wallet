@@ -211,6 +211,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -StopAfterClient
 
+      - name: Test encrypted migration across Linux service identities
+        if: runner.os == 'Linux'
+        env:
+          CARGO_PROFILE_DEV_DEBUG: ${{ matrix.test_debug }}
+        run: |
+          cargo build --locked -p ekubo-wallet-service --features migration-fixture --example linux-migration-service --jobs ${{ matrix.test_jobs }}
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS python3 contrib/check-linux-provisioning.py --fixture-binary target/debug/examples/linux-migration-service
+
       - name: Compile application and integration tests
         if: runner.os != 'Linux'
         env:
