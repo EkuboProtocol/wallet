@@ -35,6 +35,7 @@ try {
     New-Item -ItemType Directory -Path $directory | Out-Null
     $directoryCreated = $true
     Copy-Item -LiteralPath (Resolve-Path -LiteralPath $FixtureBinary).Path -Destination $binary
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'restart-windows-provisioning-fixture.ps1') -Destination $directory
     $command = '"' + $binary + '" service ' + $owner
     Invoke-Sc -Arguments @('create', $serviceName, 'binPath=', $command, 'start=', 'demand', 'obj=', ('NT SERVICE\' + $serviceName))
     $serviceCreated = $true
@@ -49,6 +50,7 @@ try {
     $exeSecurity = [Security.AccessControl.FileSecurity]::new()
     $exeSecurity.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;$serviceSid)")
     Set-Acl -LiteralPath $binary -AclObject $exeSecurity
+    Set-Acl -LiteralPath (Join-Path $directory 'restart-windows-provisioning-fixture.ps1') -AclObject $exeSecurity
     $resultFile = Join-Path $directory 'service-result.txt'
     Set-Content -LiteralPath $resultFile -Value 'Service has not returned.'
     $resultSecurity = [Security.AccessControl.FileSecurity]::new()
@@ -94,7 +96,11 @@ try {
     $serviceProcess = Get-Process -Id $processId
     & $binary client $owner
     if ($LASTEXITCODE -ne 0) { throw "Native cross-account exchange failed ($LASTEXITCODE)." }
-    if ($StopAfterClient) { Stop-Service -Name $serviceName }
+    if ($StopAfterClient) {
+        $processId = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
+        $serviceProcess = Get-Process -Id $processId
+        Stop-Service -Name $serviceName
+    }
     $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
     $status = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($status.ExitCode -ne 0 -or $status.ServiceSpecificExitCode -ne 0) {
@@ -107,6 +113,8 @@ try {
         & sc.exe queryex $serviceName
         $cleanupService = Get-Service -Name $serviceName
         if ($cleanupService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            $processId = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
+            if ($processId -ne 0) { $serviceProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue }
             Stop-Service -Name $serviceName
             $cleanupService.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
         }

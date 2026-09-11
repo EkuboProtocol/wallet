@@ -91,6 +91,7 @@ fn client(owner: &str) -> Result<()> {
             staged.reply().canonical().bytes > 0,
             "missing canonical database"
         );
+        restart_fixture_service(owner)?;
         let staged = runtime.block_on(staged.recover(owner, vec![wallet.clone()]))?;
         // Keep the source fence and lifecycle lock through reply validation.
         // No activation or deletion is performed by this fixture.
@@ -102,7 +103,35 @@ fn client(owner: &str) -> Result<()> {
         "source wallet metadata changed"
     );
     println!(
-        "Full encrypted Windows migration staged, rebuilt and recovered through the production host and client"
+        "Full encrypted Windows migration staged, rebuilt and recovered after service process restart"
     );
+    Ok(())
+}
+
+fn restart_fixture_service(owner: &str) -> Result<()> {
+    let identity = ekubo_wallet_core::windows_service_config::pending_installer_identity(owner)?;
+    let executable = std::env::current_exe()?;
+    let helper = executable
+        .parent()
+        .context("missing fixture parent")?
+        .join("restart-windows-provisioning-fixture.ps1");
+    let system = std::env::var_os("SystemRoot").context("missing fixture SystemRoot")?;
+    let powershell =
+        std::path::PathBuf::from(system).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let status = std::process::Command::new(powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(helper)
+        .arg("-ServiceName")
+        .arg(format!("EkuboWallet-{}", identity.profile_id().simple()))
+        .arg("-OwnerSid")
+        .arg(owner)
+        .status()?;
+    ensure!(status.success(), "synthetic service restart failed");
     Ok(())
 }

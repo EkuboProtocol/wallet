@@ -367,9 +367,10 @@ against a synthetic one-account SQLCipher database. Source configuration uses an
 explicit test key, never a keyring lookup; the lifecycle lock and frozen snapshot
 are retained through reply validation. The receiver performs normal credential
 staging, inventory checks and canonical database reconstruction. The fixture
-now also reconnects through the production recovery client while retaining the
-source fence, checks source metadata afterward and stops the host without activation
-or deletion. This recovery extension needs its native result separately from
+now also stops the synthetic service, waits for its original process to exit,
+starts a replacement through SCM and reconnects through the production recovery
+client while retaining the source fence, checks source metadata afterward and stops the host without activation
+or deletion. This process-restart recovery extension needs its native result separately from
 the lightweight storage/pipe harness. Its feature enables core `test-hooks`,
 which are forbidden in release builds.
 
