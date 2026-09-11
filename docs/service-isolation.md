@@ -435,7 +435,7 @@ refused on non-Windows hosts. Local preparation, deliberate dependency-mismatch
 rejection, the non-Windows guard, and Windows GNU Clippy compilation passed.
 Logs: `~/Documents/wallet-native-harness-prepare.log` and
 `~/Documents/wallet-native-harness-cross.log`. Runtime results for the new job
-are still pending.
+are recorded below.
 
 The earlier full CI run `34537601260` completed successfully on the desktop
 session checkpoint `11054cb`. It predates the shared owner-transport extraction
@@ -447,6 +447,26 @@ passed, 13 ignored, plus formatting, workspace Clippy, Ruff, generated licenses,
 vulnerability scanning, and license policy. The generated harness also passed
 Windows GNU Clippy with the exact repository-locked dependency versions.
 Log: `~/Documents/wallet-native-harness-gate.log`.
+
+The focused Windows job in run `34543869262` executed the native tests on
+`6ed850a`: 21 passed, one failed, and the child helper was ignored by the outer
+runner but explicitly executed by its passing parent test. Identity,
+impersonation rejection, registry descriptors, private ACLs, hard-link checks,
+handle-relative reads, concurrent-writer rejection, and cross-process profile
+locking passed. The real ProgramData ancestry test failed because an ancestor
+granted access outside the machine-directory policy. This is an unresolved
+failure, not successful root-bootstrap validation. Log:
+`~/Documents/wallet-native-ci-34543869262.log`.
+
+Machine-directory errors now include the rejecting SID, access mask, and
+ancestor context to identify the precise cause without weakening the policy.
+The manual workflow input `windows_primitives_only=true` runs only this focused
+job under a separate concurrency group. Its run title explicitly identifies
+diagnostics; it does not satisfy full workspace CI or release validation. The
+default remains full CI, and diagnostic runs do not cancel full runs.
+These diagnostics passed the full local gate and Windows GNU Clippy. Logs:
+`~/Documents/wallet-native-acl-diagnostic-gate.log` and
+`~/Documents/wallet-native-acl-diagnostic-cross.log`.
 
 ## Work still required before completion
 

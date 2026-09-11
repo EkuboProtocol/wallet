@@ -45,7 +45,7 @@ fn validate_machine_security(
 ) -> Result<()> {
     ensure!(
         trusted.iter().any(|sid| sid == owner),
-        "machine storage directory has an untrusted owner"
+        "machine storage directory has an untrusted owner: {owner}"
     );
     // Shared OS directories may let users create siblings. Existing protected
     // children are checked independently; deletion, ACL/owner changes, and
@@ -63,7 +63,7 @@ fn validate_machine_security(
                 *inherit_only
                     || mask & !permitted == 0
                     || trusted.iter().any(|trusted| trusted == sid),
-                "machine storage directory grants untrusted mutation rights"
+                "machine storage directory grants untrusted mutation rights: SID {sid}, mask {mask:#010x}"
             ),
             AccessEntry::Deny => {}
             AccessEntry::Unsupported => {

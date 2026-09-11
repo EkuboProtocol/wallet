@@ -1,4 +1,5 @@
 name: Tests
+run-name: ${{ inputs.windows_primitives_only && 'Windows primitive diagnostics (not full CI)' || 'Full wallet CI' }}
 
 on:
   # pull_request:
@@ -54,12 +55,17 @@ on:
   #     - "examples/policy.json"
   #     - "schemas/**"
   workflow_dispatch:
+    inputs:
+      windows_primitives_only:
+        description: Run only native primitive diagnostics; does not satisfy full CI or release checks
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ inputs.windows_primitives_only && '-native' || '' }}
   cancel-in-progress: true
 
 env:
@@ -85,6 +91,7 @@ jobs:
         run: python contrib/check-windows-service.py --output-root "$env:RUNNER_TEMP"
 
   execution-plan:
+    if: ${{ !inputs.windows_primitives_only }}
     name: Execution plan (no_std and JavaScript)
     runs-on: ubuntu-24.04
     steps:
@@ -111,6 +118,7 @@ jobs:
           wasm-bindgen target/wasm32-unknown-unknown/release/erc8410_wasm.wasm --target nodejs --out-dir crates/erc8410-wasm/pkg-node
           node crates/erc8410-wasm/smoke-test.cjs
   test:
+    if: ${{ !inputs.windows_primitives_only }}
     name: Test (${{ matrix.runner }})
     strategy:
       fail-fast: false
@@ -198,6 +206,7 @@ jobs:
         run: cargo test --locked --workspace --all-features --lib --jobs ${{ matrix.test_jobs }}
 
   lint:
+    if: ${{ !inputs.windows_primitives_only }}
     name: Formatting and lints
     runs-on: ubuntu-24.04
     steps:

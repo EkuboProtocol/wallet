@@ -7,6 +7,10 @@ advisory exceptions live in `osv-scanner.toml` with reasons and expiry dates.
 Release packaging is a deliberate two-stage process; neither stage executes
 code with signing credentials.
 
+The `windows_primitives_only` workflow input is for native service diagnostics.
+Leave it false for full CI; a diagnostic run's result does not cover the
+workspace, other platforms, or the dependency-policy gates.
+
 First, manually run **Build unsigned release artifacts** with any branch, tag,
 or exact commit SHA. The workflow resolves that reference and computes the
 build identity itself: an exact `v<package-version>` tag produces that package

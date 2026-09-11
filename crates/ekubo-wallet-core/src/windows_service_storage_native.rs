@@ -8,7 +8,7 @@ use super::{
 };
 use crate::service_profile_lock::ProfileLock;
 use crate::windows_service_config::InstalledServiceIdentity;
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use std::{
     fs::File,
     mem::size_of,
@@ -134,13 +134,15 @@ fn program_data_ancestors(trusted: &[String]) -> Result<Vec<File>> {
         "machine storage is not on a fixed local drive"
     );
     let root = open_native(None, &format!("\\??\\{drive}"), StorageKind::Directory)?;
-    validate_machine_handle(root.as_handle(), trusted, true)?;
+    validate_machine_handle(root.as_handle(), trusted, true)
+        .with_context(|| format!("unsafe machine storage drive root {drive}"))?;
     let mut ancestors = vec![root];
     for component in components {
         let parent = ancestors.last().expect("drive root is pinned");
         // machine_path validated this OS-provided component, including Unicode.
         let child = open_native(Some(parent.as_handle()), component, StorageKind::Directory)?;
-        validate_machine_handle(child.as_handle(), trusted, true)?;
+        validate_machine_handle(child.as_handle(), trusted, true)
+            .with_context(|| format!("unsafe machine storage ancestor {component} in {path}"))?;
         ancestors.push(child);
     }
     Ok(ancestors)
