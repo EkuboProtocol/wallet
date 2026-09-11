@@ -27,31 +27,19 @@ pub async fn run(owner_uid: u32) -> Result<()> {
         "service configuration escaped its protected profile"
     );
     let authority = ApplicationAuthority::open(config)?;
-    let sessions = crate::desktop_sessions::DesktopSessions::default();
-    let dapp_reviews = crate::dapp_reviews::DappReviews::default();
-    let dapps = Arc::new(crate::dapp_runtime::DappRuntime::new(
-        authority.owner_api(),
-        dapp_reviews,
-        sessions.activity(),
-    ));
+    let service = Arc::new(crate::runtime::ServiceRuntime::new(authority));
     let owner_bus = zbus::connection::Builder::unix_stream(
         ekubo_wallet_core::service_storage::system_bus_stream().await?,
     )
     .name(format!("org.ekubo.Wallet.Owner.u{owner_uid}"))?
     .serve_at(
         crate::owner_rpc::OBJECT_PATH,
-        crate::owner_rpc::LinuxOwnerInterface::new(
-            authority.owner_api(),
-            sessions.clone(),
-            dapps.clone(),
-        ),
+        crate::owner_rpc::LinuxOwnerInterface::new(service.clone()),
     )?
     .build()
     .await?;
-    let events = authority.events();
-    let mut automations =
-        Box::pin(sessions.supervise(authority.owner_api().config().clone(), events.clone()));
-    let mut dapp_supervisor = Box::pin(dapps.supervise());
+    let events = service.events();
+    let mut supervisor = Box::pin(service.supervise());
     events.publish(DomainEventKind::McpStatusChanged { online: true });
     let active = Arc::new(AtomicUsize::new(0));
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -59,12 +47,7 @@ pub async fn run(owner_uid: u32) -> Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = loop {
         tokio::select! {
-            finished = &mut dapp_supervisor => break Err(finished.err().unwrap_or_else(|| {
-                anyhow::anyhow!("dapp supervisor unexpectedly stopped")
-            })),
-            finished = &mut automations => break Err(finished.err().unwrap_or_else(|| {
-                anyhow::anyhow!("automation supervisor unexpectedly stopped")
-            })),
+            finished = &mut supervisor => break finished,
             _ = terminate.recv() => break Ok(()),
             signal = tokio::signal::ctrl_c() => break signal.map_err(anyhow::Error::from),
             accepted = listener.accept() => {
@@ -78,7 +61,7 @@ pub async fn run(owner_uid: u32) -> Result<()> {
                     continue;
                 }
                 let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
-                let agent = authority.agent_api();
+                let agent = service.agent_api();
                 let active = active.clone();
                 let events = events.clone();
                 connections.spawn(async move {
@@ -93,26 +76,17 @@ pub async fn run(owner_uid: u32) -> Result<()> {
     };
     // Cancellation drops the same core execution future used by the desktop.
     // Persisted transaction lifecycle records remain available for recovery.
-    drop(automations);
-    drop(dapp_supervisor);
+    drop(supervisor);
     events.publish(DomainEventKind::McpStatusChanged { online: false });
-    let reviews_closed = close_owner_reviews(&owner_bus).await;
+    let reviews_closed = service.close_owner_reviews();
     let owner_closed = owner_bus.close().await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
-    let dapps_closed = dapps.shutdown().await;
+    let dapps_closed = service.shutdown_dapps().await;
     reviews_closed.context("cannot close service transaction reviews")?;
     owner_closed.context("cannot close service owner endpoint")?;
     dapps_closed.context("cannot stop dapp sessions")?;
     result
-}
-
-async fn close_owner_reviews(bus: &zbus::Connection) -> Result<()> {
-    let interface = bus
-        .object_server()
-        .interface::<_, crate::owner_rpc::LinuxOwnerInterface>(crate::owner_rpc::OBJECT_PATH)
-        .await?;
-    interface.get().await.shutdown()
 }
 
 fn bind_listener(runtime: &File) -> Result<UnixListener> {

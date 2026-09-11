@@ -12,7 +12,6 @@ pub use ekubo_wallet_client::framing;
 pub mod dapp_identity;
 pub mod dapp_reviews;
 pub mod dapp_runtime;
-#[cfg(target_os = "linux")]
 mod desktop_sessions;
 #[path = "../../../src/gui_review.rs"]
 mod gui_review;
@@ -23,6 +22,7 @@ mod linux_owner_rpc;
 #[path = "../../../src/mcp_transport.rs"]
 mod mcp_transport;
 pub mod owner_rpc;
+pub mod runtime;
 mod transaction_previews;
 mod transaction_reviews;
 #[path = "../../../src/walletconnect.rs"]

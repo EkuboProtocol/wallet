@@ -1,12 +1,10 @@
-//! Tie automatic execution to live, authenticated desktop bus connections.
+//! Tie automatic execution to live, authenticated desktop connections.
 //! A running OS service alone must not start the user's automations.
 
 use crate::{config::ConfigStore, events::EventBus};
 use anyhow::{Context as _, Result};
-use futures::StreamExt as _;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
-use zbus::{Connection, fdo::DBusProxy, names::OwnedUniqueName};
 
 #[derive(Clone)]
 pub(crate) struct DesktopSessions {
@@ -24,19 +22,31 @@ impl Default for DesktopSessions {
     }
 }
 
-struct ActiveSession {
+/// Bounded admission before the adapter finishes authenticating its connection.
+#[must_use = "dropping the reservation releases admission capacity"]
+pub struct ReservedSession {
     active: watch::Sender<usize>,
-    _slot: OwnedSemaphorePermit,
+    slot: OwnedSemaphorePermit,
 }
 
-impl ActiveSession {
-    fn new(active: watch::Sender<usize>, slot: OwnedSemaphorePermit) -> Self {
-        active.send_modify(|count| *count += 1);
-        Self {
-            active,
-            _slot: slot,
+impl ReservedSession {
+    /// The platform adapter must establish caller identity and subscribe to
+    /// disconnect before activating. Keeping a reservation does not run jobs.
+    pub fn activate(self) -> ActiveSession {
+        self.active.send_modify(|count| *count += 1);
+        ActiveSession {
+            active: self.active,
+            _slot: self.slot,
         }
     }
+}
+
+/// An authenticated desktop lifetime. Drop it when the connection ends, the
+/// request is cancelled, or the platform host shuts down.
+#[must_use = "dropping the session stops its contribution to desktop activity"]
+pub struct ActiveSession {
+    active: watch::Sender<usize>,
+    _slot: OwnedSemaphorePermit,
 }
 
 impl Drop for ActiveSession {
@@ -50,31 +60,16 @@ impl DesktopSessions {
         self.active.subscribe()
     }
 
-    /// Called only inside core's authenticated owner-call context. `sender`
-    /// comes from the real message header, never from request parameters.
-    pub(crate) async fn hold(&self, bus: &Connection, sender: &OwnedUniqueName) -> Result<()> {
+    pub(crate) fn reserve(&self) -> Result<ReservedSession> {
         let slot = self
             .slots
             .clone()
             .try_acquire_owned()
             .context("too many desktop sessions")?;
-        let registry = DBusProxy::new(bus).await?;
-        // Subscribe before checking liveness, so a departure cannot be lost
-        // between accepting the session and beginning to watch it.
-        let mut departed = registry
-            .receive_name_owner_changed_with_args(&[(0, sender.as_str())])
-            .await?;
-        registry
-            .get_connection_unix_user(sender.clone().into())
-            .await?;
-        let _session = ActiveSession::new(self.active.clone(), slot);
-        while let Some(signal) = departed.next().await {
-            let args = signal.args()?;
-            if args.name().as_str() == sender.as_str() && args.new_owner().as_ref().is_none() {
-                return Ok(());
-            }
-        }
-        anyhow::bail!("desktop session lost its system bus connection")
+        Ok(ReservedSession {
+            active: self.active.clone(),
+            slot,
+        })
     }
 
     pub(crate) async fn supervise(&self, config: ConfigStore, events: EventBus) -> Result<()> {

@@ -1,7 +1,8 @@
 //! Linux D-Bus adapter for the shared owner dispatcher.
 
-use crate::{authority::OwnerApi, dapp_runtime::DappRuntime, owner_rpc::OwnerDispatcher};
+use crate::runtime::ServiceRuntime;
 use ekubo_wallet_client::owner_protocol::Request;
+use futures::StreamExt as _;
 use std::sync::Arc;
 
 /// Serialize as the same D-Bus string while erasing our owned reply on drop.
@@ -17,26 +18,38 @@ impl serde::Serialize for OwnerResponse {
 }
 
 pub(crate) struct LinuxOwnerInterface {
-    dispatcher: OwnerDispatcher,
-    sessions: crate::desktop_sessions::DesktopSessions,
+    runtime: Arc<ServiceRuntime>,
 }
 
 impl LinuxOwnerInterface {
-    // Host lifecycle only; deliberately outside the exported D-Bus interface.
-    pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
-        self.dispatcher.shutdown()
+    pub(crate) fn new(runtime: Arc<ServiceRuntime>) -> Self {
+        Self { runtime }
     }
+}
 
-    pub(crate) fn new(
-        owner: OwnerApi,
-        sessions: crate::desktop_sessions::DesktopSessions,
-        dapps: Arc<DappRuntime>,
-    ) -> Self {
-        Self {
-            dispatcher: OwnerDispatcher::new(owner, dapps),
-            sessions,
+/// Called within core's authenticated owner context. `sender` is taken from
+/// the message header. The session guard never crosses IPC to the desktop.
+async fn hold_desktop(
+    reservation: crate::runtime::ReservedDesktopSession,
+    bus: &zbus::Connection,
+    sender: &zbus::names::OwnedUniqueName,
+) -> anyhow::Result<()> {
+    let registry = zbus::fdo::DBusProxy::new(bus).await?;
+    // Subscribe before checking liveness so a departure cannot be missed.
+    let mut departed = registry
+        .receive_name_owner_changed_with_args(&[(0, sender.as_str())])
+        .await?;
+    registry
+        .get_connection_unix_user(sender.clone().into())
+        .await?;
+    let _session = reservation.activate();
+    while let Some(signal) = departed.next().await {
+        let args = signal.args()?;
+        if args.name().as_str() == sender.as_str() && args.new_owner().as_ref().is_none() {
+            return Ok(());
         }
     }
+    anyhow::bail!("desktop session lost its system bus connection")
 }
 
 #[zbus::interface(name = "org.ekubo.Wallet.Owner1")]
@@ -54,7 +67,9 @@ impl LinuxOwnerInterface {
         ekubo_wallet_core::service_presence::with_owner_call(
             connection,
             &header,
-            self.sessions.hold(connection, &sender),
+            Box::pin(async {
+                hold_desktop(self.runtime.reserve_desktop()?, connection, &sender).await
+            }),
         )
         .await
         .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?
@@ -82,7 +97,7 @@ impl LinuxOwnerInterface {
         let result = ekubo_wallet_core::service_presence::with_owner_call(
             connection,
             &header,
-            Box::pin(self.dispatcher.encode(request)),
+            Box::pin(self.runtime.owner.encode(request)),
         )
         .await
         .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?

@@ -39,6 +39,24 @@ proof. Both must support unattended policy-authorized signing without exposing
 raw keys to the agent. Platform-specific packaging must not leak into wallet
 screens or introduce a second policy implementation.
 
+`ServiceRuntime` now assembles authority, owner dispatch/reviews, desktop
+activity, the scheduler, and WalletConnect on every platform. The Linux host
+uses this shared assembly and supervisor, retaining its OS identity, storage,
+D-Bus, Unix-socket, and signal handling. It cancels the shared supervisor before
+closing reviews and endpoints, draining MCP requests, and stopping dapp workers.
+Windows can supply its authenticated transport and SCM lifecycle around the
+same runtime; those adapters and the desktop custody cutover remain unfinished.
+
+Desktop reservations and active-session guards are shared as well. Reservations
+consume bounded capacity without activating jobs. Only the platform adapter
+activates a guard after authenticating the caller and arranging disconnect
+monitoring. The Linux adapter retains core's owner-call context and subscribes
+to bus departure before checking liveness. Guards stay inside the service;
+they are activity lifetimes, not owner-authorization proofs. Shared tests cover
+bounded pending admissions, cancellation while another desktop remains active,
+and activity propagation into actual dapp admission. The relocated private-bus
+disconnect test also passed explicitly after the refactor.
+
 `OwnerConnection<T>` now owns typed RPC serialization, response bounds, and
 zeroizing JSON buffers on every platform. Its sealed transport contract keeps
 construction inside authenticated adapters. Linux `OwnerClient` is an alias
@@ -493,8 +511,16 @@ Relative opens prohibit reparsing using
 and a final metadata pass runs after the complete protected chain is pinned.
 This ensures a retained child prevents emptying each ancestor before custody
 can use the root. The native attack test also attempts child lookup after
-redirecting the parent and requires rejection. Native validation of this
-compatibility fix is pending; it is not yet a successful bootstrap checkpoint.
+redirecting the parent and requires rejection. Native diagnostic run
+`34546363561` passed all 23 tests on `967273f`, including the real ProgramData
+check and the expanded redirection test. The child-process helper was ignored
+by the outer runner but executed by its passing parent test. This validates
+these primitives, not an installed service or desktop custody migration.
+The full local gate also passed (1,711 tests, 13 ignored). Logs:
+`~/Documents/wallet-native-ci-34546363561.log` and
+`~/Documents/wallet-programdata-compat-gate.log`.
+Full CI run `34546500148` is testing that checkpoint; it predates the shared
+runtime assembly above.
 
 ## Work still required before completion
 

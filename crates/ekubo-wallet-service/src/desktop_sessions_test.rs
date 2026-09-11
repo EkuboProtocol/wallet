@@ -2,6 +2,47 @@ use super::*;
 use ekubo_wallet_core::policy_store::register_test_database_key;
 use std::time::Duration;
 
+#[test]
+fn pending_connections_are_bounded_without_starting_jobs() {
+    let sessions = DesktopSessions::default();
+    let mut reserved = (0..32)
+        .map(|_| sessions.reserve().unwrap())
+        .collect::<Vec<_>>();
+    assert!(sessions.reserve().is_err());
+    assert_eq!(*sessions.activity().borrow(), 0);
+    let active = reserved.pop().unwrap().activate();
+    assert_eq!(*sessions.activity().borrow(), 1);
+    assert!(sessions.reserve().is_err());
+    drop(reserved);
+    assert_eq!(*sessions.activity().borrow(), 1);
+    assert_eq!(sessions.slots.available_permits(), 31);
+    drop(active);
+    assert_eq!(*sessions.activity().borrow(), 0);
+    assert_eq!(sessions.slots.available_permits(), 32);
+}
+
+#[tokio::test]
+async fn cancelling_one_connection_preserves_other_desktop_sessions() {
+    let sessions = DesktopSessions::default();
+    let other = sessions.reserve().unwrap().activate();
+    let reservation = sessions.reserve().unwrap();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _active = reservation.activate();
+        ready.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    started.await.unwrap();
+    assert_eq!(*sessions.activity().borrow(), 2);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(*sessions.activity().borrow(), 1);
+    assert_eq!(sessions.slots.available_permits(), 31);
+    drop(other);
+    assert_eq!(*sessions.activity().borrow(), 0);
+    assert_eq!(sessions.slots.available_permits(), 32);
+}
+
 #[tokio::test]
 async fn supervisor_opens_storage_only_when_a_desktop_is_active() {
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -16,8 +57,7 @@ async fn supervisor_opens_storage_only_when_a_desktop_is_active() {
         .await
         .is_err()
     );
-    let slot = sessions.slots.clone().try_acquire_owned().unwrap();
-    let active = ActiveSession::new(sessions.active.clone(), slot);
+    let active = sessions.reserve().unwrap().activate();
     assert!(
         sessions
             .supervise(config, EventBus::default())
@@ -26,57 +66,4 @@ async fn supervisor_opens_storage_only_when_a_desktop_is_active() {
     );
     drop(active);
     assert_eq!(*sessions.active.borrow(), 0);
-}
-
-/// This exercises connection lifetime on a private bus. Owner UID authorization
-/// is a separate core check at the real interface, before `hold` is invoked.
-#[tokio::test]
-#[ignore = "requires dbus-daemon; launches an isolated test bus"]
-async fn desktop_disconnect_releases_its_execution_session() {
-    use std::io::{BufRead as _, BufReader};
-    use std::process::{Command, Stdio};
-    struct Bus(std::process::Child);
-    impl Drop for Bus {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut daemon = Bus(Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap());
-    let mut address = String::new();
-    BufReader::new(daemon.0.stdout.take().unwrap())
-        .read_line(&mut address)
-        .unwrap();
-    let service = zbus::connection::Builder::address(address.trim())
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
-    let desktop = zbus::connection::Builder::address(address.trim())
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
-    let sender = desktop.unique_name().unwrap().clone();
-    let sessions = DesktopSessions::default();
-    let mut activity = sessions.active.subscribe();
-    let holder = sessions.clone();
-    let lease = tokio::spawn(async move { holder.hold(&service, &sender).await });
-    tokio::time::timeout(Duration::from_secs(5), activity.changed())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(*activity.borrow_and_update(), 1);
-    desktop.close().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), lease)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(*sessions.active.borrow(), 0);
-    assert_eq!(sessions.slots.available_permits(), 32);
 }
