@@ -188,3 +188,30 @@ async fn cancellation_wakes_a_blocking_read_on_a_native_windows_pipe() {
         std::io::ErrorKind::ConnectionAborted
     );
 }
+
+#[tokio::test]
+async fn provisioning_client_rejects_a_squatted_pipe_without_sending_a_preface() {
+    let identity = crate::windows_service_identity::current_process_identity().unwrap();
+    let pipe_name = format!(
+        r"\\.\pipe\EkuboWallet.Provision.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let mut server = create(&pipe_name, identity.user_sid(), "S-1-5-32-544", true).unwrap();
+    let (accepted, rejected) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            server.connect(),
+            open_available(&pipe_name, "S-1-5-80-1-2-3-4-5", "S-1-5-32-544"),
+        )
+    })
+    .await
+    .unwrap();
+    accepted.unwrap();
+    assert!(rejected.is_err());
+    // The client opened this actual instance, inspected its owner, and closed
+    // it. The attacker gets neither a preface nor custody bytes.
+    let mut byte = [0; 1];
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), server.read(&mut byte))
+        .await
+        .unwrap();
+    assert!(matches!(result, Ok(0)) || result.is_err());
+}

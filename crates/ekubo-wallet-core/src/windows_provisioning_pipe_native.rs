@@ -2,7 +2,25 @@ use super::{ADMINISTRATORS, PREFACE, name};
 use crate::{windows_owner_pipe, windows_service_config::InstalledServiceIdentity};
 use anyhow::{Result, ensure};
 use std::{sync::Arc, time::Duration};
-use tokio::{io::AsyncReadExt as _, net::windows::named_pipe::NamedPipeServer};
+use tokio::{
+    io::AsyncReadExt as _,
+    net::windows::named_pipe::{NamedPipeClient, NamedPipeServer},
+};
+
+/// Authenticate the connected pipe's actual owner and ACL before any bytes are
+/// written. Identification-only SQOS does not let the service act as installer.
+/// Busy-instance retries precede all writes; a connected transfer never retries.
+pub async fn connect(
+    identity: &crate::windows_service_config::PendingInstallerIdentity,
+) -> Result<NamedPipeClient> {
+    crate::windows_service_identity::verify_installer_process()?;
+    windows_owner_pipe::open_private_pipe(
+        &name(identity.profile_id())?,
+        identity.service_sid(),
+        ADMINISTRATORS,
+    )
+    .await
+}
 
 pub struct ProvisioningListener {
     pipe: NamedPipeServer,

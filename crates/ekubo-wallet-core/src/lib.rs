@@ -95,3 +95,6 @@ mod service_profile_lock;
 
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_provisioning_pipe;
+
+#[cfg(target_os = "windows")]
+pub mod windows_provisioning_client;

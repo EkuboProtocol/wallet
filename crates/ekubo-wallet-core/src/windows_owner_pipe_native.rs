@@ -177,7 +177,11 @@ pub async fn connect(identity: &InstalledServiceIdentity) -> Result<NamedPipeCli
     .await
 }
 
-async fn open_available(pipe_name: &str, service: &str, desktop: &str) -> Result<NamedPipeClient> {
+pub(crate) async fn open_available(
+    pipe_name: &str,
+    service: &str,
+    desktop: &str,
+) -> Result<NamedPipeClient> {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             match open(pipe_name, service, desktop) {
@@ -199,7 +203,7 @@ async fn open_available(pipe_name: &str, service: &str, desktop: &str) -> Result
         }
     })
     .await
-    .context("owner pipe remained busy")?
+    .context("wallet pipe remained busy")?
 }
 
 /// The host must retain at least one instance while creating successors. The

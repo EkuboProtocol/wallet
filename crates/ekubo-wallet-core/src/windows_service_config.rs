@@ -10,7 +10,10 @@ use uuid::Uuid;
 #[path = "windows_service_config_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub use native::{find_installed_service_identity, installed_service_identity, service_identity};
+pub use native::{
+    find_installed_service_identity, installed_service_identity, pending_installer_identity,
+    service_identity,
+};
 #[cfg(target_os = "windows")]
 pub(crate) use native::{machine_trustees, pending_service_identity};
 
@@ -26,6 +29,26 @@ struct Configuration {
 
 #[derive(Debug)]
 pub struct InstalledServiceIdentity(Configuration);
+
+/// Protected pending metadata for a privileged installer. This cannot be passed
+/// to desktop discovery, active storage initialization, or the owner pipe.
+#[derive(Debug)]
+pub struct PendingInstallerIdentity(InstalledServiceIdentity);
+
+impl PendingInstallerIdentity {
+    #[must_use]
+    pub fn owner_sid(&self) -> &str {
+        self.0.owner_sid()
+    }
+    #[must_use]
+    pub fn service_sid(&self) -> &str {
+        self.0.service_sid()
+    }
+    #[must_use]
+    pub const fn profile_id(&self) -> Uuid {
+        self.0.profile_id()
+    }
+}
 
 impl InstalledServiceIdentity {
     #[must_use]

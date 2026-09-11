@@ -10,7 +10,10 @@ mod native;
 #[cfg(target_os = "windows")]
 pub use native::{ConnectedOwnerPipe, OwnerPipeListener, connect};
 #[cfg(target_os = "windows")]
-pub(crate) use native::{authenticate_installer_client, create as create_private_pipe};
+pub(crate) use native::{
+    authenticate_installer_client, create as create_private_pipe,
+    open_available as open_private_pipe,
+};
 
 // Avoid FILE_GENERIC_WRITE: its FILE_APPEND_DATA bit also authorizes creating
 // server instances. Clients need only data I/O, synchronization, and ACL reads.

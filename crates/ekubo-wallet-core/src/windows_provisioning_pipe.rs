@@ -17,7 +17,7 @@ fn name(profile: uuid::Uuid) -> Result<String> {
 #[path = "windows_provisioning_pipe_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub use native::{ConnectedInstaller, ProvisioningListener};
+pub use native::{ConnectedInstaller, ProvisioningListener, connect};
 
 #[cfg(test)]
 #[path = "windows_provisioning_pipe_test.rs"]

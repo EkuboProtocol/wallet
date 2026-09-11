@@ -266,8 +266,16 @@ Windows `--provision-owner-sid` host now accepts a separate administrator-only
 provisioning pipe. It reserves a successor instance before releasing the accepted
 instance, reads a fixed nonsecret preface, and authenticates the kernel client
 token before processing custody data. The wire format, limits, deadline policy
-and staging reply are shared core code. The Windows installer client remains
-unfinished.
+and staging reply are shared core code. The Windows installer client now reads
+protected pending metadata through a distinct `PendingInstallerIdentity` after
+checking its actual administrator token. It validates the connected pipe's owner
+and ACL before writing a preface or custody bytes, using identification-only
+SQOS. Busy-instance retries occur before any writes; failed transfers never
+reconnect or replay. Its successful result retains the source database fence,
+and caller cancellation wakes native I/O while the worker retains that fence
+until exit. The caller must also retain the source lifecycle lock. The staging
+reply still grants no activation or legacy-key deletion authority. The elevated
+installer entry point and durable commit/recovery coordination remain unfinished.
 
 Native Windows installer checks now distinguish privileged installation from an
 ordinary administrator-account desktop process. They require enabled Builtin

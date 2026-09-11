@@ -64,6 +64,16 @@ pub(crate) fn pending_service_identity(owner: &str) -> Result<InstalledServiceId
     Ok(identity)
 }
 
+/// The caller already has installer authority. No elevation or fallback to an
+/// active profile occurs, and the configured service SID/name is checked by the
+/// same native registry reader as service bootstrap.
+pub fn pending_installer_identity(owner: &str) -> Result<super::PendingInstallerIdentity> {
+    crate::windows_service_identity::verify_installer_process()?;
+    Ok(super::PendingInstallerIdentity(
+        pending_configuration_under(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?)?,
+    ))
+}
+
 fn pending_configuration_under(
     root: HKEY,
     owner: &str,
