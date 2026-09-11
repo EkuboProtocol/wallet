@@ -4870,3 +4870,81 @@ fn asynchronous_policy_loading_preserves_a_newer_draft(cx: &mut gpui::TestAppCon
     });
     release(cx, &view);
 }
+
+fn settle_owner_decisions(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| {
+            !wallet.policy_installing
+                && !wallet.network_proposal_busy
+                && wallet.activity_busy.is_empty()
+        }) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("owner decision did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_discard_does_not_reopen_a_record_after_navigation(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    let request_id = uuid::Uuid::new_v4();
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_route(Route::Activity);
+        wallet.discard_unsent_transaction(request_id, cx);
+        assert!(wallet.activity_busy.contains(&request_id));
+        wallet.set_route(Route::Accounts);
+    });
+    settle_owner_decisions(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.route, Route::Accounts);
+        assert!(wallet.selected_record.is_none());
+        // A nonexistent synthetic request fails at core. The result belongs
+        // to its row, even though the owner has moved to a different page.
+        assert!(wallet.activity_feedback[&request_id].error);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_policy_rejection_does_not_replace_a_newer_selection(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            let proposal = PolicyProposal {
+                wallet_instance_id: uuid::Uuid::new_v4(),
+                wallet_id: "primary".into(),
+                wallet_address: alloy::primitives::Address::from([1; 20]),
+                source_revision: 1,
+                policy: WalletPolicy::deny_all(),
+                rationale: "synthetic stale proposal".into(),
+                created_at: chrono::Utc::now(),
+            };
+            wallet.set_route(Route::Policies);
+            wallet.reject_policy_proposal(&proposal, cx);
+            wallet.release_window_state(cx);
+            assert!(
+                wallet.policy_installing,
+                "closing inputs must not enable a second mutation"
+            );
+            wallet.attach_window(window, cx);
+            wallet.open_policy_editor("savings", window, cx);
+        });
+    })
+    .unwrap();
+    settle_owner_decisions(&view, cx);
+    settle_policy_loading(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(
+            wallet.policy_action_error.is_none(),
+            "the old rejection must not label the new editor"
+        );
+        assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "savings");
+    });
+    release(cx, &view);
+}

@@ -7366,9 +7366,7 @@ impl WalletWindow {
         self.policy_json_input = None;
         self.policy_loading = None;
         self.policy_editor = None;
-        self.policy_installing = false;
         self.token_proposal_busy = false;
-        self.network_proposal_busy = false;
         cx.notify();
     }
 
@@ -9359,8 +9357,40 @@ impl WalletWindow {
     }
 
     fn reject_policy_proposal(&mut self, proposal: &PolicyProposal, cx: &mut Context<Self>) {
+        if self.policy_installing {
+            return;
+        }
         self.policy_loading = None;
-        self.policy_action_error = match self.owner.reject_policy_proposal(proposal) {
+        self.policy_installing = true;
+        let generation = self.policy_load_generation;
+        let proposal = proposal.clone();
+        let task_proposal = proposal.clone();
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.reject_policy_proposal(&task_proposal).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.policy_installing = false;
+                view.reload_desktop_snapshot(cx);
+                if view.policy_load_generation == generation {
+                    view.finish_policy_rejection(&proposal, result, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_policy_rejection(
+        &mut self,
+        proposal: &PolicyProposal,
+        result: Result<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.policy_action_error = match result {
             Ok(true) => {
                 if self
                     .policy_editor
@@ -9368,15 +9398,10 @@ impl WalletWindow {
                     .and_then(|editor| editor.proposal.as_ref())
                     == Some(proposal)
                 {
-                    self.policy_loading = None;
                     self.policy_editor = None;
                     self.policy_proposal_open = false;
                     self.policy_review_open = false;
                 }
-                // The card is gone by the time this is read, so the note has
-                // to carry the whole outcome: which way it was decided, and
-                // that deciding it that way left the policy alone. "It's gone"
-                // is otherwise the only thing the screen has said.
                 self.set_policy_status("Proposal rejected. The active policy is unchanged.", cx);
                 None
             }
@@ -9385,7 +9410,6 @@ impl WalletWindow {
             }
             Err(error) => Some(format!("Could not reject proposal: {error:#}").into()),
         };
-        cx.notify();
     }
 
     /// A note that a policy decision was carried out, which then leaves.
@@ -10659,11 +10683,33 @@ impl WalletWindow {
     }
 
     fn reject_network_proposal(&mut self, proposal: &NetworkConfig, cx: &mut Context<Self>) {
-        self.network_proposal_error = match self.owner.reject_network_proposal(proposal) {
-            Ok(true) => None,
-            Ok(false) => Some("The network proposal changed. Review the current profile.".into()),
-            Err(error) => Some(format!("Could not reject network proposal: {error:#}").into()),
-        };
+        if self.network_proposal_busy {
+            return;
+        }
+        self.network_proposal_busy = true;
+        let proposal = proposal.clone();
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.reject_network_proposal(&proposal).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.network_proposal_busy = false;
+                view.network_proposal_error = match result {
+                    Ok(true) => None,
+                    Ok(false) => {
+                        Some("The network proposal changed. Review the current profile.".into())
+                    }
+                    Err(error) => {
+                        Some(format!("Could not reject network proposal: {error:#}").into())
+                    }
+                };
+                view.reload_desktop_snapshot(cx);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -10890,14 +10936,33 @@ impl WalletWindow {
     }
 
     fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let feedback = match self.owner.discard_unsent_transaction(request_id) {
-            Ok(_) => ActivityFeedback::note("Discarded signed bytes that were never submitted."),
-            Err(error) => {
-                ActivityFeedback::failure(format!("Could not discard transaction: {error:#}"))
-            }
-        };
-        self.set_activity_feedback(request_id, feedback, cx);
+        if !self.activity_busy.insert(request_id) {
+            return;
+        }
         self.selected_record = Some(request_id);
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.discard_unsent_transaction(request_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.activity_busy.remove(&request_id);
+                let updated = result.as_ref().ok().cloned();
+                let feedback = match result {
+                    Ok(_) => {
+                        ActivityFeedback::note("Discarded signed bytes that were never submitted.")
+                    }
+                    Err(error) => ActivityFeedback::failure(format!(
+                        "Could not discard transaction: {error:#}"
+                    )),
+                };
+                view.set_activity_feedback(request_id, feedback, cx);
+                view.synchronize_transaction_activity(request_id, updated, cx);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
