@@ -34,7 +34,7 @@ enum Backend {
         response: oneshot::Sender<ProposalCommand>,
     },
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    Service,
+    Service(tokio_util::sync::CancellationToken),
 }
 
 impl DesktopDappPrompt {
@@ -62,8 +62,8 @@ impl DesktopDappPrompt {
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[must_use]
-    pub fn service(review: DappReview) -> Self {
-        Self::new(review, Backend::Service)
+    pub fn service(review: DappReview, active: tokio_util::sync::CancellationToken) -> Self {
+        Self::new(review, Backend::Service(active))
     }
 
     fn new(review: DappReview, backend: Backend) -> Self {
@@ -90,22 +90,24 @@ impl DappReviewResponse {
     pub fn is_closed(&self) -> bool {
         match &self.backend {
             Backend::Local { response, .. } => response.is_closed(),
-            // The service revalidates liveness and exact document identity at
-            // decision time. Session events must also retire expired UI reviews.
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Backend::Service => false,
+            Backend::Service(active) => active.is_cancelled(),
         }
     }
 
     /// Consume the handle exactly once. A transport failure is surfaced without
     /// retrying the decision; only the service can authorize its stored proposal.
     pub async fn respond(self, owner: &DesktopOwner, decision: DappDecision) -> Result<()> {
+        ensure!(
+            !self.is_closed(),
+            "The connection proposal is no longer active."
+        );
         match (self.backend, owner) {
             (Backend::Local { response }, DesktopOwner::Local(owner)) => {
                 respond_local(owner, *self.review, response, decision).await
             }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            (Backend::Service, DesktopOwner::Service(owner)) => {
+            (Backend::Service(_active), DesktopOwner::Service(owner)) => {
                 crate::desktop_owner::service_review::with_connection(owner, async |owner| {
                     match decision {
                         DappDecision::Approve { index } => {

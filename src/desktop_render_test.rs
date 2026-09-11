@@ -5309,3 +5309,78 @@ fn asynchronous_dapp_disconnect_removes_only_its_session_and_preserves_read_fail
     });
     release(cx, &view);
 }
+
+fn dapp_prompt_for_retirement() -> (
+    DesktopDappPrompt,
+    oneshot::Receiver<crate::walletconnect::ProposalCommand>,
+) {
+    let document = ReviewDocument::from_request(
+        ApprovalRequest::new(ApprovalKind::PolicyException, "Dapp", "Select an account"),
+        vec![],
+    );
+    let (response, receiver) = oneshot::channel();
+    let prompt = crate::walletconnect::ProposalPrompt {
+        session_id: uuid::Uuid::new_v4(),
+        unselected_document: document.clone(),
+        choices: vec![crate::walletconnect::ProposalChoice {
+            account: WalletMetadata {
+                id: "primary".into(),
+                instance_id: uuid::Uuid::new_v4(),
+                address: alloy::primitives::Address::from([1; 20]),
+                created_at: chrono::Utc::now(),
+                source: crate::config::WalletSource::Created,
+                exported_at: None,
+            },
+            document,
+            scope: walletconnect_session::ApprovedScope {
+                address: alloy::primitives::Address::from([1; 20]).to_checksum(None),
+                chains: vec!["eip155:1".into()],
+                methods: vec!["eth_accounts".into()],
+                grants: vec![],
+                events: vec![],
+            },
+        }],
+        response,
+    };
+    (DesktopDappPrompt::local(prompt), receiver)
+}
+
+#[gpui::test]
+fn expired_dapp_reviews_retire_without_reopening_the_wallet_and_advance_the_queue(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let (first, first_response) = dapp_prompt_for_retirement();
+    let (second, second_response) = dapp_prompt_for_retirement();
+    let second_identity = second.unselected_document.identity.clone();
+    let (third, third_response) = dapp_prompt_for_retirement();
+    cx.update_entity(&view, |wallet, cx| {
+        assert!(wallet.receive_dapp_proposal_update(
+            DappProposalUpdate::Changed(vec![first, second, third]),
+            cx
+        ));
+        assert!(wallet.active_review.is_some());
+        assert_eq!(wallet.queued_reviews.pending.len(), 2);
+    });
+    drop(first_response);
+    drop(third_response);
+    cx.update_entity(&view, |wallet, cx| {
+        assert!(!wallet.receive_dapp_proposal_update(DappProposalUpdate::Changed(vec![]), cx));
+        let active = wallet.active_review.as_ref().unwrap();
+        assert_eq!(active.state.document().identity, second_identity);
+        assert!(!active.selection_is_complete());
+        assert!(wallet.queued_reviews.pending.is_empty());
+    });
+    drop(second_response);
+    cx.update_entity(&view, |wallet, cx| {
+        assert!(!wallet.receive_dapp_proposal_update(
+            DappProposalUpdate::Failed("Review feed disconnected".into()),
+            cx
+        ));
+        assert!(wallet.active_review.is_none());
+        assert!(wallet.walletconnect_reviews_error.is_some());
+    });
+    assert!(measure(cx, window, &view, &["walletconnect-reviews-error"])[0].is_some());
+    release(cx, &view);
+}

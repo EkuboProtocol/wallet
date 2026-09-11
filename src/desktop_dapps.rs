@@ -3,7 +3,10 @@
 
 use crate::{
     authority::OwnerApi,
-    walletconnect::{ProposalPresenter, SessionSummary, WalletConnectManager, run_session},
+    desktop_dapp_review::DesktopDappPrompt,
+    walletconnect::{
+        ProposalPresenter, ProposalPrompt, SessionSummary, WalletConnectManager, run_session,
+    },
 };
 use anyhow::{Context as _, Result, ensure};
 use std::sync::{
@@ -12,6 +15,11 @@ use std::sync::{
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+pub enum DappProposalUpdate {
+    Changed(Vec<DesktopDappPrompt>),
+    Failed(String),
+}
 
 #[derive(Clone)]
 pub struct DesktopDapps {
@@ -91,6 +99,33 @@ impl DesktopDapps {
             }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Backend::Service(owner) => owner.close().await,
+        }
+    }
+
+    /// One application-lifetime feed. The service path never consumes a local
+    /// proposal channel or receives a native authorization capability.
+    pub async fn run_proposals(
+        &self,
+        local: tokio::sync::mpsc::UnboundedReceiver<ProposalPrompt>,
+        updates: tokio::sync::mpsc::Sender<DappProposalUpdate>,
+    ) {
+        let result = match &self.backend {
+            Backend::Local { owner, .. } => {
+                local_proposals(local, owner.event_bus(), &updates).await
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Backend::Service(owner) => {
+                drop(local);
+                service_dapp_proposals::run(owner, &updates).await
+            }
+        };
+        if let Err(error) = result {
+            let update = if self.closed.load(Ordering::SeqCst) {
+                DappProposalUpdate::Changed(Vec::new())
+            } else {
+                DappProposalUpdate::Failed(format!("WalletConnect reviews unavailable: {error:#}"))
+            };
+            let _ = updates.send(update).await;
         }
     }
 
@@ -216,6 +251,39 @@ impl StartedDappSession {
         }
     }
 }
+
+async fn local_proposals(
+    mut incoming: tokio::sync::mpsc::UnboundedReceiver<ProposalPrompt>,
+    events: crate::events::EventBus,
+    updates: &tokio::sync::mpsc::Sender<DappProposalUpdate>,
+) -> Result<()> {
+    let mut events = events.subscribe();
+    loop {
+        let prompts = tokio::select! {
+            prompt = incoming.recv() => {
+                let Some(prompt) = prompt else { return Ok(()); };
+                vec![DesktopDappPrompt::local(prompt)]
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(event) if matches!(event.kind, crate::events::DomainEventKind::WalletConnectChanged { .. }) => {},
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    _ => continue,
+                }
+                Vec::new()
+            }
+        };
+        updates
+            .send(DappProposalUpdate::Changed(prompts))
+            .await
+            .map_err(|_| anyhow::anyhow!("WalletConnect review UI is unavailable"))?;
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "service_dapp_proposals.rs"]
+mod service_dapp_proposals;
 
 #[cfg(test)]
 #[path = "desktop_dapps_test.rs"]

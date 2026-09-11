@@ -12,7 +12,7 @@ use ekubo_wallet_core::{
     approval::ReviewDocument, config::WalletMetadata, human_presence::DappAuthorization,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeSet, VecDeque},
     sync::{Arc, Mutex, MutexGuard},
 };
 use uuid::Uuid;
@@ -21,7 +21,7 @@ const MAX_REVIEWS: usize = 16;
 
 #[derive(Default)]
 struct State {
-    pending: BTreeMap<Uuid, ProposalPrompt>,
+    pending: VecDeque<ProposalPrompt>,
     authenticating: BTreeSet<Uuid>,
     closed: bool,
 }
@@ -90,9 +90,7 @@ impl DappReviews {
     pub(crate) fn insert(&self, prompt: ProposalPrompt) -> Result<()> {
         let mut state = self.state()?;
         ensure!(!state.closed, "dapp review broker is closed");
-        state
-            .pending
-            .retain(|_, prompt| !prompt.response.is_closed());
+        state.pending.retain(|prompt| !prompt.response.is_closed());
         ensure!(
             !prompt.response.is_closed(),
             "dapp proposal is no longer active"
@@ -102,7 +100,10 @@ impl DappReviews {
             "dapp proposal has no account choices"
         );
         ensure!(
-            !state.pending.contains_key(&prompt.session_id)
+            !state
+                .pending
+                .iter()
+                .any(|pending| pending.session_id == prompt.session_id)
                 && !state.authenticating.contains(&prompt.session_id),
             "dapp session already has an active review"
         );
@@ -110,18 +111,16 @@ impl DappReviews {
             state.pending.len() + state.authenticating.len() < MAX_REVIEWS,
             "too many dapp reviews"
         );
-        state.pending.insert(prompt.session_id, prompt);
+        state.pending.push_back(prompt);
         Ok(())
     }
 
     pub fn pending(&self) -> Result<Vec<DappReview>> {
         let mut state = self.state()?;
-        state
-            .pending
-            .retain(|_, prompt| !prompt.response.is_closed());
+        state.pending.retain(|prompt| !prompt.response.is_closed());
         Ok(state
             .pending
-            .values()
+            .iter()
             .map(|prompt| DappReview {
                 session_id: prompt.session_id,
                 unselected_document: prompt.unselected_document.clone(),
@@ -145,10 +144,12 @@ impl DappReviews {
     ) -> Result<(ProposalPrompt, Reservation)> {
         let mut state = self.state()?;
         ensure!(!state.closed, "dapp review broker is closed");
-        let prompt = state
+        let pending_index = state
             .pending
-            .get(&session_id)
+            .iter()
+            .position(|prompt| prompt.session_id == session_id)
             .context("dapp proposal is no longer active")?;
+        let prompt = &state.pending[pending_index];
         ensure!(
             !prompt.response.is_closed(),
             "dapp proposal is no longer active"
@@ -168,7 +169,7 @@ impl DappReviews {
         );
         let prompt = state
             .pending
-            .remove(&session_id)
+            .remove(pending_index)
             .expect("checked under the same lock");
         state.authenticating.insert(session_id);
         Ok((

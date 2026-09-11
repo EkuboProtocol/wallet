@@ -10,7 +10,7 @@ use crate::{
     automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
     desktop_dapp_review::{DappDecision, DappReviewResponse, DesktopDappPrompt},
-    desktop_dapps::{DesktopDapps, StartedDappSession},
+    desktop_dapps::{DappProposalUpdate, DesktopDapps, StartedDappSession},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
@@ -2967,6 +2967,7 @@ pub struct WalletWindow {
     walletconnect: DesktopDapps,
     walletconnect_sessions: Vec<SessionSummary>,
     walletconnect_sessions_error: Option<SharedString>,
+    walletconnect_reviews_error: Option<SharedString>,
     walletconnect_sessions_generation: u64,
     /// The pairing started by the last press of Connect, until it produces a
     /// proposal, settles, or ends.
@@ -7026,6 +7027,7 @@ impl WalletWindow {
             walletconnect,
             walletconnect_sessions: Vec::new(),
             walletconnect_sessions_error: None,
+            walletconnect_reviews_error: None,
             walletconnect_sessions_generation: 0,
             walletconnect_connecting: None,
             walletconnect_starting: None,
@@ -8933,6 +8935,51 @@ impl WalletWindow {
         })
         .detach();
         cx.notify();
+    }
+
+    fn retire_closed_walletconnect_reviews(&mut self, cx: &mut Context<Self>) {
+        self.queued_reviews.pending.retain(|queued| match queued {
+            QueuedReview::WalletConnect(prompt) => !prompt.response.is_closed(),
+            QueuedReview::Transaction(_) => true,
+        });
+        let ended = self.active_review.as_ref().is_some_and(|active| {
+            matches!(active.completion.as_ref(), Some(ActiveReviewCompletion::WalletConnect { response, .. }) if response.is_closed())
+        });
+        if ended {
+            self.active_review = None;
+            self.activate_next_waiting_surface(cx);
+        }
+    }
+
+    fn receive_dapp_proposal_update(
+        &mut self,
+        update: DappProposalUpdate,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.retire_closed_walletconnect_reviews(cx);
+        let prompts = match update {
+            DappProposalUpdate::Changed(prompts) => {
+                self.walletconnect_reviews_error = None;
+                prompts
+            }
+            DappProposalUpdate::Failed(error) => {
+                self.walletconnect_reviews_error = Some(error.into());
+                cx.notify();
+                return false;
+            }
+        };
+        let mut arrived = false;
+        for prompt in prompts {
+            if !prompt.response.is_closed() {
+                self.receive_walletconnect_prompt(prompt);
+                arrived = true;
+            }
+        }
+        if arrived {
+            self.set_route(self.active_review_route());
+        }
+        cx.notify();
+        arrived
     }
 
     fn receive_walletconnect_prompt(&mut self, prompt: DesktopDappPrompt) {
@@ -15349,6 +15396,17 @@ impl WalletWindow {
             // wallet that looked like a caption.
             panel = panel.child(selectable_error_alert("walletconnect-account-error", error));
         }
+        if let Some(error) = &self.walletconnect_reviews_error {
+            panel = panel.child(
+                div()
+                    .w_full()
+                    .debug_selector(|| "walletconnect-reviews-error".to_owned())
+                    .child(selectable_error_alert(
+                        "walletconnect-reviews-error",
+                        error.clone(),
+                    )),
+            );
+        }
         if let Some(error) = &self.walletconnect_sessions_error {
             panel = panel.child(selectable_error_alert(
                 "walletconnect-sessions-error",
@@ -21184,7 +21242,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
     let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
-    let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
+    let (walletconnect_presenter, walletconnect_prompts) = ProposalPresenter::channel();
     let walletconnect = DesktopDapps::local(owner.clone(), walletconnect, walletconnect_presenter);
 
     // Built here rather than by `gpui_tokio::init` so that the runtime outlives
@@ -21459,26 +21517,32 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             .detach();
             let walletconnect_review_view = wallet_view.clone();
             let walletconnect_review_window = window_slot.clone();
+            let proposal_backend = walletconnect.clone();
+            let (proposal_updates, mut incoming_proposal_updates) = tokio::sync::mpsc::channel(32);
+            gpui_tokio::Tokio::spawn(cx, async move {
+                proposal_backend
+                    .run_proposals(walletconnect_prompts, proposal_updates)
+                    .await;
+            })
+            .detach();
             cx.spawn(async move |cx| {
-                while let Some(prompt) = walletconnect_prompts.recv().await {
-                    if prompt.response.is_closed() {
-                        continue;
+                while let Some(update) = incoming_proposal_updates.recv().await {
+                    let arrived = walletconnect_review_view
+                        .update(cx, |view, cx| view.receive_dapp_proposal_update(update, cx));
+                    if arrived {
+                        let _ = cx.update(|cx| {
+                            show_wallet_window(
+                                cx,
+                                &walletconnect_review_view,
+                                &walletconnect_review_window,
+                            )
+                        });
                     }
-                    walletconnect_review_view.update(cx, |view, cx| {
-                        let prompt = DesktopDappPrompt::local(prompt);
-                        view.receive_walletconnect_prompt(prompt);
-                        let route = view.active_review_route();
-                        view.set_route(route);
-                        cx.notify();
-                    });
-                    let _ = cx.update(|cx| {
-                        show_wallet_window(
-                            cx,
-                            &walletconnect_review_view,
-                            &walletconnect_review_window,
-                        )
-                    });
                 }
+                walletconnect_review_view.update(cx, |view, cx| {
+                    view.retire_closed_walletconnect_reviews(cx);
+                    cx.notify();
+                });
             })
             .detach();
             let mut view_events = events.subscribe();

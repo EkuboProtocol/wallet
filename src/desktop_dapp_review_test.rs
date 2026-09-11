@@ -126,11 +126,32 @@ async fn service_review_never_falls_back_to_local_authority() {
     let directory = tempfile::tempdir().unwrap();
     let owner = DesktopOwner::from(OwnerApi::for_test(directory.path()).unwrap());
     let (local, _response) = prompt();
-    let service = DesktopDappPrompt::service(*local.response.review.clone());
+    let service = DesktopDappPrompt::service(
+        *local.response.review.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    );
     let error = service
         .response
         .respond(&owner, DappDecision::Approve { index: Some(0) })
         .await
         .unwrap_err();
     assert!(error.to_string().contains("authority backend changed"));
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[tokio::test]
+async fn expired_service_review_is_refused_before_authority_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = DesktopOwner::from(OwnerApi::for_test(directory.path()).unwrap());
+    let (local, _receiver) = prompt();
+    let active = tokio_util::sync::CancellationToken::new();
+    let service = DesktopDappPrompt::service(*local.response.review.clone(), active.clone());
+    active.cancel();
+    assert!(service.response.is_closed());
+    let error = service
+        .response
+        .respond(&owner, DappDecision::Approve { index: Some(0) })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no longer active"));
 }

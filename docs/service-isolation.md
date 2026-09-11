@@ -24,9 +24,16 @@ approvals deliver native proof directly to the session, while Linux and Windows
 service approvals send only the stored review identity and selected index. The
 service decision uses the same cancellation-bound connection as transaction
 reviews, without reconnecting to a replacement service or replaying intent.
-Closed local proposals are skipped before presentation and when draining queued
-reviews. Service proposal discovery and expiration still need event integration;
-this change does not start consuming service proposals at desktop startup.
+The application now consumes one backend-selected proposal feed. The local feed
+uses the existing presenter and session events; the Linux/Windows service feed
+captures an event cursor before reading authoritative proposals, deduplicates
+identical full reviews, and replaces changed account/document choices. The service
+broker preserves proposal arrival order, matching the local review queue. Missing
+proposals, malformed snapshots, and feed failures invalidate unused decision
+handles. Queued and visible expired reviews retire through the existing serial
+review flow without reopening the wallet solely for a retirement update. These
+liveness handles grant no authority and do not cancel authentication already in
+progress merely because the broker has removed its pending row.
 Pairing registration, session completion, disconnect, session-status reads, and
 Quit now use a `DesktopDapps` facade selected once at startup. Its service backend
 contains only the authenticated client and shared shutdown state. The existing
@@ -38,8 +45,8 @@ session after a newer disconnect or clear a newer pairing's busy state.
 Local shutdown excludes late registrations before draining relay farewells;
 service shutdown closes the owner transport and releases its desktop lease while
 the resident service finishes cancellation. Production still constructs the
-local backend. Remote proposal discovery and expiration, updates, and global
-event/session startup still must move to the client before startup may select
+local backend. Updates and global event/session startup still must move to the
+client before startup may select
 the service for an installed profile. Installed-profile
 startup must make that selection before opening any local authority.
 

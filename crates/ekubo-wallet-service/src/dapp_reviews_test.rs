@@ -305,3 +305,36 @@ async fn broker_shutdown_during_authentication_cannot_deliver_approval() {
         "shutdown must prevent proof delivery to the session"
     );
 }
+
+#[test]
+fn pending_reviews_preserve_arrival_order_instead_of_sorting_session_ids() {
+    let queue = DappReviews::default();
+    let first = Uuid::from_u128(30);
+    let second = Uuid::from_u128(10);
+    let third = Uuid::from_u128(20);
+    let (a, _a_response) = prompt(first, account());
+    let (b, b_response) = prompt(second, account());
+    let (c, _c_response) = prompt(third, account());
+    queue.insert(a).unwrap();
+    queue.insert(b).unwrap();
+    queue.insert(c).unwrap();
+    assert_eq!(
+        queue
+            .pending()
+            .unwrap()
+            .iter()
+            .map(|review| review.session_id)
+            .collect::<Vec<_>>(),
+        vec![first, second, third]
+    );
+    drop(b_response);
+    assert_eq!(
+        queue
+            .pending()
+            .unwrap()
+            .iter()
+            .map(|review| review.session_id)
+            .collect::<Vec<_>>(),
+        vec![first, third]
+    );
+}
