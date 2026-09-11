@@ -24,6 +24,7 @@ pub mod core;
 mod credential_store;
 pub mod custody;
 pub mod custody_envelope;
+pub mod custody_provisioning;
 pub mod custody_relay;
 pub mod default_tokens;
 pub mod desktop_store;

@@ -100,6 +100,17 @@ cannot be swept up in the old desktop's cleanup. Canceled sessions disappear fro
 in-memory list and release registration capacity; an old worker's late failure cannot
 resurrect its row. Existing protocol shutdown still handles dapp farewells.
 
+The shared `custody_provisioning` preparation step now builds the exact credential
+records read by both service stores. It takes already-held keys and the expected
+account inventory, checks complete inventory/exact metadata/unique names and instances,
+and derives each supplied key's address before sealing. It creates a fresh wrapping
+key and enrollment, seals the existing database key and each account key under their
+proper identities, and exposes the desktop relay separately from service-only records.
+Tests unlock the output through the actual shared `ServiceCustody` loader. This step
+reads no live keyring, writes no files, authorizes no migration, and deletes nothing.
+Protected staging, database copy/verification, durable commit, recovery, activation,
+and exact legacy-credential deletion still require installer integration.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

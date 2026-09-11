@@ -2,7 +2,8 @@
 
 These assets are not yet included in release packages or installed by the
 application. Do not start this service against real accounts: key enrollment,
-transactional migration, and desktop remote startup remain unfinished. Storage
+transactional migration, and protected installation remain unfinished. Installed-profile
+desktop remote startup is implemented but has not been verified in a packaged install. Storage
 now requires encrypted credentials and starts locked. The host waits for the
 authenticated client's enrolled ciphertext before constructing authority.
 
