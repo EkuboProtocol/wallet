@@ -10,6 +10,7 @@ use ekubo_wallet_core::{
 use serde::{Deserialize, Serialize};
 
 pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
+pub const CUSTODY_OBJECT_PATH: &str = "/org/ekubo/Wallet/Custody";
 
 #[derive(Serialize, Deserialize)]
 #[serde(

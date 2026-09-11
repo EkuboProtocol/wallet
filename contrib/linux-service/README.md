@@ -3,8 +3,8 @@
 These assets are not yet included in release packages or installed by the
 application. Do not start this service against real accounts: key enrollment,
 transactional migration, and desktop remote startup remain unfinished. Storage
-now requires encrypted credentials and starts locked. The host's bootstrap
-unlock relay is still missing, so authority creation currently fails closed.
+now requires encrypted credentials and starts locked. The host waits for the
+authenticated client's enrolled ciphertext before constructing authority.
 
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is
@@ -28,8 +28,9 @@ kernel credentials. Do not recursively chown or repair an existing unsafe tree.
 The service retains its own no-follow, ownership, mode, and singleton-lock checks.
 
 The template is started as `ekubo-wallet@<uid>.service`. D-Bus name acquisition
-marks readiness only after protected storage and authority initialize. The
-service being up does not start automations: they require a desktop-session
+marks bootstrap availability after protected storage initializes. The
+`org.ekubo.Wallet.Custody1.Unlock` reply succeeds only after authority and its
+owner API are ready. The service being up does not start automations: they require a desktop-session
 lease. Enabling/activation, boot-time runtime-directory creation, installation
 rollback, upgrade coordination, and removal still need installer implementation.
 The install target is intentionally omitted until those steps are implemented.

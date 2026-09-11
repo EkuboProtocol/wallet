@@ -8,6 +8,7 @@
 pub use ekubo_wallet_core::*;
 
 pub use ekubo_wallet_client::framing;
+pub mod custody_bootstrap;
 #[path = "../../../src/dapp_identity.rs"]
 pub mod dapp_identity;
 pub mod dapp_reviews;
@@ -17,6 +18,8 @@ mod desktop_sessions;
 mod gui_review;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+mod linux_custody_rpc;
 #[cfg(target_os = "linux")]
 mod linux_owner_rpc;
 #[path = "../../../src/mcp_transport.rs"]

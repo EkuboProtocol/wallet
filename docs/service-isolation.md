@@ -606,8 +606,8 @@ arbitrary-signing oracle and does not satisfy this objective.
 The at-rest design splits protection across the two OS identities. The shared
 `custody_envelope` primitive now implements symmetric key wrapping: only the
 service creates and unwraps data keys, so public-key distribution is unnecessary.
-The Linux protected-file backend now uses it. The desktop keyring relay and
-Windows file-backend activation are not connected yet.
+The Linux protected-file backend and authenticated client bootstrap now use it.
+Windows file-backend activation and the desktop application cutover remain.
 
 - The service owns a random 256-bit wrapping key in its private directory.
 - The desktop credential store contains only an authenticated envelope of the
@@ -667,13 +667,41 @@ verified identities, protected file operations, and authenticated IPC; the share
 cryptographic module does not establish OS identity. This avoids a separate
 Windows cryptographic format or unlock policy.
 
+`CustodyBootstrap` shares startup coordination across platform hosts. It accepts
+only the fixed wrapped-data-key format, invokes the platform's protected unlock
+operation, and withholds a successful reply until the host publishes authority.
+Pending requests have bounded capacity; cancellation releases that capacity
+without undoing a completed unlock. Host startup failure cannot produce a ready
+reply. Unlock does not create a desktop-session lease or signing authorization.
+
+The Linux host publishes only `/org/ekubo/Wallet/Custody` initially. Its `Unlock`
+method authenticates the live bus sender through core before touching protected
+custody, and accepts no identity, path, expected digest, or approval flag. Only
+after unlock does the host create its MCP listener, authority, and owner API.
+Termination and system-bus loss end the bootstrap wait; bus loss also stops the
+active runtime. D-Bus name acquisition now means bootstrap availability, while
+a successful `Unlock` reply means owner-API readiness.
+
+Linux `OwnerClient::connect` pins the installed service's unique bus name before
+loading the profile's ciphertext from the login credential store. The fixed
+`org.ekubo.wallet.custody-envelope` namespace contains only this opaque blob,
+keyed by the installer-attested profile UUID. Core rejects malformed/raw keys,
+reads a fresh credential entry, and provides no filesystem cache or fallback.
+The client sends the blob to that same pinned service and verifies reply
+provenance; it never reconnects or replays the bootstrap after name replacement.
+The shared envelope reader is also available for the future Windows client.
+
+Bootstrap validation passed the full local gate (1,738 tests, 14 ignored), plus
+the three explicitly enabled private-bus client tests and the isolated keyring
+restart test. Those tests use synthetic enrollment and disposable same-UID
+services; installed cross-UID authentication, provisioning, and migration still
+require their own integration evidence.
+
 Protected wrapping-key provisioning, transactional digest enrollment/rotation,
-the login-keyring ciphertext relay, Windows backend activation, and crash
-recovery/migration remain unimplemented. In particular, the prototype Linux host
-still constructs authority before an unlock relay exists, so it currently fails
-closed at locked custody and cannot serve accounts. These assets remain excluded
-from release installation; desktop custody and UX are unchanged. Do not deploy
-this intermediate backend with real accounts.
+Windows backend/transport activation, and crash recovery/migration remain
+unimplemented. These assets remain excluded from release installation; the
+desktop application still uses local authority, so its custody and UX are
+unchanged. Do not deploy this intermediate backend with real accounts.
 
 ## Latest checkpoint verification
 

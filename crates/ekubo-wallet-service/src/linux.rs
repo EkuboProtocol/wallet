@@ -20,6 +20,26 @@ const MAX_CONNECTIONS: usize = 32;
 pub async fn run(owner_uid: u32) -> Result<()> {
     let data_dir = ekubo_wallet_core::service_storage::initialize(owner_uid)?;
     let runtime = ekubo_wallet_core::service_storage::runtime_directory()?;
+    let (bootstrap, mut startup) = crate::custody_bootstrap::CustodyBootstrap::new();
+    let owner_bus = zbus::connection::Builder::unix_stream(
+        ekubo_wallet_core::service_storage::system_bus_stream().await?,
+    )
+    .name(format!("org.ekubo.Wallet.Owner.u{owner_uid}"))?
+    .serve_at(
+        ekubo_wallet_client::owner_protocol::CUSTODY_OBJECT_PATH,
+        crate::linux_custody_rpc::LinuxCustodyInterface(bootstrap),
+    )?
+    .build()
+    .await?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = startup.wait_for_unlock() => result?,
+        () = owner_bus.closed() => anyhow::bail!("system bus disconnected during custody startup"),
+        _ = terminate.recv() => return Ok(()),
+        signal = tokio::signal::ctrl_c() => return signal.map_err(anyhow::Error::from),
+    }
+    // Neither wallet authority nor an MCP listener exists before core validates
+    // the enrolled ciphertext. The bus name advertises bootstrap availability.
     let listener = bind_listener(&runtime)?;
     let config = ConfigStore::production()?;
     ensure!(
@@ -28,26 +48,24 @@ pub async fn run(owner_uid: u32) -> Result<()> {
     );
     let authority = ApplicationAuthority::open(config)?;
     let service = Arc::new(crate::runtime::ServiceRuntime::new(authority));
-    let owner_bus = zbus::connection::Builder::unix_stream(
-        ekubo_wallet_core::service_storage::system_bus_stream().await?,
-    )
-    .name(format!("org.ekubo.Wallet.Owner.u{owner_uid}"))?
-    .serve_at(
-        crate::owner_rpc::OBJECT_PATH,
-        crate::owner_rpc::LinuxOwnerInterface::new(service.clone()),
-    )?
-    .build()
-    .await?;
+    owner_bus
+        .object_server()
+        .at(
+            crate::owner_rpc::OBJECT_PATH,
+            crate::owner_rpc::LinuxOwnerInterface::new(service.clone()),
+        )
+        .await?;
+    startup.ready();
     let events = service.events();
     let mut supervisor = Box::pin(service.supervise());
     events.publish(DomainEventKind::McpStatusChanged { online: true });
     let active = Arc::new(AtomicUsize::new(0));
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = loop {
         tokio::select! {
             finished = &mut supervisor => break finished,
+            () = owner_bus.closed() => break Err(anyhow::anyhow!("wallet service lost its system bus connection")),
             _ = terminate.recv() => break Ok(()),
             signal = tokio::signal::ctrl_c() => break signal.map_err(anyhow::Error::from),
             accepted = listener.accept() => {

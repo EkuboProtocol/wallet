@@ -24,18 +24,35 @@ impl OwnerConnection<LinuxOwnerTransport> {
             )
             .build()
             .await?;
-            Self::on_bus(
+            let transport = LinuxOwnerTransport::authenticate(
                 bus,
                 &format!("org.ekubo.Wallet.Owner.u{}", identity.owner_uid()),
                 identity.service_uid(),
             )
-            .await
+            .await?;
+            // Read the login-keyring ciphertext only after pinning the service
+            // identity. Never read account/database keys or cache this on disk.
+            let wrapped = tokio::task::spawn_blocking(move || {
+                ekubo_wallet_core::custody_relay::load(identity.profile_id())
+            })
+            .await??;
+            transport.unlock(&wrapped).await?;
+            Ok(Self::from_transport(transport))
         })
         .await
         .context("wallet service connection timed out")?
     }
 
+    #[cfg(test)]
     async fn on_bus(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
+        Ok(Self::from_transport(
+            LinuxOwnerTransport::authenticate(bus, name, expected_uid).await?,
+        ))
+    }
+}
+
+impl LinuxOwnerTransport {
+    async fn authenticate(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
         let registry = DBusProxy::new(&bus).await?;
         let service = registry.get_name_owner(name.try_into()?).await?;
         let actual_uid = registry
@@ -49,7 +66,26 @@ impl OwnerConnection<LinuxOwnerTransport> {
         // name. A restart requires a new explicitly authenticated connection.
         let proxy =
             Proxy::new_owned(bus, service.clone(), OBJECT_PATH, "org.ekubo.Wallet.Owner1").await?;
-        Ok(Self::from_transport(LinuxOwnerTransport { proxy, service }))
+        Ok(Self { proxy, service })
+    }
+
+    async fn unlock(
+        &self,
+        wrapped: &ekubo_wallet_core::custody_envelope::WrappedDataKey,
+    ) -> Result<()> {
+        let proxy = Proxy::new(
+            self.proxy.connection(),
+            self.service.as_str(),
+            crate::owner_protocol::CUSTODY_OBJECT_PATH,
+            "org.ekubo.Wallet.Custody1",
+        )
+        .await?;
+        let reply = proxy.call_method("Unlock", &(wrapped.as_bytes(),)).await?;
+        ensure!(
+            reply.header().sender() == Some(self.service.inner()),
+            "custody reply came from an unexpected service"
+        );
+        Ok(reply.body().deserialize::<()>()?)
     }
 }
 

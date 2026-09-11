@@ -145,6 +145,30 @@ fn exercise_restart(home: &Path) {
     let database = home.join("wallet-data");
     assert!(PolicyStore::production(&database).is_err());
     let daemon = start_keyring(home);
+    let relay_profile = uuid::Uuid::new_v4();
+    let relay = super::entry(crate::custody_relay::SERVICE, &relay_profile.to_string()).unwrap();
+    assert!(crate::custody_relay::load(relay_profile).is_err());
+    // The desktop relay accepts only a wrapped data key, never a legacy raw key.
+    relay.set_secret(&[0x22; 32]).unwrap();
+    assert!(crate::custody_relay::load(relay_profile).is_err());
+    let binding = crate::custody_envelope::CustodyBinding::new(
+        "linux:uid:1000",
+        "linux:uid:2000",
+        relay_profile,
+        uuid::Uuid::new_v4(),
+    )
+    .unwrap();
+    let (_, wrapped) =
+        crate::custody_envelope::WrappingKey::from_material(zeroize::Zeroizing::new([0x33; 32]))
+            .enroll(binding)
+            .unwrap();
+    relay.set_secret(wrapped.as_bytes()).unwrap();
+    assert_eq!(
+        crate::custody_relay::load(relay_profile)
+            .unwrap()
+            .as_bytes(),
+        wrapped.as_bytes()
+    );
     PolicyStore::production(&database)
         .unwrap()
         .assert_schema_current()
@@ -165,6 +189,12 @@ fn exercise_restart(home: &Path) {
         "old Secret Service session unexpectedly survived restart"
     );
     let fresh = super::entry(SERVICE, USER).unwrap();
+    assert_eq!(
+        crate::custody_relay::load(relay_profile)
+            .unwrap()
+            .as_bytes(),
+        wrapped.as_bytes()
+    );
     assert_eq!(fresh.get_secret().unwrap(), SECRET);
     // Exercise both production call sites, not just the entry factory: MCP
     // startup must reopen its existing database, and custody must still read

@@ -192,6 +192,16 @@ jobs:
         # The complete workspace checks below remain required.
         run: cargo test --locked -p ekubo-wallet-core --all-features --lib --jobs ${{ matrix.test_jobs }} windows_service_
 
+      - name: Test isolated owner transport and custody relay
+        # Private buses exercise authentication, ciphertext relay readiness,
+        # name replacement, and disconnects without desktop credentials.
+        # Keep these ignored tests explicitly enabled in the Linux gate.
+        if: runner.os == 'Linux'
+        env:
+          RUST_MIN_STACK: 67108864
+          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
+        run: cargo test --locked --workspace --all-features --lib owner_client::tests -- --ignored
+
       - name: Compile application and integration tests
         if: runner.os != 'Linux'
         env:

@@ -45,6 +45,115 @@ impl Endpoint {
     }
 }
 
+struct CustodyEndpoint {
+    expected: Vec<u8>,
+    entered: tokio::sync::watch::Sender<usize>,
+    ready: tokio::sync::watch::Receiver<bool>,
+}
+
+#[zbus::interface(name = "org.ekubo.Wallet.Custody1")]
+impl CustodyEndpoint {
+    async fn unlock(&self, ciphertext: &[u8]) -> zbus::fdo::Result<()> {
+        assert_eq!(ciphertext, self.expected);
+        self.entered.send_modify(|count| *count += 1);
+        self.ready
+            .clone()
+            .wait_for(|ready| *ready)
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("startup failed".into()))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn custody_relay_waits_for_readiness_and_stays_on_the_authenticated_service() {
+    use ekubo_wallet_core::custody_envelope::{CustodyBinding, WrappingKey};
+    use uuid::Uuid;
+
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet.Owner.CustodyTest";
+    let binding =
+        CustodyBinding::new("owner", "service", Uuid::from_u128(1), Uuid::from_u128(2)).unwrap();
+    let (_, wrapped) = WrappingKey::from_material(zeroize::Zeroizing::new([0x11; 32]))
+        .enroll(binding)
+        .unwrap();
+    let (entered, mut received) = tokio::sync::watch::channel(0);
+    let (ready, waiting) = tokio::sync::watch::channel(false);
+    let original = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            crate::owner_protocol::CUSTODY_OBJECT_PATH,
+            CustodyEndpoint {
+                expected: wrapped.as_bytes().to_vec(),
+                entered,
+                ready: waiting,
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(
+        LinuxOwnerTransport::authenticate(desktop.clone(), name, uid.wrapping_add(1))
+            .await
+            .is_err()
+    );
+    assert_eq!(*received.borrow(), 0);
+    let transport = LinuxOwnerTransport::authenticate(desktop, name, uid)
+        .await
+        .unwrap();
+    original.release_name(name).await.unwrap();
+    let (replaced, replacement_calls) = tokio::sync::watch::channel(0);
+    let replacement = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            crate::owner_protocol::CUSTODY_OBJECT_PATH,
+            CustodyEndpoint {
+                expected: wrapped.as_bytes().to_vec(),
+                entered: replaced,
+                ready: ready.subscribe(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let mut relay = Box::pin(transport.unlock(&wrapped));
+    tokio::select! {
+        result = relay.as_mut() => panic!("reply preceded readiness: {result:?}"),
+        result = received.wait_for(|count| *count == 1) => { result.unwrap(); },
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("relay never reached pinned service"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), relay.as_mut())
+            .await
+            .is_err()
+    );
+    ready.send_replace(true);
+    relay.await.unwrap();
+    assert_eq!(*replacement_calls.borrow(), 0);
+    original.close().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), transport.unlock(&wrapped))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(*replacement_calls.borrow(), 0);
+    replacement.close().await.unwrap();
+}
+
 /// No real service, keys, or system-bus configuration are involved. The UID
 /// mismatch and name replacement exercise actual private-bus peer lookups.
 #[tokio::test]
