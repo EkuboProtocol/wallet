@@ -127,5 +127,9 @@ pub struct EventBatch {
     /// Capture fresh authoritative state before continuing from this cursor.
     /// Initial connection, service restart, and lost history all require this.
     pub refresh_required: bool,
+    /// Latest listener status on an initial/reset batch, even if its event expired.
+    /// Informational only; never grants agent access or signing authority.
+    #[serde(default)]
+    pub mcp_online: Option<bool>,
     pub events: Vec<DomainEvent>,
 }

@@ -139,3 +139,20 @@ async fn byte_budget_evicts_history_before_the_event_count_limit() {
     assert!(journal.bytes <= MAX_JOURNAL_BYTES);
     assert!(journal.entries.len() < 4);
 }
+
+#[tokio::test]
+async fn reset_retains_latest_mcp_status_after_the_status_event_has_expired() {
+    let bus = EventBus::default();
+    assert_eq!(bus.wait_since(None).await.unwrap().mcp_online, None);
+    bus.publish(DomainEventKind::McpStatusChanged { online: true });
+    let old = bus.wait_since(None).await.unwrap().cursor;
+    for _ in 0..=MAX_EVENTS {
+        bus.publish(DomainEventKind::ConfigurationChanged);
+    }
+    let reset = bus.wait_since(Some(old)).await.unwrap();
+    assert!(reset.refresh_required);
+    assert!(reset.events.is_empty());
+    assert_eq!(reset.mcp_online, Some(true));
+    bus.publish(DomainEventKind::McpStatusChanged { online: false });
+    assert_eq!(bus.wait_since(None).await.unwrap().mcp_online, Some(false));
+}

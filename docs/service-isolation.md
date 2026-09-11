@@ -59,7 +59,18 @@ Missing acknowledgements fail startup after ten seconds and close the connection
 readiness failures wait for closure to finish and never reconnect or fall back to
 local authority. This acknowledgement grants no owner authorization. The Linux
 Hold signature and its service/client implementations must be installed together.
-Startup selection and global event integration remain unfinished.
+Startup selection remains unfinished.
+
+The global desktop and notification consumers now subscribe through `DesktopEvents`,
+which selects the local broadcast stream or authenticated service long polls. Remote
+I/O stays on Tokio; a single queued batch bounds the relay, and dropping a subscription
+aborts its reader. Initial/gap batches trigger fresh snapshot, token, portfolio and
+selected-transaction reads, without manufacturing historical notifications. Actual
+events retain their service timestamps and ordering. Reset batches carry the latest
+informational MCP listener status even after the corresponding event has expired from
+the journal. Transport failure ends the feed without reconnecting or replaying calls.
+Production still constructs the local owner; installed-profile startup selection and
+full packaged service behavior remain to be completed.
 
 ## Required outcome
 

@@ -21545,7 +21545,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 });
             })
             .detach();
-            let mut view_events = events.subscribe();
+            let mut view_events = crate::desktop_events::DesktopEvents::subscribe(
+                &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+                &gpui_tokio::Tokio::handle(cx),
+            );
             let event_view = wallet_view.clone();
             let event_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
             let event_tray = tray.clone();
@@ -21555,7 +21558,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 let mut mcp_online = false;
                 loop {
                     let changed = match view_events.recv().await {
-                        Ok(event) => {
+                        Ok(crate::desktop_events::DesktopEvent::Event(event)) => {
                             let transaction_request = match &event.kind {
                                 crate::events::DomainEventKind::Transaction {
                                     request_id, ..
@@ -21610,8 +21613,29 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             true
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                        Ok(crate::desktop_events::DesktopEvent::Refresh { mcp_online: status }) => {
+                            if let Some(online) = status {
+                                mcp_online = online;
+                            }
+                            event_view.update(cx, |view, cx| {
+                                view.invalidate_portfolio();
+                                view.reload_tokens(cx);
+                                view.reload_desktop_snapshot(cx);
+                                view.activity_inspections.clear();
+                                if let Some(request_id) = view.selected_record {
+                                    view.load_transaction_inspection(request_id, cx);
+                                }
+                                cx.notify();
+                            });
+                            true
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "desktop event stream stopped");
+                            if let Some(tray) = event_tray.borrow_mut().as_mut() {
+                                tray.set_mcp_online(false);
+                            }
+                            false
+                        }
                     };
                     if changed {
                         let owner = event_owner.clone();
@@ -21696,12 +21720,15 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let (notification_clicks, mut clicked_notifications) =
                 tokio::sync::mpsc::unbounded_channel();
             let notification_service = PlatformNotificationService::new(notification_clicks);
-            let mut domain_events = events.subscribe();
+            let mut domain_events = crate::desktop_events::DesktopEvents::subscribe(
+                &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+                &gpui_tokio::Tokio::handle(cx),
+            );
             let notification_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
             gpui_tokio::Tokio::spawn(cx, async move {
                 loop {
                     match domain_events.recv().await {
-                        Ok(event) => {
+                        Ok(crate::desktop_events::DesktopEvent::Event(event)) => {
                             let described = async {
                                 let context =
                                     notification_context(&notification_owner, &event).await?;
@@ -21724,8 +21751,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 notification_service.show(notification);
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Ok(crate::desktop_events::DesktopEvent::Refresh { .. }) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "notification event stream stopped");
+                            break;
+                        }
                     }
                 }
             })

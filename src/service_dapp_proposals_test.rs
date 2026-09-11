@@ -127,6 +127,7 @@ async fn event_gaps_refresh_authoritative_state_and_transport_failure_retires_th
     };
     events
         .send(Ok(EventBatch {
+            mcp_online: None,
             cursor: first_cursor,
             refresh_required: true,
             events: vec![],
@@ -147,6 +148,7 @@ async fn event_gaps_refresh_authoritative_state_and_transport_failure_retires_th
     };
     events
         .send(Ok(EventBatch {
+            mcp_online: None,
             cursor: later,
             refresh_required: true,
             events: vec![],

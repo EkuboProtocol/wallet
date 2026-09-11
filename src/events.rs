@@ -22,10 +22,14 @@ struct Journal {
     cursor: EventCursor,
     entries: VecDeque<(u64, DomainEvent, usize)>,
     bytes: usize,
+    mcp_online: Option<bool>,
 }
 
 impl Journal {
     fn publish(&mut self, event: &DomainEvent) {
+        if let DomainEventKind::McpStatusChanged { online } = &event.kind {
+            self.mcp_online = Some(*online);
+        }
         if self.cursor.sequence == u64::MAX {
             self.cursor = EventCursor {
                 epoch: Uuid::new_v4(),
@@ -65,6 +69,7 @@ impl Journal {
             return EventBatch {
                 cursor: self.cursor,
                 refresh_required: true,
+                mcp_online: self.mcp_online,
                 events: Vec::new(),
             };
         };
@@ -82,6 +87,7 @@ impl Journal {
         EventBatch {
             cursor,
             refresh_required: false,
+            mcp_online: None,
             events,
         }
     }
@@ -113,6 +119,7 @@ impl Default for EventBus {
                     cursor,
                     entries: VecDeque::new(),
                     bytes: 0,
+                    mcp_online: None,
                 }),
                 changed,
                 sender,
