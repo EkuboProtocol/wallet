@@ -88,7 +88,7 @@ jobs:
       - name: Install latest stable Rust
         run: rustup update stable --no-self-update
       - name: Execute native Windows service tests
-        run: python contrib/check-windows-service.py --output-root "$env:RUNNER_TEMP"
+        run: python contrib/check-windows-service.py --output-root "$env:RUNNER_TEMP" --scm-fixture
 
   execution-plan:
     if: ${{ !inputs.windows_primitives_only }}

@@ -1,0 +1,98 @@
+# Synthetic cross-account fixture for disposable GitHub Windows runners only.
+param([Parameter(Mandatory = $true)][string]$FixtureBinary)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') {
+    throw 'This fixture requires a disposable GitHub Windows runner.'
+}
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'The fixture requires an elevated runner.'
+}
+if (-not [Environment]::Is64BitProcess) { throw 'The fixture requires the 64-bit registry view.' }
+$registryPath = 'HKLM:\SOFTWARE\EkuboWallet'
+if (Test-Path $registryPath) { throw 'Refusing to touch an existing Ekubo installation.' }
+$profile = [Guid]::NewGuid()
+$serviceName = 'EkuboWallet-' + $profile.ToString('N')
+$owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$directory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) ('EkuboScmFixture-' + $profile.ToString('N'))
+if (Test-Path $directory) { throw 'Fixture directory already exists.' }
+$binary = Join-Path $directory 'ekubo-wallet-scm-fixture.exe'
+$serviceCreated = $false
+$registryCreated = $false
+$directoryCreated = $false
+$serviceProcess = $null
+
+function Invoke-Sc([string[]]$Arguments) {
+    & sc.exe @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe failed: $($Arguments[0]) ($LASTEXITCODE)" }
+}
+
+try {
+    New-Item -ItemType Directory -Path $directory | Out-Null
+    $directoryCreated = $true
+    Copy-Item -LiteralPath (Resolve-Path -LiteralPath $FixtureBinary).Path -Destination $binary
+    $command = '"' + $binary + '" service ' + $owner
+    Invoke-Sc -Arguments @('create', $serviceName, 'binPath=', $command, 'start=', 'demand', 'obj=', ('NT SERVICE\' + $serviceName))
+    $serviceCreated = $true
+    $serviceSid = [Security.Principal.NTAccount]::new('NT SERVICE', $serviceName).Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($serviceSid -eq $owner) { throw 'Service and installer identities must differ.' }
+
+    # Only administrators/System may change the fixture executable. The virtual
+    # account receives read/execute access, not the runner's user authority.
+    $fileSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $fileSecurity.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;$serviceSid)")
+    Set-Acl -LiteralPath $directory -AclObject $fileSecurity
+    $exeSecurity = [Security.AccessControl.FileSecurity]::new()
+    $exeSecurity.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;$serviceSid)")
+    Set-Acl -LiteralPath $binary -AclObject $exeSecurity
+    $resultFile = Join-Path $directory 'service-result.txt'
+    Set-Content -LiteralPath $resultFile -Value 'Service has not returned.'
+    $resultSecurity = [Security.AccessControl.FileSecurity]::new()
+    $resultSecurity.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFW;;;$serviceSid)")
+    Set-Acl -LiteralPath $resultFile -AclObject $resultSecurity
+
+    New-Item -Path $registryPath | Out-Null
+    $registryCreated = $true
+    $registrySecurity = [Security.AccessControl.RegistrySecurity]::new()
+    $registrySecurity.SetSecurityDescriptorSddlForm("O:BAD:P(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KR;;;$serviceSid)")
+    Set-Acl -LiteralPath $registryPath -AclObject $registrySecurity
+    $pendingPath = Join-Path $registryPath ('Pending\' + $owner)
+    New-Item -Path $pendingPath -Force | Out-Null
+    $metadata = @{ owner_sid = $owner; service_sid = $serviceSid; profile_id = $profile.ToString() } | ConvertTo-Json -Compress
+    New-ItemProperty -LiteralPath $pendingPath -Name Profile -PropertyType Binary -Value ([Text.Encoding]::UTF8.GetBytes($metadata)) | Out-Null
+
+    Invoke-Sc -Arguments @('start', $serviceName)
+    $service = Get-Service -Name $serviceName
+    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+    $processId = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
+    $serviceProcess = Get-Process -Id $processId
+    & $binary client $owner
+    if ($LASTEXITCODE -ne 0) { throw "Native cross-account exchange failed ($LASTEXITCODE)." }
+    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    $status = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($status.ExitCode -ne 0 -or $status.ServiceSpecificExitCode -ne 0) {
+        throw "Service reported failure: $($status.ExitCode)/$($status.ServiceSpecificExitCode)"
+    }
+    Write-Output 'Production pending SCM bootstrap and cross-account provisioning authentication passed.'
+} finally {
+    if ($serviceCreated) {
+        # Only this invocation's randomly named synthetic service is stopped.
+        & sc.exe queryex $serviceName
+        $cleanupService = Get-Service -Name $serviceName
+        if ($cleanupService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            Stop-Service -Name $serviceName
+            $cleanupService.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        }
+        Invoke-Sc -Arguments @('delete', $serviceName)
+    }
+    if ($null -ne $serviceProcess -and -not $serviceProcess.WaitForExit(30000)) {
+        throw 'Fixture process did not exit; preserving its files for diagnosis.'
+    }
+    if (Test-Path (Join-Path $directory 'service-result.txt')) {
+        Get-Content -LiteralPath (Join-Path $directory 'service-result.txt')
+    }
+    # Refusal above and creation flags confine cleanup to this fixture's objects.
+    if ($registryCreated) { Remove-Item -LiteralPath $registryPath -Recurse }
+    if ($directoryCreated) { Remove-Item -LiteralPath $directory -Recurse }
+}

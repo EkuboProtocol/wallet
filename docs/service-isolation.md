@@ -301,7 +301,13 @@ running SQLCipher operation retains the pending root until it returns. Neither a
 successful transfer nor its reply activates custody. Tests cover native pipe
 privilege checks, administrator ACL rights, bridge round trips and cancellation.
 A real SCM fixture using distinct installer and virtual-service identities is
-still required: same-user pipe fixtures do not prove cross-identity token access.
+now included in the native Windows CI job. It creates a temporary virtual-account
+service on a disposable elevated GitHub runner, reads protected pending metadata,
+and exchanges random bytes through the production pending SCM and pipe code. It
+refuses an existing Ekubo installation and cleans up only the objects it created.
+Its native result is still required: same-user pipe fixtures and cross-compilation
+do not prove cross-identity token access. This fixture does not exercise database
+migration, active custody, desktop owner presence or packaged installation.
 
 The Linux privileged client is now implemented in core's
 `linux_provisioning_client::transfer`. A root-only pending-identity reader checks

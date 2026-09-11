@@ -75,6 +75,9 @@ def write_manifest(directory, lock):
              'edition = "2024"', "publish = false", "[workspace]", "[dependencies]"]
     for name, specification in locked_dependencies(manifest, lock).items():
         lines.append(f"{name} = {toml_value(specification)}")
+    fixture = (CORE / "src" / "windows_provisioning_scm_test.rs").resolve(strict=True)
+    lines.extend(['[[bin]]', 'name = "ekubo-wallet-scm-fixture"',
+                  f"path = {json.dumps(fixture.as_posix())}", 'test = false'])
     for group, settings in read_toml(ROOT / "Cargo.toml")["workspace"]["lints"].items():
         lines.append(f"[lints.{group}]")
         lines.extend(f"{name} = {toml_value(value)}" for name, value in settings.items())
@@ -123,6 +126,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--scm-fixture", action="store_true",
+                        help="install a synthetic service on a disposable GitHub runner")
     args = parser.parse_args()
     if sys.platform != "win32" and not args.prepare_only:
         parser.error("native tests must run on Windows; use --prepare-only to inspect the harness")
@@ -134,6 +139,16 @@ def main():
     subprocess.run(["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"],
                    cwd=directory, env=env, check=True)
     subprocess.run(["cargo", "test", "--locked"], cwd=directory, env=env, check=True)
+    if args.scm_fixture:
+        run_scm_fixture(directory, env)
+
+
+def run_scm_fixture(directory, env):
+    subprocess.run(["cargo", "build", "--locked", "--bin", "ekubo-wallet-scm-fixture"],
+                   cwd=directory, env=env, check=True)
+    subprocess.run(["pwsh", "-NoProfile", "-File", str(ROOT / "contrib" / "check-windows-provisioning-scm.ps1"),
+                    "-FixtureBinary", str(directory / "target" / "debug" / "ekubo-wallet-scm-fixture.exe")],
+                   cwd=directory, env=env, check=True)
 
 
 if __name__ == "__main__":
