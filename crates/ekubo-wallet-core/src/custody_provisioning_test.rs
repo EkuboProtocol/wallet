@@ -352,11 +352,13 @@ impl crate::database_staging::DatabaseStagingStore for StageStore {
         anyhow::bail!("this fixture supplies a database directly")
     }
     fn open_staged_database(&self, _: Uuid) -> Result<std::fs::File> {
-        Ok(std::fs::File::open(self.database.path().join("wallet.db"))?)
+        Ok(std::fs::File::open(
+            self.database.path().canonicalize()?.join("wallet.db"),
+        )?)
     }
     fn staged_database(&self, stage: Uuid) -> Result<crate::database_staging::StagedDatabase<'_>> {
         Ok(crate::database_staging::StagedDatabase::new(
-            self.database.path().join("wallet.db"),
+            self.database.path().canonicalize()?.join("wallet.db"),
             self.open_staged_database(stage)?,
             self,
         ))
@@ -385,7 +387,12 @@ fn verification_fixture() -> (
     )
     .unwrap();
     let mut db = PolicyStore::open(
-        &store.database.path().join("wallet.db"),
+        &store
+            .database
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("wallet.db"),
         &DatabaseKey::new([0x42; 32]),
     )
     .unwrap();
@@ -412,7 +419,12 @@ fn verification_fixture() -> (
 #[test]
 fn staged_database_verification_matches_credentials_and_both_account_inventories_without_writes() {
     let (prepared, store, stage, _) = verification_fixture();
-    let path = store.database.path().join("wallet.db");
+    let path = store
+        .database
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("wallet.db");
     let before = std::fs::read(&path).unwrap();
     prepared.verify_staged_inventory(&store, &stage).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -432,7 +444,12 @@ fn staged_database_rejects_missing_metadata_changed_signing_rows_and_extra_activ
         "CREATE TRIGGER migration_trigger AFTER UPDATE ON application_settings BEGIN UPDATE wallet_instances SET wallet_id='changed'; END",
     ] {
         let (prepared, store, stage, _) = verification_fixture();
-        let path = store.database.path().join("wallet.db");
+        let path = store
+            .database
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("wallet.db");
         let db = PolicyStore::open(&path, &DatabaseKey::new([0x42; 32])).unwrap();
         db.connection.execute_batch(sql).unwrap();
         drop(db);
@@ -468,7 +485,12 @@ fn staged_database_rejects_changed_enrollment_or_credentials_before_acceptance()
 fn staged_database_preserves_retired_history_but_rejects_broken_references() {
     use crate::policy_store::{DatabaseKey, PolicyStore};
     let (prepared, store, stage, _) = verification_fixture();
-    let path = store.database.path().join("wallet.db");
+    let path = store
+        .database
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("wallet.db");
     let db = PolicyStore::open(&path, &DatabaseKey::new([0x42; 32])).unwrap();
     db.connection.execute_batch("INSERT INTO wallet_instances VALUES('00000000-0000-0000-0000-000000000099','retired','0x0000000000000000000000000000000000000001',1,2)").unwrap();
     drop(db);
@@ -483,7 +505,12 @@ fn staged_database_preserves_retired_history_but_rejects_broken_references() {
 fn staged_database_under_another_key_is_rejected_without_rekeying_it() {
     use crate::policy_store::{DatabaseKey, PolicyStore};
     let (prepared, store, stage, _) = verification_fixture();
-    let path = store.database.path().join("wallet.db");
+    let path = store
+        .database
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("wallet.db");
     std::fs::remove_file(&path).unwrap();
     drop(PolicyStore::open(&path, &DatabaseKey::new([0x99; 32])).unwrap());
     let before = std::fs::read(&path).unwrap();

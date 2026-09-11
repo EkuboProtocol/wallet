@@ -46,8 +46,14 @@ impl MigrationDatabaseSnapshot {
             "migration source schema is not current"
         );
         verify_integrity(&connection)?;
-        let snapshot =
-            NamedTempFile::new().context("failed to create encrypted migration snapshot")?;
+        // macOS exposes its temporary directory through /var -> /private/var.
+        // Resolve only this scratch parent before creating a fresh private file;
+        // source paths and all SQLite opens retain their no-follow checks.
+        let temporary = std::env::temp_dir()
+            .canonicalize()
+            .context("failed to resolve migration snapshot directory")?;
+        let snapshot = NamedTempFile::new_in(temporary)
+            .context("failed to create encrypted migration snapshot")?;
         if let Err(error) = prepare_snapshot(&connection, &snapshot, &key) {
             // Windows may deny removal while SQLite has the snapshot attached.
             // Close all SQLite handles before NamedTempFile attempts cleanup.

@@ -6,7 +6,7 @@ use std::{fs, io, time::Duration};
 const KEY: [u8; 32] = [0x43; 32];
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("wallet.db");
+    let path = dir.path().canonicalize().unwrap().join("wallet.db");
     let store = PolicyStore::open(&path, &DatabaseKey::new(KEY)).unwrap();
     store
         .connection
@@ -45,7 +45,7 @@ fn encrypted_snapshot_preserves_schema_data_and_header_while_source_remains_fenc
         transfer
     );
     assert_ne!(&bytes[..16], b"SQLite format 3\0");
-    let target = dir.path().join("received.db");
+    let target = dir.path().canonicalize().unwrap().join("received.db");
     fs::write(&target, &bytes).unwrap();
     let copied = open_existing(&target, &DatabaseKey::new(KEY)).unwrap();
     verify_integrity(&copied).unwrap();
@@ -126,7 +126,7 @@ fn failed_transfer_keeps_source_fenced_and_retry_restarts_at_zero() {
 #[test]
 fn missing_wrong_key_and_old_schema_sources_fail_without_creation_or_upgrade() {
     let (dir, source) = fixture();
-    let missing = dir.path().join("absent.db");
+    let missing = dir.path().canonicalize().unwrap().join("absent.db");
     assert!(MigrationDatabaseSnapshot::freeze(&missing, Zeroizing::new(KEY)).is_err());
     assert!(!missing.exists());
     let before = fs::read(&source).unwrap();

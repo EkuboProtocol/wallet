@@ -4,8 +4,8 @@ use crate::policy_store::PolicyStore;
 const KEY: [u8; 32] = [0x43; 32];
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source.db");
-    let target = dir.path().join("target.db");
+    let source = dir.path().canonicalize().unwrap().join("source.db");
+    let target = dir.path().canonicalize().unwrap().join("target.db");
     let store = PolicyStore::open(&source, &DatabaseKey::new(KEY)).unwrap();
     store.connection.execute_batch("INSERT INTO application_settings(rowid,key,value_json,updated_at) VALUES(41,'retained','{\"value\":true}',17); PRAGMA user_version=37; PRAGMA application_id=42").unwrap();
     drop(store);
