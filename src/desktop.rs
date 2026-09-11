@@ -3005,6 +3005,8 @@ pub struct WalletWindow {
     activity_detail_record: Cell<Option<uuid::Uuid>>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
+    policy_load_generation: u64,
+    policy_loading: Option<u64>,
     policy_account_id: Option<String>,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
@@ -4334,15 +4336,15 @@ fn review_document_is_visible(
 /// owner has chosen to see, and it is also where the account and network names
 /// live. A pairing proposal has no row and no chain yet — nothing has been
 /// approved — so it is admitted on the strength of the event alone.
-fn notification_context(
-    owner: &OwnerApi,
+async fn notification_context(
+    owner: &crate::desktop_owner::DesktopOwner,
     event: &crate::events::DomainEvent,
 ) -> Option<NotificationContext> {
     use crate::events::{DomainEventKind, SignatureKind};
 
     let (account, chain_id) = match &event.kind {
         DomainEventKind::Transaction { request_id, .. } => {
-            let record = owner.transaction(*request_id).ok()?;
+            let record = owner.transaction(*request_id).await.ok()?;
             let chain_id = record.chain_id.parse().ok();
             (record.wallet_id, chain_id)
         }
@@ -4351,7 +4353,7 @@ fn notification_context(
             kind: SignatureKind::Message,
             ..
         } => {
-            let record = owner.message(*request_id).ok()?;
+            let record = owner.message(*request_id).await.ok()?;
             // An EIP-191 message binds no chain, so a request that declared
             // none is not hidden by a network filter: there is no network to
             // filter on, and the signature is just as usable either way.
@@ -4363,7 +4365,7 @@ fn notification_context(
             kind: SignatureKind::TypedData,
             ..
         } => {
-            let record = owner.typed_data(*request_id).ok()?;
+            let record = owner.typed_data(*request_id).await.ok()?;
             let chain_id = record.chain_id.parse().ok();
             (record.wallet_id, chain_id)
         }
@@ -4381,8 +4383,8 @@ fn notification_context(
         }
         _ => return None,
     };
-    let networks = owner.networks().ok()?;
-    let testnet_mode = owner.testnet_mode().ok()?;
+    let networks = owner.networks().await.ok()?;
+    let testnet_mode = owner.testnet_mode().await.ok()?;
     let visible_chain_ids = visible_network_chain_ids(&networks, testnet_mode);
     let configured_chain_ids = networks
         .iter()
@@ -6940,6 +6942,8 @@ impl WalletWindow {
             activity_detail_record: Cell::new(None),
             policy_json_input: None,
             policy_editor: None,
+            policy_load_generation: 0,
+            policy_loading: None,
             policy_account_id: None,
             policy_installing: false,
             policy_review_open: false,
@@ -7360,6 +7364,7 @@ impl WalletWindow {
         self.network_editor_open = false;
         self.network_editor_original = None;
         self.policy_json_input = None;
+        self.policy_loading = None;
         self.policy_editor = None;
         self.policy_installing = false;
         self.token_proposal_busy = false;
@@ -9138,12 +9143,84 @@ impl WalletWindow {
         stored.take();
     }
 
-    fn open_policy_editor(&mut self, wallet_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_policy_editor(
+        &mut self,
+        wallet_id: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_policy_editor(wallet_id.to_owned(), None, cx);
+    }
+
+    fn open_policy_proposal(
+        &mut self,
+        proposal: PolicyProposal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_policy_editor(proposal.wallet_id.clone(), Some(proposal), cx);
+    }
+
+    fn load_policy_editor(
+        &mut self,
+        wallet_id: String,
+        proposal: Option<PolicyProposal>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.policy_json_input.clone() else {
+            return;
+        };
+        let original_text = input.read(cx).value();
+        self.policy_account_id = Some(wallet_id.clone());
+        self.policy_load_generation = self.policy_load_generation.wrapping_add(1);
+        let generation = self.policy_load_generation;
+        self.policy_loading = Some(generation);
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task_wallet = wallet_id.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.policy_history(&task_wallet).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let history = task.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                if view.policy_loading != Some(generation) {
+                    return;
+                }
+                view.policy_loading = None;
+                // A read may finish after the input has been rebuilt or the
+                // owner has continued editing the displayed draft. Neither
+                // permits replacing that newer state with the fetched policy.
+                if view.route != Route::Policies
+                    || view.policy_account_id.as_deref() != Some(wallet_id.as_str())
+                    || view.policy_json_input.as_ref() != Some(&input)
+                    || input.read(cx).value() != original_text
+                {
+                    cx.notify();
+                    return;
+                }
+                match proposal {
+                    Some(proposal) => view.finish_policy_proposal(proposal, history, window, cx),
+                    None => view.finish_policy_editor(&wallet_id, history, window, cx),
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_policy_editor(
+        &mut self,
+        wallet_id: &str,
+        history: Result<Vec<StoredPolicy>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(input) = self.policy_json_input.as_ref() else {
             return;
         };
-        self.policy_account_id = Some(wallet_id.to_owned());
-        match self.owner.policy_history(wallet_id) {
+        match history {
             Ok(history) => {
                 let current = history.last();
                 let source_revision = current.map(|policy| policy.revision);
@@ -9185,17 +9262,17 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn open_policy_proposal(
+    fn finish_policy_proposal(
         &mut self,
         proposal: PolicyProposal,
+        history: Result<Vec<StoredPolicy>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(input) = self.policy_json_input.as_ref() else {
             return;
         };
-        self.policy_account_id = Some(proposal.wallet_id.clone());
-        match self.owner.policy_history(&proposal.wallet_id) {
+        match history {
             Ok(history) => {
                 // A proposal is not itself an installed revision. Its first
                 // Previous revision action opens the latest installed policy.
@@ -9282,6 +9359,7 @@ impl WalletWindow {
     }
 
     fn reject_policy_proposal(&mut self, proposal: &PolicyProposal, cx: &mut Context<Self>) {
+        self.policy_loading = None;
         self.policy_action_error = match self.owner.reject_policy_proposal(proposal) {
             Ok(true) => {
                 if self
@@ -9290,6 +9368,7 @@ impl WalletWindow {
                     .and_then(|editor| editor.proposal.as_ref())
                     == Some(proposal)
                 {
+                    self.policy_loading = None;
                     self.policy_editor = None;
                     self.policy_proposal_open = false;
                     self.policy_review_open = false;
@@ -9507,6 +9586,7 @@ impl WalletWindow {
     }
 
     fn install_policy_editor(&mut self, cx: &mut Context<Self>) {
+        self.policy_loading = None;
         if self.policy_installing {
             return;
         }
@@ -11853,6 +11933,7 @@ impl WalletWindow {
                 // Historical revisions are temporary views. Re-entering the
                 // tab reconstructs the editor from core's latest installed
                 // policy for the selected account.
+                self.policy_loading = None;
                 self.policy_editor = None;
                 self.policy_action_error = None;
                 self.policy_review_open = false;
@@ -11909,6 +11990,7 @@ impl WalletWindow {
             // another — taking the draft with it. The intent is retained and
             // resumes when the editor closes.
             || self.policy_editor.is_some()
+            || self.policy_loading.is_some()
     }
 
     fn take_pending_notification_route(&mut self) -> Option<NotificationRoute> {
@@ -20094,6 +20176,7 @@ impl Render for WalletWindow {
         if self.route == Route::Policies
             && !self.legal_gate
             && self.policy_editor.is_none()
+            && self.policy_loading.is_none()
             && self.policy_action_error.is_none()
         {
             let default_wallet = self.cached_accounts().ok().and_then(|accounts| {
@@ -21133,24 +21216,23 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 tokio::sync::mpsc::unbounded_channel();
             let notification_service = PlatformNotificationService::new(notification_clicks);
             let mut domain_events = events.subscribe();
-            let notification_owner = owner.clone();
+            let notification_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
             gpui_tokio::Tokio::spawn(cx, async move {
                 loop {
                     match domain_events.recv().await {
                         Ok(event) => {
-                            let owner = notification_owner.clone();
-                            let described = tokio::task::spawn_blocking(move || {
-                                let context = notification_context(&owner, &event)?;
+                            let described = async {
+                                let context =
+                                    notification_context(&notification_owner, &event).await?;
                                 let preferences = NotificationPreferences {
-                                    detailed_previews: owner
+                                    detailed_previews: notification_owner
                                         .detailed_notification_previews()
+                                        .await
                                         .ok()?,
                                 };
                                 Some((event, context, preferences))
-                            })
-                            .await
-                            .ok()
-                            .flatten();
+                            }
+                            .await;
                             if let Some(notification) =
                                 described
                                     .as_ref()

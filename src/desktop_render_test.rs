@@ -4765,3 +4765,108 @@ fn summary_batches_preserve_saved_text_and_cover_history(cx: &mut gpui::TestAppC
     });
     release(cx, &view);
 }
+
+fn seed_policy_loading_accounts(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    cx.update_entity(view, |wallet, _| {
+        let accounts = ["primary", "savings"].map(|id| WalletMetadata {
+            instance_id: uuid::Uuid::new_v4(),
+            id: id.into(),
+            address: alloy::primitives::Address::from([if id == "primary" { 1 } else { 2 }; 20]),
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        });
+        wallet
+            .owner
+            .config()
+            .update_for_test(|config| {
+                config.wallets.extend(accounts.clone());
+                Ok(())
+            })
+            .unwrap();
+        let mut store = ekubo_wallet_core::policy_store::PolicyStore::production(
+            wallet.owner.config().data_dir(),
+        )
+        .unwrap();
+        for account in accounts {
+            store.register_wallet_without_policy(&account).unwrap();
+        }
+    });
+}
+
+fn settle_policy_loading(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| wallet.policy_loading.is_none()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("policy read did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_policy_loading_keeps_the_latest_account_selection(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            wallet.attach_window(window, cx);
+            wallet.set_route(Route::Policies);
+            wallet.open_policy_editor("primary", window, cx);
+            // Both reads are issued before the foreground can accept either
+            // completion. Returning to the route must not revive the first.
+            wallet.set_route(Route::Accounts);
+            assert!(wallet.policy_loading.is_none());
+            wallet.set_route(Route::Policies);
+            wallet.open_policy_editor("savings", window, cx);
+            assert!(wallet.notification_navigation_blocked());
+        });
+    })
+    .unwrap();
+    settle_policy_loading(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(
+            wallet.policy_action_error.is_none(),
+            "{:?}",
+            wallet.policy_action_error
+        );
+        assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "savings");
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_policy_loading_preserves_a_newer_draft(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            wallet.attach_window(window, cx);
+            wallet.set_route(Route::Policies);
+            wallet.finish_policy_editor("primary", Ok(Vec::new()), window, cx);
+            wallet.open_policy_editor("savings", window, cx);
+            wallet
+                .policy_json_input
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| {
+                    input.set_value("the owner continued editing", window, cx);
+                });
+        });
+    })
+    .unwrap();
+    settle_policy_loading(&view, cx);
+    cx.read_entity(&view, |wallet, cx| {
+        assert_eq!(
+            wallet.policy_json_input.as_ref().unwrap().read(cx).value(),
+            "the owner continued editing"
+        );
+        assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "primary");
+    });
+    release(cx, &view);
+}
