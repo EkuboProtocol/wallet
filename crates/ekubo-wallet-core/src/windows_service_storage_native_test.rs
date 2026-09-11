@@ -160,6 +160,7 @@ fn native_attribute_writer_cannot_redirect_a_directory_with_a_pinned_child() {
     let target = dir.0.join("target");
     let parent_path = dir.0.join("parent");
     std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("state"), b"redirected state").unwrap();
     std::fs::create_dir(&parent_path).unwrap();
     let writer = attribute_writer(&parent_path);
     let fixture = directory_handle(&dir.0);
@@ -178,6 +179,9 @@ fn native_attribute_writer_cannot_redirect_a_directory_with_a_pinned_child() {
     // Positive control: the same attribute-only handle and request can redirect
     // an empty parent, even while its production handle remains open.
     set_junction(&writer, &target).unwrap();
+    // An attacker can change an ancestor before its child is pinned. Relative
+    // lookup must not follow the new junction, even temporarily.
+    assert!(open_relative(parent.as_handle(), "state", StorageKind::File).is_err());
     assert!(read_security(parent.as_handle(), StorageKind::Directory).is_err());
     drop(writer);
     drop(parent);

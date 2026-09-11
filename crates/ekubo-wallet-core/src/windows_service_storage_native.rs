@@ -15,7 +15,9 @@ use std::{
     os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, FromRawHandle as _},
 };
 use windows::Win32::{
-    Foundation::{HANDLE, HLOCAL, LocalFree, OBJ_CASE_INSENSITIVE, UNICODE_STRING},
+    Foundation::{
+        HANDLE, HLOCAL, LocalFree, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, UNICODE_STRING,
+    },
     Security::{
         Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
@@ -83,6 +85,14 @@ impl PrivateStorageRoot {
             StorageKind::File,
         )?;
         let lock = ProfileLock::acquire(lock_file)?;
+        // Only now is every ancestor guaranteed to have a retained child.
+        // Those child handles deny deletion, preventing the empty-directory
+        // prerequisite for setting a reparse point via FILE_WRITE_ATTRIBUTES.
+        // Reject any reparse point introduced during initial traversal. The
+        // relative opens themselves also prohibit following reparse points.
+        for ancestor in &ancestors {
+            read_security(ancestor.as_handle(), StorageKind::Directory)?;
+        }
         Ok(Self {
             directory,
             _ancestors: ancestors,
@@ -151,10 +161,10 @@ fn program_data_ancestors(trusted: &[String]) -> Result<Vec<File>> {
 fn validate_machine_handle(
     handle: BorrowedHandle<'_>,
     trusted: &[String],
-    allow_child_creation: bool,
+    shared_os_ancestor: bool,
 ) -> Result<()> {
     let (owner, entries) = read_security(handle, StorageKind::Directory)?;
-    validate_machine_security(&owner, &entries, trusted, allow_child_creation)
+    validate_machine_security(&owner, &entries, trusted, shared_os_ancestor)
 }
 
 /// Validate one object held open by the service. The caller must first traverse
@@ -200,11 +210,18 @@ fn open_native(parent: Option<BorrowedHandle<'_>>, name: &str, kind: StorageKind
         MaximumLength: length,
         Buffer: PWSTR(wide_name.as_mut_ptr()),
     };
+    // The initial DOS drive lookup needs its OS object-manager mapping. Once
+    // that root is pinned, never follow a reparse during a relative lookup,
+    // including a parent changed by an attribute-only writer during traversal.
+    let mut flags = OBJ_CASE_INSENSITIVE;
+    if parent.is_some() {
+        flags |= OBJ_DONT_REPARSE;
+    }
     let attributes = OBJECT_ATTRIBUTES {
         Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>())?,
         RootDirectory: parent.map_or(HANDLE::default(), |parent| HANDLE(parent.as_raw_handle())),
         ObjectName: &raw const name,
-        Attributes: OBJ_CASE_INSENSITIVE,
+        Attributes: flags,
         ..Default::default()
     };
     let (access, file_type) = match kind {

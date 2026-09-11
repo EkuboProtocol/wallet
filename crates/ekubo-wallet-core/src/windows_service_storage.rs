@@ -41,18 +41,20 @@ fn validate_machine_security(
     owner: &str,
     entries: &[AccessEntry],
     trusted: &[String],
-    allow_child_creation: bool,
+    shared_os_ancestor: bool,
 ) -> Result<()> {
     ensure!(
         trusted.iter().any(|sid| sid == owner),
         "machine storage directory has an untrusted owner: {owner}"
     );
-    // Shared OS directories may let users create siblings. Existing protected
-    // children are checked independently; deletion, ACL/owner changes, and
-    // attribute-write rights are never accepted. Native callers
-    // retain handles that deny data-write and delete sharing during traversal.
+    // ProgramData permits child creation and EA/attribute writes. Attribute
+    // writers can set reparse points even with no write sharing, so this policy
+    // is only one part of the native bootstrap: no-reparse relative opens,
+    // retained children that prevent emptying each ancestor, then a final
+    // metadata check are required. Never permit deletion or ACL/owner changes.
+    // Wallet-owned machine directories do not allow these shared-OS rights.
     let permitted =
-        0x8000_0000 | 0x2000_0000 | 0x0012_0000 | 0xa9 | if allow_child_creation { 0x6 } else { 0 };
+        0x8000_0000 | 0x2000_0000 | 0x0012_0000 | 0xa9 | if shared_os_ancestor { 0x116 } else { 0 };
     for entry in entries {
         match entry {
             AccessEntry::Allow {

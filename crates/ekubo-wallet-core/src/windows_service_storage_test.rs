@@ -32,16 +32,12 @@ fn machine_ancestors_allow_siblings_but_not_replacement_or_security_changes() {
     let creator = [allow("S-1-5-32-545", 0x6, false)];
     assert!(validate_machine_security("S-1-5-18", &creator, &trusted, true).is_ok());
     assert!(validate_machine_security("S-1-5-18", &creator, &trusted, false).is_err());
-    for mask in [
-        0x10,
-        0x40,
-        0x100,
-        0x10000,
-        0x40000,
-        0x80000,
-        0x4000_0000,
-        0x1000_0000,
-    ] {
+    for mask in [0x10, 0x100, 0x116] {
+        let shared_os_rights = [allow("S-1-5-32-545", mask, false)];
+        assert!(validate_machine_security("S-1-5-18", &shared_os_rights, &trusted, true).is_ok());
+        assert!(validate_machine_security("S-1-5-18", &shared_os_rights, &trusted, false).is_err());
+    }
+    for mask in [0x40, 0x10000, 0x40000, 0x80000, 0x4000_0000, 0x1000_0000] {
         assert!(
             validate_machine_security(
                 "S-1-5-18",
@@ -107,7 +103,17 @@ fn private_state_rejects_readers_as_well_as_writers() {
         allow("S-1-5-18", u32::MAX, false),
     ];
     assert!(validate_security(SERVICE, &trusted, SERVICE).is_ok());
-    for mask in [1, 2, 0x20000, 0x8000_0000, 0x4000_0000, u32::MAX] {
+    for mask in [
+        1,
+        2,
+        0x10,
+        0x100,
+        0x116,
+        0x20000,
+        0x8000_0000,
+        0x4000_0000,
+        u32::MAX,
+    ] {
         assert!(
             validate_security(SERVICE, &[allow("S-1-5-32-545", mask, false)], SERVICE).is_err()
         );

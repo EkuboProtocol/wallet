@@ -374,9 +374,12 @@ drives are accepted. Every component is opened relative to its pinned parent;
 reparse points, unsafe ACLs/owners, and incompatible existing writer/delete
 handles fail the open. All ancestor handles remain owned by the root object.
 
-OS ancestors may grant namespace creation beside existing protected children;
-their ACLs must still deny untrusted deletion, ACL/owner changes, and attribute
-writes. Handles deny data-write/delete sharing while retained. The Ekubo and
+OS ancestors may grant namespace creation and EA/attribute writes beside
+existing protected children; their ACLs must still deny untrusted deletion and
+ACL/owner changes. Attribute writes can set reparse points on empty directories,
+so denying data-write/delete sharing alone is insufficient. Relative opens use
+`OBJ_DONT_REPARSE`, and bootstrap checks ancestor metadata again after every
+ancestor has a retained child that prevents it being emptied. The Ekubo and
 Owners directories have stricter machine ownership and mutation checks, and
 the profile itself requires the exact service SID and private ACL. The root
 exposes validated existing-file reads only. It creates no directory, repairs
@@ -477,9 +480,21 @@ to be empty before setting a reparse point. A native synthetic-directory test
 now exercises an attribute-only writer alongside the actual retained-handle
 open mode, attempts to delete the pinned child and redirect its parent, and
 uses the same reparse request on the emptied parent as a positive control.
-Native execution of this new test is pending. The machine-directory policy
-remains strict until the protection and traversal races are validated; the
-ProgramData compatibility failure remains unresolved.
+Native run `34545729433` passed this test: the pinned child could not be deleted,
+the nonempty parent rejected redirection, and the attribute-only writer could
+redirect the emptied parent despite its retained handle. The run still failed
+the unchanged ProgramData ACL check (22 passed, one failed, one helper ignored).
+Log: `~/Documents/wallet-native-ci-34545729433.log`.
+
+Bootstrap now accepts the observed `0x116` rights only on shared OS ancestors.
+Private state and wallet-owned machine-directory policies remain strict.
+Relative opens prohibit reparsing using
+[`OBJ_DONT_REPARSE`](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes),
+and a final metadata pass runs after the complete protected chain is pinned.
+This ensures a retained child prevents emptying each ancestor before custody
+can use the root. The native attack test also attempts child lookup after
+redirecting the parent and requires rejection. Native validation of this
+compatibility fix is pending; it is not yet a successful bootstrap checkpoint.
 
 ## Work still required before completion
 
