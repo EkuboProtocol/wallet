@@ -89,7 +89,10 @@ saved summaries continue to be used without inference. Deterministic review
 interpretation remains part of the security audit; model internals are outside
 the isolated service process.
 
-The service-isolation branch still needs transport handling for evidence batches
-that exceed the 16 MiB owner-response limit. Those currently use the optional
-decoded fallback. Exact-input transfer for these cases is required before
-claiming unchanged preview behavior for all supported execution plans.
+Large evidence responses are transferred as immutable snapshots in 256 KiB
+UTF-8 pages. The desktop checks the transfer identity, total size and byte offset
+on every page; it does not truncate evidence or replay generation after a failed
+connection. Snapshots expire after 60 seconds and are released after their last
+page or service shutdown. Retained transfers are limited to sixteen snapshots
+and 256 MiB in aggregate; an individual response has the same 256 MiB limit.
+Resource exhaustion or expiration retains the existing optional decoded fallback.

@@ -30,6 +30,7 @@ mod owner_activity_batch;
 pub mod owner_rpc;
 #[cfg(any(target_os = "windows", test))]
 mod owner_stream_rpc;
+mod preview_transfer;
 pub mod runtime;
 #[cfg(any(target_os = "windows", test))]
 mod service_host;

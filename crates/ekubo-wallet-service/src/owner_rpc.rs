@@ -226,8 +226,12 @@ impl OwnerDispatcher {
                 )?
             }
             Request::TransactionPreviewInputs { request_ids } => {
-                serde_json::to_value(self.previews.generate(owner.clone(), request_ids).await?)?
+                serde_json::to_value(self.previews.begin(owner.clone(), request_ids).await?)?
             }
+            Request::TransactionPreviewPage {
+                transfer_id,
+                offset,
+            } => serde_json::to_value(self.previews.page(transfer_id, offset)?)?,
             Request::SaveAdvisorySummary { summary } => {
                 serde_json::to_value(owner.save_advisory_summary(&summary)?)?
             }

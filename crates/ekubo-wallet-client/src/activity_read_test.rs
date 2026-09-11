@@ -125,3 +125,57 @@ async fn a_disconnect_during_hydration_does_not_replay_or_return_a_partial_list(
     assert!(client.activity(None, 2).await.is_err());
     assert_eq!(transport.sent.lock().unwrap().len(), 3);
 }
+
+fn preview_page(id: Uuid, offset: usize, total: usize, text: &str) -> Value {
+    json!({"transfer_id":id, "offset":offset, "total_bytes":total, "text":text})
+}
+
+#[tokio::test]
+async fn preview_pages_reconstruct_exact_inputs_without_replaying_generation() {
+    let id = Uuid::new_v4();
+    let (client, transport) = client(vec![
+        Some(preview_page(id, 0, 2, "[")),
+        Some(preview_page(id, 1, 2, "]")),
+    ]);
+    assert!(
+        client
+            .transaction_preview_inputs(&[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let sent = transport.sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["method"], "transaction_preview_inputs");
+    assert_eq!(
+        sent[1],
+        json!({"method":"transaction_preview_page",
+        "params":{"transfer_id":id,"offset":1}})
+    );
+}
+
+#[tokio::test]
+async fn preview_pages_reject_mixed_truncated_and_oversized_snapshots() {
+    let id = Uuid::new_v4();
+    for bad in [
+        preview_page(Uuid::new_v4(), 1, 2, "]"),
+        preview_page(id, 0, 2, "]"),
+        preview_page(id, 1, 3, "]"),
+        preview_page(id, 1, 2, ""),
+        preview_page(id, 1, 2, "]extra"),
+    ] {
+        let (client, transport) = client(vec![Some(preview_page(id, 0, 2, "[")), Some(bad)]);
+        assert!(client.transaction_preview_inputs(&[]).await.is_err());
+        assert_eq!(transport.sent.lock().unwrap().len(), 2);
+    }
+    let (oversized, _) = client(vec![Some(preview_page(
+        id,
+        0,
+        crate::preview_page::MAX_EVIDENCE_BYTES + 1,
+        "[",
+    ))]);
+    assert!(oversized.transaction_preview_inputs(&[]).await.is_err());
+    let (lost, transport) = client(vec![Some(preview_page(id, 0, 2, "[")), None]);
+    assert!(lost.transaction_preview_inputs(&[]).await.is_err());
+    assert_eq!(transport.sent.lock().unwrap().len(), 2);
+}

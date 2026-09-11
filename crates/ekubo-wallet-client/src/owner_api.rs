@@ -327,10 +327,46 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         &self,
         request_ids: &[uuid::Uuid],
     ) -> Result<Vec<ekubo_wallet_core::preview_evidence::PreviewInput>> {
-        self.call(&Request::TransactionPreviewInputs {
-            request_ids: request_ids.to_vec(),
-        })
-        .await
+        use crate::preview_page::{MAX_EVIDENCE_BYTES, PAGE_BYTES, PreviewPage};
+        anyhow::ensure!(
+            request_ids.len() <= 8,
+            "at most 8 transaction preview inputs"
+        );
+        let first: PreviewPage = self
+            .call(&Request::TransactionPreviewInputs {
+                request_ids: request_ids.to_vec(),
+            })
+            .await?;
+        let identity = first.transfer_id;
+        let total = first.total_bytes;
+        anyhow::ensure!(
+            !identity.is_nil() && total > 0 && total <= MAX_EVIDENCE_BYTES,
+            "invalid preview transfer size or identity"
+        );
+        let mut text = String::new();
+        let mut page = first;
+        loop {
+            anyhow::ensure!(
+                page.transfer_id == identity
+                    && page.total_bytes == total
+                    && page.offset == text.len()
+                    && !page.text.is_empty()
+                    && page.text.len() <= PAGE_BYTES
+                    && page.text.len() <= total.saturating_sub(text.len()),
+                "invalid preview transfer page"
+            );
+            text.push_str(&page.text);
+            if text.len() == total {
+                break;
+            }
+            page = self
+                .call(&Request::TransactionPreviewPage {
+                    transfer_id: identity,
+                    offset: text.len(),
+                })
+                .await?;
+        }
+        Ok(serde_json::from_str(&text)?)
     }
 
     pub async fn save_advisory_summary(

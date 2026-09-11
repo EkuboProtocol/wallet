@@ -128,6 +128,10 @@ pub enum Request {
     TransactionPreviewInputs {
         request_ids: Vec<uuid::Uuid>,
     },
+    TransactionPreviewPage {
+        transfer_id: uuid::Uuid,
+        offset: usize,
+    },
     SaveAdvisorySummary {
         summary: ekubo_wallet_core::preview_evidence::AdvisorySummary,
     },

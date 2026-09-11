@@ -493,7 +493,7 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
     let record = pending
         .create(&wallet.id, "ethereum", &plan(), None, 1)
         .unwrap();
-    let inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput> = call(
+    let page: ekubo_wallet_client::preview_page::PreviewPage = call(
         &owner,
         Request::TransactionPreviewInputs {
             request_ids: vec![record.request_id],
@@ -501,6 +501,8 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
     )
     .await
     .unwrap();
+    let inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput> =
+        serde_json::from_str(&page.text).unwrap();
     assert_eq!(inputs.len(), 1);
     let input = &inputs[0];
     let mut summary = ekubo_wallet_core::preview_evidence::AdvisorySummary {
@@ -559,7 +561,7 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
     .unwrap();
     assert_eq!(result, [(record.request_id, saved)].into_iter().collect());
     assert_eq!(pending.get(record.request_id).unwrap(), record);
-    let inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput> = call(
+    let page: ekubo_wallet_client::preview_page::PreviewPage = call(
         &owner,
         Request::TransactionPreviewInputs {
             request_ids: vec![record.request_id],
@@ -567,6 +569,8 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
     )
     .await
     .unwrap();
+    let inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput> =
+        serde_json::from_str(&page.text).unwrap();
     assert!(inputs.is_empty());
     assert!(
         call::<serde_json::Value>(
