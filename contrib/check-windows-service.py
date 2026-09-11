@@ -30,9 +30,11 @@ MODULES = (
     "service_custody",
     "windows_service_custody",
     "windows_owner_pipe",
+    "windows_provisioning_pipe",
+    "provisioning_io",
 )
 DEPENDENCIES = ("anyhow", "chacha20poly1305", "fs2", "hex", "rand", "serde",
-                "serde_json", "sha2", "subtle", "tempfile", "tokio", "uuid", "windows", "zeroize")
+                "serde_json", "sha2", "subtle", "tempfile", "tokio", "tokio-util", "uuid", "windows", "zeroize")
 
 
 def read_toml(path):

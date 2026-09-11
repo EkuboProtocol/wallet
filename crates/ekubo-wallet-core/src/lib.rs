@@ -53,6 +53,7 @@ pub mod plan_fetch;
 pub mod policy_store;
 #[cfg(target_os = "linux")]
 pub mod polkit;
+pub mod provisioning_io;
 pub mod reconcile;
 pub mod rpc;
 pub mod sanitize;
@@ -91,3 +92,6 @@ pub mod windows_service_storage;
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod service_profile_lock;
+
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_provisioning_pipe;

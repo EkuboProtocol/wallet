@@ -262,8 +262,12 @@ SCM bootstrap alongside active startup. The mode is fixed before dispatcher entr
 it selects only protected pending metadata, rejects active-profile conflicts, and
 still verifies the SCM-supplied service name and actual virtual-account primary
 token/session before invoking its host. A console cannot enter either mode. The
-Windows provisioning pipe host and installer client remain unfinished; the wire
-format, limits, deadline policy and staging reply are shared core code.
+Windows `--provision-owner-sid` host now accepts a separate administrator-only
+provisioning pipe. It reserves a successor instance before releasing the accepted
+instance, reads a fixed nonsecret preface, and authenticates the kernel client
+token before processing custody data. The wire format, limits, deadline policy
+and staging reply are shared core code. The Windows installer client remains
+unfinished.
 
 Native Windows installer checks now distinguish privileged installation from an
 ordinary administrator-account desktop process. They require enabled Builtin
@@ -272,8 +276,8 @@ integrity; mere group presence, deny-only membership, or medium integrity fails.
 The primary-process check rejects thread impersonation and queries a read-only
 copy of the actual primary token. The synchronous pipe-client helper requires an
 existing thread token and has no primary-token fallback. It must be called inside
-a native impersonation/revert guard after the pipe read; the pipe host has not yet
-been wired. These checks recognize existing administrator authority, grant no
+a native impersonation/revert guard after the pipe read, as the provisioning host
+now does. These checks recognize existing administrator authority, grant no
 elevation or fresh wallet-owner presence, and access no credentials. Tests include
 native self-impersonation, a separately created token with its Administrators SID
 made deny-only, and isolated pending-mode console rejection. Native Windows CI is
@@ -281,6 +285,16 @@ required in addition to cross-compilation. The token checks follow Microsoft's
 [CheckTokenMembership](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-checktokenmembership)
 and [integrity-control](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control)
 contracts.
+
+The Windows host runs the blocking transfer codec through a shared asynchronous
+I/O bridge with one absolute deadline and cancellation that wakes blocked reads.
+It admits one storage worker at a time. Stopping cancels transport I/O; an already
+running SQLCipher operation retains the pending root until it returns. Neither a
+successful transfer nor its reply activates custody. Tests cover native pipe
+privilege checks, administrator ACL rights, bridge round trips and cancellation.
+A real SCM fixture using distinct installer and virtual-service identities is
+still required: same-user pipe fixtures do not prove cross-identity token access.
+
 The Linux privileged client is now implemented in core's
 `linux_provisioning_client::transfer`. A root-only pending-identity reader checks
 protected configuration and rejects existing or damaged active metadata without

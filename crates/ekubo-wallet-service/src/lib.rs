@@ -45,6 +45,8 @@ mod walletconnect_review;
 pub mod windows;
 #[cfg(target_os = "windows")]
 pub mod windows_owner_rpc;
+#[cfg(target_os = "windows")]
+pub mod windows_provisioning;
 
 #[path = "../../../src/authority.rs"]
 pub mod authority;

@@ -98,7 +98,12 @@ fn validate_pipe(handle: HANDLE, service: &str, desktop: &str) -> Result<()> {
     validate_security(&owner, &entries, service, desktop)
 }
 
-fn create(pipe_name: &str, service: &str, desktop: &str, first: bool) -> Result<NamedPipeServer> {
+pub(crate) fn create(
+    pipe_name: &str,
+    service: &str,
+    desktop: &str,
+    first: bool,
+) -> Result<NamedPipeServer> {
     let descriptor = descriptor(service, desktop)?;
     let security = SECURITY_ATTRIBUTES {
         nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())?,
@@ -270,13 +275,27 @@ impl Drop for Revert {
     }
 }
 
+pub(crate) fn authenticate_installer_client(pipe: &NamedPipeServer) -> Result<()> {
+    with_client(
+        HANDLE(pipe.as_raw_handle()),
+        crate::windows_service_identity::verify_installer_thread,
+    )
+}
+
 fn client_sid(pipe: HANDLE) -> Result<String> {
+    with_client(
+        pipe,
+        crate::windows_service_identity::current_thread_user_sid,
+    )
+}
+
+fn with_client<T>(pipe: HANDLE, inspect: impl FnOnce() -> Result<T>) -> Result<T> {
     // Reject nested impersonation before changing any thread context.
     crate::windows_service_identity::current_process_identity()?;
     // SAFETY: the server handle is live and its last read selected this client.
     unsafe { ImpersonateNamedPipeClient(pipe) }?;
     let _revert = Revert;
-    crate::windows_service_identity::current_thread_user_sid()
+    inspect()
 }
 
 #[cfg(test)]
