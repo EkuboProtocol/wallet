@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import pwd
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -73,23 +72,50 @@ def configure(stack, owner, account, profile):
     return private
 
 
-def stop_fixture(process):
-    if process.poll() is None:
-        # The still-live child owns this new process group; no system daemon is stopped.
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+def remove_unit(path):
+    path.unlink()
+    run(["systemctl", "daemon-reload"])
 
 
-def wait_ready(process, owner):
+def stop_fixture(unit):
+    # Only the unique unit created by this fixture; never stop a system daemon.
+    subprocess.run(["systemctl", "stop", unit], check=True, timeout=45)
+
+
+def fixture_unit_content(account_name, executable):
+    content = (ROOT / "contrib/linux-service/ekubo-wallet-provision@.service").read_text()
+    content = content.replace("User=ekubo-wallet", f"User={account_name}")
+    content = content.replace("Group=ekubo-wallet", f"Group={account_name}")
+    content = content.replace(
+        "ExecStart=/usr/lib/ekubo-wallet/ekubo-wallet-service --provision-owner-uid %i",
+        f'ExecStart="{executable}" service %i',
+    )
+    # systemd does not inherit the invoking runner's environment. These enable
+    # only the fixture executable's guard, not an alternate production host.
+    content += "\nEnvironment=GITHUB_ACTIONS=true\nEnvironment=RUNNER_OS=Linux\n"
+    return content
+
+
+def install_fixture_unit(stack, account, executable, profile, owner):
+    template = f"ekubo-wallet-provision-fixture-{profile.hex}@.service"
+    unit = template.replace("@.service", f"@{owner}.service")
+    path = Path("/run/systemd/system") / template
+    content = fixture_unit_content(account.pw_name, executable)
+    with path.open("x") as output:
+        output.write(content)
+    stack.callback(remove_unit, path)
+    path.chmod(0o644)
+    run(["systemctl", "daemon-reload"])
+    stack.callback(stop_fixture, unit)
+    return unit
+
+
+def wait_ready(unit, owner):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise RuntimeError("Synthetic service exited before readiness")
+        status = subprocess.run(["systemctl", "is-active", "--quiet", unit], check=False, timeout=30)
+        if status.returncode != 0:
+            raise RuntimeError("Synthetic systemd service exited before readiness")
         reply = run(["busctl", "--system", "call", "org.freedesktop.DBus",
                      "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
                      "s", f"org.ekubo.Wallet.Provision.u{owner}"], capture_output=True, text=True)
@@ -128,21 +154,16 @@ def exercise(binary, owner):
         executable = directory / "migration-fixture"
         shutil.copyfile(binary, executable)
         executable.chmod(0o755)
-        log_path = directory / "service.log"
-        log = stack.enter_context(log_path.open("w"))
-        process = subprocess.Popen(["runuser", "--user", account.pw_name, "--",
-                                    str(executable), "service", str(owner)],
-                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        stack.callback(stop_fixture, process)
+        unit = install_fixture_unit(stack, account, executable, profile, owner)
         try:
-            wait_ready(process, owner)
+            subprocess.run(["systemctl", "start", unit], check=True, timeout=45)
+            wait_ready(unit, owner)
             subprocess.run([str(executable), "client", str(owner)], check=True, timeout=420)
             check_raw_denial(private, owner)
         finally:
-            stop_fixture(process)
-            log.flush()
-            print(log_path.read_text())
-        print("Production Linux cross-user transfer/recovery and ordinary-owner raw file denial passed.")
+            stop_fixture(unit)
+            run(["journalctl", "--unit", unit, "--no-pager", "--output", "cat"])
+        print("Production Linux systemd migration/recovery and ordinary-owner raw file denial passed.")
 
 
 def main():
@@ -152,6 +173,8 @@ def main():
     if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_OS") != "Linux"
             or os.getuid() != 0 or os.geteuid() != 0):
         raise RuntimeError("Requires privileged installer context on disposable GitHub Linux CI")
+    if Path("/proc/1/comm").read_text().strip() != "systemd":
+        raise RuntimeError("Requires the disposable runner's systemd manager")
     owner = int(os.environ.get("SUDO_UID", "0"))
     if owner == 0:
         raise RuntimeError("Requires the original non-root runner owner")

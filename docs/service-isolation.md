@@ -365,14 +365,18 @@ runs `contrib/check-linux-provisioning.py` as the disposable runner's privileged
 installer. The harness refuses existing wallet service paths, creates a unique
 unprivileged service account, installs the production provisioning bus policy for
 that account, and prepares root-owned metadata plus service-only pending storage.
+It starts a uniquely named instance of the production provisioning systemd unit,
+substituting only the fixture account, executable entry point and guard environment.
+The unit retains its privilege, filesystem, device and address-family restrictions.
 It launches the actual host on the real system bus and runs the actual root client
 against explicit synthetic keys and a one-account encrypted database, including
 reconnection/recovery while the source fence is held. It then requires raw read
 and write opens by the original non-root runner owner to fail with `EACCES`.
-Cleanup targets only the account, process group, policy and paths it created;
-the system bus is reloaded, never restarted. This fixture must pass natively
-before claiming Linux cross-user provisioning evidence. It does not install the
-packaged systemd units or activate a profile.
+Cleanup stops only the unique fixture unit and removes the account, unit file,
+policy and paths it created. systemd configuration and system-bus policy are
+reloaded without restarting either manager. This revision must pass natively
+before claiming provisioning under the systemd sandbox. It does not install a
+release package, exercise active-profile on-demand startup, or activate a profile.
 
 The full Windows matrix also builds the service's `windows-migration-scm` example
 with the test-only `migration-fixture` feature. The disposable SCM setup runs the
