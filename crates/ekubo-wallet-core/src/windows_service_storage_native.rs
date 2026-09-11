@@ -361,7 +361,7 @@ fn open_native_access(
     parent: Option<BorrowedHandle<'_>>,
     name: &str,
     kind: StorageKind,
-    journal_write: bool,
+    flush_access: bool,
 ) -> Result<File> {
     let mut wide_name: Vec<u16> = name.encode_utf16().collect();
     let length = u16::try_from(wide_name.len() * size_of::<u16>())?;
@@ -390,7 +390,7 @@ fn open_native_access(
             FILE_DIRECTORY_FILE,
         ),
         StorageKind::File => (
-            if journal_write {
+            if flush_access {
                 FILE_GENERIC_READ | windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE
             } else {
                 FILE_GENERIC_READ
@@ -668,6 +668,22 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
 }
 
 impl crate::pending_profile::sealed::Sealed for PendingCredentialStorage {}
+impl PendingCredentialStorage {
+    fn open_prepared_record(&self, name: &str) -> Result<File> {
+        validate_component(name)?;
+        // FlushFileBuffers requires write access. Open the existing object
+        // without creation/truncation and retain the normal no-writer sharing
+        // and private-file checks through verification and flush.
+        let file = open_native_access(
+            Some(self.0.directory.as_handle()),
+            name,
+            StorageKind::File,
+            true,
+        )?;
+        validate_private_handle(file.as_handle(), &self.0.identity, StorageKind::File)?;
+        Ok(file)
+    }
+}
 impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
     fn prepare_record(&self, mut record: crate::pending_profile::ProfileRecord<'_>) -> Result<()> {
         crate::windows_service_identity::verify_service_process(self.0.identity.service_sid())?;
@@ -677,8 +693,14 @@ impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
             StorageKind::Directory,
         )?;
         let name = record.name.clone();
-        match self.0.open_file(&name) {
-            Ok(mut file) => return record.verify(&mut file),
+        match self.open_prepared_record(&name) {
+            Ok(mut file) => {
+                record.verify(&mut file)?;
+                // Retry the post-rename flush too: the earlier attempt may
+                // have published this name but failed before becoming durable.
+                file.sync_all()?;
+                return Ok(());
+            }
             Err(error)
                 if error
                     .downcast_ref::<windows::core::Error>()

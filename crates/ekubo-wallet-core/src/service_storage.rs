@@ -881,7 +881,15 @@ impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
         self.validate_process()?;
         let name = record.name.clone();
         match open_regular(&self.0.directory, &name, self.0.service_uid, true) {
-            Ok(mut file) => return record.verify(&mut file),
+            Ok(mut file) => {
+                record.verify(&mut file)?;
+                // Publication may have renamed the file before its final
+                // directory sync failed. Exact readback alone does not finish
+                // that interrupted publication, including for the ready marker.
+                file.sync_all()?;
+                self.0.directory.sync_all()?;
+                return Ok(());
+            }
             Err(error)
                 if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) => {
             }
