@@ -52,3 +52,15 @@ impl OwnerConnection<WindowsOwnerTransport> {
 }
 
 pub type OwnerClient = OwnerConnection<WindowsOwnerTransport>;
+
+/// Connect the stdio bridge to the protected service MCP runtime. The returned
+/// stream speaks the existing bridge handshake and MCP protocol exclusively.
+pub async fn connect_agent_stream() -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    let identity =
+        Arc::new(ekubo_wallet_core::windows_service_config::installed_service_identity()?);
+    let profile = identity.profile_id();
+    crate::stream_owner_client::connect_agent(WindowsConnector(identity), move || async move {
+        tokio::task::spawn_blocking(move || ekubo_wallet_core::custody_relay::load(profile)).await?
+    })
+    .await
+}

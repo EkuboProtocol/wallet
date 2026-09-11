@@ -1,6 +1,6 @@
 //! Shared custody startup and ordered runtime shutdown for stream service hosts.
 
-use crate::{custody_bootstrap::Startup, runtime::ServiceRuntime};
+use crate::{custody_bootstrap::Startup, events::DomainEventKind, runtime::ServiceRuntime};
 use anyhow::{Context as _, Result, anyhow};
 use std::{future::Future, sync::Arc};
 use tokio::sync::watch;
@@ -45,6 +45,9 @@ where
             let service = open()?;
             runtime = Some(service.clone());
             publish(service.clone())?;
+            service
+                .events()
+                .publish(DomainEventKind::McpStatusChanged { online: true });
             startup.ready();
             tokio::select! {
                 biased;
@@ -61,9 +64,12 @@ where
         // Dropping readiness also rejects unlock waiters on failed startup.
         drop(startup);
         endpoint_stop.send_replace(true);
-        let reviews = runtime
-            .as_ref()
-            .map_or(Ok(()), |service| service.close_owner_reviews());
+        let reviews = runtime.as_ref().map_or(Ok(()), |service| {
+            service
+                .events()
+                .publish(DomainEventKind::McpStatusChanged { online: false });
+            service.close_owner_reviews()
+        });
         let endpoint_closed = if endpoint_finished {
             Ok(())
         } else {

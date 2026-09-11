@@ -102,6 +102,9 @@ impl Peer for ConnectedOwnerPipe {
     fn stream(&mut self) -> &mut Self::Stream {
         self.stream()
     }
+    fn into_stream(self) -> Self::Stream {
+        self.into_stream()
+    }
     fn authenticate(&self) -> Result<()> {
         self.authenticate_request()
     }

@@ -70,6 +70,7 @@ async fn startup_case(fail_open: bool, fail_publish: bool) {
     let (bootstrap, startup) = CustodyBootstrap::new();
     let (endpoint_stop, mut stopping) = watch::channel(false);
     let (stop, stopped) = watch::channel(false);
+    let observed = std::cell::RefCell::new(None);
     let opened = AtomicBool::new(false);
     let published = AtomicBool::new(false);
     let drained = AtomicBool::new(false);
@@ -93,9 +94,11 @@ async fn startup_case(fail_open: bool, fail_publish: bool) {
             opened.store(true, Ordering::SeqCst);
             anyhow::ensure!(!fail_open, "test open failure");
             let owner = OwnerApi::for_test(directory.path())?;
-            Ok(Arc::new(ServiceRuntime::new(ApplicationAuthority::open(
+            let service = Arc::new(ServiceRuntime::new(ApplicationAuthority::open(
                 owner.config().clone(),
-            )?)))
+            )?));
+            *observed.borrow_mut() = Some(service.events().subscribe());
+            Ok(service)
         },
         publish: |_| {
             anyhow::ensure!(!fail_publish, "test publish failure");
@@ -107,6 +110,22 @@ async fn startup_case(fail_open: bool, fail_publish: bool) {
     .await;
     assert!(opened.load(Ordering::SeqCst));
     assert!(drained.load(Ordering::SeqCst));
+    if let Some(mut events) = observed.into_inner() {
+        let mut online = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let crate::events::DomainEventKind::McpStatusChanged { online: value } = event.kind {
+                online.push(value);
+            }
+        }
+        assert_eq!(
+            online,
+            if fail_publish {
+                vec![false]
+            } else {
+                vec![true, false]
+            }
+        );
+    }
     if fail_open {
         assert_eq!(result.unwrap_err().to_string(), "test open failure");
     } else if fail_publish {

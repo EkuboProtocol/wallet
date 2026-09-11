@@ -14,6 +14,8 @@ pub enum Kind {
     Call = 4,
     Ok = 5,
     Error = 6,
+    /// Switch this authenticated connection permanently to the MCP protocol.
+    Agent = 7,
 }
 
 pub struct Frame {
@@ -39,6 +41,7 @@ pub async fn read(stream: &mut (impl AsyncRead + Unpin)) -> Result<Option<Frame>
         4 => Kind::Call,
         5 => Kind::Ok,
         6 => Kind::Error,
+        7 => Kind::Agent,
         _ => anyhow::bail!("invalid owner stream message"),
     };
     Ok(Some(Frame { kind, bytes }))

@@ -3,7 +3,7 @@ use crate::authority::{ApplicationAuthority, OwnerApi};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::DuplexStream;
 
-struct TestPeer {
+pub(super) struct TestPeer {
     stream: DuplexStream,
     allowed: bool,
     checked: Arc<AtomicUsize>,
@@ -13,6 +13,9 @@ impl Peer for TestPeer {
     fn stream(&mut self) -> &mut DuplexStream {
         &mut self.stream
     }
+    fn into_stream(self) -> Self::Stream {
+        self.stream
+    }
     fn authenticate(&self) -> Result<()> {
         self.checked.fetch_add(1, Ordering::SeqCst);
         ensure!(self.allowed, "untrusted test peer");
@@ -20,7 +23,7 @@ impl Peer for TestPeer {
     }
 }
 
-fn pair(allowed: bool) -> (TestPeer, DuplexStream, Arc<AtomicUsize>) {
+pub(super) fn pair(allowed: bool) -> (TestPeer, DuplexStream, Arc<AtomicUsize>) {
     let (stream, client) = tokio::io::duplex(8192);
     let checked = Arc::new(AtomicUsize::new(0));
     (
@@ -34,7 +37,7 @@ fn pair(allowed: bool) -> (TestPeer, DuplexStream, Arc<AtomicUsize>) {
     )
 }
 
-fn runtime(path: &std::path::Path) -> Arc<ServiceRuntime> {
+pub(super) fn runtime(path: &std::path::Path) -> Arc<ServiceRuntime> {
     let owner = OwnerApi::for_test(path).unwrap();
     for document in [
         crate::legal::LegalDocument::TermsOfService,
@@ -48,7 +51,7 @@ fn runtime(path: &std::path::Path) -> Arc<ServiceRuntime> {
     ))
 }
 
-fn envelope() -> WrappedDataKey {
+pub(super) fn envelope() -> WrappedDataKey {
     use ekubo_wallet_core::custody_envelope::{CustodyBinding, WrappingKey};
     WrappingKey::from_material(zeroize::Zeroizing::new([0x22; 32]))
         .enroll(

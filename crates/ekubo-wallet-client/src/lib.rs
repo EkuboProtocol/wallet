@@ -30,4 +30,4 @@ mod stream_owner_client;
 #[cfg(target_os = "windows")]
 mod windows_owner_client;
 #[cfg(target_os = "windows")]
-pub use windows_owner_client::OwnerClient;
+pub use windows_owner_client::{OwnerClient, connect_agent_stream};

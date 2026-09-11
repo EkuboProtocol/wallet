@@ -237,6 +237,14 @@ impl ConnectedOwnerPipe {
         &mut self.pipe
     }
 
+    /// Transfer a connection after authenticating its protocol-selection read.
+    /// The receiving protocol owns the stream until disconnect; it must never
+    /// switch back to owner dispatch without a new authenticated connection.
+    #[must_use]
+    pub fn into_stream(self) -> NamedPipeServer {
+        self.pipe
+    }
+
     /// Verify the kernel client context of the last read. This is synchronous:
     /// impersonation cannot cross an await, task migration, or owner dispatch.
     /// A successful check supplies no human-presence proof.

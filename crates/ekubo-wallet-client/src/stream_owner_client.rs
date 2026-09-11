@@ -40,18 +40,10 @@ impl<C: Connector> StreamOwnerClient<C> {
     where
         F: std::future::Future<Output = Result<WrappedDataKey>> + Send,
     {
-        let (mut stream, instance) = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut stream = connector.connect().await?;
-            let instance = wire::read_hello(&mut stream).await?;
-            // Do not even invoke the credential loader before endpoint and
-            // greeting validation. Only its encrypted envelope is transmitted.
-            let wrapped = load().await?;
-            wire::write(&mut stream, Kind::Unlock, wrapped.as_bytes()).await?;
-            unit_reply(&mut stream).await?;
-            Ok::<_, anyhow::Error>((stream, instance))
-        })
-        .await
-        .context("owner service connection timed out")??;
+        let (mut stream, instance) =
+            tokio::time::timeout(Duration::from_secs(10), connect_unlocked(&connector, load))
+                .await
+                .context("owner service connection timed out")??;
         let (stop, mut stopping) = watch::channel(false);
         let (hold, mut holding) = watch::channel(false);
         let (closed, status) = watch::channel(None);
@@ -143,6 +135,42 @@ impl<C: Connector> StreamOwnerClient<C> {
     }
 }
 
+async fn connect_unlocked<C: Connector, F>(
+    connector: &C,
+    load: impl FnOnce() -> F,
+) -> Result<(C::Stream, uuid::Uuid)>
+where
+    F: std::future::Future<Output = Result<WrappedDataKey>> + Send,
+{
+    let mut stream = connector.connect().await?;
+    let instance = wire::read_hello(&mut stream).await?;
+    // Never invoke the ciphertext loader before OS endpoint authentication
+    // and greeting validation. Callers bound the complete startup duration.
+    let wrapped = load().await?;
+    wire::write(&mut stream, Kind::Unlock, wrapped.as_bytes()).await?;
+    unit_reply(&mut stream).await?;
+    Ok((stream, instance))
+}
+
+/// Retain the same authenticated kernel connection through relay and handoff.
+/// No desktop lease, owner-call client, or raw key is returned to the agent.
+pub(crate) async fn connect_agent<C: Connector, F>(
+    connector: C,
+    load: impl FnOnce() -> F,
+) -> Result<C::Stream>
+where
+    F: std::future::Future<Output = Result<WrappedDataKey>> + Send,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (mut stream, _) = connect_unlocked(&connector, load).await?;
+        wire::write(&mut stream, Kind::Agent, &[]).await?;
+        unit_reply(&mut stream).await?;
+        Ok(stream)
+    })
+    .await
+    .context("MCP service connection timed out")?
+}
+
 async fn supervise(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     holding: &mut watch::Receiver<bool>,
@@ -187,3 +215,7 @@ async fn unit_reply(stream: &mut (impl AsyncRead + Unpin)) -> Result<()> {
 #[cfg(test)]
 #[path = "stream_owner_client_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "stream_agent_client_test.rs"]
+mod agent_tests;

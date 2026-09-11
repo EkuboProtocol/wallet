@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{io::DuplexStream, sync::mpsc};
 
 #[derive(Clone)]
-struct Factory {
-    incoming: mpsc::UnboundedSender<DuplexStream>,
-    opened: Arc<AtomicUsize>,
+pub(super) struct Factory {
+    pub(super) incoming: mpsc::UnboundedSender<DuplexStream>,
+    pub(super) opened: Arc<AtomicUsize>,
 }
 impl Connector for Factory {
     type Stream = DuplexStream;
@@ -21,7 +21,7 @@ impl Connector for Factory {
     }
 }
 
-fn envelope() -> WrappedDataKey {
+pub(super) fn envelope() -> WrappedDataKey {
     use ekubo_wallet_core::custody_envelope::{CustodyBinding, WrappingKey};
     WrappingKey::from_material(Zeroizing::new([0x44; 32]))
         .enroll(
