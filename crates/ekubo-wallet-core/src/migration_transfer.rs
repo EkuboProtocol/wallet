@@ -326,6 +326,35 @@ pub struct StagingReply {
 }
 
 impl StagingReply {
+    pub(crate) fn write_to(&self, output: &mut impl Write) -> Result<()> {
+        let reply = Reply {
+            session: self.session,
+            stage: self.stage,
+            canonical: self.canonical.clone(),
+            relay: hex::encode(self.relay.as_bytes()),
+        };
+        write_frame(output, &encode(&reply, MAX_HEADER_BYTES)?)?;
+        output.flush()?;
+        Ok(())
+    }
+
+    /// Return source evidence to an already authenticated installer while the
+    /// caller retains lifecycle exclusion and the snapshot's SQLite fence. This
+    /// accepts only a caller-created snapshot, never collects opaque core keys,
+    /// and grants no activation or deletion authority. A write/flush failure is
+    /// ambiguous and must not trigger an automatic retry.
+    pub fn write_source_checkpoint(
+        &self,
+        output: &mut impl Write,
+        destination: Destination,
+        snapshot: &mut MigrationDatabaseSnapshot,
+    ) -> Result<()> {
+        let checkpoint = RecoveryCheckpoint::capture(destination, self, snapshot)?;
+        write_frame(output, &encode(&checkpoint, MAX_HEADER_BYTES)?)?;
+        output.flush()?;
+        Ok(())
+    }
+
     /// Original authenticated transfer identity for the installer's journal.
     /// Retaining it grants no recovery, activation or legacy-deletion authority.
     #[must_use]
@@ -357,7 +386,9 @@ pub fn read_reply(input: &mut impl Read, session: Uuid) -> Result<StagingReply> 
         "provisioning reply session mismatch"
     );
     ensure!(
-        !reply.stage.is_nil() && reply.canonical.bytes != 0,
+        !reply.stage.is_nil()
+            && reply.canonical.bytes != 0
+            && reply.canonical.bytes <= crate::installer_checkpoint::MAX_DATABASE_BYTES,
         "invalid provisioning reply"
     );
     ensure!(

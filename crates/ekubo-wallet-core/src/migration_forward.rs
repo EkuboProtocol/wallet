@@ -1,8 +1,8 @@
 //! Bounded request forwarding for the owner -> installer -> service path.
 //! No credential lookup, peer authentication, recovery or activation occurs here.
 use super::{
-    Destination, Header, MAGIC, MAX_HEADER_BYTES, TransferLimits, encode, read_frame, read_key,
-    write_frame,
+    Destination, Header, MAGIC, MAX_HEADER_BYTES, RecoveryCheckpoint, StagingReply, TransferLimits,
+    encode, read_frame, read_key, read_reply, write_frame,
 };
 use crate::{config::WalletMetadata, database_staging::DatabaseTransfer};
 use anyhow::{Result, ensure};
@@ -12,12 +12,43 @@ use uuid::Uuid;
 /// Public source evidence from one forwarded request. This establishes neither
 /// source provenance nor durable staging; the service must still validate it.
 pub struct RelayedRequest {
+    destination: Destination,
     session: Uuid,
     source: DatabaseTransfer,
     wallets: Vec<WalletMetadata>,
 }
 
 impl RelayedRequest {
+    /// Finish the staging handshake on the same authenticated channels. Forward
+    /// the validated service reply, then require owner checkpoint evidence bound
+    /// to that reply and the original request. Consuming self prevents accidental
+    /// repetition of this phase. No retry is safe after a missing reply.
+    ///
+    /// The owner supplies the logical fingerprint; this function cannot verify
+    /// a remote SQLite fence. Native callers must retain and monitor that owner
+    /// connection. Neither this result nor checkpoint persistence permits cutover.
+    pub fn finish(
+        self,
+        service: &mut impl Read,
+        owner: &mut (impl Read + Write),
+    ) -> Result<(StagingReply, RecoveryCheckpoint)> {
+        let reply = read_reply(service, self.session)?;
+        reply.write_to(owner)?;
+        let mut remaining = u64::from(MAX_HEADER_BYTES);
+        let checkpoint: RecoveryCheckpoint = read_frame(owner, MAX_HEADER_BYTES, &mut remaining)?;
+        ensure!(
+            checkpoint.version == 1
+                && checkpoint.destination == self.destination
+                && checkpoint.session == self.session
+                && checkpoint.source == self.source
+                && checkpoint.stage == reply.stage()
+                && checkpoint.canonical == *reply.canonical()
+                && checkpoint.relay_digest == reply.relay().digest(),
+            "owner checkpoint does not match forwarded staging"
+        );
+        Ok((reply, checkpoint))
+    }
+
     #[must_use]
     pub const fn session(&self) -> Uuid {
         self.session
@@ -73,6 +104,7 @@ pub fn relay_request(
     crate::database_staging::copy_checked(&header.database, input, output)?;
     output.flush()?;
     Ok(RelayedRequest {
+        destination: header.destination,
         session: header.session,
         source: header.database,
         wallets,
