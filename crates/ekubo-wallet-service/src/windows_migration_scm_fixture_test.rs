@@ -49,6 +49,12 @@ fn host(
 }
 
 fn client(owner: &str) -> Result<()> {
+    ensure!(
+        std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+            && std::env::var("RUNNER_OS").as_deref() == Ok("Windows"),
+        "disposable Windows CI only"
+    );
+
     let temporary = tempfile::tempdir()?;
     let source = temporary.path().canonicalize()?;
     let database = source.join("wallet.db");
@@ -96,7 +102,7 @@ fn client(owner: &str) -> Result<()> {
             owner,
             &staged.checkpoint()?,
         )?;
-        let relay = staged.reply().relay().clone();
+        let relay = runtime.block_on(deliver_owner_relay(owner, staged.reply().relay()))?;
         drop(staged);
         let snapshot = MigrationDatabaseSnapshot::freeze(&database, Zeroizing::new(key))?;
         let checkpoint =
@@ -151,4 +157,27 @@ fn restart_fixture_service(owner: &str) -> Result<()> {
         .status()?;
     ensure!(status.success(), "synthetic service restart failed");
     Ok(())
+}
+
+async fn deliver_owner_relay(
+    owner: &str,
+    relay: &ekubo_wallet_core::custody_envelope::WrappedDataKey,
+) -> Result<ekubo_wallet_core::custody_envelope::WrappedDataKey> {
+    use ekubo_wallet_core::{
+        custody_relay, windows_relay_handoff, windows_service_config, windows_service_identity,
+    };
+    ensure!(
+        windows_service_identity::current_process_identity()?.user_sid() == owner,
+        "fixture must run under its synthetic owner account"
+    );
+    let profile = windows_service_config::pending_installer_identity(owner)?.profile_id();
+    let endpoint = windows_relay_handoff::OwnerRelayEndpoint::bind()?;
+    let endpoint_id = endpoint.endpoint_id();
+    let (stop, receiver) = watch::channel(false);
+    let serving = tokio::spawn(endpoint.run(receiver));
+    let result = windows_relay_handoff::deliver(owner, endpoint_id, profile, relay).await;
+    let _ = stop.send(true);
+    serving.await??;
+    result?;
+    custody_relay::load(profile)
 }

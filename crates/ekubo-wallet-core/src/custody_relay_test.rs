@@ -90,7 +90,6 @@ fn relay_persistence_rejects_failed_write_or_mismatched_readback() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn receipt_cannot_be_replayed_for_another_nonce_profile_or_relay() {
     let relay = relay();

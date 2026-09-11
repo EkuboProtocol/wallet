@@ -69,7 +69,7 @@ impl InstalledServiceIdentity {
     }
 }
 
-fn validate_owner_component(owner: &str) -> Result<()> {
+pub(crate) fn validate_owner_component(owner: &str) -> Result<()> {
     // This is only a safe registry component check. Client identity originates
     // in the primary token, and service callers must match protected metadata.
     ensure!(

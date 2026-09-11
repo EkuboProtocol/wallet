@@ -106,3 +106,12 @@ mod installer_checkpoint;
 
 #[cfg(target_os = "linux")]
 pub mod linux_relay_handoff;
+
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_relay_pipe;
+
+#[cfg(target_os = "windows")]
+pub mod windows_relay_handoff;
+
+#[cfg(any(target_os = "windows", test))]
+mod relay_frame;

@@ -1715,3 +1715,29 @@ The earlier systemd migration fixture at revision `848e76c` passed its complete
 Linux CI job (run `34629641344`), including production-sandbox transfer/recovery
 and raw credential denial. That result predates the newer journal and relay
 handoff changes and does not validate them.
+
+### Windows installer-to-owner relay channel
+
+`windows_relay_pipe` reuses the native private-pipe creation and security checks
+with the actual owner's SID as pipe owner and restricted Administrators client
+access. A fresh endpoint UUID supplies the fixed local name; the first instance
+rejects preexisting names and a successor is reserved before the connected
+instance closes. Remote clients are rejected. A fixed preface precedes the
+existing synchronous installer-token inspection and mandatory impersonation
+revert. The installer checks the connected pipe owner/DACL before writing.
+
+`windows_relay_handoff` uses bounded 4096-byte frames and the shared profile,
+nonce and relay-digest receipt. The delivery client has a 300-second deadline
+and never retries a written request. Only one credential operation is admitted;
+the blocking worker retains its permit even if the request times out or the
+endpoint stops. Endpoint shutdown can cancel native I/O without admitting a
+replacement credential write while that worker is still running.
+
+The Windows SCM fixture now delivers the staged relay through this endpoint and
+reloads it from the fresh profile's credential entry before recovery. The client
+requires disposable GitHub Windows CI before accessing that entry. Installer and
+owner endpoint run under the same CI account; this does not test the separate
+administrator-account elevation case or production desktop launch. Native CI
+must still verify the full pipe/credential flow. Framing tests and native-pipe
+cross-compilation alone do not establish that result. No active profile or
+legacy credential is deleted by this fixture.

@@ -86,7 +86,6 @@ pub struct RelayReceipt {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl RelayReceipt {
-    #[cfg(target_os = "linux")]
     pub(crate) fn persisted(profile: Uuid, nonce: Uuid, relay: &WrappedDataKey) -> Result<Self> {
         ensure!(
             !nonce.is_nil() && !profile.is_nil(),
@@ -100,7 +99,6 @@ impl RelayReceipt {
         })
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn verify(&self, profile: Uuid, nonce: Uuid, relay: &WrappedDataKey) -> Result<()> {
         ensure!(
             !nonce.is_nil()
