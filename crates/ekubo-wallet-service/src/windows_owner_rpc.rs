@@ -12,7 +12,11 @@ use ekubo_wallet_core::{
     windows_service_config::InstalledServiceIdentity,
 };
 use std::sync::Arc;
-use tokio::{net::windows::named_pipe::NamedPipeServer, sync::Semaphore, task::JoinSet};
+use tokio::{
+    net::windows::named_pipe::NamedPipeServer,
+    sync::{Semaphore, watch},
+    task::JoinSet,
+};
 
 pub struct WindowsOwnerEndpoint {
     identity: Arc<InstalledServiceIdentity>,
@@ -52,19 +56,27 @@ impl WindowsOwnerEndpoint {
         ))
     }
 
-    /// Cancellation drops every connection and therefore every desktop lease.
-    /// Keep this future alive alongside startup and the runtime supervisor.
-    pub async fn run(self) -> Result<()> {
+    /// A stop request closes admission and drains aborted connection tasks,
+    /// releasing their desktop leases before returning to the host.
+    pub async fn run(self, mut stop: watch::Receiver<bool>) -> Result<()> {
         let slots = Arc::new(Semaphore::new(32));
         let mut connections = JoinSet::new();
         let mut accepting = Box::pin(self.listener.accept());
-        loop {
+        let result = loop {
             tokio::select! {
+                biased;
+                _ = stop.wait_for(|stop| *stop) => break Ok(()),
                 accepted = &mut accepting => {
-                    let peer = accepted?;
+                    let peer = match accepted {
+                        Ok(peer) => peer,
+                        Err(error) => break Err(error),
+                    };
                     // The accepted instance keeps the namespace alive while
                     // its successor is created; there is no rebind gap.
-                    let next = OwnerPipeListener::bind(self.identity.clone(), false)?;
+                    let next = match OwnerPipeListener::bind(self.identity.clone(), false) {
+                        Ok(next) => next,
+                        Err(error) => break Err(error),
+                    };
                     accepting = Box::pin(next.accept());
                     let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
                     let service = self.service.clone();
@@ -77,7 +89,11 @@ impl WindowsOwnerEndpoint {
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
             }
-        }
+        };
+        drop(accepting);
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+        result
     }
 }
 

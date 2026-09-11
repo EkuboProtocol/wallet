@@ -29,6 +29,8 @@ pub mod owner_rpc;
 #[cfg(any(target_os = "windows", test))]
 mod owner_stream_rpc;
 pub mod runtime;
+#[cfg(any(target_os = "windows", test))]
+mod service_host;
 mod transaction_previews;
 mod transaction_reviews;
 #[path = "../../../src/walletconnect.rs"]
@@ -37,6 +39,8 @@ pub mod walletconnect;
 mod walletconnect_handler;
 #[path = "../../../src/walletconnect_review.rs"]
 mod walletconnect_review;
+#[cfg(target_os = "windows")]
+pub mod windows;
 #[cfg(target_os = "windows")]
 pub mod windows_owner_rpc;
 
