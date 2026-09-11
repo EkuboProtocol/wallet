@@ -14,8 +14,9 @@ zeroizing typed input. Native authorization remains in the existing authority
 and core paths. The local removal adapter checks the exact reviewed account and
 document before entering native authorization, matching service dispatch.
 
-This is a desktop integration step, not custody cutover. Startup still opens
-local `ApplicationAuthority` and supplies the adapter's local variant. Startup
+Installed-profile startup now selects the authenticated service before opening
+any local `ApplicationAuthority`. Only profiles without installed service metadata
+retain the local path. Invalid metadata and service failures never fall back. Startup
 settings, legal acceptance, ordinary settings mutations, signature decisions,
 and account-removal reviews now use the async adapter. WalletConnect review state
 now contains display-only account choices and a single-use decision handle. The
@@ -44,11 +45,11 @@ Status reads carry a UI generation so a delayed response cannot resurrect a
 session after a newer disconnect or clear a newer pairing's busy state.
 Local shutdown excludes late registrations before draining relay farewells;
 service shutdown closes the owner transport and releases its desktop lease while
-the resident service finishes cancellation. Production still constructs the
-local backend. Updates and global event/session startup still must move to the
-client before startup may select
-the service for an installed profile. Installed-profile
-startup must make that selection before opening any local authority.
+the resident service finishes cancellation. Startup retains the acknowledged
+`DesktopSession` until Quit, closes it before the Tokio runtime, and also closes it
+on initial-state failure or an exit that bypasses the normal quit callback.
+The service backend starts neither a local automation supervisor nor a local MCP
+listener. The existing desktop paths remain for macOS and profiles not yet migrated.
 
 Desktop-session readiness now distinguishes authenticated transport startup from
 an accepted execution lease. Windows forwards the existing Hold acknowledgement
@@ -59,7 +60,7 @@ Missing acknowledgements fail startup after ten seconds and close the connection
 readiness failures wait for closure to finish and never reconnect or fall back to
 local authority. This acknowledgement grants no owner authorization. The Linux
 Hold signature and its service/client implementations must be installed together.
-Startup selection remains unfinished.
+Native packaged startup and shutdown still require end-to-end verification.
 
 The global desktop and notification consumers now subscribe through `DesktopEvents`,
 which selects the local broadcast stream or authenticated service long polls. Remote
@@ -72,12 +73,11 @@ the journal. Transport failure ends the feed without reconnecting or replaying c
 The window now retains `DesktopOwner` and all normal reads, reviews, and settings use
 that selected backend; test fixture storage access remains test-only. Transaction
 inspection results must match their active load identity, so service latency cannot
-let an older reply overwrite a refresh or repopulate cleared history. Production
-startup still constructs the local owner. Update authorization delegates to the existing
+let an older reply overwrite a refresh or repopulate cleared history. Update authorization delegates to the existing
 local core path only; service-backed update installation explicitly fails until the
 protected service installer is implemented. No desktop authorization proof is created
-for a service profile. Installed-profile startup selection and full packaged service
-behavior remain to be completed.
+for a service profile. Full packaged service behavior, installation/migration, protected updates, and
+Windows native owner authorization remain to be completed.
 
 ## Required outcome
 
@@ -371,8 +371,8 @@ Log: `~/Documents/wallet-service-assets-verify.log`.
   pinned service, without activation or custody relay. A supervisor closes it on
   completion or cancellation; dropping a method future alone would not cancel D-Bus.
   Windows cancellation drops the initiating call's pipe. Closed GUI response channels
-  are discarded rather than reopening stale prompts. Production startup still chooses
-  the local backend; large-frame handling and native successful signing validation
+  are discarded rather than reopening stale prompts. Installed-profile startup selects
+  the service backend; large-frame handling and native successful signing validation
   are still required.
 
 Account creation and removal now have shared typed owner RPCs. Creation accepts
@@ -665,9 +665,8 @@ runtime assembly above.
    from authority reads. Keep that presentation model while making capture use
    remote reads; do not block the UI on synchronous D-Bus calls. Large inventories
    and payloads need pagination/chunking so transport bounds cannot hide records
-   or break existing large-payload screens. Startup still
-   constructs local authority and launches automation against local stores, so
-   adding the client crate has not changed the custody path yet.
+   or break existing large-payload screens. Installed-profile startup now selects service custody and omits the local
+   automation and MCP workers; native packaged validation remains required.
 6. Integrate installation, authenticated updates, upgrades, rollback behavior,
    and removal. Keep the service binary and configuration unwritable by the
    desktop user. Per-user Windows installation currently needs no service;

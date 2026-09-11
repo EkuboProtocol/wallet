@@ -3531,3 +3531,40 @@ fn walletconnect_progress_distinguishes_transport_from_waiting_for_the_dapp() {
         walletconnect_pairing_status(Some(&SessionStatus::Reconnecting)).contains("Reconnecting")
     );
 }
+
+struct SessionClosureProbe {
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    fail: bool,
+}
+impl ekubo_wallet_client::desktop_session::SessionTransport for SessionClosureProbe {
+    async fn hold(&self, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
+        let _ = ready.send(());
+        std::future::pending().await
+    }
+    async fn close(&self) -> Result<()> {
+        tokio::task::yield_now().await;
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        anyhow::ensure!(!self.fail, "synthetic close failure");
+        Ok(())
+    }
+}
+
+#[test]
+fn desktop_shutdown_awaits_service_transport_closure_and_reports_failure() {
+    for fail in [false, true] {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let session = runtime.block_on(async {
+            let session =
+                ekubo_wallet_client::desktop_session::DesktopSession::start(SessionClosureProbe {
+                    closed: closed.clone(),
+                    fail,
+                });
+            session.ready().await.unwrap();
+            session
+        });
+        let result = close_service_session(runtime.handle(), Some(session));
+        assert_eq!(result.is_err(), fail);
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}

@@ -16,6 +16,7 @@
 
 use super::*;
 use crate::authority::OwnerApi;
+use crate::walletconnect::WalletConnectManager;
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 
 /// Serializes the render tests against each other.

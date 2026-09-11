@@ -20,6 +20,7 @@ pub mod desktop_dapp_review;
 pub mod desktop_dapps;
 pub mod desktop_events;
 pub mod desktop_owner;
+mod desktop_startup;
 pub mod events;
 pub mod gui_review;
 pub mod ipc_server;

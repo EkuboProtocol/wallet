@@ -3,9 +3,9 @@ use crate::{
     agent_config::AgentAdapter,
     assets::{PENCIL_ICON, REFRESH_ICON, WalletAssets},
     authority::{
-        ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord,
-        OwnerPortfolioAccount, OwnerPortfolioSnapshot, OwnerReviewQueues,
-        OwnerTransactionInspection, PRIVATE_KEY_REVEAL_DURATION,
+        AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerPortfolioAccount,
+        OwnerPortfolioSnapshot, OwnerReviewQueues, OwnerTransactionInspection,
+        PRIVATE_KEY_REVEAL_DURATION,
     },
     automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
@@ -22,7 +22,7 @@ use crate::{
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
-    walletconnect::{ProposalPresenter, SessionSummary, WalletConnectManager},
+    walletconnect::{ProposalPresenter, SessionSummary},
 };
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::{
@@ -1298,6 +1298,7 @@ struct RemoveAccount {
 struct DesktopRuntime {
     _instance: Arc<Mutex<Option<SingleInstance>>>,
     _server: Arc<Mutex<Option<McpIpcServer>>>,
+    _service_session: Arc<Mutex<Option<ekubo_wallet_client::desktop_session::DesktopSession>>>,
     _walletconnect: DesktopDapps,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
     _pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
@@ -7699,6 +7700,15 @@ impl WalletWindow {
             }
         }
         None
+    }
+
+    fn update_mcp_listener_status(&mut self, online: bool, cx: &mut Context<Self>) {
+        self.mcp_status = if online {
+            McpGatewayStatus::Online
+        } else {
+            McpGatewayStatus::Offline("MCP server is offline.".into())
+        };
+        cx.notify();
     }
 
     fn reload_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -21145,6 +21155,17 @@ where
     tokio.block_on(async move { tokio::time::timeout(timeout, future).await })
 }
 
+fn close_service_session(
+    tokio: &tokio::runtime::Handle,
+    session: Option<ekubo_wallet_client::desktop_session::DesktopSession>,
+) -> Result<()> {
+    if let Some(session) = session {
+        block_on_with_timeout(tokio, DESKTOP_SERVER_SHUTDOWN_TIMEOUT, session.close())
+            .context("service session shutdown timed out")??;
+    }
+    Ok(())
+}
+
 fn perform_desktop_shutdown(
     server: Option<McpIpcServer>,
     tokio: &tokio::runtime::Handle,
@@ -21152,7 +21173,14 @@ fn perform_desktop_shutdown(
     instance_slot: Arc<Mutex<Option<SingleInstance>>>,
     data_dir: &Path,
     walletconnect: &DesktopDapps,
+    session: Option<ekubo_wallet_client::desktop_session::DesktopSession>,
 ) -> Result<bool> {
+    if let Err(error) = close_service_session(tokio, session) {
+        let _ = crate::release_check::record_update_diagnostic(
+            data_dir,
+            &format!("service session shutdown failed: {error:#}"),
+        );
+    }
     // First, because it is the only part of shutdown someone else is watching.
     // A dapp is told the session is over by a publish to the relay, and the
     // quit used to cancel the sessions and let the process exit out from under
@@ -21231,9 +21259,9 @@ fn close_active_window(_: &CloseWindow, cx: &mut App) {
 
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
-    let config = crate::config::ConfigStore::production()?;
+    let data_dir = crate::config::default_data_dir()?;
     let (activation_tx, activation_rx) = tokio::sync::mpsc::unbounded_channel();
-    let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
+    let instance = match SingleInstance::acquire(&data_dir, activation_tx)? {
         InstanceOutcome::Primary(instance) => instance,
         InstanceOutcome::ActivatedExisting => return Ok(()),
     };
@@ -21245,19 +21273,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     // whole entitlement, so it is also what unlocks every later write.
     crate::agent_config::grant_helper_write_authority();
     crate::agent_config::install_bridge_helper()?;
-    let data_dir = config.data_dir().to_path_buf();
     let _ = crate::release_check::record_update_diagnostic(&data_dir, "wallet process started");
-    let authority = ApplicationAuthority::open(config)?;
-    let owner = authority.owner_api();
-    let agent = authority.agent_api();
-    let events = authority.events();
     let server_slot = Arc::new(Mutex::new(None::<McpIpcServer>));
     let pending_update = Arc::new(Mutex::new(None::<PreparedUpdate>));
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
-    let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, walletconnect_prompts) = ProposalPresenter::channel();
-    let walletconnect = DesktopDapps::local(owner.clone(), walletconnect, walletconnect_presenter);
 
     // Built here rather than by `gpui_tokio::init` so that the runtime outlives
     // the GPUI application and can be *joined* on the way out; see
@@ -21268,9 +21289,23 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .enable_all()
         .build()
         .context("could not start the Tokio runtime")?;
-    let initial = tokio.block_on(InitialDesktopState::capture(
-        &crate::desktop_owner::DesktopOwner::from(owner.clone()),
-    ))?;
+    let crate::desktop_startup::DesktopStartup {
+        owner,
+        dapps: walletconnect,
+        local,
+        session,
+    } = crate::desktop_startup::DesktopStartup::open(&tokio, walletconnect_presenter)?;
+    let initial = match tokio.block_on(InitialDesktopState::capture(&owner)) {
+        Ok(initial) => initial,
+        Err(error) => {
+            if let Some(session) = session {
+                let _ = close_service_session(tokio.handle(), Some(session));
+            }
+            return Err(error);
+        }
+    };
+    let service_session = Arc::new(Mutex::new(session));
+    let fallback_session = service_session.clone();
     let tokio_handle = tokio.handle().clone();
     // In a slot because the quit handler and the tail of this function both
     // have to be able to claim it; see `join_tokio_runtime`.
@@ -21325,9 +21360,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             // needs the Tokio runtime `gpui_tokio::init` just installed. It
             // holds an `AgentExecutionAuthority` — the same narrow signing
             // capability the MCP server gets — and never a key store.
-            {
-                let automation_config = owner.config().clone();
-                let automation_events = events.clone();
+            if let Some(local) = &local {
+                let automation_config = local.config.clone();
+                let automation_events = local.events.clone();
                 gpui_tokio::Tokio::spawn(cx, async move {
                     if let Err(error) =
                         crate::automation_runtime::run(automation_config, automation_events).await
@@ -21341,6 +21376,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             cx.set_global(DesktopRuntime {
                 _instance: instance_slot.clone(),
                 _server: server_slot.clone(),
+                _service_session: service_session.clone(),
                 _walletconnect: walletconnect.clone(),
                 _tray: tray.clone(),
                 _pending_update: pending_update.clone(),
@@ -21394,6 +21430,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     .lock()
                     .ok()
                     .and_then(|mut update| update.take());
+                let session = service_session
+                    .lock()
+                    .ok()
+                    .and_then(|mut session| session.take());
                 let update_requested = prepared.is_some();
                 if update_requested {
                     let _ = crate::release_check::record_update_diagnostic(
@@ -21415,6 +21455,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             shutdown_instance,
                             &worker_data_dir,
                             &walletconnect,
+                            session,
                         )
                     });
                 async move {
@@ -21560,11 +21601,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             })
             .detach();
             let mut view_events = crate::desktop_events::DesktopEvents::subscribe(
-                &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+                &owner.clone(),
                 &gpui_tokio::Tokio::handle(cx),
             );
             let event_view = wallet_view.clone();
-            let event_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
+            let event_owner = owner.clone();
             let event_tray = tray.clone();
             let event_walletconnect = wallet_view.read(cx).walletconnect.clone();
             let event_tokio = gpui_tokio::Tokio::handle(cx);
@@ -21583,6 +21624,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind
                             {
                                 mcp_online = *online;
+                                event_view.update(cx, |view, cx| {
+                                    view.update_mcp_listener_status(*online, cx);
+                                });
                             }
                             let portfolio_changed = matches!(
                                 &event.kind,
@@ -21630,6 +21674,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         Ok(crate::desktop_events::DesktopEvent::Refresh { mcp_online: status }) => {
                             if let Some(online) = status {
                                 mcp_online = online;
+                                event_view.update(cx, |view, cx| {
+                                    view.update_mcp_listener_status(online, cx);
+                                });
                             }
                             event_view.update(cx, |view, cx| {
                                 view.invalidate_portfolio();
@@ -21645,6 +21692,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         }
                         Err(error) => {
                             tracing::warn!(%error, "desktop event stream stopped");
+                            event_view.update(cx, |view, cx| {
+                                view.mcp_status =
+                                    McpGatewayStatus::Offline(format!("{error:#}").into());
+                                cx.notify();
+                            });
                             if let Some(tray) = event_tray.borrow_mut().as_mut() {
                                 tray.set_mcp_online(false);
                             }
@@ -21735,10 +21787,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 tokio::sync::mpsc::unbounded_channel();
             let notification_service = PlatformNotificationService::new(notification_clicks);
             let mut domain_events = crate::desktop_events::DesktopEvents::subscribe(
-                &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+                &owner.clone(),
                 &gpui_tokio::Tokio::handle(cx),
             );
-            let notification_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
+            let notification_owner = owner.clone();
             gpui_tokio::Tokio::spawn(cx, async move {
                 loop {
                     match domain_events.recv().await {
@@ -21808,35 +21860,47 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             })
             .detach();
 
-            let slot = server_slot.clone();
-            let status_tray = tray.clone();
-            let server_events = events.clone();
-            let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                McpIpcServer::start(&data_dir, agent, server_events)
-            });
-            cx.spawn(async move |cx| match server_task.await {
-                Ok(server) => {
-                    if let Ok(mut guard) = slot.lock() {
-                        *guard = Some(server);
+            if let Some(local) = local {
+                let slot = server_slot.clone();
+                let status_tray = tray.clone();
+                let server_events = local.events;
+                let agent = local.agent;
+                let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    McpIpcServer::start(&data_dir, agent, server_events)
+                });
+                cx.spawn(async move |cx| match server_task.await {
+                    Ok(server) => {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = Some(server);
+                        }
+                        if let Some(tray) = status_tray.borrow_mut().as_mut() {
+                            tray.set_mcp_online(true);
+                        }
+                        wallet_view.update(cx, |view, cx| {
+                            view.mcp_status = McpGatewayStatus::Online;
+                            cx.notify();
+                        });
                     }
-                    if let Some(tray) = status_tray.borrow_mut().as_mut() {
-                        tray.set_mcp_online(true);
-                    }
-                    wallet_view.update(cx, |view, cx| {
-                        view.mcp_status = McpGatewayStatus::Online;
+                    Err(error) => wallet_view.update(cx, |view, cx| {
+                        view.mcp_status = McpGatewayStatus::Offline(format!("{error:#}").into());
                         cx.notify();
-                    });
-                }
-                Err(error) => wallet_view.update(cx, |view, cx| {
-                    view.mcp_status = McpGatewayStatus::Offline(format!("{error:#}").into());
-                    cx.notify();
-                }),
-            })
-            .detach();
+                    }),
+                })
+                .detach();
+            }
         });
     // Ordinarily a no-op: the quit handler has already claimed the runtime by
     // the time control gets here. This covers an exit that never ran one, and
     // it is the last thing between here and `main` returning into `exit`.
+    if let Some(session) = fallback_session
+        .lock()
+        .ok()
+        .and_then(|mut session| session.take())
+        && let Ok(runtime) = tokio_slot.lock()
+        && let Some(runtime) = runtime.as_ref()
+    {
+        let _ = close_service_session(runtime.handle(), Some(session));
+    }
     join_tokio_runtime(&tokio_slot, &shutdown_data_dir);
     Ok(())
 }
