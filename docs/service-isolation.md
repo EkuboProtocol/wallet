@@ -314,6 +314,18 @@ result. Same-user tests and cross-compilation do not prove cross-identity storag
 access. The fixture does not exercise SQLCipher migration, active custody, desktop
 owner presence or packaged installation.
 
+After canonical reconstruction, the shared receiver publishes an immutable
+`custody-stage-<stage>-candidate.json` record through the protected native store.
+It binds the protocol version, transfer session, destination identity, source
+snapshot digest/length, credential-stage marker, canonical digest/length and
+relay ciphertext. Publication and exact readback must succeed before returning a
+candidate or sending its staging reply. A truncated transfer cannot create this
+record; a publication or readback error leaves ambiguous pending state for later
+recovery. This supplies durable staging evidence, not a commit journal or
+activation/deletion authority. Recovery still needs to revalidate the actual
+protected credentials and database, persist the login relay and coordinate the
+source fence with durable activation.
+
 The full Windows matrix also builds the service's `windows-migration-scm` example
 with the test-only `migration-fixture` feature. The disposable SCM setup runs the
 actual `windows_provisioning::run` host and `windows_provisioning_client::transfer`

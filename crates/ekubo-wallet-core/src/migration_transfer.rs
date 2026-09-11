@@ -9,7 +9,7 @@ use crate::{
     config::WalletMetadata,
     custody_envelope::WrappedDataKey,
     custody_provisioning::{MigrationAccount, PreparedServiceCredentials, validate_accounts},
-    custody_staging::{CredentialStage, CredentialStagingStore},
+    custody_staging::{CredentialStage, CredentialStagingStore, StagedRecord},
     database_staging::{DatabaseStagingStore, DatabaseTransfer},
     policy_store::migration_database::MigrationDatabaseSnapshot,
 };
@@ -134,6 +134,34 @@ pub struct ReceivedCandidate<'a, S> {
     stage: CredentialStage,
     session: Uuid,
     canonical: DatabaseTransfer,
+}
+
+/// Durable staging evidence for later recovery. No field authorizes activation:
+/// recovery must revalidate protected storage, credentials and database contents.
+/// The source descriptor binds the frozen transfer, not a live source pathname.
+#[derive(Serialize)]
+struct CandidateRecord<'a> {
+    version: u8,
+    session: Uuid,
+    destination: &'a Destination,
+    source: &'a DatabaseTransfer,
+    credentials: &'a CredentialStage,
+    canonical: &'a DatabaseTransfer,
+    relay: String,
+}
+
+fn persist_candidate(
+    store: &impl CredentialStagingStore,
+    record: &CandidateRecord<'_>,
+) -> Result<()> {
+    let bytes = encode(record, MAX_HEADER_BYTES)?;
+    let stage = record.credentials.id();
+    store.create_new(stage, StagedRecord::Candidate, &bytes)?;
+    ensure!(
+        store.read(stage, StagedRecord::Candidate)?.as_slice() == bytes,
+        "migration candidate readback mismatch"
+    );
+    Ok(())
 }
 
 impl<S> ReceivedCandidate<'_, S> {
@@ -276,6 +304,21 @@ pub fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
     let stage = prepared.stage(store)?;
     store.receive_database(stage.id(), &header.database, input)?;
     let canonical = prepared.rebuild_staged_database(store, &stage)?;
+    // Publish last, only after credential and database validation. A lost reply
+    // then leaves a durable session-to-candidate mapping. Publication/readback
+    // failure is ambiguous and must not produce a successful staging reply.
+    persist_candidate(
+        store,
+        &CandidateRecord {
+            version: 1,
+            session: header.session,
+            destination: &header.destination,
+            source: &header.database,
+            credentials: &stage,
+            canonical: &canonical,
+            relay: hex::encode(prepared.relay().as_bytes()),
+        },
+    )?;
     Ok(ReceivedCandidate {
         _store: store,
         prepared,

@@ -164,3 +164,64 @@ fn reply_rejects_wrong_session_invalid_stage_database_and_relay() {
         assert!(read_reply(&mut bytes.as_slice(), session).is_err());
     }
 }
+
+#[test]
+fn candidate_publication_rejects_write_failure_corrupt_readback_and_replacement() {
+    struct Store {
+        bytes: std::cell::RefCell<Option<Vec<u8>>>,
+        fail_write: bool,
+        corrupt_read: bool,
+    }
+    impl CredentialStagingStore for Store {
+        fn identity(&self) -> (String, String, Uuid) {
+            UnusedStore.identity()
+        }
+        fn create_new(&self, _: Uuid, record: StagedRecord, bytes: &[u8]) -> Result<()> {
+            assert!(matches!(record, StagedRecord::Candidate));
+            ensure!(!self.fail_write, "synthetic write failure");
+            let mut stored = self.bytes.borrow_mut();
+            ensure!(stored.is_none(), "immutable candidate already exists");
+            *stored = Some(bytes.to_vec());
+            Ok(())
+        }
+        fn read(&self, _: Uuid, _: StagedRecord) -> Result<Zeroizing<Vec<u8>>> {
+            let mut bytes = self.bytes.borrow().clone().unwrap();
+            if self.corrupt_read {
+                bytes[0] ^= 1;
+            }
+            Ok(Zeroizing::new(bytes))
+        }
+    }
+    let header = header();
+    let credentials = CredentialStage {
+        version: 1,
+        stage: Uuid::new_v4(),
+        records: 3,
+        digest: [0x33; 32],
+    };
+    let record = CandidateRecord {
+        version: 1,
+        session: header.session,
+        destination: &header.destination,
+        source: &header.database,
+        credentials: &credentials,
+        canonical: &header.database,
+        relay: "synthetic ciphertext".into(),
+    };
+    for (fail_write, corrupt_read) in [(true, false), (false, true), (false, false)] {
+        let store = Store {
+            bytes: std::cell::RefCell::new(None),
+            fail_write,
+            corrupt_read,
+        };
+        assert_eq!(
+            persist_candidate(&store, &record).is_ok(),
+            !fail_write && !corrupt_read
+        );
+        if !fail_write {
+            let original = store.bytes.borrow().clone();
+            assert!(persist_candidate(&store, &record).is_err());
+            assert_eq!(*store.bytes.borrow(), original);
+        }
+    }
+}

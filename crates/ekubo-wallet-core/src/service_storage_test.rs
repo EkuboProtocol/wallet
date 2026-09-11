@@ -666,31 +666,19 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
         limits,
     )
     .unwrap();
-    let canonical_count = || {
-        std::fs::read_dir(directory.path())
-            .unwrap()
-            .filter(|entry| {
-                entry
-                    .as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with("-canonical.db")
-            })
-            .count()
-    };
-    let before_interruption = canonical_count();
+    let before_interruption = candidate_artifact_count(directory.path());
     assert!(
         crate::migration_transfer::receive(&pending, &mut &wire[..wire.len() - 1], limits).is_err()
     );
     assert_eq!(
-        canonical_count(),
+        candidate_artifact_count(directory.path()),
         before_interruption,
         "truncated transfer cannot publish a candidate"
     );
     wire.extend_from_slice(b"next protocol frame");
     let mut input = wire.as_slice();
     let candidate = crate::migration_transfer::receive(&pending, &mut input, limits).unwrap();
+    assert_candidate_record(&pending, &candidate, session, &snapshot.transfer().unwrap());
     assert_eq!(candidate.session(), session);
     assert_eq!(input, b"next protocol frame");
     assert_ne!(candidate.stage(), stage);
@@ -732,4 +720,54 @@ fn ordinary_process_cannot_read_installer_identity() {
     if rustix::process::geteuid().as_raw() != 0 {
         assert!(pending_installer_identity(1000).is_err());
     }
+}
+
+fn candidate_artifact_count(directory: &std::path::Path) -> usize {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.ends_with("-canonical.db") || name.ends_with("-candidate.json")
+        })
+        .count()
+}
+
+fn assert_candidate_record(
+    pending: &PendingCredentialStorage,
+    candidate: &crate::migration_transfer::ReceivedCandidate<'_, PendingCredentialStorage>,
+    session: uuid::Uuid,
+    source: &crate::database_staging::DatabaseTransfer,
+) {
+    use crate::custody_staging::{CredentialStagingStore as _, StagedRecord};
+    let record: serde_json::Value = serde_json::from_slice(
+        &pending
+            .read(candidate.stage(), StagedRecord::Candidate)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["version"], 1);
+    assert_eq!(record["source"], serde_json::to_value(source).unwrap());
+    let credential_marker: serde_json::Value = serde_json::from_slice(
+        &pending
+            .read(candidate.stage(), StagedRecord::Complete)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["credentials"], credential_marker);
+    assert_eq!(record["session"], session.to_string());
+    assert_eq!(
+        record["credentials"]["stage"],
+        candidate.stage().to_string()
+    );
+    assert_eq!(
+        record["canonical"],
+        serde_json::to_value(candidate.canonical()).unwrap()
+    );
+    assert_eq!(record["relay"], hex::encode(candidate.relay().as_bytes()));
+    let (owner, service, profile) = pending.identity();
+    assert_eq!(
+        record["destination"],
+        serde_json::json!({"owner":owner,"service":service,"profile":profile})
+    );
 }

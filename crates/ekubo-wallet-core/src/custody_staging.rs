@@ -30,6 +30,9 @@ impl ServiceCredentialRecord {
 pub enum StagedRecord {
     Credential(ServiceCredentialRecord),
     Complete,
+    /// Verified migration candidate, published after the canonical database.
+    /// This is staging evidence, never an activation or deletion receipt.
+    Candidate,
 }
 impl StagedRecord {
     pub fn file_name(self, stage: Uuid) -> Result<String> {
@@ -41,6 +44,7 @@ impl StagedRecord {
             }
             Self::Credential(record) => record.file_name(),
             Self::Complete => "complete.json".into(),
+            Self::Candidate => "candidate.json".into(),
         };
         Ok(format!("custody-stage-{stage}-{suffix}"))
     }
