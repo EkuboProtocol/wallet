@@ -57,6 +57,24 @@ bounded pending admissions, cancellation while another desktop remains active,
 and activity propagation into actual dapp admission. The relocated private-bus
 disconnect test also passed explicitly after the refactor.
 
+The typed activity client now obtains an ordered index and then reads stored
+records in byte-bounded batches. A list containing many valid, large typed-data
+requests can exceed a single 16 MiB frame even though each record fits. The
+service returns a fitting prefix; the client verifies its record types and IDs
+against the index before requesting the remainder. Empty, oversized, duplicate,
+or mismatched responses and mid-read failures produce an error rather than a
+partial list. There is no mutation replay or retained server transfer cache.
+The initial index preserves the existing activity membership/order; records
+may advance state before their later read, and are not authorization snapshots.
+
+Tests reconstruct a synthetic inventory exceeding one frame and compare every
+record, exercise actual protected-store lookups, and reject broken batch/index
+responses and disconnects. This addresses the multi-record activity reply only.
+The index currently uses the existing activity query internally; reducing its
+database read cost, streaming individually oversized records, and covering the
+remaining review/configuration inventories are still required for the desktop
+cutover. No existing activity limit or display flow was changed.
+
 `OwnerConnection<T>` now owns typed RPC serialization, response bounds, and
 zeroizing JSON buffers on every platform. Its sealed transport contract keeps
 construction inside authenticated adapters. Linux `OwnerClient` is an alias

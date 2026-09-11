@@ -89,6 +89,13 @@ pub enum Request {
         wallet_id: Option<String>,
         limit: u16,
     },
+    ActivityIndex {
+        wallet_id: Option<String>,
+        limit: u16,
+    },
+    ActivityRecords {
+        references: Vec<crate::activity::OwnerActivityReference>,
+    },
     ActivityRecord {
         request_id: uuid::Uuid,
     },

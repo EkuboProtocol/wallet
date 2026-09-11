@@ -183,6 +183,16 @@ impl OwnerDispatcher {
             Request::Activity { wallet_id, limit } => {
                 serde_json::to_value(owner.activity(wallet_id.as_deref(), limit)?)?
             }
+            Request::ActivityIndex { wallet_id, limit } => serde_json::to_value(
+                owner
+                    .activity(wallet_id.as_deref(), limit)?
+                    .iter()
+                    .map(ekubo_wallet_client::activity::OwnerActivityRecord::reference)
+                    .collect::<Vec<_>>(),
+            )?,
+            Request::ActivityRecords { references } => {
+                crate::owner_activity_batch::read(owner, &references)?
+            }
             Request::ActivityRecord { request_id } => {
                 serde_json::to_value(owner.activity_record(request_id)?)?
             }

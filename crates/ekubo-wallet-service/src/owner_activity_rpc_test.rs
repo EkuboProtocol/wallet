@@ -110,6 +110,37 @@ async fn activity_reads_keep_terminal_records_out_of_the_review_queue() {
     .await
     .unwrap();
     assert_eq!(activity.len(), 2);
+    let index: Vec<ekubo_wallet_client::activity::OwnerActivityReference> = call(
+        &owner,
+        Request::ActivityIndex {
+            wallet_id: None,
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        index,
+        activity
+            .iter()
+            .map(OwnerActivityRecord::reference)
+            .collect::<Vec<_>>()
+    );
+    let paged: Vec<OwnerActivityRecord> =
+        call(&owner, Request::ActivityRecords { references: index })
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&paged).unwrap(),
+        serde_json::to_value(&activity).unwrap()
+    );
+    for references in [Vec::new(), vec![activity[0].reference(); 1001]] {
+        assert!(
+            call::<serde_json::Value>(&owner, Request::ActivityRecords { references })
+                .await
+                .is_err()
+        );
+    }
     assert!(
         activity
             .windows(2)

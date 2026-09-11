@@ -16,6 +16,10 @@ use ekubo_wallet_core::{
     token_store::{ListedToken, StoredToken, TokenProposal},
 };
 
+#[cfg(test)]
+#[path = "activity_read_test.rs"]
+mod activity_read_tests;
+
 impl<T: OwnerTransport> OwnerConnection<T> {
     pub async fn portfolio(
         &self,
@@ -205,11 +209,49 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         wallet_id: Option<&str>,
         limit: u16,
     ) -> Result<Vec<crate::activity::OwnerActivityRecord>> {
-        self.call(&Request::Activity {
-            wallet_id: wallet_id.map(str::to_owned),
-            limit,
-        })
-        .await
+        use crate::activity::{OwnerActivityRecord, OwnerActivityReference};
+        anyhow::ensure!(
+            (1..=1000).contains(&limit),
+            "limit must be between 1 and 1000"
+        );
+        let references: Vec<OwnerActivityReference> = self
+            .call(&Request::ActivityIndex {
+                wallet_id: wallet_id.map(str::to_owned),
+                limit,
+            })
+            .await?;
+        anyhow::ensure!(
+            references.len() <= usize::from(limit),
+            "oversized activity index"
+        );
+        anyhow::ensure!(
+            references
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == references.len(),
+            "duplicate activity index entries"
+        );
+        let mut records = Vec::with_capacity(references.len());
+        while records.len() < references.len() {
+            let remaining = &references[records.len()..];
+            let batch: Vec<OwnerActivityRecord> = self
+                .call(&Request::ActivityRecords {
+                    references: remaining.to_vec(),
+                })
+                .await?;
+            anyhow::ensure!(
+                !batch.is_empty()
+                    && batch.len() <= remaining.len()
+                    && batch
+                        .iter()
+                        .zip(remaining)
+                        .all(|(record, expected)| record.reference() == *expected),
+                "activity batch does not match its ordered index"
+            );
+            records.extend(batch);
+        }
+        Ok(records)
     }
     pub async fn activity_record(
         &self,

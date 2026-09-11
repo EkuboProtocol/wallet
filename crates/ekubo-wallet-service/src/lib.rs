@@ -21,6 +21,7 @@ pub mod linux;
 mod linux_owner_rpc;
 #[path = "../../../src/mcp_transport.rs"]
 mod mcp_transport;
+mod owner_activity_batch;
 pub mod owner_rpc;
 pub mod runtime;
 mod transaction_previews;

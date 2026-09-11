@@ -9,6 +9,23 @@ use ekubo_wallet_core::{
 };
 use uuid::Uuid;
 
+/// Ordered read selectors for owner activity. These are not signing inputs or
+/// authorization; the service always reloads the corresponding stored record.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(
+    tag = "kind",
+    content = "request_id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum OwnerActivityReference {
+    Transaction(Uuid),
+    Message(Uuid),
+    TypedData(Uuid),
+}
+
 /// One durable owner-visible activity record. Signature requests remain in
 /// the audit trail after approval or rejection just like transactions do.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -19,6 +36,15 @@ pub enum OwnerActivityRecord {
 }
 
 impl OwnerActivityRecord {
+    #[must_use]
+    pub const fn reference(&self) -> OwnerActivityReference {
+        match self {
+            Self::Transaction(record) => OwnerActivityReference::Transaction(record.request_id),
+            Self::Message(record) => OwnerActivityReference::Message(record.request_id),
+            Self::TypedData(record) => OwnerActivityReference::TypedData(record.request_id),
+        }
+    }
+
     #[must_use]
     pub const fn request_id(&self) -> Uuid {
         match self {
