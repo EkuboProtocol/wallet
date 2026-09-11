@@ -158,9 +158,10 @@ def stop_owner(child):
             child.wait(timeout=5)
 
 
-def start_owner(stack, executable, owner):
+def start_owner(stack, executable, owner, source):
     child = subprocess.Popen(["runuser", "--user", pwd.getpwuid(owner).pw_name, "--",
-                              "python3", str(ROOT / "contrib/linux_relay_owner_fixture.py"), str(executable)],
+                              "python3", str(ROOT / "contrib/linux_relay_owner_fixture.py"), str(executable),
+                              "source-owner" if source else "relay-owner"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
     stack.callback(stop_owner, child)
     name = read_line(child, 30)
@@ -169,7 +170,7 @@ def start_owner(stack, executable, owner):
     return child, name
 
 
-def exercise(binary, owner):
+def exercise(binary, owner, source=False):
     with ExitStack() as stack:
         profile = uuid.uuid4()
         account = create_account(stack, "ewfixture" + profile.hex[:10])
@@ -183,9 +184,11 @@ def exercise(binary, owner):
         try:
             subprocess.run(["systemctl", "start", unit], check=True, timeout=45)
             wait_ready(unit, owner)
-            owner_process, recipient = start_owner(stack, executable, owner)
-            environment = dict(os.environ, EKUBO_FIXTURE_RELAY_RECIPIENT=recipient)
-            subprocess.run([str(executable), "client", str(owner)], env=environment, check=True, timeout=420)
+            owner_process, recipient = start_owner(stack, executable, owner, source)
+            variable = "EKUBO_FIXTURE_SOURCE_RECIPIENT" if source else "EKUBO_FIXTURE_RELAY_RECIPIENT"
+            environment = dict(os.environ, **{variable: recipient})
+            subprocess.run([str(executable), "source-client" if source else "client", str(owner)],
+                           env=environment, check=True, timeout=420)
             owner_process.stdin.write(b"finish\n")
             owner_process.stdin.flush()
             if owner_process.wait(timeout=15) != 0:
@@ -194,7 +197,8 @@ def exercise(binary, owner):
         finally:
             stop_fixture(unit)
             run(["journalctl", "--unit", unit, "--no-pager", "--output", "cat"])
-        print("Production Linux systemd migration/recovery and ordinary-owner raw file denial passed.")
+        label = "owner-keyring source forwarding" if source else "migration/recovery"
+        print(f"Production Linux systemd {label} and ordinary-owner raw file denial passed.")
 
 
 def main():
@@ -210,6 +214,7 @@ def main():
     if owner == 0:
         raise RuntimeError("Requires the original non-root runner owner")
     exercise(args.fixture_binary.resolve(strict=True), owner)
+    exercise(args.fixture_binary.resolve(strict=True), owner, source=True)
 
 
 if __name__ == "__main__":

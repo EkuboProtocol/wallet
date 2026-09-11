@@ -8,7 +8,7 @@ license = "FSL-1.1-MIT"
 description = "Headless wallet authority for the isolated custody service"
 
 [features]
-migration-fixture = ["ekubo-wallet-core/test-hooks", "tokio/process", "tokio/io-std", "tokio/io-util"]
+migration-fixture = ["ekubo-wallet-core/test-hooks", "tokio/process", "tokio/io-std", "tokio/io-util", "dep:keyring-core", "dep:zbus-secret-service-keyring-store"]
 
 [[example]]
 name = "windows-migration-scm"
@@ -47,6 +47,8 @@ url = { version = "2.5.7", features = ["serde"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+keyring-core = { version = "1.0.0", optional = true }
+zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"], optional = true }
 zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 

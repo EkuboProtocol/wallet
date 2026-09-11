@@ -78,8 +78,8 @@ def main():
     if (os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_OS") != "Linux"
             or os.getuid() == 0 or os.getuid() != os.geteuid()):
         raise RuntimeError("Requires an ordinary owner on disposable GitHub Linux CI")
-    if len(sys.argv) != 2:
-        raise RuntimeError("expected fixture executable")
+    if len(sys.argv) != 3 or sys.argv[2] not in ("relay-owner", "source-owner"):
+        raise RuntimeError("expected fixture executable and owner mode")
     executable = Path(sys.argv[1]).resolve(strict=True)
     with ExitStack() as stack:
         directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="ekubo-relay-")))
@@ -92,8 +92,9 @@ def main():
             environment[name] = str(path)
         environment["DBUS_SESSION_BUS_ADDRESS"] = private_bus(stack, directory)
         environment["EKUBO_FIXTURE_ISOLATED_RELAY"] = str(directory)
+        environment["EKUBO_WALLET_HOME"] = str(directory / "wallet")
         start_keyring(stack, directory, environment)
-        subprocess.run([str(executable), "relay-owner", str(os.getuid())], env=environment,
+        subprocess.run([str(executable), sys.argv[2], str(os.getuid())], env=environment,
                        check=True, timeout=480)
 
 

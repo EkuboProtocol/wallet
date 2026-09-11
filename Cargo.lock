@@ -4696,6 +4696,7 @@ dependencies = [
  "ekubo-wallet-core",
  "futures",
  "hex",
+ "keyring-core",
  "reqwest 0.13.4",
  "rmcp",
  "rustix",
@@ -4711,6 +4712,7 @@ dependencies = [
  "uuid 1.26.0",
  "walletconnect-session",
  "zbus",
+ "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
