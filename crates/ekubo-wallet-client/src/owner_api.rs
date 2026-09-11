@@ -322,15 +322,22 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         })
         .await
     }
-    /// Generate at most eight advisory summaries from service-held records.
-    pub async fn transaction_previews(
+    /// Read at most eight stored transactions' advisory inference inputs.
+    pub async fn transaction_preview_inputs(
         &self,
         request_ids: &[uuid::Uuid],
-    ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
-        self.call(&Request::TransactionPreviews {
+    ) -> Result<Vec<ekubo_wallet_core::preview_evidence::PreviewInput>> {
+        self.call(&Request::TransactionPreviewInputs {
             request_ids: request_ids.to_vec(),
         })
         .await
+    }
+
+    pub async fn save_advisory_summary(
+        &self,
+        summary: ekubo_wallet_core::preview_evidence::AdvisorySummary,
+    ) -> Result<String> {
+        self.call(&Request::SaveAdvisorySummary { summary }).await
     }
 
     pub async fn saved_transaction_summaries(

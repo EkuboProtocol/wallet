@@ -125,8 +125,11 @@ pub enum Request {
     TransactionHeadlines {
         request_ids: Vec<uuid::Uuid>,
     },
-    TransactionPreviews {
+    TransactionPreviewInputs {
         request_ids: Vec<uuid::Uuid>,
+    },
+    SaveAdvisorySummary {
+        summary: ekubo_wallet_core::preview_evidence::AdvisorySummary,
     },
     SavedTransactionSummaries {
         request_ids: Vec<uuid::Uuid>,

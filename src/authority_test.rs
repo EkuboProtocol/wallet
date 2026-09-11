@@ -268,11 +268,24 @@ fn summaries_are_generated_for_history_and_reused_without_current_chain_context(
     let mut store = PendingStore::new(database);
     let pending = store.create("primary", "ethereum", &plan, None, 1).unwrap();
     let history = store.reject(pending.request_id).unwrap();
-    let summaries = owner.transaction_previews(&[&history]).unwrap();
-    assert!(
-        summaries[&history.request_id].contains("1 ETH"),
-        "{summaries:?}"
-    );
+    let inputs = owner.transaction_preview_inputs(&[&history]).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0].calls[0].native_value.contains("1 ETH"));
+    let mut advisory = ekubo_wallet_core::preview_evidence::AdvisorySummary {
+        request_id: history.request_id,
+        wallet_instance_id: history.wallet_instance_id,
+        plan_digest: inputs[0].plan_digest.clone(),
+        summary: "Send 1 ETH".into(),
+    };
+    advisory.plan_digest = "wrong".into();
+    assert!(owner.save_advisory_summary(&advisory).is_err());
+    advisory.plan_digest = inputs[0].plan_digest.clone();
+    advisory.wallet_instance_id = Uuid::new_v4();
+    assert!(owner.save_advisory_summary(&advisory).is_err());
+    advisory.wallet_instance_id = history.wallet_instance_id;
+    owner.save_advisory_summary(&advisory).unwrap();
+    assert_eq!(store.get(history.request_id).unwrap(), history);
+    let summaries = owner.saved_transaction_summaries(&[&history]).unwrap();
     drop(owner);
     let reopened = OwnerApi::for_test(directory.path()).unwrap();
     reopened
@@ -286,8 +299,10 @@ fn summaries_are_generated_for_history_and_reused_without_current_chain_context(
         reopened.saved_transaction_summaries(&[&history]).unwrap(),
         summaries
     );
-    assert_eq!(
-        reopened.transaction_previews(&[&history]).unwrap(),
-        summaries
+    assert!(
+        reopened
+            .transaction_preview_inputs(&[&history])
+            .unwrap()
+            .is_empty()
     );
 }

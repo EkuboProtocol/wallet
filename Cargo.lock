@@ -4694,7 +4694,6 @@ dependencies = [
  "chrono",
  "ekubo-wallet-client",
  "ekubo-wallet-core",
- "ekubo-wallet-preview",
  "futures",
  "hex",
  "reqwest 0.13.4",

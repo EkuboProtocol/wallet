@@ -53,6 +53,7 @@ pub mod plan_fetch;
 pub mod policy_store;
 #[cfg(target_os = "linux")]
 pub mod polkit;
+pub mod preview_evidence;
 pub mod provisioning_io;
 pub mod reconcile;
 pub mod rpc;

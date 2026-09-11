@@ -2091,21 +2091,21 @@ impl OwnerApi {
         Ok(summaries)
     }
 
-    /// Generate and persist missing summaries from immutable call data and
+    /// Prepare missing summary inputs from immutable call data and
     /// local decoding only. Pending and historical records use the same path.
     /// No simulation, receipt, RPC, or current blockchain state is an input.
-    pub fn transaction_previews(
+    pub fn transaction_preview_inputs(
         &self,
         transactions: &[&PendingTransaction],
-    ) -> Result<BTreeMap<Uuid, String>> {
-        let mut summaries = self.saved_transaction_summaries(transactions)?;
+    ) -> Result<Vec<ekubo_wallet_core::preview_evidence::PreviewInput>> {
+        let summaries = self.saved_transaction_summaries(transactions)?;
         let transactions = transactions
             .iter()
             .copied()
             .filter(|record| !summaries.contains_key(&record.request_id))
             .collect::<Vec<_>>();
         if transactions.is_empty() {
-            return Ok(summaries);
+            return Ok(Vec::new());
         }
         let own_accounts = self
             .config
@@ -2164,12 +2164,7 @@ impl OwnerApi {
                             || address_label(step.transaction.to, &own_accounts),
                             |entry| trusted_token_label_from(step.transaction.to, entry),
                         );
-                        let mut summary = crate::preview::call_summary(
-                            interpretation,
-                            target,
-                            native_value_label(&step.transaction.value, network),
-                        );
-                        summary.evidence = Some(ekubo_wallet_preview::slots::CallEvidence {
+                        let evidence = ekubo_wallet_core::preview_evidence::CallEvidence {
                             chain_id: step.transaction.chain_id.to_string(),
                             from: step.transaction.from.to_checksum(None),
                             to: step.transaction.to.to_checksum(None),
@@ -2200,36 +2195,50 @@ impl OwnerApi {
                             abi: interpretation
                                 .candidates
                                 .iter()
-                                .map(|candidate| ekubo_wallet_preview::slots::AbiCandidate {
-                                    signature: candidate.signature.clone(),
-                                    contract_match: candidate.contract_match,
-                                    arguments: candidate.arguments.clone(),
+                                .map(|candidate| {
+                                    ekubo_wallet_core::preview_evidence::AbiCandidate {
+                                        signature: candidate.signature.clone(),
+                                        contract_match: candidate.contract_match,
+                                        arguments: candidate.arguments.clone(),
+                                    }
                                 })
                                 .collect(),
-                        });
-                        summary
+                        };
+                        ekubo_wallet_core::preview_evidence::PreviewCall {
+                            description: interpretation.description.clone(),
+                            details: interpretation.details.clone(),
+                            warnings: interpretation.warnings.clone(),
+                            target,
+                            native_value: native_value_label(&step.transaction.value, network),
+                            evidence,
+                        }
                     })
                     .collect();
-                plans.push((
-                    pending.request_id,
-                    ekubo_wallet_preview::PlanDocument {
-                        simulation: None,
-                        calls,
-                    },
-                ));
+                plans.push(ekubo_wallet_core::preview_evidence::PreviewInput {
+                    request_id: pending.request_id,
+                    wallet_instance_id: pending.wallet_instance_id,
+                    plan_digest: format!("{:#x}", pending.execution_plan.digest()),
+                    calls,
+                });
             }
         }
-        let generated = crate::preview::previews(plans);
+        Ok(plans)
+    }
+
+    /// Persist bounded untrusted display text. Re-read service-held identity;
+    /// never accept a caller's plan or alter approval/policy/lifecycle state.
+    pub fn save_advisory_summary(
+        &self,
+        summary: &ekubo_wallet_core::preview_evidence::AdvisorySummary,
+    ) -> Result<String> {
         let mut store = PendingStore::production(self.config.data_dir())?;
-        for record in transactions {
-            if let Some(preview) = generated.get(&record.request_id)
-                && !preview.summary.trim().is_empty()
-            {
-                let text = store.save_transaction_summary(record, &preview.summary)?;
-                summaries.insert(record.request_id, text);
-            }
-        }
-        Ok(summaries)
+        let record = store.get(summary.request_id)?;
+        anyhow::ensure!(
+            record.wallet_instance_id == summary.wallet_instance_id
+                && format!("{:#x}", record.execution_plan.digest()) == summary.plan_digest,
+            "advisory summary transaction identity changed"
+        );
+        store.save_transaction_summary(&record, &summary.summary)
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {

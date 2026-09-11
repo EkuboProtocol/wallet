@@ -561,7 +561,8 @@ Log: `~/Documents/wallet-service-assets-verify.log`.
   authentication and atomic stale-review checks. The older broad network
   install operation is not exposed; desktop forms use add/replace operations.
 - The `ekubo-wallet-service` library compiles the existing authority, MCP,
-  event, batch-read, and preview implementation without GPUI. Shared source
+  event and batch-read implementation without GPUI. Neural previews now run
+  exclusively in the desktop; see `docs/transaction-previews.md`. Shared source
   paths are transitional: do not fork the policy implementation. Once desktop
   authority is a remote facade, relocate service implementation into this crate
   and remove direct desktop compilation of it.
@@ -1375,7 +1376,8 @@ vulnerability scanning, and license policy passed. Logs use the prefix
 `~/Documents/wallet-history-` with `workspace-tests.log`, `clippy.log`,
 `osv.log`, and `licenses.log`.
 
-Transaction preview generation now has a shared owner RPC accepting at most
+Historical checkpoint (superseded by desktop-only inference described in
+`docs/transaction-previews.md`): transaction preview generation had a shared owner RPC accepting at most
 eight stored request IDs, matching the desktop's current batch size. The service
 reloads records and trusted metadata itself and reuses the existing local model
 and persistence path. One blocking worker runs at a time, with sixteen admitted

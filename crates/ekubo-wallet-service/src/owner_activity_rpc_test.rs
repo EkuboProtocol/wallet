@@ -493,12 +493,65 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
     let record = pending
         .create(&wallet.id, "ethereum", &plan(), None, 1)
         .unwrap();
-    let saved = pending
-        .save_transaction_summary(&record, "Synthetic saved summary")
-        .unwrap();
+    let inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput> = call(
+        &owner,
+        Request::TransactionPreviewInputs {
+            request_ids: vec![record.request_id],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(inputs.len(), 1);
+    let input = &inputs[0];
+    let mut summary = ekubo_wallet_core::preview_evidence::AdvisorySummary {
+        request_id: input.request_id,
+        wallet_instance_id: input.wallet_instance_id,
+        plan_digest: input.plan_digest.clone(),
+        summary: "Synthetic saved summary".into(),
+    };
+    summary.plan_digest = "mismatch".into();
+    assert!(
+        call::<String>(
+            &owner,
+            Request::SaveAdvisorySummary {
+                summary: summary.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    summary.plan_digest = input.plan_digest.clone();
+    summary.summary = "x".repeat(101);
+    assert!(
+        call::<String>(
+            &owner,
+            Request::SaveAdvisorySummary {
+                summary: summary.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(pending.transaction_summary(&record).unwrap().is_none());
+    summary.summary = "Synthetic saved summary".into();
+    let saved: String = call(
+        &owner,
+        Request::SaveAdvisorySummary {
+            summary: summary.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    summary.summary = "Replacement text".into();
+    assert_eq!(
+        call::<String>(&owner, Request::SaveAdvisorySummary { summary })
+            .await
+            .unwrap(),
+        saved
+    );
     let result: std::collections::BTreeMap<uuid::Uuid, String> = call(
         &owner,
-        Request::TransactionPreviews {
+        Request::SavedTransactionSummaries {
             request_ids: vec![record.request_id],
         },
     )
@@ -506,10 +559,19 @@ async fn preview_rpc_reads_saved_text_without_replacing_transaction_state() {
     .unwrap();
     assert_eq!(result, [(record.request_id, saved)].into_iter().collect());
     assert_eq!(pending.get(record.request_id).unwrap(), record);
+    let inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput> = call(
+        &owner,
+        Request::TransactionPreviewInputs {
+            request_ids: vec![record.request_id],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(inputs.is_empty());
     assert!(
         call::<serde_json::Value>(
             &owner,
-            Request::TransactionPreviews {
+            Request::TransactionPreviewInputs {
                 request_ids: vec![uuid::Uuid::new_v4()]
             }
         )

@@ -1,9 +1,9 @@
-//! Bounded background generation of advisory transaction text. This worker
+//! Bounded background preparation of advisory transaction evidence. This worker
 //! never receives caller-authored plans, metadata, signing proofs, or keys.
 
 use crate::authority::OwnerApi;
 use anyhow::{Context as _, Result, ensure};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -32,7 +32,7 @@ impl TransactionPreviews {
         &self,
         owner: OwnerApi,
         request_ids: Vec<Uuid>,
-    ) -> Result<BTreeMap<Uuid, String>> {
+    ) -> Result<Vec<ekubo_wallet_core::preview_evidence::PreviewInput>> {
         // Match the existing desktop batch size without making the transport
         // allocate or decode an unbounded collection of execution plans.
         ensure!(
@@ -44,7 +44,7 @@ impl TransactionPreviews {
                 .into_iter()
                 .map(|id| owner.transaction(id))
                 .collect::<Result<Vec<_>>>()?;
-            owner.transaction_previews(&records.iter().collect::<Vec<_>>())
+            owner.transaction_preview_inputs(&records.iter().collect::<Vec<_>>())
         })
         .await
     }
@@ -65,7 +65,7 @@ impl TransactionPreviews {
             .await
             .context("transaction preview worker is stopped")?;
         tokio::task::spawn_blocking(move || {
-            // A blocking inference cannot be interrupted safely. Keep the slot
+            // A blocking evidence read cannot be interrupted safely. Keep the slot
             // in the worker even if its RPC future is dropped. No native owner
             // authentication context is inherited by this advisory-only work.
             let _slot = slot;

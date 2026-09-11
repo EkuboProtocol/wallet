@@ -25,7 +25,6 @@ test = false
 [dependencies]
 ekubo-wallet-core = { path = "../ekubo-wallet-core" }
 ekubo-wallet-client = { path = "../ekubo-wallet-client" }
-ekubo-wallet-preview = { path = "../ekubo-wallet-preview", default-features = false }
 walletconnect-session = { path = "../walletconnect-session" }
 alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"

@@ -62,8 +62,6 @@ pub mod events;
 pub mod mcp;
 #[path = "../../../src/owner_snapshot.rs"]
 mod owner_snapshot;
-#[path = "../../../src/preview.rs"]
-pub mod preview;
 #[path = "../../../src/release_check.rs"]
 pub mod release_check;
 

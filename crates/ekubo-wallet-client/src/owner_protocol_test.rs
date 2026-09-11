@@ -99,7 +99,7 @@ fn preview_generation_cannot_accept_caller_authored_evidence() {
         "model_path",
     ] {
         let mut request =
-            serde_json::json!({"method":"transaction_previews", "params":{"request_ids":[]}});
+            serde_json::json!({"method":"transaction_preview_inputs", "params":{"request_ids":[]}});
         request["params"][field] = serde_json::json!("replacement");
         assert!(serde_json::from_value::<Request>(request).is_err());
     }

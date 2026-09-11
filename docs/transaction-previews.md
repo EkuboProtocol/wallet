@@ -71,3 +71,25 @@ cargo run --profile preview-train -p ekubo-wallet-preview --features train --bin
 ### September 9 context update benchmark
 
 On one pinned core of an AMD Ryzen AI 9 HX 470, the optimized CPU card path measured 2.2 ms p95 for a typical call and 205.5 ms p95 for 4,096 distinct readings (20 warm iterations). Cold initialization plus the first summary took 16 ms. These measurements cover inference and rendering, not RPC simulation or wallet input assembly, and do not establish a latency guarantee on every low-spec device. Wallet summary generation uses no simulation results or RPC requests.
+
+## Isolated service boundary
+
+Neural inference runs in the desktop process, including when Linux or Windows
+custody uses the protected service identity. The service does not depend on
+`ekubo-wallet-preview` or compile the desktop model adapter. It supplies stored
+transaction evidence through the owner protocol, in batches of at most eight.
+The desktop uses the same CPU model, fallback, and asynchronous card refresh.
+
+The desktop returns advisory text with the request ID, wallet instance ID and
+plan digest. The service re-reads the stored transaction and core persists only
+1–100 characters without control characters, retaining the first saved summary.
+This operation cannot change the plan, approval identity, policy or lifecycle.
+Neither the text nor its origin is trusted as signing authorization. Existing
+saved summaries continue to be used without inference. Deterministic review
+interpretation remains part of the security audit; model internals are outside
+the isolated service process.
+
+The service-isolation branch still needs transport handling for evidence batches
+that exceed the 16 MiB owner-response limit. Those currently use the optional
+decoded fallback. Exact-input transfer for these cases is required before
+claiming unchanged preview behavior for all supported execution plans.

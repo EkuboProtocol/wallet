@@ -225,8 +225,11 @@ impl OwnerDispatcher {
                     owner.transaction_headlines(&records.iter().collect::<Vec<_>>())?,
                 )?
             }
-            Request::TransactionPreviews { request_ids } => {
+            Request::TransactionPreviewInputs { request_ids } => {
                 serde_json::to_value(self.previews.generate(owner.clone(), request_ids).await?)?
+            }
+            Request::SaveAdvisorySummary { summary } => {
+                serde_json::to_value(owner.save_advisory_summary(&summary)?)?
             }
             Request::SavedTransactionSummaries { request_ids } => {
                 let records = self.transaction_records(&request_ids)?;

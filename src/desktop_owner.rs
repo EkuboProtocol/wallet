@@ -460,9 +460,14 @@ impl DesktopOwner {
         &self,
         request_ids: &[uuid::Uuid],
     ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
-        match self {
+        anyhow::ensure!(
+            request_ids.len() <= 8,
+            "at most 8 transaction previews at once"
+        );
+        let mut summaries = self.saved_transaction_summaries(request_ids).await?;
+        let inputs = match self {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Self::Service(owner) => owner.transaction_previews(request_ids).await,
+            Self::Service(owner) => owner.transaction_preview_inputs(request_ids).await?,
             Self::Local(owner) => {
                 let owner = owner.clone();
                 let request_ids = request_ids.to_owned();
@@ -471,11 +476,27 @@ impl DesktopOwner {
                         .into_iter()
                         .map(|id| owner.transaction(id))
                         .collect::<Result<Vec<_>>>()?;
-                    owner.transaction_previews(&records.iter().collect::<Vec<_>>())
+                    owner.transaction_preview_inputs(&records.iter().collect::<Vec<_>>())
                 })
-                .await?
+                .await??
             }
+        };
+        let generated =
+            tokio::task::spawn_blocking(move || crate::preview::generate_summaries(inputs)).await?;
+        for summary in generated {
+            let id = summary.request_id;
+            let saved = match self {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                Self::Service(owner) => owner.save_advisory_summary(summary).await?,
+                Self::Local(owner) => {
+                    let owner = owner.clone();
+                    tokio::task::spawn_blocking(move || owner.save_advisory_summary(&summary))
+                        .await??
+                }
+            };
+            summaries.insert(id, saved);
         }
+        Ok(summaries)
     }
 
     pub async fn saved_transaction_summaries(
