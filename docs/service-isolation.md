@@ -601,29 +601,58 @@ ordinary-process threat model; hardware-backed keys are not a prerequisite.
 Keeping policy in the desktop while moving only signing would leave an
 arbitrary-signing oracle and does not satisfy this objective.
 
-## At-rest wrapping design to implement
+## At-rest wrapping implementation and remaining integration
 
-A possible way to preserve the login-keyring at-rest property without giving
-its user raw key access is to split protection across the two OS identities:
+The at-rest design splits protection across the two OS identities. The shared
+`custody_envelope` primitive now implements symmetric key wrapping: only the
+service creates and unwraps data keys, so public-key distribution is unnecessary.
+It is not connected to the current file backend or desktop keyring yet.
 
-- The service owns an asymmetric unwrapping key in its private directory.
+- The service owns a random 256-bit wrapping key in its private directory.
 - The desktop credential store contains only an authenticated envelope of the
-  wallet data key encrypted to the service public key. The service must not
+  wallet data key encrypted with the service wrapping key. The service must not
   also persist that envelope as an ordinary disk file; that would defeat the
   offline protection supplied by the login keyring.
 - A desktop relay supplies that ciphertext when the already-unlocked credential
   store makes it available. The service unwraps it in memory and opens its
   encrypted database/credentials. Relaying ciphertext grants no signing rights.
 - Bind the enrolled envelope to the configured owner, service identity, profile,
-  protocol version, and a pinned digest in protected state. Reject substitutions
+  protocol version, key-generation UUID, and a pinned digest in protected state. Reject substitutions
   and rollbacks; changes require authenticated migration/rotation.
 - The service exposes no general unwrap operation. Only the internal custody
-  bootstrap consumes the envelope; neither the data key nor private unwrapping
-  key crosses IPC. Use an audited envelope encryption implementation, not a new
-  cryptographic construction.
+  bootstrap consumes the envelope; neither the data key nor wrapping key crosses
+  IPC. The data-key capability exposes only fixed-size database/account-key
+  encryption, with separate purposes and a wallet-instance binding for accounts.
 
-This is an unimplemented design requiring review and tests, not a current
-security guarantee. The current protected-file backend is an intermediate
+The implementation uses RustCrypto XChaCha20-Poly1305, with its `zeroize` feature
+explicitly enabled, OS-generated 24-byte nonces, and zeroizing plaintext buffers.
+The dependency was already in Cargo.lock; only direct use and zeroization feature
+edges were added, without changing dependency versions. The crate reports a
+[prior NCC Group audit](https://docs.rs/crate/chacha20poly1305/0.11.0);
+this is not an audit of the new integration. Symmetric wrapping follows the
+usual [data-key/key-encryption-key model](https://docs.cloud.google.com/kms/docs/envelope-encryption).
+
+The fixed v1 blob is 82 bytes: `EKUBOKEY`, version byte 1, purpose byte, 24-byte
+nonce, encrypted 32-byte key, and 16-byte tag. AEAD associated data contains the
+ten-byte header, SHA-256 of a fixed JSON tuple identifying owner/service/profile/
+generation, and the account-instance UUID (nil only for database and data keys).
+Purpose bytes 1, 2, and 3 distinguish data, database, and account keys. Parsing
+rejects unsupported versions, roles, lengths, and legacy plaintext. Unlock also
+requires the exact envelope digest pinned in protected enrollment; the desktop
+must never supply that expected digest or the binding as authority.
+
+Tests include an independently generated libsodium 1.0.22 vector, modification
+of every blob byte, wrong wrapping keys and bindings, old-enrollment replay,
+cross-account/purpose substitution, malformed lengths, and reconstruction after
+wrapping-key reload. The native Windows harness now includes this same source
+and its tests with the exact locked dependency declarations. The independent
+vector generator is `~/Documents/wallet-custody-vector.py`, using the documented
+[libsodium API](https://doc.libsodium.org/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction).
+
+Protected wrapping-key provisioning, transactional digest enrollment/rotation,
+the login-keyring ciphertext relay, encrypted file-backend activation, and crash
+recovery/migration remain unimplemented. The primitive alone supplies no deployed
+at-rest guarantee. The current protected-file backend is an intermediate
 storage/identity implementation and must not be deployed with real accounts
 before the at-rest requirement is resolved.
 

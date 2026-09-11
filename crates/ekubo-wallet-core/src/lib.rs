@@ -23,6 +23,7 @@ pub mod config;
 pub mod core;
 mod credential_store;
 pub mod custody;
+pub mod custody_envelope;
 pub mod default_tokens;
 pub mod desktop_store;
 /// Debug-build-only scratch sessions. Never compiled into a release binary.
