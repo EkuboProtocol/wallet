@@ -134,7 +134,9 @@ pub fn send(
 /// root through the next installer phase. No raw key, wrapping key or enrollment
 /// records are exposed. This is not an activation or legacy-deletion receipt.
 pub struct ReceivedCandidate<'a, S> {
-    _store: &'a S,
+    // macOS has no pending runtime publisher; this borrow still pins the root.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    store: &'a S,
     prepared: PreparedServiceCredentials,
     stage: CredentialStage,
     session: Uuid,
@@ -223,7 +225,7 @@ pub fn recover<'a, S: CredentialStagingStore + DatabaseStagingStore>(
         &record.canonical,
     )?;
     Ok(ReceivedCandidate {
-        _store: store,
+        store,
         prepared,
         stage: record.credentials,
         session,
@@ -261,6 +263,49 @@ impl<S> ReceivedCandidate<'_, S> {
     #[must_use]
     pub fn relay(&self) -> &WrappedDataKey {
         self.prepared.relay()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl<S: CredentialStagingStore + DatabaseStagingStore + crate::pending_profile::PendingProfileStore>
+    ReceivedCandidate<'_, S>
+{
+    /// Prepare the runtime layout in pending storage. Retry accepts only exact
+    /// existing bytes. This neither publishes active discovery nor deletes keys.
+    pub fn prepare_runtime_files(&self) -> Result<()> {
+        #[derive(Serialize)]
+        struct Ready<'a> {
+            version: u8,
+            session: Uuid,
+            credentials: &'a CredentialStage,
+            canonical: &'a DatabaseTransfer,
+        }
+        use crate::pending_profile::ProfileRecord;
+        self.prepared
+            .verify_staged_inventory(self.store, &self.stage)?;
+        let canonical = self.store.canonical_database(self.stage.id())?;
+        ensure!(
+            canonical.transfer()? == self.canonical,
+            "canonical database changed"
+        );
+        self.prepared.visit_service_records(|record, bytes| {
+            self.store
+                .prepare_record(ProfileRecord::credential(record, bytes))
+        })?;
+        self.store.prepare_record(ProfileRecord::database(
+            canonical.reader()?,
+            &self.canonical,
+        ))?;
+        let marker = encode(
+            &Ready {
+                version: 1,
+                session: self.session,
+                credentials: &self.stage,
+                canonical: &self.canonical,
+            },
+            MAX_HEADER_BYTES,
+        )?;
+        self.store.prepare_record(ProfileRecord::marker(&marker))
     }
 }
 
@@ -399,7 +444,7 @@ pub fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
         },
     )?;
     Ok(ReceivedCandidate {
-        _store: store,
+        store,
         prepared,
         stage,
         session: header.session,

@@ -49,6 +49,8 @@ pub mod migration_transfer;
 pub mod networks;
 pub mod orchestrator;
 pub mod pending;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod pending_profile;
 pub mod plan_fetch;
 pub mod policy_store;
 #[cfg(target_os = "linux")]

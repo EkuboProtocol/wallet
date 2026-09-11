@@ -866,3 +866,25 @@ impl PendingCredentialStorage {
         validate_directory(&self.0.directory, self.0.service_uid, true)
     }
 }
+
+impl crate::pending_profile::sealed::Sealed for PendingCredentialStorage {}
+impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
+    fn prepare_record(&self, mut record: crate::pending_profile::ProfileRecord<'_>) -> Result<()> {
+        self.validate_process()?;
+        let name = record.name.clone();
+        match open_regular(&self.0.directory, &name, self.0.service_uid, true) {
+            Ok(mut file) => return record.verify(&mut file),
+            Err(error)
+                if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) => {
+            }
+            Err(error) => return Err(error),
+        }
+        publish_private_with(&self.0.directory, &name, |file| record.populate(file))?;
+        record.verify(&mut open_regular(
+            &self.0.directory,
+            &name,
+            self.0.service_uid,
+            true,
+        )?)
+    }
+}

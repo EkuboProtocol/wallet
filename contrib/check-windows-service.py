@@ -27,6 +27,7 @@ MODULES = (
     "custody_envelope",
     "custody_staging",
     "database_staging",
+    "pending_profile",
     "service_custody",
     "windows_service_custody",
     "windows_owner_pipe",
@@ -109,7 +110,7 @@ def prepare(output_root):
         path = (CORE / "src" / f"{module}.rs").resolve(strict=True)
         # This adapter's crate-private callers live in the full core storage,
         # presence, and migration modules, which this harness excludes.
-        if module in ("windows_service_custody", "database_staging"):
+        if module in ("windows_service_custody", "database_staging", "pending_profile"):
             source.append("#[allow(dead_code)]")
         source.extend([f"#[path = {json.dumps(path.as_posix(), ensure_ascii=False)}]", f"pub mod {module};"])
     (directory / "src" / "lib.rs").write_text("\n".join(source) + "\n", encoding="utf-8")

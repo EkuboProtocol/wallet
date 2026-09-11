@@ -89,6 +89,7 @@ impl ProvisioningInterface {
                 &mut stream,
                 migration_transfer::INSTALLER_LIMITS,
             )?;
+            candidate.prepare_runtime_files()?;
             candidate.write_reply(&mut stream)
         });
         // A service stop or caller disconnect drops the cancellation guard and

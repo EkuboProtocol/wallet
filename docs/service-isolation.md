@@ -1544,3 +1544,27 @@ Tests cover the activation state machine and use a random nonexistent name for
 native SCM lookup; they do not provision or start an installed service. Packaged
 activation tests, installer grants, and Windows owner-presence proofs remain
 required before desktop cutover.
+
+
+## Pending runtime file preparation
+
+After receiving or recovering a verified candidate, both native provisioning
+hosts now prepare the fixed runtime filenames inside the protected pending root.
+Core revalidates staged inventory and the canonical database digest first. It
+copies credentials and encrypted database bytes with durable no-overwrite
+publication and exact readback. Retrying accepts only matching existing files;
+a conflicting or damaged file is reported and never overwritten. The immutable
+`profile-ready.json` marker is written last and binds session, credential stage
+and canonical database descriptor. It contains no relay envelope or raw key.
+
+Only native pending roots implement this writer interface. Its opaque record
+requests have no public constructor or raw-material accessor. The same core
+preparation drives Linux relative-directory writes and Windows validated-handle
+writes; the original canonical database remains available for recovery.
+
+This prepares files only. The root remains pending, no global custody is
+initialized, no installed discovery is published, and no legacy key is removed.
+The installer still needs durable journal/relay persistence, live-source
+revalidation, protected promotion and activation before cleanup can be allowed.
+The native Linux/Windows migration fixtures exercise this step through their
+production hosts; a native result at this new revision remains required.

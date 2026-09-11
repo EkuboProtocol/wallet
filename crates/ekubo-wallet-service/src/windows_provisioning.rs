@@ -35,6 +35,7 @@ pub async fn run(
                 &mut stream,
                 migration_transfer::INSTALLER_LIMITS,
             )?;
+            candidate.prepare_runtime_files()?;
             candidate.write_reply(&mut stream)
         });
         tokio::select! {

@@ -9,8 +9,10 @@ authenticated client's enrolled ciphertext before constructing authority.
 
 Credential preparation and protected staging now share a contract with Windows.
 Staging creates fresh immutable record names, verifies readback, and publishes a
-completion marker last. It does not activate custody, copy the database, or authorize
-legacy-key deletion. Partial or ambiguous stages require installer recovery; this
+completion marker last. The provisioning host also verifies/rebuilds the encrypted
+database and prepares the runtime filenames within the pending root, with exact
+retry validation and a final readiness marker. It does not activate custody or
+authorize legacy-key deletion. Partial or ambiguous stages require installer recovery; this
 primitive is not a completed migration or an installation procedure.
 
 Pending bootstrap is separate from active discovery. The installer may provision

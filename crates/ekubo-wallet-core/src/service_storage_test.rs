@@ -679,6 +679,7 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     let mut input = wire.as_slice();
     let candidate = crate::migration_transfer::receive(&pending, &mut input, limits).unwrap();
     assert_candidate_record(&pending, &candidate, session, &snapshot.transfer().unwrap());
+    assert_runtime_preparation(&pending, &candidate, directory.path(), wallet.instance_id);
     assert_eq!(candidate.session(), session);
     assert_eq!(input, b"next protocol frame");
     assert_ne!(candidate.stage(), stage);
@@ -725,7 +726,7 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     drop(output);
     drop(PolicyStore::open(&imported, &DatabaseKey::new(raw_key)).unwrap());
     assert!(PolicyStore::open(&imported, &DatabaseKey::new([0x55; 32])).is_err());
-    assert!(!directory.path().join("wallet.db").exists());
+    assert!(directory.path().join("wallet.db").exists());
 }
 
 #[test]
@@ -916,4 +917,73 @@ fn assert_recovery_stream(
         assert_eq!(reply.stage(), request.stage);
         assert_eq!(reply.relay().as_bytes(), request.relay.as_bytes());
     }
+}
+
+fn assert_runtime_preparation(
+    pending: &PendingCredentialStorage,
+    candidate: &crate::migration_transfer::ReceivedCandidate<'_, PendingCredentialStorage>,
+    directory: &Path,
+    account: uuid::Uuid,
+) {
+    use crate::custody_staging::{
+        CredentialStagingStore as _, ServiceCredentialRecord, StagedRecord,
+    };
+    use crate::database_staging::DatabaseTransfer;
+    assert!(
+        data_dir().is_none(),
+        "preparing a pending layout must not activate custody"
+    );
+    let rejected = directory.join("key-database");
+    std::fs::write(&rejected, b"different candidate").unwrap();
+    std::fs::set_permissions(&rejected, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(candidate.prepare_runtime_files().is_err());
+    assert_eq!(std::fs::read(&rejected).unwrap(), b"different candidate");
+    assert!(!directory.join("profile-ready.json").exists());
+    // Simulate recovery after an interrupted partial preparation, using only
+    // this test's synthetic files. Existing matching records must be retained.
+    std::fs::remove_file(&rejected).unwrap();
+    candidate.prepare_runtime_files().unwrap();
+    candidate.prepare_runtime_files().unwrap();
+    for record in [
+        ServiceCredentialRecord::WrappingKey,
+        ServiceCredentialRecord::Enrollment,
+        ServiceCredentialRecord::DatabaseKey,
+        ServiceCredentialRecord::AccountKey(account),
+    ] {
+        let path = directory.join(record.file_name());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            *pending
+                .read(candidate.stage(), StagedRecord::Credential(record))
+                .unwrap()
+        );
+    }
+    assert!(
+        data_dir().is_none(),
+        "preparing a pending layout must not activate custody"
+    );
+    let database = directory.join("wallet.db");
+    assert_eq!(
+        DatabaseTransfer::describe(&mut File::open(&database).unwrap()).unwrap(),
+        *candidate.canonical()
+    );
+    let marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join("profile-ready.json")).unwrap())
+            .unwrap();
+    assert_eq!(marker["session"], candidate.session().to_string());
+    assert_eq!(
+        marker["credentials"]["stage"],
+        candidate.stage().to_string()
+    );
+    assert!(marker.get("relay").is_none());
+    let original = std::fs::read(&database).unwrap();
+    std::fs::write(&database, b"damaged pending database").unwrap();
+    assert!(candidate.prepare_runtime_files().is_err());
+    assert_eq!(
+        std::fs::read(&database).unwrap(),
+        b"damaged pending database"
+    );
+    std::fs::write(&database, original).unwrap();
+    candidate.prepare_runtime_files().unwrap();
 }

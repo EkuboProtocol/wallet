@@ -76,6 +76,12 @@ impl<'a> StagedDatabase<'a> {
             _root: std::marker::PhantomData,
         }
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn reader(&self) -> Result<File> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
     pub(crate) fn transfer(&self) -> Result<DatabaseTransfer> {
         let mut file = self.file.try_clone()?;
         file.seek(SeekFrom::Start(0))?;

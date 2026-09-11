@@ -650,3 +650,35 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
             .open_file(&crate::database_staging::file_name(stage)?)
     }
 }
+
+impl crate::pending_profile::sealed::Sealed for PendingCredentialStorage {}
+impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
+    fn prepare_record(&self, mut record: crate::pending_profile::ProfileRecord<'_>) -> Result<()> {
+        crate::windows_service_identity::verify_service_process(self.0.identity.service_sid())?;
+        validate_private_handle(
+            self.0.directory.as_handle(),
+            &self.0.identity,
+            StorageKind::Directory,
+        )?;
+        let name = record.name.clone();
+        match self.0.open_file(&name) {
+            Ok(mut file) => return record.verify(&mut file),
+            Err(error)
+                if error
+                    .downcast_ref::<windows::core::Error>()
+                    .is_some_and(|error| {
+                        error.code()
+                            == windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.to_hresult()
+                    }) => {}
+            Err(error) => return Err(error),
+        }
+        write::publish_with(
+            &self.0.directory,
+            &name,
+            self.0.identity.service_sid(),
+            |file| validate_private_handle(file.as_handle(), &self.0.identity, StorageKind::File),
+            |file| record.populate(file),
+        )?;
+        record.verify(&mut self.0.open_file(&name)?)
+    }
+}
