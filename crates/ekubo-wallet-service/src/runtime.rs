@@ -58,7 +58,7 @@ impl ServiceRuntime {
         let dapps = Arc::new(DappRuntime::new(
             authority.owner_api(),
             DappReviews::default(),
-            sessions.activity(),
+            sessions.clone(),
         ));
         let owner = OwnerDispatcher::new(authority.owner_api(), dapps.clone());
         Self {
@@ -76,7 +76,7 @@ impl ServiceRuntime {
 
     pub(crate) fn agent_connection(&self) -> Result<ServiceAgentConnection> {
         Ok(ServiceAgentConnection {
-            stopped: self.sessions.agent_period()?,
+            stopped: self.sessions.execution_period()?,
             agent: self.authority.agent_api(),
             events: self.events(),
         })

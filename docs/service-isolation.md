@@ -90,6 +90,16 @@ production service no longer exposes an unrestricted `AgentApi` to platform host
 This is availability control, not owner authorization, and cannot undo a transaction
 already submitted. Native packaged lifetime behavior remains to be verified.
 
+The scheduler and dapp workers now use those same permanent desktop-period tokens.
+The scheduler drops its old driver before creating a replacement even when a rapid
+zero-to-one transition is coalesced by the activity watch. Each dapp registration
+receives a child shutdown token of its originating period, and registration rechecks
+that period after inserting the session. The review collector no longer reacts to a
+sampled zero count by disconnecting every session: a newly reopened desktop's sessions
+cannot be swept up in the old desktop's cleanup. Canceled sessions disappear from the
+in-memory list and release registration capacity; an old worker's late failure cannot
+resurrect its row. Existing protocol shutdown still handles dapp farewells.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

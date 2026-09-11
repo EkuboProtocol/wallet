@@ -43,7 +43,7 @@ async fn export_uses_the_direct_encoder_and_cannot_accept_an_authorization_flag(
     use crate::{dapp_runtime::DappRuntime, owner_rpc::OwnerDispatcher};
     let directory = tempfile::tempdir().unwrap();
     let owner = OwnerApi::for_test(directory.path()).unwrap();
-    let (_active, activity) = tokio::sync::watch::channel(0);
+    let activity = crate::desktop_sessions::DesktopSessions::default();
     let dapps = Arc::new(DappRuntime::new(
         owner.clone(),
         DappReviews::default(),

@@ -91,7 +91,7 @@ async fn approval_uses_the_stored_document_and_keeps_the_proof_inside_the_servic
     .unwrap();
     // Keep the host alive across approval and replay. Dropping a temporary
     // runtime would close the broker and could mask a broken replay check.
-    let (_active, receiver) = tokio::sync::watch::channel(0);
+    let receiver = crate::desktop_sessions::DesktopSessions::default();
     let runtime = std::sync::Arc::new(crate::dapp_runtime::DappRuntime::new(
         owner.clone(),
         queue.clone(),

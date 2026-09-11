@@ -282,7 +282,7 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
     };
     let directory = tempfile::tempdir().unwrap();
     let owner = OwnerApi::for_test(directory.path()).unwrap();
-    let (_active, activity) = tokio::sync::watch::channel(0);
+    let activity = crate::desktop_sessions::DesktopSessions::default();
     let dapps = Arc::new(DappRuntime::new(
         owner.clone(),
         DappReviews::default(),

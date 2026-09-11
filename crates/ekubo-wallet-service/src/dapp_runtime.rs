@@ -44,18 +44,22 @@ pub struct DappRuntime {
     manager: Arc<Mutex<WalletConnectManager>>,
     presenter: ProposalPresenter,
     incoming: Mutex<Option<mpsc::UnboundedReceiver<ProposalPrompt>>>,
-    active: watch::Receiver<usize>,
+    desktops: crate::desktop_sessions::DesktopSessions,
     jobs: Mutex<Jobs>,
 }
 
 impl DappRuntime {
     #[must_use]
-    pub fn new(owner: OwnerApi, reviews: DappReviews, active: watch::Receiver<usize>) -> Self {
+    pub(crate) fn new(
+        owner: OwnerApi,
+        reviews: DappReviews,
+        desktops: crate::desktop_sessions::DesktopSessions,
+    ) -> Self {
         let (presenter, incoming) = ProposalPresenter::channel();
         Self {
             owner,
             reviews,
-            active,
+            desktops,
             presenter,
             manager: Arc::new(Mutex::new(WalletConnectManager::default())),
             incoming: Mutex::new(Some(incoming)),
@@ -95,7 +99,7 @@ impl DappRuntime {
         uri: &str,
         run: impl FnOnce(SessionWorker) -> Result<()> + Send + 'static,
     ) -> Result<SessionSummary> {
-        ensure!(*self.active.borrow() > 0, "no desktop session is active");
+        let period = self.desktops.execution_period()?;
         let dapp = self.owner.dapp_api();
         dapp.require_legal_acceptance()?;
         ensure!(
@@ -123,9 +127,9 @@ impl DappRuntime {
             .manager
             .lock()
             .map_err(|_| anyhow::anyhow!("dapp manager lock was poisoned"))?
-            .begin_uri(uri)?;
+            .begin_uri_with_shutdown(uri, period.child_token())?;
         // Close the race with the last desktop departing during registration.
-        if *self.active.borrow() == 0 {
+        if period.is_cancelled() {
             self.manager
                 .lock()
                 .map_err(|_| anyhow::anyhow!("dapp manager lock was poisoned"))?
@@ -148,6 +152,7 @@ impl DappRuntime {
             });
             if let Ok(mut manager) = manager.lock() {
                 match &result {
+                    _ if period.is_cancelled() => manager.finish(id),
                     Ok(()) => manager.finish(id),
                     Err(error) => manager.fail(
                         id,
@@ -230,18 +235,8 @@ impl DappRuntime {
             .map_err(|_| anyhow::anyhow!("dapp review channel lock was poisoned"))?
             .take()
             .context("dapp review collector already started")?;
-        let collector = self.reviews.collect(incoming, self.owner.event_bus());
-        tokio::pin!(collector);
-        let mut active = self.active.clone();
-        loop {
-            if *active.borrow_and_update() == 0 {
-                self.cancel_sessions()?;
-            }
-            tokio::select! {
-                () = &mut collector => anyhow::bail!("dapp review collector stopped"),
-                change = active.changed() => change.context("desktop session monitor stopped")?,
-            }
-        }
+        self.reviews.collect(incoming, self.owner.event_bus()).await;
+        anyhow::bail!("dapp review collector stopped")
     }
 
     pub async fn shutdown(&self) -> Result<()> {

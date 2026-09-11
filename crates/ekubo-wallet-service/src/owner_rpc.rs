@@ -436,7 +436,7 @@ pub(crate) async fn dispatch(
     reviews: &crate::dapp_reviews::DappReviews,
     request: Request,
 ) -> anyhow::Result<Value> {
-    let (_active, receiver) = tokio::sync::watch::channel(0);
+    let receiver = crate::desktop_sessions::DesktopSessions::default();
     let dapps = Arc::new(DappRuntime::new(owner.clone(), reviews.clone(), receiver));
     OwnerDispatcher::new(owner.clone(), dapps)
         .dispatch(request)

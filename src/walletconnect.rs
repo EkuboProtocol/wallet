@@ -51,13 +51,23 @@ pub struct SessionStart {
 
 impl WalletConnectManager {
     pub fn begin_uri(&mut self, uri: &str) -> Result<(SessionStart, SessionSummary)> {
+        self.begin_uri_with_shutdown(uri, CancellationToken::new())
+    }
+
+    pub(crate) fn begin_uri_with_shutdown(
+        &mut self,
+        uri: &str,
+        shutdown: CancellationToken,
+    ) -> Result<(SessionStart, SessionSummary)> {
+        ensure!(!shutdown.is_cancelled(), "desktop session has ended");
+        self.sessions
+            .retain(|_, session| !session.shutdown.is_cancelled());
         ensure!(
             self.sessions.len() < MAX_WALLETCONNECT_SESSIONS,
             "too many concurrent WalletConnect sessions"
         );
         let pairing = PairingUri::parse(uri, Utc::now())?;
         let id = Uuid::new_v4();
-        let shutdown = CancellationToken::new();
         let farewell = CancellationToken::new();
         let summary = SessionSummary {
             id,
@@ -97,6 +107,7 @@ impl WalletConnectManager {
     pub fn sessions(&self) -> Vec<SessionSummary> {
         self.sessions
             .values()
+            .filter(|session| !session.shutdown.is_cancelled())
             .map(|session| session.summary.clone())
             .collect()
     }

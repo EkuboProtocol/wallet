@@ -172,3 +172,26 @@ fn quitting_leaves_something_to_wait_on_for_every_settled_dapp() {
     assert!(manager.sessions().is_empty());
     let _ = never_settled;
 }
+
+#[test]
+fn ended_desktop_periods_hide_old_sessions_and_release_registration_capacity() {
+    let mut manager = WalletConnectManager::default();
+    let uri = format!(
+        "wc:{}@2?relay-protocol=irn&symKey={}",
+        "11".repeat(32),
+        "22".repeat(32)
+    );
+    for _ in 0..=MAX_WALLETCONNECT_SESSIONS {
+        let period = CancellationToken::new();
+        let (start, _) = manager
+            .begin_uri_with_shutdown(&uri, period.child_token())
+            .unwrap();
+        assert_eq!(manager.sessions().len(), 1);
+        period.cancel();
+        assert!(start.shutdown.is_cancelled());
+        assert!(manager.sessions().is_empty());
+    }
+    let expired = CancellationToken::new();
+    expired.cancel();
+    assert!(manager.begin_uri_with_shutdown(&uri, expired).is_err());
+}

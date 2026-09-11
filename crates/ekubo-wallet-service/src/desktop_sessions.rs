@@ -77,7 +77,7 @@ impl Drop for ActiveSession {
 impl DesktopSessions {
     /// A child of this exact active period. A zero-to-one transition creates a
     /// new parent; quick reopen cannot revive connections from the prior run.
-    pub(crate) fn agent_period(&self) -> Result<CancellationToken> {
+    pub(crate) fn execution_period(&self) -> Result<CancellationToken> {
         self.period
             .lock()
             .expect("desktop period poisoned")
@@ -86,6 +86,7 @@ impl DesktopSessions {
             .context("no desktop session is active")
     }
 
+    #[cfg(test)]
     pub(crate) fn activity(&self) -> watch::Receiver<usize> {
         self.active.subscribe()
     }
@@ -104,30 +105,31 @@ impl DesktopSessions {
     }
 
     pub(crate) async fn supervise(&self, config: ConfigStore, events: EventBus) -> Result<()> {
+        self.supervise_with(|| crate::automation_runtime::run(config.clone(), events.clone()))
+            .await
+    }
+
+    async fn supervise_with<F: std::future::Future<Output = Result<()>>>(
+        &self,
+        run: impl Fn() -> F,
+    ) -> Result<()> {
         let mut active = self.active.subscribe();
         loop {
-            if *active.borrow_and_update() == 0 {
+            active.borrow_and_update();
+            let Ok(period) = self.execution_period() else {
                 active
                     .changed()
                     .await
                     .context("desktop session monitor stopped")?;
                 continue;
+            };
+            // This token remains cancelled even if the count has returned to one
+            // before this task polls. Drop the old driver before creating another.
+            tokio::select! {
+                biased;
+                () = period.cancelled() => {},
+                result = run() => return result,
             }
-            let execution = crate::automation_runtime::run(config.clone(), events.clone());
-            tokio::pin!(execution);
-            loop {
-                tokio::select! {
-                    result = &mut execution => return result,
-                    change = active.changed() => {
-                        change.context("desktop session monitor stopped")?;
-                        if *active.borrow_and_update() == 0 {
-                            break;
-                        }
-                    }
-                }
-            }
-            // Last desktop disconnected: drop the driver before waiting for
-            // another session. The next session reopens current protected state.
         }
     }
 }
