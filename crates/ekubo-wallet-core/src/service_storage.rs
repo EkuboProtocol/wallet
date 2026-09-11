@@ -62,17 +62,30 @@ impl InstalledServiceIdentity {
 /// Read only public installer configuration, without activating custody or
 /// touching credentials. Clients cannot choose another owner or a config path.
 pub fn installed_service_identity() -> Result<InstalledServiceIdentity> {
+    find_installed_service_identity()?.context("wallet service is not installed")
+}
+
+/// Absence permits pre-installation behavior. Unsafe or unreadable paths and
+/// malformed configuration never count as an absent installation.
+pub fn find_installed_service_identity() -> Result<Option<InstalledServiceIdentity>> {
+    let owner_uid = client_uid()?;
+    let Some(configured) = find_owner_configuration(&root_directory()?, owner_uid, 0)? else {
+        return Ok(None);
+    };
+    Ok(Some(InstalledServiceIdentity {
+        owner_uid,
+        service_uid: configured.service_uid,
+        profile_id: configured.profile_id,
+    }))
+}
+
+fn client_uid() -> Result<u32> {
     let owner_uid = rustix::process::geteuid().as_raw();
     ensure!(
         rustix::process::getuid().as_raw() == owner_uid,
         "wallet client cannot run as a set-user-ID process"
     );
-    let configured = owner_configuration(&root_directory()?, owner_uid)?;
-    Ok(InstalledServiceIdentity {
-        owner_uid,
-        service_uid: configured.service_uid,
-        profile_id: configured.profile_id,
-    })
+    Ok(owner_uid)
 }
 
 fn root_directory() -> Result<File> {
@@ -86,17 +99,51 @@ fn root_directory() -> Result<File> {
 }
 
 fn owner_configuration(root: &File, owner_uid: u32) -> Result<OwnerConfiguration> {
-    let etc = directory(root, "etc", 0, false)?;
-    let config_root = directory(&etc, "ekubo-wallet", 0, false)?;
-    let owners = directory(&config_root, "owners", 0, false)?;
-    let config = open_regular(&owners, &format!("{owner_uid}.json"), 0, false)?;
+    find_owner_configuration(root, owner_uid, 0)?.context("wallet service is not installed")
+}
+
+fn find_owner_configuration(
+    root: &File,
+    owner_uid: u32,
+    system_uid: u32,
+) -> Result<Option<OwnerConfiguration>> {
+    let mut parent = directory(root, "etc", system_uid, false)?;
+    for name in ["ekubo-wallet", "owners"] {
+        let Some(next) = open_optional(
+            &parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        )?
+        else {
+            return Ok(None);
+        };
+        validate_directory(&next, system_uid, false)?;
+        parent = next;
+    }
+    let Some(config) = open_optional(
+        &parent,
+        &format!("{owner_uid}.json"),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+    )?
+    else {
+        return Ok(None);
+    };
+    validate_file(&config, system_uid, false)?;
     ensure!(
         config.metadata()?.len() <= MAX_CONFIG_BYTES,
         "service configuration is oversized"
     );
     let mut bytes = Vec::new();
     config.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
-    decode_configuration(&bytes, owner_uid)
+    Ok(Some(decode_configuration(&bytes, owner_uid)?))
+}
+
+fn open_optional(parent: &File, name: &str, flags: OFlags) -> Result<Option<File>> {
+    match openat(parent, name, flags, Mode::empty()) {
+        Ok(file) => Ok(Some(File::from(file))),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn decode_configuration(bytes: &[u8], owner_uid: u32) -> Result<OwnerConfiguration> {
@@ -194,6 +241,75 @@ pub async fn system_bus_stream() -> Result<tokio::net::UnixStream> {
     let stream = tokio::net::UnixStream::connect(path).await?;
     drop(bus);
     Ok(stream)
+}
+
+/// Connect only to the installed owner's protected MCP socket. The expected
+/// process comes from the authenticated system-bus peer that unlocked custody;
+/// it supplements, and cannot replace, the installed service UID check.
+pub async fn agent_stream(
+    identity: &InstalledServiceIdentity,
+    expected_pid: u32,
+) -> Result<tokio::net::UnixStream> {
+    ensure!(
+        client_uid()? == identity.owner_uid,
+        "MCP client belongs to another owner"
+    );
+    connect_agent_under(&root_directory()?, identity, expected_pid, 0).await
+}
+
+async fn connect_agent_under(
+    root: &File,
+    identity: &InstalledServiceIdentity,
+    expected_pid: u32,
+    system_uid: u32,
+) -> Result<tokio::net::UnixStream> {
+    use std::os::{fd::AsRawFd as _, unix::fs::FileTypeExt as _};
+    let run = client_directory(root, "run", system_uid)?;
+    let parent = client_directory(&run, "ekubo-wallet", system_uid)?;
+    let runtime = client_directory(
+        &parent,
+        &identity.owner_uid.to_string(),
+        identity.service_uid,
+    )?;
+    let path = format!("/proc/self/fd/{}/mcp.sock", runtime.as_raw_fd());
+    ensure!(
+        std::fs::symlink_metadata(&path)?.file_type().is_socket(),
+        "service MCP endpoint is not a socket"
+    );
+    let stream = tokio::net::UnixStream::connect(path).await?;
+    validate_agent_peer(&stream, identity.service_uid, expected_pid)?;
+    drop(runtime);
+    Ok(stream)
+}
+
+fn client_directory(parent: &File, name: &str, uid: u32) -> Result<File> {
+    // O_PATH pins an execute-only runtime directory without requiring a client
+    // to list its contents. Metadata and connection checks still fail closed.
+    let directory = File::from(openat(
+        parent,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    validate_directory(&directory, uid, false)?;
+    Ok(directory)
+}
+
+fn validate_agent_peer(
+    stream: &tokio::net::UnixStream,
+    service_uid: u32,
+    expected_pid: u32,
+) -> Result<()> {
+    let peer = stream.peer_cred()?;
+    ensure!(
+        peer.uid() == service_uid,
+        "MCP endpoint does not belong to the installed service"
+    );
+    ensure!(
+        peer.pid().and_then(|pid| u32::try_from(pid).ok()) == Some(expected_pid),
+        "MCP endpoint is not the authenticated custody process"
+    );
+    Ok(())
 }
 
 /// Pinned runtime directory provisioned by the installer, accessible to clients

@@ -247,7 +247,14 @@ async fn emit(stdout: &mut tokio::io::Stdout, bytes: &[u8]) -> Result<()> {
 
 #[cfg(unix)]
 async fn connect(client: ClientKind) -> Result<tokio::net::UnixStream> {
-    let mut stream = tokio::net::UnixStream::connect(data_dir()?.join("mcp.sock")).await?;
+    #[cfg(target_os = "linux")]
+    let installed = ekubo_wallet_client::try_connect_agent_stream().await?;
+    #[cfg(not(target_os = "linux"))]
+    let installed = None;
+    let mut stream = match installed {
+        Some(stream) => stream,
+        None => tokio::net::UnixStream::connect(data_dir()?.join("mcp.sock")).await?,
+    };
     let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
     stream.write_all(&hello).await?;
     stream.write_all(b"\n").await?;

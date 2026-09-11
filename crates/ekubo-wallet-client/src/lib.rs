@@ -22,7 +22,7 @@ pub mod simulation_display;
 pub mod token_import;
 pub mod transaction_review;
 #[cfg(target_os = "linux")]
-pub use owner_client::OwnerClient;
+pub use owner_client::{OwnerClient, try_connect_agent_stream};
 mod owner_api;
 
 #[cfg(any(target_os = "windows", test))]

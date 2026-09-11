@@ -221,3 +221,126 @@ fn open_directory_descriptor_does_not_follow_replaced_paths() {
     );
     assert_eq!(entry.get_secret().unwrap(), [0x11; KEY_BYTES]);
 }
+
+fn public_root() -> (tempfile::TempDir, File, u32) {
+    let root = tempfile::tempdir().unwrap();
+    let handle = File::open(root.path()).unwrap();
+    (root, handle, rustix::process::geteuid().as_raw())
+}
+
+#[test]
+fn optional_installation_read_distinguishes_absence_from_invalid_files() {
+    let (root, handle, uid) = public_root();
+    assert!(find_owner_configuration(&handle, 1000, uid).is_err());
+    std::fs::create_dir(root.path().join("etc")).unwrap();
+    assert!(
+        find_owner_configuration(&handle, 1000, uid)
+            .unwrap()
+            .is_none()
+    );
+    let owners = root.path().join("etc/ekubo-wallet/owners");
+    std::fs::create_dir_all(&owners).unwrap();
+    assert!(
+        find_owner_configuration(&handle, 1000, uid)
+            .unwrap()
+            .is_none()
+    );
+    let path = owners.join("1000.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "owner_uid":1000,"service_uid":2000,"profile_id":uuid::Uuid::from_u128(1)
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let found = find_owner_configuration(&handle, 1000, uid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.service_uid, 2000);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(find_owner_configuration(&handle, 1000, uid).is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&path, b"not json").unwrap();
+    assert!(find_owner_configuration(&handle, 1000, uid).is_err());
+    std::fs::remove_file(&path).unwrap();
+    symlink(owners.join("absent"), &path).unwrap();
+    assert!(
+        find_owner_configuration(&handle, 1000, uid).is_err(),
+        "a dangling link is not an absent installation"
+    );
+}
+
+#[test]
+fn unsafe_ancestors_cannot_hide_behind_missing_configuration() {
+    let (root, handle, uid) = public_root();
+    let config = root.path().join("etc/ekubo-wallet");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(find_owner_configuration(&handle, 1000, uid).is_err());
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        find_owner_configuration(&handle, 1000, uid)
+            .unwrap()
+            .is_none()
+    );
+    std::fs::remove_dir(&config).unwrap();
+    symlink(root.path().join("missing"), &config).unwrap();
+    assert!(find_owner_configuration(&handle, 1000, uid).is_err());
+}
+
+#[tokio::test]
+async fn mcp_peer_checks_both_the_installed_uid_and_authenticated_process() {
+    let (stream, _peer) = tokio::net::UnixStream::pair().unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let pid = std::process::id();
+    validate_agent_peer(&stream, uid, pid).unwrap();
+    assert!(validate_agent_peer(&stream, uid.wrapping_add(1), pid).is_err());
+    assert!(validate_agent_peer(&stream, uid, pid.wrapping_add(1)).is_err());
+    assert!(validate_agent_peer(&stream, uid, 0).is_err());
+}
+
+#[tokio::test]
+async fn mcp_connects_through_pinned_runtime_and_rejects_substituted_paths() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (root, handle, uid) = public_root();
+    let identity = InstalledServiceIdentity {
+        owner_uid: 1000,
+        service_uid: uid,
+        profile_id: uuid::Uuid::from_u128(1),
+    };
+    let runtime = root.path().join("run/ekubo-wallet/1000");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o711)).unwrap();
+    let socket = runtime.join("mcp.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let mut stream = connect_agent_under(&handle, &identity, std::process::id(), uid)
+        .await
+        .unwrap();
+    let (mut server, _) = listener.accept().await.unwrap();
+    stream.write_all(b"MCP").await.unwrap();
+    let mut bytes = [0; 3];
+    server.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(bytes, *b"MCP");
+    assert!(
+        connect_agent_under(&handle, &identity, std::process::id().wrapping_add(1), uid)
+            .await
+            .is_err()
+    );
+    std::fs::remove_file(&socket).unwrap();
+    let target = runtime.join("different.sock");
+    let _different = tokio::net::UnixListener::bind(&target).unwrap();
+    symlink(&target, &socket).unwrap();
+    assert!(
+        connect_agent_under(&handle, &identity, std::process::id(), uid)
+            .await
+            .is_err()
+    );
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::write(&socket, b"not a socket").unwrap();
+    assert!(
+        connect_agent_under(&handle, &identity, std::process::id(), uid)
+            .await
+            .is_err()
+    );
+}

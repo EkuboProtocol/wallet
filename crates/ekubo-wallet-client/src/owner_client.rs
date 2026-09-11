@@ -10,6 +10,7 @@ use zbus::{Connection, Proxy, fdo::DBusProxy, names::OwnedUniqueName};
 pub struct LinuxOwnerTransport {
     proxy: Proxy<'static>,
     service: OwnedUniqueName,
+    process: u32,
 }
 
 impl OwnerConnection<LinuxOwnerTransport> {
@@ -17,27 +18,9 @@ impl OwnerConnection<LinuxOwnerTransport> {
     /// and the real system bus. No caller-provided UID, bus address, or service
     /// name is accepted at this boundary.
     pub async fn connect() -> Result<Self> {
+        let identity = ekubo_wallet_core::service_storage::installed_service_identity()?;
         tokio::time::timeout(Duration::from_secs(10), async {
-            let identity = ekubo_wallet_core::service_storage::installed_service_identity()?;
-            let bus = zbus::connection::Builder::unix_stream(
-                ekubo_wallet_core::service_storage::system_bus_stream().await?,
-            )
-            .build()
-            .await?;
-            let transport = LinuxOwnerTransport::authenticate(
-                bus,
-                &format!("org.ekubo.Wallet.Owner.u{}", identity.owner_uid()),
-                identity.service_uid(),
-            )
-            .await?;
-            // Read the login-keyring ciphertext only after pinning the service
-            // identity. Never read account/database keys or cache this on disk.
-            let wrapped = tokio::task::spawn_blocking(move || {
-                ekubo_wallet_core::custody_relay::load(identity.profile_id())
-            })
-            .await??;
-            transport.unlock(&wrapped).await?;
-            Ok(Self::from_transport(transport))
+            Ok(Self::from_transport(connect_custody(&identity).await?))
         })
         .await
         .context("wallet service connection timed out")?
@@ -64,9 +47,16 @@ impl LinuxOwnerTransport {
         );
         // Address the verified unique name, never the replaceable well-known
         // name. A restart requires a new explicitly authenticated connection.
+        let process = registry
+            .get_connection_unix_process_id(service.clone().into())
+            .await?;
         let proxy =
             Proxy::new_owned(bus, service.clone(), OBJECT_PATH, "org.ekubo.Wallet.Owner1").await?;
-        Ok(Self { proxy, service })
+        Ok(Self {
+            proxy,
+            service,
+            process,
+        })
     }
 
     async fn unlock(
@@ -120,6 +110,47 @@ impl OwnerTransport for LinuxOwnerTransport {
     async fn close(&self) -> Result<()> {
         Ok(self.proxy.connection().clone().close().await?)
     }
+}
+
+async fn connect_custody(
+    identity: &ekubo_wallet_core::service_storage::InstalledServiceIdentity,
+) -> Result<LinuxOwnerTransport> {
+    let bus = zbus::connection::Builder::unix_stream(
+        ekubo_wallet_core::service_storage::system_bus_stream().await?,
+    )
+    .build()
+    .await?;
+    let transport = LinuxOwnerTransport::authenticate(
+        bus,
+        &format!("org.ekubo.Wallet.Owner.u{}", identity.owner_uid()),
+        identity.service_uid(),
+    )
+    .await?;
+    // The login keyring is not touched until the service identity is pinned.
+    let profile = identity.profile_id();
+    let wrapped =
+        tokio::task::spawn_blocking(move || ekubo_wallet_core::custody_relay::load(profile))
+            .await??;
+    transport.unlock(&wrapped).await?;
+    Ok(transport)
+}
+
+/// An installed service failure never falls back to the desktop's local socket.
+/// The agent receives an MCP stream, without an owner client or desktop lease.
+pub async fn try_connect_agent_stream() -> Result<Option<tokio::net::UnixStream>> {
+    let Some(identity) = ekubo_wallet_core::service_storage::find_installed_service_identity()?
+    else {
+        return Ok(None);
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let custody = connect_custody(&identity).await?;
+        let stream =
+            ekubo_wallet_core::service_storage::agent_stream(&identity, custody.process).await?;
+        custody.close().await?;
+        Ok(Some(stream))
+    })
+    .await
+    .context("MCP service connection timed out")?
 }
 
 pub type OwnerClient = OwnerConnection<LinuxOwnerTransport>;

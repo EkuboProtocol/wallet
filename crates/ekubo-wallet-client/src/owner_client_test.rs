@@ -111,6 +111,7 @@ async fn custody_relay_waits_for_readiness_and_stays_on_the_authenticated_servic
     let transport = LinuxOwnerTransport::authenticate(desktop, name, uid)
         .await
         .unwrap();
+    assert_eq!(transport.process, std::process::id());
     original.release_name(name).await.unwrap();
     let (replaced, replacement_calls) = tokio::sync::watch::channel(0);
     let replacement = zbus::connection::Builder::address(address.trim())
