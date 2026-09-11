@@ -24,3 +24,10 @@ pub mod transaction_review;
 #[cfg(target_os = "linux")]
 pub use owner_client::OwnerClient;
 mod owner_api;
+
+#[cfg(any(target_os = "windows", test))]
+mod stream_owner_client;
+#[cfg(target_os = "windows")]
+mod windows_owner_client;
+#[cfg(target_os = "windows")]
+pub use windows_owner_client::OwnerClient;

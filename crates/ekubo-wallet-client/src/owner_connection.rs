@@ -27,7 +27,7 @@ pub struct OwnerConnection<T: OwnerTransport> {
 }
 
 impl<T: OwnerTransport> OwnerConnection<T> {
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", target_os = "windows", test))]
     pub(crate) fn from_transport(transport: T) -> Self {
         Self { transport }
     }

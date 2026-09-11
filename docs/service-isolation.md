@@ -1054,3 +1054,20 @@ its last read. EOF or unexpected input cancels a pending call/readiness wait;
 those monitors use cancellation-safe one-byte reads. No mutation is replayed.
 Secret-bearing frame readers erase partial payloads when an I/O failure occurs.
 The Windows desktop client and SCM host still need to use this protocol.
+
+The Windows `OwnerClient` now uses this stream protocol through the authenticated
+core pipe connector. It invokes the login-keyring ciphertext loader only after
+endpoint and greeting validation, pins the service instance, and checks every
+call connection before sending its request. Lost replies never trigger replay.
+A background lifetime driver sends Hold only when requested, survives cancellation
+of an individual Hold future, and closes when the last client is dropped or any
+clone explicitly closes. Explicit closure waits for that actual lifetime pipe to
+be dropped and invalidates pending and future calls. A replaced service instance
+closes all clones before receiving request bytes.
+
+The native connector waits for a free pipe instance for at most ten seconds when
+Windows reports `ERROR_PIPE_BUSY`; these retries precede all protocol writes.
+Other connection/authentication failures are returned immediately. This avoids
+ordinary concurrent UI reads failing in the brief interval before the server
+creates its next listener instance. Desktop startup and SCM hosting still need
+to select this client and keep its existing DesktopSession supervisor alive.

@@ -64,3 +64,24 @@ fn native_descriptor_keeps_desktop_data_access_separate_from_server_creation() {
     );
     assert_eq!(grants[0] & 3, 3);
 }
+
+#[tokio::test]
+async fn native_client_waits_for_a_free_instance_before_any_request_is_sent() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let first = create(&pipe_name, &sid, &sid, true).unwrap();
+    let _occupied = open(&pipe_name, &sid, &sid).unwrap();
+    first.connect().await.unwrap();
+    let mut waiting = Box::pin(open_available(&pipe_name, &sid, &sid));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), waiting.as_mut())
+            .await
+            .is_err()
+    );
+    let next = create(&pipe_name, &sid, &sid, false).unwrap();
+    let _client = waiting.await.unwrap();
+    next.connect().await.unwrap();
+}

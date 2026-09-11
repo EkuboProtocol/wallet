@@ -3,7 +3,7 @@
 
 use super::{CLIENT_ACCESS, name, validate_security};
 use crate::windows_service_config::InstalledServiceIdentity;
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use std::{
     mem::size_of,
     os::windows::io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _, OwnedHandle},
@@ -156,20 +156,45 @@ fn open(pipe_name: &str, service: &str, desktop: &str) -> Result<NamedPipeClient
     Ok(unsafe { NamedPipeClient::from_raw_handle(handle.into_raw_handle()) }?)
 }
 
-/// Connect once to the protected profile endpoint. Busy/missing endpoints are
-/// reported to the caller; no request is retried or sent before ACL validation.
-/// Must be called inside a Tokio runtime.
-pub fn connect(identity: &InstalledServiceIdentity) -> Result<NamedPipeClient> {
+/// Connect to the protected profile endpoint, waiting briefly when all server
+/// instances are occupied. No bytes have been sent during these retries.
+pub async fn connect(identity: &InstalledServiceIdentity) -> Result<NamedPipeClient> {
     let current = crate::windows_service_identity::current_process_identity()?;
     ensure!(
         current.user_sid() == identity.owner_sid(),
         "owner pipe belongs to another desktop account"
     );
-    open(
+    open_available(
         &name(identity.profile_id())?,
         identity.service_sid(),
         identity.owner_sid(),
     )
+    .await
+}
+
+async fn open_available(pipe_name: &str, service: &str, desktop: &str) -> Result<NamedPipeClient> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match open(pipe_name, service, desktop) {
+                Ok(pipe) => return Ok(pipe),
+                Err(error)
+                    if error
+                        .downcast_ref::<windows::core::Error>()
+                        .is_some_and(|error| {
+                            error.code()
+                                == windows::core::HRESULT::from_win32(
+                                    windows::Win32::Foundation::ERROR_PIPE_BUSY.0,
+                                )
+                        }) =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .context("owner pipe remained busy")?
 }
 
 /// The host must retain at least one instance while creating successors. The
