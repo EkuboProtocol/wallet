@@ -2352,23 +2352,16 @@ fn a_dapp_connection_cannot_be_approved_before_an_account_is_chosen() {
     // A connection can go on to propose transactions that policy signs
     // without a second review, so "which account" is not a question with a
     // sensible default.
-    let (response, _receiver) = oneshot::channel();
-    assert!(!review_selection_is_complete(Some(
-        &ActiveReviewCompletion::WalletConnect {
-            choices: Vec::new(),
-            selected_account: None,
-            response,
-        }
-    )));
-
-    let (response, _receiver) = oneshot::channel();
-    assert!(review_selection_is_complete(Some(
-        &ActiveReviewCompletion::WalletConnect {
-            choices: Vec::new(),
-            selected_account: Some(0),
-            response,
-        }
-    )));
+    let (mut review, _receiver) = connection_review(&["primary"], &[]);
+    assert!(!review_selection_is_complete(review.completion.as_ref()));
+    let Some(ActiveReviewCompletion::WalletConnect {
+        selected_account, ..
+    }) = review.completion.as_mut()
+    else {
+        panic!("expected a connection review");
+    };
+    *selected_account = Some(0);
+    assert!(review_selection_is_complete(review.completion.as_ref()));
 
     // Every other review answers its own question by existing.
     assert!(review_selection_is_complete(None));
@@ -2416,13 +2409,19 @@ fn connection_review(
             document: connection_document(Some(id), warnings),
         })
         .collect();
+    let prompt = DesktopDappPrompt::local(crate::walletconnect::ProposalPrompt {
+        session_id: uuid::Uuid::new_v4(),
+        unselected_document: connection_document(None, warnings),
+        choices,
+        response,
+    });
     let review = ActiveReview::new(
-        connection_document(None, warnings),
+        prompt.unselected_document,
         None,
         Some(ActiveReviewCompletion::WalletConnect {
-            choices,
+            choices: prompt.choices,
             selected_account: None,
-            response,
+            response: prompt.response,
         }),
     );
     (review, receiver)

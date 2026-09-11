@@ -47,6 +47,27 @@ pub(super) async fn review(
     request_id: Uuid,
     presenter: &GuiReviewPresenter,
 ) -> Result<crate::authority::ReviewedTransaction> {
+    with_connection(owner, async |owner| {
+        let review_id = Uuid::new_v4();
+        drive(
+            owner,
+            request_id,
+            review_id,
+            presenter,
+            owner.review_transaction(request_id, review_id),
+        )
+        .await
+    })
+    .await
+}
+
+/// Run a decision on a connection whose remote lifetime ends when its UI task
+/// is canceled. This must not reactivate a replacement service or replay intent.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) async fn with_connection<T>(
+    owner: &ekubo_wallet_client::OwnerClient,
+    operation: impl AsyncFnOnce(&ekubo_wallet_client::OwnerClient) -> Result<T>,
+) -> Result<T> {
     #[cfg(target_os = "linux")]
     let isolated = owner.independent_connection().await?;
     #[cfg(target_os = "linux")]
@@ -56,17 +77,9 @@ pub(super) async fn review(
         let transport = owner.clone();
         CloseOnDrop::start(async move { transport.close().await })
     };
-    let review_id = Uuid::new_v4();
-    let operation = drive(
-        owner,
-        request_id,
-        review_id,
-        presenter,
-        owner.review_transaction(request_id, review_id),
-    );
+    let result = operation(owner).await;
     #[cfg(target_os = "linux")]
     {
-        let result = operation.await;
         let closed = closing.close().await;
         match (result, closed) {
             (Ok(value), Ok(())) => Ok(value),
@@ -77,7 +90,7 @@ pub(super) async fn review(
         }
     }
     #[cfg(target_os = "windows")]
-    operation.await
+    result
 }
 
 async fn drive<T>(

@@ -9,6 +9,7 @@ use crate::{
     },
     automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
+    desktop_dapp_review::{DappDecision, DappReviewResponse, DesktopDappPrompt},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
@@ -20,10 +21,7 @@ use crate::{
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
-    walletconnect::{
-        ProposalCommand, ProposalPresenter, ProposalPrompt, SessionSummary, WalletConnectManager,
-        run_session,
-    },
+    walletconnect::{ProposalPresenter, SessionSummary, WalletConnectManager, run_session},
 };
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::{
@@ -3792,7 +3790,7 @@ enum ActiveReviewCompletion {
         digest: String,
     },
     WalletConnect {
-        choices: Vec<crate::walletconnect::ProposalChoice>,
+        choices: Vec<ekubo_wallet_client::dapp_review::DappChoice>,
         /// Which account the owner chose to expose, once they have chosen.
         ///
         /// It used to start at the first account, which meant the default
@@ -3801,7 +3799,7 @@ enum ActiveReviewCompletion {
         /// transactions that a policy signs without a second review. Nothing
         /// is exposed until this is `Some`.
         selected_account: Option<usize>,
-        response: oneshot::Sender<ProposalCommand>,
+        response: DappReviewResponse,
     },
     AccountRemoval {
         reviewed: Box<crate::authority::OwnerAccountRemovalReview>,
@@ -3906,7 +3904,7 @@ const fn review_decision_labels(
 
 enum QueuedReview {
     Transaction(Box<GuiReviewPrompt>),
-    WalletConnect(Box<ProposalPrompt>),
+    WalletConnect(Box<DesktopDappPrompt>),
 }
 
 struct SerialQueue<T> {
@@ -8856,7 +8854,10 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn receive_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+    fn receive_walletconnect_prompt(&mut self, prompt: DesktopDappPrompt) {
+        if prompt.response.is_closed() {
+            return;
+        }
         if !prompt
             .choices
             .iter()
@@ -8875,7 +8876,10 @@ impl WalletWindow {
         self.activate_walletconnect_prompt(*prompt);
     }
 
-    fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+    fn activate_walletconnect_prompt(&mut self, prompt: DesktopDappPrompt) {
+        if prompt.response.is_closed() {
+            return;
+        }
         // The connect button stays busy through the review rather than
         // stopping when the proposal lands: a proposal under review is not a
         // connection, and nothing else on the screen behind stands for it.
@@ -8898,7 +8902,7 @@ impl WalletWindow {
         }
         self.queued_reviews.pending.retain(|review| match review {
             QueuedReview::Transaction(prompt) => !prompt.response.is_closed(),
-            QueuedReview::WalletConnect(_) => true,
+            QueuedReview::WalletConnect(prompt) => !prompt.response.is_closed(),
         });
         let networks = self.cached_networks().unwrap_or_default().to_vec();
         let testnet_mode = self.testnet_mode;
@@ -12097,79 +12101,44 @@ impl WalletWindow {
                 .detach();
             }
             (
-                GuiReviewCommand::Approve,
+                command @ (GuiReviewCommand::Approve
+                | GuiReviewCommand::Reject
+                | GuiReviewCommand::Close),
                 Some(ActiveReviewCompletion::WalletConnect {
-                    choices,
                     selected_account,
                     response,
+                    ..
                 }),
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let Some((index, choice)) = selected_account
-                    .and_then(|index| choices.get(index).map(|choice| (index, choice)))
-                else {
-                    let _ = response.send(ProposalCommand::Reject);
-                    self.set_route_error(
-                        Route::WalletConnect,
-                        "The selected account is no longer available.",
-                    );
-                    return;
+                let decision = match command {
+                    GuiReviewCommand::Approve => DappDecision::Approve {
+                        index: selected_account,
+                    },
+                    GuiReviewCommand::Reject => DappDecision::Reject,
+                    GuiReviewCommand::Close => DappDecision::Close,
+                    GuiReviewCommand::Refresh => unreachable!(),
                 };
-                let document = choice.document.clone();
-                let account = choice.account.clone();
+                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.authorize_dapp_connection(&document, &account).await
+                    response.respond(&owner, decision).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
                         view.finish_review_flow(cx);
                         match result {
-                            Ok(authorization) => {
-                                if response
-                                    .send(ProposalCommand::Approve {
-                                        index,
-                                        authorization,
-                                    })
-                                    .is_err()
-                                {
-                                    view.set_route_error(
-                                        Route::WalletConnect,
-                                        "The connection proposal is no longer active.",
-                                    );
-                                } else {
-                                    view.clear_route_error(Route::WalletConnect);
-                                }
-                            }
-                            Err(error) => {
-                                let _ = response.send(ProposalCommand::Reject);
-                                view.set_route_error(
-                                    Route::WalletConnect,
-                                    format!("Dapp connection was not authorized: {error:#}"),
-                                );
-                            }
+                            Ok(()) => view.clear_route_error(Route::WalletConnect),
+                            Err(error) => view.set_route_error(
+                                Route::WalletConnect,
+                                format!("Dapp connection decision failed: {error:#}"),
+                            ),
                         }
                         cx.notify();
                     });
                 })
                 .detach();
-            }
-            (
-                GuiReviewCommand::Reject,
-                Some(ActiveReviewCompletion::WalletConnect { response, .. }),
-            ) => {
-                self.active_review = None;
-                let _ = response.send(ProposalCommand::Reject);
-                self.clear_route_error(Route::WalletConnect);
-            }
-            (
-                GuiReviewCommand::Close,
-                Some(ActiveReviewCompletion::WalletConnect { response, .. }),
-            ) => {
-                self.active_review = None;
-                let _ = response.send(ProposalCommand::Close);
-                self.clear_route_error(Route::WalletConnect);
             }
             (GuiReviewCommand::Refresh, completion) => {
                 active.completion = completion;
@@ -21412,7 +21381,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let walletconnect_review_window = window_slot.clone();
             cx.spawn(async move |cx| {
                 while let Some(prompt) = walletconnect_prompts.recv().await {
+                    if prompt.response.is_closed() {
+                        continue;
+                    }
                     walletconnect_review_view.update(cx, |view, cx| {
+                        let prompt = DesktopDappPrompt::local(prompt);
                         view.receive_walletconnect_prompt(prompt);
                         let route = view.active_review_route();
                         view.set_route(route);

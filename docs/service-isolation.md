@@ -17,7 +17,17 @@ document before entering native authorization, matching service dispatch.
 This is a desktop integration step, not custody cutover. Startup still opens
 local `ApplicationAuthority` and supplies the adapter's local variant. Startup
 settings, legal acceptance, ordinary settings mutations, signature decisions,
-and account-removal reviews now use the async adapter. WalletConnect orchestration,
+and account-removal reviews now use the async adapter. WalletConnect review state
+now contains display-only account choices and a single-use decision handle. The
+handle retains the original review independently of UI display edits; local
+approvals deliver native proof directly to the session, while Linux and Windows
+service approvals send only the stored review identity and selected index. The
+service decision uses the same cancellation-bound connection as transaction
+reviews, without reconnecting to a replacement service or replaying intent.
+Closed local proposals are skipped before presentation and when draining queued
+reviews. Service proposal discovery and expiration still need event integration;
+this change does not start consuming service proposals at desktop startup.
+WalletConnect orchestration,
 updates, and event/session lifecycle still must move to the adapter/client before
 startup may select the service for an installed profile. Installed-profile
 startup must make that selection before opening any local authority.
