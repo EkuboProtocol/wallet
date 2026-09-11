@@ -10,6 +10,7 @@ use crate::{
     automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
     desktop_dapp_review::{DappDecision, DappReviewResponse, DesktopDappPrompt},
+    desktop_dapps::{DesktopDapps, StartedDappSession},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
@@ -21,7 +22,7 @@ use crate::{
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
-    walletconnect::{ProposalPresenter, SessionSummary, WalletConnectManager, run_session},
+    walletconnect::{ProposalPresenter, SessionSummary, WalletConnectManager},
 };
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::{
@@ -1297,7 +1298,7 @@ struct RemoveAccount {
 struct DesktopRuntime {
     _instance: Arc<Mutex<Option<SingleInstance>>>,
     _server: Arc<Mutex<Option<McpIpcServer>>>,
-    _walletconnect: Arc<Mutex<crate::walletconnect::WalletConnectManager>>,
+    _walletconnect: DesktopDapps,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
     _pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
 }
@@ -2963,8 +2964,10 @@ pub struct WalletWindow {
     /// redraw it without changing them.
     portfolio_row_cache: RefCell<Option<PortfolioRowCache>>,
     modal_focus: FocusHandle,
-    walletconnect: Arc<Mutex<WalletConnectManager>>,
+    walletconnect: DesktopDapps,
     walletconnect_sessions: Vec<SessionSummary>,
+    walletconnect_sessions_error: Option<SharedString>,
+    walletconnect_sessions_generation: u64,
     /// The pairing started by the last press of Connect, until it produces a
     /// proposal, settles, or ends.
     ///
@@ -2974,7 +2977,8 @@ pub struct WalletWindow {
     /// idle and burned the URI on a second pairing that could never settle.
     /// While this is set the button is busy and the press is refused.
     walletconnect_connecting: Option<uuid::Uuid>,
-    walletconnect_presenter: ProposalPresenter,
+    walletconnect_starting: Option<tokio_util::sync::CancellationToken>,
+    walletconnect_disconnecting: BTreeSet<uuid::Uuid>,
     network_editor_open: bool,
     network_editor_scroll_handle: ScrollHandle,
     network_editor_overflow_indicator: ScrollOverflowIndicator,
@@ -6845,8 +6849,7 @@ impl WalletWindow {
         owner: OwnerApi,
         initial: InitialDesktopState,
         review_presenter: GuiReviewPresenter,
-        walletconnect: Arc<Mutex<WalletConnectManager>>,
-        walletconnect_presenter: ProposalPresenter,
+        walletconnect: DesktopDapps,
         tray: Rc<RefCell<Option<PlatformTray>>>,
         pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
         data_dir: &Path,
@@ -7022,8 +7025,11 @@ impl WalletWindow {
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_sessions: Vec::new(),
+            walletconnect_sessions_error: None,
+            walletconnect_sessions_generation: 0,
             walletconnect_connecting: None,
-            walletconnect_presenter,
+            walletconnect_starting: None,
+            walletconnect_disconnecting: BTreeSet::new(),
             network_editor_open: false,
             network_editor_scroll_handle,
             network_editor_overflow_indicator,
@@ -8720,7 +8726,7 @@ impl WalletWindow {
         // The button renders disabled while a pairing is in flight, but a
         // render-time property is not what decides this: refuse the press
         // here, where the second click of a double click arrives.
-        if self.walletconnect_connecting.is_some() {
+        if self.walletconnect_starting.is_some() || self.walletconnect_connecting.is_some() {
             return;
         }
         let text = cx
@@ -8754,33 +8760,69 @@ impl WalletWindow {
             Err(error) => anyhow::bail!("could not verify a signing account: {error:#}"),
             Ok(_) => {}
         }
-        let start = self
-            .walletconnect
-            .lock()
-            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))?
-            .begin_uri(uri)?;
-        let (start, summary) = start;
-        self.walletconnect_sessions.push(summary);
-        let session_id = start.id;
-        self.walletconnect_connecting = Some(session_id);
+        if self.walletconnect_starting.is_some() || self.walletconnect_connecting.is_some() {
+            return Ok(());
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.walletconnect_starting = Some(cancel.clone());
+        self.walletconnect_sessions_generation =
+            self.walletconnect_sessions_generation.wrapping_add(1);
         self.clear_route_error(Route::WalletConnect);
-        self.owner
-            .event_bus()
-            .publish(crate::events::DomainEventKind::WalletConnectChanged {
-                session_id: start.id.to_string(),
+        let walletconnect = self.walletconnect.clone();
+        let uri = Zeroizing::new(uri.to_owned());
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { walletconnect.begin(&uri, &cancel).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.walletconnect_sessions_generation =
+                    view.walletconnect_sessions_generation.wrapping_add(1);
+                let canceled = view
+                    .walletconnect_starting
+                    .take()
+                    .is_some_and(|cancel| cancel.is_cancelled());
+                match result {
+                    Ok(Some(started)) => {
+                        let session_id = started.summary.id;
+                        if !view
+                            .walletconnect_sessions
+                            .iter()
+                            .any(|session| session.id == session_id)
+                        {
+                            view.walletconnect_sessions.push(started.summary.clone());
+                        }
+                        view.walletconnect_connecting = walletconnect_pairing_is_in_flight(
+                            &view.walletconnect_sessions,
+                            session_id,
+                        )
+                        .then_some(session_id);
+                        Self::wait_walletconnect_session(started, cx);
+                        // Cancel may arrive after the adapter's last check but
+                        // before this GPUI completion callback.
+                        if canceled {
+                            view.disconnect_walletconnect(session_id, cx);
+                        }
+                    }
+                    Ok(None) => view.clear_route_error(Route::WalletConnect),
+                    Err(error) => view.set_route_error(
+                        Route::WalletConnect,
+                        format!("Could not connect: {error:#}"),
+                    ),
+                }
+                cx.notify();
             });
-        let dapp = self.owner.dapp_api();
-        let presenter = self.walletconnect_presenter.clone();
-        let manager = self.walletconnect.clone();
-        let events = self.owner.event_bus();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current()
-                    .block_on(run_session(start, dapp, presenter, manager, events))
-            })
-            .await
-            .context("WalletConnect session task failed")?
-        });
+        })
+        .detach();
+        cx.notify();
+        Ok(())
+    }
+
+    fn wait_walletconnect_session(started: StartedDappSession, cx: &mut Context<Self>) {
+        let session_id = started.summary.id;
+        let task = gpui_tokio::Tokio::spawn_result(cx, started.wait());
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -8796,8 +8838,14 @@ impl WalletWindow {
             });
         })
         .detach();
-        cx.notify();
-        Ok(())
+    }
+
+    fn cancel_walletconnect_pairing(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = &self.walletconnect_starting {
+            cancel.cancel();
+        } else if let Some(session_id) = self.walletconnect_connecting {
+            self.disconnect_walletconnect(session_id, cx);
+        }
     }
 
     /// Stop showing Connect as busy, if it was busy on this pairing.
@@ -8825,6 +8873,26 @@ impl WalletWindow {
         self.walletconnect_sessions = sessions;
     }
 
+    fn update_walletconnect_sessions(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<SessionSummary>>,
+    ) {
+        if generation != self.walletconnect_sessions_generation {
+            return;
+        }
+        match result {
+            Ok(sessions) => {
+                self.walletconnect_sessions_error = None;
+                self.set_walletconnect_sessions(sessions);
+            }
+            Err(error) => {
+                self.walletconnect_sessions_error =
+                    Some(format!("WalletConnect sessions unavailable: {error:#}").into());
+            }
+        }
+    }
+
     /// The dapps the owner let in — the only ones the connection list draws.
     fn approved_walletconnect_sessions(&self) -> impl Iterator<Item = &SessionSummary> {
         self.walletconnect_sessions
@@ -8833,24 +8901,37 @@ impl WalletWindow {
     }
 
     fn disconnect_walletconnect(&mut self, session_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let result = self
-            .walletconnect
-            .lock()
-            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))
-            .and_then(|mut manager| manager.disconnect(session_id).map(|_| ()));
-        self.finish_walletconnect_connecting(session_id);
-        match result {
-            Ok(()) => self.clear_route_error(Route::WalletConnect),
-            Err(error) => self.set_route_error(
-                Route::WalletConnect,
-                format!("Could not disconnect session: {error:#}"),
-            ),
+        if !self.walletconnect_disconnecting.insert(session_id) {
+            return;
         }
-        self.owner
-            .event_bus()
-            .publish(crate::events::DomainEventKind::WalletConnectChanged {
-                session_id: session_id.to_string(),
+        self.walletconnect_sessions_generation =
+            self.walletconnect_sessions_generation.wrapping_add(1);
+        let walletconnect = self.walletconnect.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            walletconnect.disconnect(session_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.walletconnect_sessions_generation =
+                    view.walletconnect_sessions_generation.wrapping_add(1);
+                view.walletconnect_disconnecting.remove(&session_id);
+                view.finish_walletconnect_connecting(session_id);
+                match result {
+                    Ok(_) => {
+                        view.walletconnect_sessions
+                            .retain(|session| session.id != session_id);
+                        view.clear_route_error(Route::WalletConnect);
+                    }
+                    Err(error) => view.set_route_error(
+                        Route::WalletConnect,
+                        format!("Could not disconnect session: {error:#}"),
+                    ),
+                }
+                cx.notify();
             });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -15154,6 +15235,7 @@ impl WalletWindow {
         };
         let account_unavailable = account_error.is_some();
         let connecting = self.walletconnect_connecting;
+        let pairing_in_flight = self.walletconnect_starting.is_some() || connecting.is_some();
         // The same frame the account form and the inbox use: roomier than the
         // cards below it, and filled with the page background rather than
         // `secondary`. This is the one card on the page that is a form, and
@@ -15209,10 +15291,10 @@ impl WalletWindow {
                     .child(
                         app_button("paste-walletconnect-uri")
                             .debug_selector(|| "paste-walletconnect-uri".to_owned())
-                            .label(if connecting.is_some() { "Connecting" } else { "Paste link & connect" })
-                            .loading(connecting.is_some())
+                            .label(if pairing_in_flight { "Connecting" } else { "Paste link & connect" })
+                            .loading(pairing_in_flight)
                             .primary()
-                            .disabled(account_unavailable || connecting.is_some())
+                            .disabled(account_unavailable || pairing_in_flight)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.connect_walletconnect_from_clipboard(cx);
                             })),
@@ -15221,23 +15303,24 @@ impl WalletWindow {
                     // Disconnect button of its own, and a dapp that never
                     // proposes would otherwise leave the wallet waiting with
                     // no way out but quitting.
-                    .when_some(connecting, |row, session_id| {
+                    .when(pairing_in_flight, |row| {
                         row.child(
                             app_button("cancel-walletconnect")
                                 .debug_selector(|| "cancel-walletconnect".to_owned())
                                 .label("Cancel")
                                 .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.disconnect_walletconnect(session_id, cx);
+                                    view.cancel_walletconnect_pairing(cx);
                                 })),
                         )
                     }),
             );
-        if let Some(session_id) = connecting {
-            let status = self
-                .walletconnect_sessions
-                .iter()
-                .find(|session| session.id == session_id)
-                .map(|session| &session.status);
+        if pairing_in_flight {
+            let status = connecting.and_then(|session_id| {
+                self.walletconnect_sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| &session.status)
+            });
             panel = panel.child(
                 // With the spinner, because this is a wait on a relay and a
                 // dapp, and the only thing on screen saying so was a sentence
@@ -15265,6 +15348,12 @@ impl WalletWindow {
             // be read. As a line of red text it was the one failure in the
             // wallet that looked like a caption.
             panel = panel.child(selectable_error_alert("walletconnect-account-error", error));
+        }
+        if let Some(error) = &self.walletconnect_sessions_error {
+            panel = panel.child(selectable_error_alert(
+                "walletconnect-sessions-error",
+                error.clone(),
+            ));
         }
         let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
         // Only dapps the owner approved. A pairing that has not been through
@@ -20990,31 +21079,27 @@ fn perform_desktop_shutdown(
     prepared: Option<PreparedUpdate>,
     instance_slot: Arc<Mutex<Option<SingleInstance>>>,
     data_dir: &Path,
-    walletconnect_farewells: &[tokio_util::sync::CancellationToken],
+    walletconnect: &DesktopDapps,
 ) -> Result<bool> {
     // First, because it is the only part of shutdown someone else is watching.
     // A dapp is told the session is over by a publish to the relay, and the
     // quit used to cancel the sessions and let the process exit out from under
     // that publish — so the dapp went on showing a wallet that had closed.
-    if !walletconnect_farewells.is_empty() {
-        let waited = block_on_with_timeout(
-            tokio,
-            DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT,
-            futures::future::join_all(
-                walletconnect_farewells
-                    .iter()
-                    .map(tokio_util::sync::CancellationToken::cancelled),
-            ),
-        );
-        if waited.is_err() {
-            let _ = crate::release_check::record_update_diagnostic(
-                data_dir,
-                &format!(
-                    "WalletConnect disconnect notices exceeded {} seconds",
-                    DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT.as_secs()
-                ),
-            );
-        }
+    let disconnected = block_on_with_timeout(
+        tokio,
+        DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT,
+        walletconnect.shutdown(),
+    );
+    let failure = match disconnected {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("WalletConnect shutdown failed: {error:#}")),
+        Err(_) => Some(format!(
+            "WalletConnect disconnect notices exceeded {} seconds",
+            DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT.as_secs()
+        )),
+    };
+    if let Some(failure) = failure {
+        let _ = crate::release_check::record_update_diagnostic(data_dir, &failure);
     }
     if let Some(server) = server {
         let stopped = block_on_with_timeout(tokio, DESKTOP_SERVER_SHUTDOWN_TIMEOUT, server.stop());
@@ -21097,11 +21182,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let server_slot = Arc::new(Mutex::new(None::<McpIpcServer>));
     let pending_update = Arc::new(Mutex::new(None::<PreparedUpdate>));
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
-    let walletconnect = Arc::new(Mutex::new(
-        crate::walletconnect::WalletConnectManager::default(),
-    ));
+    let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
+    let walletconnect = DesktopDapps::local(owner.clone(), walletconnect, walletconnect_presenter);
 
     // Built here rather than by `gpui_tokio::init` so that the runtime outlives
     // the GPUI application and can be *joined* on the way out; see
@@ -21228,10 +21312,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 let update_data_dir = update_data_dir.clone();
                 let shutdown_instance = shutdown_instance.clone();
                 let quit_tokio_slot = Arc::clone(&quit_tokio_slot);
-                let farewells = shutdown_walletconnect
-                    .lock()
-                    .map(|mut sessions| sessions.disconnect_all())
-                    .unwrap_or_default();
+                let walletconnect = shutdown_walletconnect.clone();
                 let server = shutdown_server
                     .lock()
                     .ok()
@@ -21261,7 +21342,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             prepared,
                             shutdown_instance,
                             &worker_data_dir,
-                            &farewells,
+                            &walletconnect,
                         )
                     });
                 async move {
@@ -21320,7 +21401,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     initial,
                     review_presenter.clone(),
                     walletconnect.clone(),
-                    walletconnect_presenter.clone(),
                     tray.clone(),
                     pending_update.clone(),
                     &data_dir,
@@ -21405,7 +21485,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let event_view = wallet_view.clone();
             let event_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
             let event_tray = tray.clone();
-            let event_walletconnect = walletconnect.clone();
+            let event_walletconnect = wallet_view.read(cx).walletconnect.clone();
             let event_tokio = gpui_tokio::Tokio::handle(cx);
             cx.spawn(async move |cx| {
                 let mut mcp_online = false;
@@ -21472,11 +21552,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     if changed {
                         let owner = event_owner.clone();
                         let walletconnect = event_walletconnect.clone();
+                        let session_generation =
+                            event_view.update(cx, |view, _| view.walletconnect_sessions_generation);
                         let counts = event_tokio
                             .spawn(async move {
-                                let sessions = walletconnect
-                                    .lock()
-                                    .map_or_else(|_| Vec::new(), |manager| manager.sessions());
+                                let sessions = walletconnect.sessions().await;
                                 let networks = owner.networks().await.unwrap_or_default();
                                 let testnet_mode = owner.testnet_mode().await.unwrap_or(false);
                                 (
@@ -21491,22 +21571,19 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 )
                             })
                             .await
-                            .unwrap_or_default();
+                            .unwrap_or_else(|error| (0, Err(error.into())));
+                        let session_count = event_view.update(cx, |view, cx| {
+                            view.update_walletconnect_sessions(session_generation, counts.1);
+                            cx.notify();
+                            view.approved_walletconnect_sessions().count()
+                        });
                         if let Some(tray) = event_tray.borrow_mut().as_mut() {
                             tray.update(&TraySnapshot {
                                 pending_reviews: counts.0,
                                 mcp_online,
-                                walletconnect_sessions: counts
-                                    .1
-                                    .iter()
-                                    .filter(|session| session.settled)
-                                    .count(),
+                                walletconnect_sessions: session_count,
                             });
                         }
-                        event_view.update(cx, |view, cx| {
-                            view.set_walletconnect_sessions(counts.1);
-                            cx.notify();
-                        });
                     } else {
                         break;
                     }

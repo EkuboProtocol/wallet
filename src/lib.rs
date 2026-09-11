@@ -17,6 +17,7 @@ pub mod bridge_protocol;
 pub mod dapp_identity;
 pub mod desktop;
 pub mod desktop_dapp_review;
+pub mod desktop_dapps;
 pub mod desktop_owner;
 pub mod events;
 pub mod gui_review;

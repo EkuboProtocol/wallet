@@ -27,9 +27,20 @@ reviews, without reconnecting to a replacement service or replaying intent.
 Closed local proposals are skipped before presentation and when draining queued
 reviews. Service proposal discovery and expiration still need event integration;
 this change does not start consuming service proposals at desktop startup.
-WalletConnect orchestration,
-updates, and event/session lifecycle still must move to the adapter/client before
-startup may select the service for an installed profile. Installed-profile
+Pairing registration, session completion, disconnect, session-status reads, and
+Quit now use a `DesktopDapps` facade selected once at startup. Its service backend
+contains only the authenticated client and shared shutdown state. The existing
+Cancel control remains available while registration awaits its response; a
+canceled registration is disconnected when its ID arrives, without replaying a
+lost start. Session read failures preserve the last snapshot and display an error.
+Status reads carry a UI generation so a delayed response cannot resurrect a
+session after a newer disconnect or clear a newer pairing's busy state.
+Local shutdown excludes late registrations before draining relay farewells;
+service shutdown closes the owner transport and releases its desktop lease while
+the resident service finishes cancellation. Production still constructs the
+local backend. Remote proposal discovery and expiration, updates, and global
+event/session startup still must move to the client before startup may select
+the service for an installed profile. Installed-profile
 startup must make that selection before opening any local authority.
 
 ## Required outcome

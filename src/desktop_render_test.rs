@@ -96,11 +96,10 @@ fn wallet(
     let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
     let window = cx.add_window(|_, cx| {
         WalletWindow::new(
-            owner,
+            owner.clone(),
             initial,
             review_presenter,
-            walletconnect,
-            walletconnect_presenter,
+            DesktopDapps::local(owner, walletconnect, walletconnect_presenter),
             Rc::new(RefCell::new(None)),
             Arc::new(Mutex::new(None)),
             directory.path(),
@@ -3495,11 +3494,14 @@ fn screenshots() {
         .open_window(VIEWPORT, |_, cx| {
             cx.new(|cx| {
                 WalletWindow::new(
-                    owner,
+                    owner.clone(),
                     initial,
                     review_presenter,
-                    Arc::new(Mutex::new(WalletConnectManager::default())),
-                    walletconnect_presenter,
+                    DesktopDapps::local(
+                        owner,
+                        Arc::new(Mutex::new(WalletConnectManager::default())),
+                        walletconnect_presenter,
+                    ),
                     Rc::new(RefCell::new(None)),
                     Arc::new(Mutex::new(None)),
                     temp.path(),
@@ -5208,6 +5210,102 @@ fn asynchronous_guided_setup_load_preserves_stored_progress_and_saves_new_observ
         let stored = wallet.owner.guided_setup().unwrap();
         assert!(stored.completed.contains(SetupTask::InstallAgent.key()));
         assert!(stored.completed.contains(SetupTask::CreateAccount.key()));
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn pairing_registration_keeps_the_existing_cancel_control_available(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::WalletConnect);
+        wallet.walletconnect_starting = Some(cancel.clone());
+    });
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &["cancel-walletconnect", "walletconnect-pairing-status"],
+    );
+    assert!(bounds.iter().all(Option::is_some));
+    cx.update_entity(&view, WalletWindow::cancel_walletconnect_pairing);
+    assert!(cancel.is_cancelled());
+    assert!(cx.read_entity(&view, |wallet, _| wallet.walletconnect_starting.is_some()));
+    // Stay busy until registration acknowledges cancellation, so a second press
+    // cannot consume the same clipboard link while the first RPC is unresolved.
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &["cancel-walletconnect", "walletconnect-pairing-status"],
+    );
+    assert!(bounds.iter().all(Option::is_some));
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_dapp_disconnect_removes_only_its_session_and_preserves_read_failures(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    let manager = Arc::new(Mutex::new(WalletConnectManager::default()));
+    let uri = |topic: &str| {
+        format!(
+            "wc:{}@2?relay-protocol=irn&symKey={}",
+            topic.repeat(32),
+            "22".repeat(32)
+        )
+    };
+    let (first, first_summary) = manager.lock().unwrap().begin_uri(&uri("11")).unwrap();
+    let (_second, second_summary) = manager.lock().unwrap().begin_uri(&uri("33")).unwrap();
+    let (presenter, _incoming) = ProposalPresenter::channel();
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.walletconnect =
+            DesktopDapps::local(wallet.owner.clone(), manager.clone(), presenter);
+        wallet.set_walletconnect_sessions(manager.lock().unwrap().sessions());
+        wallet.walletconnect_connecting = Some(first_summary.id);
+        wallet.update_walletconnect_sessions(
+            wallet.walletconnect_sessions_generation,
+            Err(anyhow::anyhow!("transport disconnected")),
+        );
+        assert_eq!(wallet.walletconnect_sessions.len(), 2);
+        assert_eq!(wallet.walletconnect_connecting, Some(first_summary.id));
+        assert!(wallet.walletconnect_sessions_error.is_some());
+        wallet.update_walletconnect_sessions(
+            wallet.walletconnect_sessions_generation,
+            Ok(manager.lock().unwrap().sessions()),
+        );
+        assert!(wallet.walletconnect_sessions_error.is_none());
+        wallet.disconnect_walletconnect(first_summary.id, cx);
+        wallet.disconnect_walletconnect(first_summary.id, cx);
+        assert_eq!(wallet.walletconnect_disconnecting.len(), 1);
+    });
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(&view, |wallet, _| {
+            wallet.walletconnect_disconnecting.is_empty()
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(first.shutdown.is_cancelled());
+    cx.read_entity(&view, |wallet, _| {
+        assert!(wallet.walletconnect_disconnecting.is_empty());
+        assert!(wallet.walletconnect_connecting.is_none());
+        assert_eq!(wallet.walletconnect_sessions.len(), 1);
+        assert_eq!(wallet.walletconnect_sessions[0].id, second_summary.id);
+        assert!(!wallet.route_errors.contains_key(&Route::WalletConnect));
+    });
+    cx.update_entity(&view, |wallet, _| {
+        let stale = wallet.walletconnect_sessions_generation.wrapping_sub(1);
+        wallet.update_walletconnect_sessions(stale, Ok(vec![first_summary, second_summary]));
+        assert_eq!(wallet.walletconnect_sessions.len(), 1);
+        wallet.update_walletconnect_sessions(stale, Err(anyhow::anyhow!("old failed read")));
+        assert!(wallet.walletconnect_sessions_error.is_none());
     });
     release(cx, &view);
 }
