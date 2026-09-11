@@ -271,12 +271,20 @@ struct Reply {
 /// Installer-visible staged result. Contains only relay ciphertext, never a
 /// usable key. Not an activation, recovery or legacy-credential deletion proof.
 pub struct StagingReply {
+    session: Uuid,
     stage: Uuid,
     canonical: DatabaseTransfer,
     relay: WrappedDataKey,
 }
 
 impl StagingReply {
+    /// Original authenticated transfer identity for the installer's journal.
+    /// Retaining it grants no recovery, activation or legacy-deletion authority.
+    #[must_use]
+    pub const fn session(&self) -> Uuid {
+        self.session
+    }
+
     #[must_use]
     pub const fn stage(&self) -> Uuid {
         self.stage
@@ -310,6 +318,7 @@ pub fn read_reply(input: &mut impl Read, session: Uuid) -> Result<StagingReply> 
     );
     let relay = WrappedDataKey::from_bytes(&hex::decode(reply.relay)?)?;
     Ok(StagingReply {
+        session: reply.session,
         stage: reply.stage,
         canonical: reply.canonical,
         relay,
