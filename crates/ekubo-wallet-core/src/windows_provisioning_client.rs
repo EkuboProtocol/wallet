@@ -45,37 +45,33 @@ impl StagedSource {
     /// Explicitly reconnect and revalidate this same stage without releasing the
     /// source fence. Keep the caller's lifecycle lock held too. Failure aborts
     /// retention; it never activates custody or retries the original transfer.
-    pub async fn recover(mut self, owner_sid: &str, expected: Vec<WalletMetadata>) -> Result<Self> {
+    pub async fn recover(self, owner_sid: &str, expected: Vec<WalletMetadata>) -> Result<Self> {
         let identity = windows_service_config::pending_installer_identity(owner_sid)?;
         ensure!(
             destination(&identity) == self.destination,
             "pending recovery profile changed"
         );
-        let pipe = windows_provisioning_pipe::connect(&identity).await?;
-        let (mut stream, _cancel) =
-            provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
-        tokio::task::spawn_blocking(move || {
-            stream.write_all(windows_provisioning_pipe::PREFACE)?;
-            if let Some(checkpoint) = &self.checkpoint {
-                self.reply = checkpoint.exchange(
-                    &mut stream,
-                    self.destination.clone(),
-                    &self.snapshot,
-                    self.reply.relay().clone(),
+        let (mut source, reply) = exchange(&identity, self, move |stream, destination, source| {
+            if let Some(checkpoint) = &source.checkpoint {
+                return checkpoint.exchange(
+                    stream,
+                    destination,
+                    &source.snapshot,
+                    source.reply.relay().clone(),
                     &expected,
-                )?;
-                return Ok(self);
+                );
             }
-            self.reply = migration_transfer::recover_exchange(
-                &mut stream,
-                self.destination.clone(),
-                &self.reply,
-                &mut self.snapshot,
+            migration_transfer::recover_exchange(
+                stream,
+                destination,
+                &source.reply,
+                &mut source.snapshot,
                 &expected,
-            )?;
-            Ok(self)
+            )
         })
-        .await?
+        .await?;
+        source.reply = reply;
+        Ok(source)
     }
 }
 
@@ -95,35 +91,29 @@ pub async fn transfer(
     database_key: Zeroizing<[u8; 32]>,
     expected: Vec<WalletMetadata>,
     accounts: Vec<MigrationAccount>,
-    mut snapshot: MigrationDatabaseSnapshot,
+    snapshot: MigrationDatabaseSnapshot,
 ) -> Result<StagedSource> {
     let identity = windows_service_config::pending_installer_identity(owner_sid)?;
-    let pipe = windows_provisioning_pipe::connect(&identity).await?;
     let destination = destination(&identity);
-    let (mut stream, _cancel) =
-        provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
-    // The worker owns the source fence. Dropping the awaiting future cancels
-    // native I/O, but the fence remains held until the worker actually exits.
-    tokio::task::spawn_blocking(move || {
-        stream.write_all(windows_provisioning_pipe::PREFACE)?;
+    let (snapshot, reply) = exchange(&identity, snapshot, move |stream, destination, snapshot| {
         let session = migration_transfer::send(
-            &mut stream,
-            destination.clone(),
+            stream,
+            destination,
             database_key,
             &expected,
             accounts,
-            &mut snapshot,
+            snapshot,
             migration_transfer::INSTALLER_LIMITS,
         )?;
-        let reply = migration_transfer::read_reply(&mut stream, session)?;
-        Ok(StagedSource {
-            snapshot,
-            reply,
-            destination,
-            checkpoint: None,
-        })
+        migration_transfer::read_reply(stream, session)
     })
-    .await?
+    .await?;
+    Ok(StagedSource {
+        snapshot,
+        reply,
+        destination,
+        checkpoint: None,
+    })
 }
 
 /// Resume from protected journal evidence after re-quiescing and freezing the
@@ -137,25 +127,43 @@ pub async fn resume(
     expected: Vec<WalletMetadata>,
 ) -> Result<StagedSource> {
     let identity = windows_service_config::pending_installer_identity(owner_sid)?;
-    let pipe = windows_provisioning_pipe::connect(&identity).await?;
     let destination = destination(&identity);
+    let evidence = checkpoint.clone();
+    let (snapshot, reply) = exchange(&identity, snapshot, move |stream, destination, snapshot| {
+        checkpoint.exchange(stream, destination, snapshot, relay, &expected)
+    })
+    .await?;
+    Ok(StagedSource {
+        snapshot,
+        reply,
+        destination,
+        checkpoint: Some(evidence),
+    })
+}
+
+type InstallerStream = tokio_util::io::SyncIoBridge<
+    provisioning_io::DeadlineStream<tokio::net::windows::named_pipe::NamedPipeClient>,
+>;
+
+// Match Linux's source-state retention contract. This private transport helper
+// does not collect credentials or expose a writer to presentation/MCP callers.
+async fn exchange<S: Send + 'static>(
+    identity: &windows_service_config::PendingInstallerIdentity,
+    mut source: S,
+    operation: impl FnOnce(&mut InstallerStream, Destination, &mut S) -> Result<StagingReply>
+    + Send
+    + 'static,
+) -> Result<(S, StagingReply)> {
+    let pipe = windows_provisioning_pipe::connect(identity).await?;
+    let destination = destination(identity);
     let (mut stream, _cancel) =
         provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
+    // Cancellation stays with the awaiting task. Source state remains with the
+    // blocking worker until its native I/O exits, even if the task is dropped.
     tokio::task::spawn_blocking(move || {
         stream.write_all(windows_provisioning_pipe::PREFACE)?;
-        let reply = checkpoint.exchange(
-            &mut stream,
-            destination.clone(),
-            &snapshot,
-            relay,
-            &expected,
-        )?;
-        Ok(StagedSource {
-            snapshot,
-            reply,
-            destination,
-            checkpoint: Some(checkpoint),
-        })
+        let reply = operation(&mut stream, destination, &mut source)?;
+        Ok((source, reply))
     })
     .await?
 }

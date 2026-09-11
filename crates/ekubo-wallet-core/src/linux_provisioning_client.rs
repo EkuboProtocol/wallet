@@ -196,18 +196,17 @@ async fn authenticate(
     Ok(service)
 }
 
-async fn exchange(
+// Transport retains the supplied source state without requiring a database
+// snapshot in this process. The local-source adapters above supply a snapshot;
+// an owner-channel adapter must instead retain its authenticated connection.
+async fn exchange<S: Send + 'static>(
     bus: &Connection,
     identity: &PendingInstallerIdentity,
-    mut snapshot: MigrationDatabaseSnapshot,
-    operation: impl FnOnce(
-        &mut InstallerStream,
-        Destination,
-        &mut MigrationDatabaseSnapshot,
-    ) -> Result<StagingReply>
+    mut source: S,
+    operation: impl FnOnce(&mut InstallerStream, Destination, &mut S) -> Result<StagingReply>
     + Send
     + 'static,
-) -> Result<(MigrationDatabaseSnapshot, StagingReply)> {
+) -> Result<(S, StagingReply)> {
     let registry = DBusProxy::new(bus).await?;
     let name = format!("org.ekubo.Wallet.Provision.u{}", identity.owner_uid());
     // Resolve exactly once. Calls address the authenticated unique owner, not
@@ -234,8 +233,8 @@ async fn exchange(
     let remote = zbus::zvariant::OwnedFd::from(remote);
     let destination = destination(identity);
     let worker = tokio::task::spawn_blocking(move || {
-        let reply = operation(&mut stream, destination, &mut snapshot)?;
-        Ok::<_, anyhow::Error>((snapshot, reply))
+        let reply = operation(&mut stream, destination, &mut source)?;
+        Ok::<_, anyhow::Error>((source, reply))
     });
     let call = async {
         let reply = bus
@@ -256,7 +255,7 @@ async fn exchange(
     };
     // The method completes only after stream exchange. Run both concurrently;
     // awaiting the method before sending data would deadlock. Cancellation
-    // shuts the shared socket; the worker retains the source fence until exit.
+    // shuts the shared socket; the worker retains the source state until exit.
     tokio::select! {
         result = async { let (transfer, ()) = tokio::try_join!(async { worker.await? }, call)?; Ok(transfer) } => result,
         _ = departed.next() => Err(anyhow::anyhow!("pending service disconnected")),
