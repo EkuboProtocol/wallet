@@ -10,7 +10,9 @@ use anyhow::{Result, ensure};
 #[path = "windows_service_storage_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub use native::{PrivateStorageRoot, open_private_child, validate_private_handle};
+pub use native::{
+    PendingCredentialStorage, PrivateStorageRoot, open_private_child, validate_private_handle,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum StorageKind {

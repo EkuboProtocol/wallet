@@ -13,6 +13,19 @@ completion marker last. It does not activate custody, copy the database, or auth
 legacy-key deletion. Partial or ambiguous stages require installer recovery; this
 primitive is not a completed migration or an installation procedure.
 
+Pending bootstrap is separate from active discovery. The installer may provision
+root-owned `/etc/ekubo-wallet/pending/<uid>.json` using the same closed identity
+schema, with service-owned mode-0700 storage at
+`/var/lib/ekubo-wallet/pending/<profile-uuid>`. Both pending parent directories and
+all their ancestors must be root-owned and not writable by ordinary users. Core's
+`pending_credential_staging_root` validates the real service process, metadata,
+directory handles and singleton lock, then exposes staging only. It neither sets
+the global custody backend nor activates an owner/MCP endpoint. Desktop discovery
+continues to read only `owners/<uid>.json`. Existing or malformed active metadata
+rejects pending bootstrap, so this is not a replacement/rotation path. The installer
+must still implement verified transfer, durable activation and interruption recovery;
+these paths are not an instruction to publish active metadata early.
+
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is
 `/usr/lib/ekubo-wallet/ekubo-wallet-service`. Install the unit under

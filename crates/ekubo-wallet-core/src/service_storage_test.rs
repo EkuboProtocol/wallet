@@ -376,3 +376,87 @@ fn custody_stage_records_use_private_immutable_names_and_leave_active_custody_un
     assert!(publish_stage_record(&entry.directory, entry.service_uid, &linked, b"{}").is_err());
     assert!(read_stage_record(&entry.directory, entry.service_uid, &linked).is_err());
 }
+
+#[test]
+fn pending_storage_stages_without_becoming_an_active_profile() {
+    use crate::custody_staging::{
+        CredentialStagingStore as _, ServiceCredentialRecord, StagedRecord,
+    };
+    let (root, handle, uid) = public_root();
+    let owner = if uid == 1000 { 1001 } else { 1000 };
+    let profile = uuid::Uuid::new_v4();
+    let pending = root.path().join("etc/ekubo-wallet/pending");
+    std::fs::create_dir_all(&pending).unwrap();
+    let config = pending.join(format!("{owner}.json"));
+    let bytes = serde_json::to_vec(
+        &serde_json::json!({"owner_uid":owner,"service_uid":uid,"profile_id":profile}),
+    )
+    .unwrap();
+    std::fs::write(&config, &bytes).unwrap();
+    let private = root
+        .path()
+        .join(format!("var/lib/ekubo-wallet/pending/{profile}"));
+    std::fs::create_dir_all(&private).unwrap();
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        find_owner_configuration(&handle, owner, uid)
+            .unwrap()
+            .is_none()
+    );
+    let staging = open_pending_storage(&handle, owner, uid).unwrap();
+    assert_eq!(
+        staging.identity(),
+        (
+            format!("linux:uid:{owner}"),
+            format!("linux:uid:{uid}"),
+            profile
+        )
+    );
+    assert!(
+        open_pending_storage(&handle, owner, uid).is_err(),
+        "pending profile must retain its singleton lock"
+    );
+    let stage = uuid::Uuid::new_v4();
+    let record = StagedRecord::Credential(ServiceCredentialRecord::WrappingKey);
+    staging.create_new(stage, record, &[0x77; 32]).unwrap();
+    assert_eq!(staging.read(stage, record).unwrap().as_slice(), [0x77; 32]);
+    assert!(
+        find_owner_configuration(&handle, owner, uid)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!private.join("wrapping.key").exists());
+    drop(staging);
+    drop(open_pending_storage(&handle, owner, uid).unwrap());
+    let active = root.path().join("etc/ekubo-wallet/owners");
+    std::fs::create_dir_all(&active).unwrap();
+    let active = active.join(format!("{owner}.json"));
+    std::fs::write(&active, &bytes).unwrap();
+    assert!(open_pending_storage(&handle, owner, uid).is_err());
+    std::fs::write(&active, b"invalid").unwrap();
+    assert!(
+        open_pending_storage(&handle, owner, uid).is_err(),
+        "invalid active metadata must not permit pending fallback"
+    );
+}
+
+#[test]
+fn pending_configuration_requires_protected_valid_metadata() {
+    let (root, handle, uid) = public_root();
+    let pending = root.path().join("etc/ekubo-wallet/pending");
+    std::fs::create_dir_all(&pending).unwrap();
+    assert!(pending_configuration(&handle, 1000, uid).is_err());
+    let path = pending.join("1000.json");
+    std::fs::write(&path,br#"{"owner_uid":1000,"service_uid":2000,"profile_id":"00000000-0000-0000-0000-000000000001"}"#).unwrap();
+    assert!(pending_configuration(&handle, 1000, uid).is_ok());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(pending_configuration(&handle, 1000, uid).is_err());
+    std::fs::remove_file(&path).unwrap();
+    symlink("absent", &path).unwrap();
+    assert!(pending_configuration(&handle, 1000, uid).is_err());
+    assert!(
+        find_owner_configuration(&handle, 1000, uid)
+            .unwrap()
+            .is_none()
+    );
+}

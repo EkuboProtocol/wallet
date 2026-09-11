@@ -142,6 +142,22 @@ source write exclusion in an independent process, failed transfer/retry, release
 wrong keys, missing sources, obsolete schemas, and WAL rejection. Native packaged
 migration and Windows execution of this component remain CI/integration work.
 
+Pending credential storage no longer requires publishing an active profile first.
+Linux reads protected `/etc/ekubo-wallet/pending/<uid>.json` and opens only
+`/var/lib/ekubo-wallet/pending/<profile-uuid>` under the actual service UID. Windows
+reads the protected 64-bit `HKLM\\SOFTWARE\\EkuboWallet\\Pending\\<owner-SID>`
+`Profile` value, validates the virtual-service account, and opens only
+`ProgramData\\EkuboWallet\\Pending\\<profile-uuid-simple>`. The existing metadata
+schemas, ancestor checks, private permissions/ACLs and singleton locks apply.
+Pending handles expose credential staging only; they do not initialize global
+custody, grant owner authorization, or open owner/agent endpoints. Windows keeps
+the pending identity reader crate-private, so it cannot be passed to desktop
+connection APIs as an installed identity. Active discovery still reads only
+`owners`/`Owners`, and pending bootstrap refuses an existing or malformed active
+profile. No fallback from damaged active custody is added. The installer must
+provision these separate locations and implement verified transfer, activation,
+recovery and exact legacy deletion; bootstrap alone performs none of those steps.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

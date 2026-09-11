@@ -56,6 +56,27 @@ pub fn service_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
     Ok(identity)
 }
 
+// Pending identities are confined to the storage bootstrap, never returned to
+// desktop discovery or exposed as a public installed-identity constructor.
+pub(crate) fn pending_service_identity(owner: &str) -> Result<InstalledServiceIdentity> {
+    let identity = pending_configuration_under(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?)?;
+    verify_service_process(identity.service_sid())?;
+    Ok(identity)
+}
+
+fn pending_configuration_under(
+    root: HKEY,
+    owner: &str,
+    trusted: &[String],
+) -> Result<InstalledServiceIdentity> {
+    ensure!(
+        read_configuration_under(root, owner, trusted)?.is_none(),
+        "pending bootstrap cannot replace an active service profile"
+    );
+    read_configuration_at(root, owner, trusted, "Pending")?
+        .context("pending service profile is missing")
+}
+
 fn account_sid(account: &str) -> Result<String> {
     let account = wide(account);
     let mut bytes = 0;
@@ -154,10 +175,19 @@ fn read_configuration_under(
     owner: &str,
     trusted: &[String],
 ) -> Result<Option<InstalledServiceIdentity>> {
+    read_configuration_at(root, owner, trusted, "Owners")
+}
+
+fn read_configuration_at(
+    root: HKEY,
+    owner: &str,
+    trusted: &[String],
+    collection: &str,
+) -> Result<Option<InstalledServiceIdentity>> {
     validate_owner_component(owner)?;
     let mut keys = Vec::new();
     let mut parent = root;
-    for component in ["SOFTWARE", "EkuboWallet", "Owners", owner] {
+    for component in ["SOFTWARE", "EkuboWallet", collection, owner] {
         let Some(key) = open_component(parent, component, trusted)? else {
             ensure!(
                 component != "SOFTWARE",

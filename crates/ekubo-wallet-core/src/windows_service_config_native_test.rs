@@ -147,3 +147,31 @@ fn native_untrusted_ancestor_is_rejected_before_considering_missing_children() {
     assert!(read_configuration_under(registry.root.0, "S-1-5-21-1-2-3-1001", &[]).is_err());
     assert!(registry.read().unwrap().is_none());
 }
+
+#[test]
+fn native_pending_metadata_is_separate_from_active_discovery() {
+    let registry = RegistryFixture::new();
+    let owner = "S-1-5-21-1-2-3-1001";
+    let profile = registry.create(r"SOFTWARE\EkuboWallet\Pending\S-1-5-21-1-2-3-1001");
+    assert!(registry.read().unwrap().is_none());
+    // An incomplete pending profile must not be usable even though the desktop
+    // correctly remains in its pre-installation state.
+    assert!(pending_configuration_under(registry.root.0, owner, &registry.trusted).is_err());
+    let name = wide("Profile");
+    unsafe {
+        RegSetValueExW(
+            profile.0,
+            PCWSTR(name.as_ptr()),
+            None,
+            REG_BINARY,
+            Some(b"invalid"),
+        )
+    }
+    .ok()
+    .unwrap();
+    assert!(pending_configuration_under(registry.root.0, owner, &registry.trusted).is_err());
+    assert!(registry.read().unwrap().is_none());
+    drop(registry.create(r"SOFTWARE\EkuboWallet\Owners\S-1-5-21-1-2-3-1001"));
+    assert!(registry.read().is_err());
+    assert!(pending_configuration_under(registry.root.0, owner, &registry.trusted).is_err());
+}

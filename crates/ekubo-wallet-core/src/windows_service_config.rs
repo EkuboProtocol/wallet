@@ -10,9 +10,9 @@ use uuid::Uuid;
 #[path = "windows_service_config_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub(crate) use native::machine_trustees;
-#[cfg(target_os = "windows")]
 pub use native::{find_installed_service_identity, installed_service_identity, service_identity};
+#[cfg(target_os = "windows")]
+pub(crate) use native::{machine_trustees, pending_service_identity};
 
 const MAX_CONFIG_BYTES: usize = 4096;
 

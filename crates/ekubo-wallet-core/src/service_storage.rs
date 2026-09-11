@@ -107,8 +107,17 @@ fn find_owner_configuration(
     owner_uid: u32,
     system_uid: u32,
 ) -> Result<Option<OwnerConfiguration>> {
+    find_configuration_at(root, owner_uid, system_uid, "owners")
+}
+
+fn find_configuration_at(
+    root: &File,
+    owner_uid: u32,
+    system_uid: u32,
+    collection: &str,
+) -> Result<Option<OwnerConfiguration>> {
     let mut parent = directory(root, "etc", system_uid, false)?;
-    for name in ["ekubo-wallet", "owners"] {
+    for name in ["ekubo-wallet", collection] {
         let Some(next) = open_optional(
             &parent,
             name,
@@ -377,22 +386,91 @@ pub fn unlock(wrapped: &WrappedDataKey) -> Result<()> {
         .unlock(wrapped)
 }
 
-pub struct CredentialStagingRoot(&'static Storage);
+pub struct CredentialStagingRoot {
+    directory: Arc<File>,
+    owner_uid: u32,
+    service_uid: u32,
+    profile_id: uuid::Uuid,
+    _lock: Option<ProfileLock>,
+}
 
 pub fn credential_staging_root() -> Result<CredentialStagingRoot> {
-    Ok(CredentialStagingRoot(
-        STORAGE
-            .get()
-            .context("service storage is not initialized")?,
-    ))
+    let storage = STORAGE
+        .get()
+        .context("service storage is not initialized")?;
+    Ok(CredentialStagingRoot {
+        directory: storage.directory.clone(),
+        owner_uid: storage.owner_uid,
+        service_uid: storage.service_uid,
+        profile_id: storage.profile_id,
+        _lock: None,
+    })
+}
+
+/// Open only pending installer storage, without initializing global custody or
+/// publishing an installed identity. No owner or agent endpoint is activated.
+pub fn pending_credential_staging_root(owner_uid: u32) -> Result<CredentialStagingRoot> {
+    let service_uid = rustix::process::geteuid().as_raw();
+    ensure!(
+        service_uid != 0
+            && service_uid != owner_uid
+            && rustix::process::getuid().as_raw() == service_uid,
+        "pending storage requires a distinct unprivileged service process"
+    );
+    let root = root_directory()?;
+    open_pending_storage(&root, owner_uid, 0)
+}
+
+fn open_pending_storage(
+    root: &File,
+    owner_uid: u32,
+    system_uid: u32,
+) -> Result<CredentialStagingRoot> {
+    let service_uid = rustix::process::geteuid().as_raw();
+    let configured = pending_configuration(root, owner_uid, system_uid)?;
+    ensure!(
+        configured.service_uid == service_uid,
+        "pending service identity mismatch"
+    );
+    let var = directory(root, "var", system_uid, false)?;
+    let lib = directory(&var, "lib", system_uid, false)?;
+    let parent = directory(&lib, "ekubo-wallet", system_uid, false)?;
+    let pending = directory(&parent, "pending", system_uid, false)?;
+    let directory = Arc::new(directory(
+        &pending,
+        &configured.profile_id.to_string(),
+        service_uid,
+        true,
+    )?);
+    let lock = lock_profile(&directory, service_uid)?;
+    Ok(CredentialStagingRoot {
+        directory,
+        owner_uid,
+        service_uid,
+        profile_id: configured.profile_id,
+        _lock: Some(lock),
+    })
+}
+
+fn pending_configuration(
+    root: &File,
+    owner_uid: u32,
+    system_uid: u32,
+) -> Result<OwnerConfiguration> {
+    ensure!(
+        find_owner_configuration(root, owner_uid, system_uid)?.is_none(),
+        "pending bootstrap cannot replace an active service profile"
+    );
+    find_configuration_at(root, owner_uid, system_uid, "pending")?
+        .context("pending service profile is missing")
 }
 
 impl crate::custody_staging::CredentialStagingStore for CredentialStagingRoot {
     fn identity(&self) -> (String, String, uuid::Uuid) {
         (
-            format!("linux:uid:{}", self.0.owner_uid),
-            format!("linux:uid:{}", self.0.service_uid),
-            self.0.profile_id,
+            format!("linux:uid:{}", self.owner_uid),
+            format!("linux:uid:{}", self.service_uid),
+            self.profile_id,
         )
     }
     fn create_new(
@@ -402,12 +480,12 @@ impl crate::custody_staging::CredentialStagingStore for CredentialStagingRoot {
         bytes: &[u8],
     ) -> Result<()> {
         ensure!(
-            rustix::process::geteuid().as_raw() == self.0.service_uid,
+            rustix::process::geteuid().as_raw() == self.service_uid,
             "service process identity changed"
         );
         publish_stage_record(
-            &self.0.directory,
-            self.0.service_uid,
+            &self.directory,
+            self.service_uid,
             &record.file_name(stage)?,
             bytes,
         )
@@ -418,14 +496,10 @@ impl crate::custody_staging::CredentialStagingStore for CredentialStagingRoot {
         record: crate::custody_staging::StagedRecord,
     ) -> Result<Zeroizing<Vec<u8>>> {
         ensure!(
-            rustix::process::geteuid().as_raw() == self.0.service_uid,
+            rustix::process::geteuid().as_raw() == self.service_uid,
             "service process identity changed"
         );
-        read_stage_record(
-            &self.0.directory,
-            self.0.service_uid,
-            &record.file_name(stage)?,
-        )
+        read_stage_record(&self.directory, self.service_uid, &record.file_name(stage)?)
     }
 }
 

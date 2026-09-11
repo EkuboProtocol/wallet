@@ -70,9 +70,13 @@ impl PrivateStorageRoot {
     /// path, environment override, provisioning, or permission repair is used.
     pub fn open(owner_sid: &str) -> Result<Self> {
         let identity = crate::windows_service_config::service_identity(owner_sid)?;
+        Self::open_identity(identity, "Owners")
+    }
+
+    fn open_identity(identity: InstalledServiceIdentity, collection: &str) -> Result<Self> {
         let trusted = crate::windows_service_config::machine_trustees()?;
         let mut ancestors = program_data_ancestors(&trusted)?;
-        for component in ["EkuboWallet", "Owners"] {
+        for component in ["EkuboWallet", collection] {
             let parent = ancestors.last().expect("drive root is pinned");
             let child = open_relative(parent.as_handle(), component, StorageKind::Directory)?;
             validate_machine_handle(child.as_handle(), &trusted, false)?;
@@ -522,5 +526,37 @@ impl crate::custody_staging::CredentialStagingStore for PrivateStorageRoot {
             .read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 4096, "custody staging record is oversized");
         Ok(bytes)
+    }
+}
+
+/// Pending storage exposes credential staging only. It cannot be used as a
+/// desktop installed identity, active custody backend, or owner authorization.
+pub struct PendingCredentialStorage(PrivateStorageRoot);
+impl PendingCredentialStorage {
+    pub fn open(owner_sid: &str) -> Result<Self> {
+        let identity = crate::windows_service_config::pending_service_identity(owner_sid)?;
+        Ok(Self(PrivateStorageRoot::open_identity(
+            identity, "Pending",
+        )?))
+    }
+}
+impl crate::custody_staging::CredentialStagingStore for PendingCredentialStorage {
+    fn identity(&self) -> (String, String, uuid::Uuid) {
+        self.0.identity()
+    }
+    fn create_new(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.0.create_new(stage, record, bytes)
+    }
+    fn read(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        self.0.read(stage, record)
     }
 }
