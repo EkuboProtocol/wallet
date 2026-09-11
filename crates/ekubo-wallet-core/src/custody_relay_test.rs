@@ -89,3 +89,25 @@ fn relay_persistence_rejects_failed_write_or_mismatched_readback() {
         .is_err()
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn receipt_cannot_be_replayed_for_another_nonce_profile_or_relay() {
+    let relay = relay();
+    let profile = Uuid::new_v4();
+    let nonce = Uuid::new_v4();
+    let receipt = RelayReceipt {
+        profile,
+        nonce,
+        relay_digest: relay.digest(),
+    };
+    receipt.verify(profile, nonce, &relay).unwrap();
+    assert!(receipt.verify(profile, Uuid::new_v4(), &relay).is_err());
+    assert!(receipt.verify(Uuid::new_v4(), nonce, &relay).is_err());
+    let wrong = RelayReceipt {
+        profile,
+        nonce,
+        relay_digest: [0; 32],
+    };
+    assert!(wrong.verify(profile, nonce, &relay).is_err());
+}

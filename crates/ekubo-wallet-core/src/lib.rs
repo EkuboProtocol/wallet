@@ -103,3 +103,6 @@ pub mod windows_provisioning_pipe;
 pub mod windows_provisioning_client;
 
 mod installer_checkpoint;
+
+#[cfg(target_os = "linux")]
+pub mod linux_relay_handoff;

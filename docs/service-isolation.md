@@ -1680,3 +1680,38 @@ The authenticated installer-to-desktop relay handoff and its verified receipt
 are still missing. This operation is not yet connected to the installer or its
 native migration fixtures. A successful checkpoint write alone still cannot
 permit activation or legacy cleanup.
+
+### Linux installer-to-owner relay endpoint
+
+`linux_relay_handoff::OwnerRelayEndpoint` exports only relay persistence at a
+unique system-bus identity. The ordinary owner creates it without owning a
+well-known name. The endpoint derives the installer UID from the actual message
+sender, requires UID 0 before persistence, admits one blocking credential
+operation at a time, and rechecks the caller's live unique identity before
+replying. Parsed UUIDs and the wrapped envelope have fixed bounds.
+
+The privileged `deliver` client validates protected pending configuration,
+authenticates the recipient's actual owner UID, calls that unique bus name, and
+checks a receipt bound to the profile, fresh nonce and exact relay digest. The
+whole client operation has a 300-second timeout with no automatic replay. The
+shared receipt is correlation evidence, not a signature, owner proof or
+activation receipt. It exposes neither a private key nor a generic credential
+write operation.
+
+This endpoint is not yet started by desktop bootstrap. The native Linux migration
+fixture now launches an ordinary-owner endpoint under a fresh private session
+bus and keyring, delivers the relay from the privileged client over the system
+bus, and verifies the owner can load it. A negative call checks ordinary-caller
+access denial. Temporary XDG data/runtime directories, a bus without activation
+service directories, and a synthetic password keep this isolated from the
+runner's normal credentials. Only processes created by the fixture are stopped.
+
+Native CI must still verify this cross-user delivery at the new revision;
+malformed-input and receipt-binding unit tests alone do not prove it. The real
+installer launch handoff must supply the exact desktop unique name. Windows
+needs its native transport for the shared receipt and owner-bound persistence.
+
+The earlier systemd migration fixture at revision `848e76c` passed its complete
+Linux CI job (run `34629641344`), including production-sandbox transfer/recovery
+and raw credential denial. That result predates the newer journal and relay
+handoff changes and does not validate them.

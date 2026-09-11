@@ -7,11 +7,15 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
+import signal
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
+
+from linux_relay_owner_fixture import read_line
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -144,6 +148,27 @@ for flags in (os.O_RDONLY, os.O_WRONLY):
          "python3", "-c", code, str(files[0])])
 
 
+def stop_owner(child):
+    if child.poll() is None:
+        os.killpg(child.pid, signal.SIGTERM)
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+
+
+def start_owner(stack, executable, owner):
+    child = subprocess.Popen(["runuser", "--user", pwd.getpwuid(owner).pw_name, "--",
+                              "python3", str(ROOT / "contrib/linux_relay_owner_fixture.py"), str(executable)],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+    stack.callback(stop_owner, child)
+    name = read_line(child, 30)
+    if re.fullmatch(r":[0-9]+\.[0-9]+", name) is None:
+        raise RuntimeError("owner relay returned an invalid unique name")
+    return child, name
+
+
 def exercise(binary, owner):
     with ExitStack() as stack:
         profile = uuid.uuid4()
@@ -158,7 +183,13 @@ def exercise(binary, owner):
         try:
             subprocess.run(["systemctl", "start", unit], check=True, timeout=45)
             wait_ready(unit, owner)
-            subprocess.run([str(executable), "client", str(owner)], check=True, timeout=420)
+            owner_process, recipient = start_owner(stack, executable, owner)
+            environment = dict(os.environ, EKUBO_FIXTURE_RELAY_RECIPIENT=recipient)
+            subprocess.run([str(executable), "client", str(owner)], env=environment, check=True, timeout=420)
+            owner_process.stdin.write(b"finish\n")
+            owner_process.stdin.flush()
+            if owner_process.wait(timeout=15) != 0:
+                raise RuntimeError("owner relay verification failed")
             check_raw_denial(private, owner)
         finally:
             stop_fixture(unit)

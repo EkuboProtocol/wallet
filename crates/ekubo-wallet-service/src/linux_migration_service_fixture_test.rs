@@ -1,4 +1,4 @@
-//! Disposable CI fixture: explicit synthetic keys, never login keyring reads.
+//! Disposable CI fixture: synthetic keys and an explicitly isolated login keyring.
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::{
     config::{ConfigStore, WalletMetadata, WalletSource},
@@ -16,11 +16,15 @@ pub fn run() -> Result<()> {
         "disposable Linux CI only"
     );
     let args: Vec<_> = std::env::args().skip(1).collect();
-    ensure!(args.len() == 2, "expected service|client <owner UID>");
+    ensure!(
+        args.len() == 2,
+        "expected service|client|relay-owner <owner UID>"
+    );
     let owner = args[1].parse()?;
     match args[0].as_str() {
         "service" => runtime()?.block_on(ekubo_wallet_service::linux_provisioning::run(owner)),
         "client" => client(owner),
+        "relay-owner" => relay_owner(owner),
         _ => anyhow::bail!("unknown fixture mode"),
     }
 }
@@ -74,6 +78,15 @@ fn client(owner: u32) -> Result<()> {
             staged.reply().canonical().bytes > 0,
             "missing canonical database"
         );
+        let recipient = std::env::var("EKUBO_FIXTURE_RELAY_RECIPIENT")?.try_into()?;
+        let profile =
+            ekubo_wallet_core::service_storage::pending_installer_identity(owner)?.profile_id();
+        runtime.block_on(ekubo_wallet_core::linux_relay_handoff::deliver(
+            owner,
+            recipient,
+            profile,
+            staged.reply().relay(),
+        ))?;
         ekubo_wallet_core::service_storage::installer_journal::save_checkpoint(
             owner,
             &staged.checkpoint()?,
@@ -103,6 +116,68 @@ fn client(owner: u32) -> Result<()> {
     );
     println!(
         "Full encrypted Linux migration staged, rebuilt and recovered across service identities"
+    );
+    Ok(())
+}
+
+fn relay_owner(owner: u32) -> Result<()> {
+    use std::io::Write as _;
+    ensure!(
+        owner != 0 && rustix::process::getuid().as_raw() == owner,
+        "incorrect fixture owner"
+    );
+    let isolated = std::path::PathBuf::from(std::env::var("EKUBO_FIXTURE_ISOLATED_RELAY")?);
+    ensure!(
+        std::env::var_os("XDG_DATA_HOME").as_deref() == Some(isolated.join("data").as_os_str())
+            && std::env::var_os("XDG_RUNTIME_DIR").as_deref()
+                == Some(isolated.join("runtime").as_os_str())
+            && std::env::var("DBUS_SESSION_BUS_ADDRESS")?
+                .starts_with(&format!("unix:path={}/bus", isolated.display())),
+        "fixture keyring is not isolated"
+    );
+    let runtime = runtime()?;
+    let endpoint =
+        runtime.block_on(ekubo_wallet_core::linux_relay_handoff::OwnerRelayEndpoint::bind())?;
+    runtime.block_on(reject_ordinary_relay_caller(endpoint.unique_name()?))?;
+    println!("{}", endpoint.unique_name()?);
+    std::io::stdout().flush()?;
+    let mut command = String::new();
+    std::io::stdin().read_line(&mut command)?;
+    ensure!(
+        command == "finish\n",
+        "fixture owner did not receive completion"
+    );
+    let profile = ekubo_wallet_core::service_storage::pending_owner_profile()?;
+    ekubo_wallet_core::custody_relay::load(profile)?;
+    runtime.block_on(endpoint.close())
+}
+
+async fn reject_ordinary_relay_caller(recipient: zbus::names::OwnedUniqueName) -> Result<()> {
+    let connection = zbus::connection::Builder::unix_stream(
+        ekubo_wallet_core::service_storage::system_bus_stream().await?,
+    )
+    .build()
+    .await?;
+    let proxy = zbus::Proxy::new(
+        &connection,
+        recipient.as_str(),
+        "/org/ekubo/Wallet/InstallerRelay",
+        "org.ekubo.Wallet.InstallerRelay1",
+    )
+    .await?;
+    let result: zbus::Result<String> = proxy
+        .call(
+            "Persist",
+            &(
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                Vec::<u8>::new(),
+            ),
+        )
+        .await;
+    ensure!(
+        matches!(result, Err(zbus::Error::MethodError(ref name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"),
+        "ordinary owner reached relay persistence"
     );
     Ok(())
 }

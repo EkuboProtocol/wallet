@@ -73,6 +73,46 @@ fn persist_with(
     Ok(())
 }
 
+/// Correlates a native authenticated delivery with a verified keyring readback.
+/// This is not a signature, owner proof, or service activation receipt.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayReceipt {
+    profile: Uuid,
+    nonce: Uuid,
+    relay_digest: [u8; 32],
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl RelayReceipt {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn persisted(profile: Uuid, nonce: Uuid, relay: &WrappedDataKey) -> Result<Self> {
+        ensure!(
+            !nonce.is_nil() && !profile.is_nil(),
+            "invalid relay delivery identity"
+        );
+        persist_pending(profile, relay)?;
+        Ok(Self {
+            profile,
+            nonce,
+            relay_digest: relay.digest(),
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify(&self, profile: Uuid, nonce: Uuid, relay: &WrappedDataKey) -> Result<()> {
+        ensure!(
+            !nonce.is_nil()
+                && self.profile == profile
+                && self.nonce == nonce
+                && self.relay_digest == relay.digest(),
+            "relay receipt does not match this delivery"
+        );
+        Ok(())
+    }
+}
+
 #[cfg(all(test, any(target_os = "linux", target_os = "windows")))]
 #[path = "custody_relay_test.rs"]
 mod tests;
