@@ -153,10 +153,12 @@ fn open(pipe_name: &str, service: &str, desktop: &str) -> Result<NamedPipeClient
             FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
             None,
         )
-    }?;
+    }
+    .context("opening authenticated wallet pipe")?;
     // SAFETY: take ownership before any validation that can fail.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
-    validate_pipe(HANDLE(handle.as_raw_handle()), service, desktop)?;
+    validate_pipe(HANDLE(handle.as_raw_handle()), service, desktop)
+        .context("validating connected wallet pipe security")?;
     // SAFETY: transfer the verified overlapped handle, including on error.
     Ok(unsafe { NamedPipeClient::from_raw_handle(handle.into_raw_handle()) }?)
 }

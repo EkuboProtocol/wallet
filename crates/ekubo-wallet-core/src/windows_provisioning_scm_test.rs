@@ -1,7 +1,7 @@
 //! Standalone native fixture, built only by contrib/check-windows-service.py.
 //! Runs the production SCM and pipe code under distinct real Windows accounts.
 //! It exchanges synthetic bytes only; no wallet storage or credentials are used.
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_native_check::{
     provisioning_io, windows_provisioning_pipe, windows_service_config, windows_service_identity,
     windows_service_manager,
@@ -63,19 +63,26 @@ fn host(
 }
 
 async fn client(owner: &str) -> Result<()> {
-    let identity = windows_service_config::pending_installer_identity(owner)?;
+    let identity = windows_service_config::pending_installer_identity(owner)
+        .context("fixture installer metadata authentication")?;
     ensure!(
         identity.service_sid() != windows_service_identity::current_process_identity()?.user_sid(),
         "fixture must use different service and installer accounts"
     );
-    let pipe = windows_provisioning_pipe::connect(&identity).await?;
+    let pipe = windows_provisioning_pipe::connect(&identity)
+        .await
+        .context("fixture installer pipe connection")?;
     let (mut stream, _cancel) = provisioning_io::bridge(pipe, Duration::from_secs(10));
     tokio::task::spawn_blocking(move || {
         let nonce = *uuid::Uuid::new_v4().as_bytes();
-        stream.write_all(windows_provisioning_pipe::PREFACE)?;
-        stream.write_all(&nonce)?;
+        stream
+            .write_all(windows_provisioning_pipe::PREFACE)
+            .context("fixture preface write")?;
+        stream.write_all(&nonce).context("fixture nonce write")?;
         let mut reply = [0; 16];
-        stream.read_exact(&mut reply)?;
+        stream
+            .read_exact(&mut reply)
+            .context("fixture reply read")?;
         ensure!(
             reply == nonce.map(|byte| byte ^ 0xff),
             "invalid fixture reply"
