@@ -10,9 +10,9 @@ use anyhow::{Result, ensure};
 #[path = "windows_service_identity_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub(crate) use native::sid_string;
-#[cfg(target_os = "windows")]
 pub use native::{current_process_identity, verify_service_process};
+#[cfg(target_os = "windows")]
+pub(crate) use native::{current_thread_user_sid, sid_string};
 
 /// Identity read from the current process's primary token, never an IPC field.
 #[derive(Debug)]

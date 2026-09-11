@@ -132,6 +132,14 @@ pub(crate) unsafe fn sid_string(sid: windows::Win32::Security::PSID) -> Result<S
     Ok(unsafe { text.0.to_string() }?)
 }
 
+pub(crate) fn current_thread_user_sid() -> Result<String> {
+    let mut handle = HANDLE::default();
+    // SAFETY: query the current thread only, using the process token for the
+    // access check so an identification-only client context remains queryable.
+    unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &raw mut handle) }?;
+    user_sid(&Token(handle))
+}
+
 /// Read primary account identity. Thread impersonation is rejected so callers
 /// cannot mistake a temporary client context for the host's custody identity.
 pub fn current_process_identity() -> Result<ProcessIdentity> {

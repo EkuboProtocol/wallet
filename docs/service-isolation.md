@@ -1023,3 +1023,20 @@ Windows service owner presence fails closed pending the authenticated desktop
 transport and operation-bound proof adapter. The desktop still uses its existing
 backend: this activation API is not yet called by an installed SCM host, and
 provisioning, migration, transport, and desktop cutover remain incomplete.
+
+Windows owner transport endpoints now use a profile-derived local named pipe.
+Creation requires the actual configured service process, sets service ownership
+and an explicit protected DACL, rejects remote clients, and refuses an existing
+name for the first instance. Desktop permissions use individual read/write,
+synchronize, and read-control bits; they omit the append/create-instance bit
+included in generic write. The client validates the connected pipe object's
+owner and DACL before returning its stream, so a name or recycled PID is not
+accepted as service identity.
+
+After reading a bounded request, the server adapter must authenticate the last
+read's kernel client context. That synchronous check uses identification-level
+impersonation, reads the actual token SID, and always reverts before returning.
+A failed revert aborts rather than allowing later service work in client context.
+This proves OS account identity only. The owner dispatcher, bounded request
+protocol, desktop lifetime management, and fresh owner proofs still need wiring
+to these endpoints; no service is installed by this change.

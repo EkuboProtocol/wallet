@@ -71,6 +71,8 @@ pub mod windows_service_config;
 pub mod windows_service_identity;
 
 #[cfg(any(target_os = "windows", test))]
+pub mod windows_owner_pipe;
+#[cfg(any(target_os = "windows", test))]
 mod windows_security;
 #[cfg(target_os = "windows")]
 pub mod windows_service_custody;
