@@ -16,6 +16,7 @@ pub mod batch_read;
 pub mod bridge_protocol;
 pub mod dapp_identity;
 pub mod desktop;
+pub mod desktop_owner;
 pub mod events;
 pub mod gui_review;
 pub mod ipc_server;

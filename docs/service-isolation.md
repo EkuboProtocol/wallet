@@ -4,6 +4,23 @@ Status: in progress. The shipped application still uses desktop-user credential
 storage. The new headless runtime alone provides no OS isolation and must not
 be described as fixing issue #112.
 
+The desktop now has an async `DesktopOwner` adapter with mutually exclusive
+local-authority and authenticated-service-client variants. Snapshot refreshes
+and the background account, token, network, activity, and automation operations
+use its async methods. Local blocking operations run on workers; remote calls
+use the existing typed client and never open a local store after an RPC error.
+Transaction-summary requests carry stored IDs, and account imports retain
+zeroizing typed input. Native authorization remains in the existing authority
+and core paths. The local removal adapter checks the exact reviewed account and
+document before entering native authorization, matching service dispatch.
+
+This is a desktop integration step, not custody cutover. Startup still opens
+local `ApplicationAuthority` and supplies the adapter's local variant. Synchronous
+page initialization/settings, native review and WalletConnect orchestration,
+updates, and event/session lifecycle must move to the adapter/client before
+startup may select the service for an installed profile. Installed-profile
+startup must make that selection before opening any local authority.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,
