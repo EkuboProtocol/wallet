@@ -12,7 +12,7 @@ fn limits() -> TransferLimits {
     }
 }
 
-struct UnusedStore;
+pub(super) struct UnusedStore;
 impl CredentialStagingStore for UnusedStore {
     fn identity(&self) -> (String, String, Uuid) {
         (

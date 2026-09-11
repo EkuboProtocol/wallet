@@ -336,10 +336,21 @@ relay digest, and hashes the retained source snapshot. Inside core it unlocks th
 staged enrollment, checks every account key against the expected metadata,
 recomputes the credential marker and verifies both received and canonical database
 inventories and the canonical digest. Its result retains the pending-root borrow
-and exposes no raw-record visitor. This is a service-side primitive with no RPC
-entry point yet: the host still must authenticate the installer, bound execution,
+and exposes no raw-record visitor. The host still must authenticate the installer, bound execution,
 and revalidate/quiesce the live legacy source before any later activation. It
 cannot recover a missing relay from service storage or authorize key deletion.
+
+The existing privileged Linux/Windows provisioning receivers now also accept
+`EKUBORC1` recovery frames through the same authenticated, bounded stream. The
+shared `send_recovery` codec preflights all metadata before sending the relay;
+the receiver validates the destination, original session/stage, declared source
+size and account/metadata budgets before reading protected credentials. It then
+uses the recovery validator above and replies for the original session/stage.
+This read-only recovery does not create a replacement stage, replay a transfer,
+or grant activation authority. The platform installer clients still need recovery
+entry points and durable journal/source-fence coordination. Tests cover malformed
+admission without storage access, metadata preflight and repeated recovery of a
+real encrypted Linux stage through the shared production receiver.
 
 The full Windows matrix also builds the service's `windows-migration-scm` example
 with the test-only `migration-fixture` feature. The disposable SCM setup runs the

@@ -803,8 +803,25 @@ fn assert_recovery(
     relay: crate::custody_envelope::WrappedDataKey,
     wallet: &crate::config::WalletMetadata,
 ) {
+    use crate::custody_staging::CredentialStagingStore as _;
     use crate::{custody_staging::StagedRecord, migration_transfer::recover};
     let expected = std::slice::from_ref(wallet);
+    let (owner, service, profile) = pending.identity();
+    assert_recovery_stream(
+        pending,
+        &crate::migration_transfer::RecoveryRequest {
+            destination: crate::migration_transfer::Destination {
+                owner,
+                service,
+                profile,
+            },
+            session,
+            stage,
+            source: source.clone(),
+            relay: relay.clone(),
+        },
+        expected,
+    );
     let candidate = recover(pending, stage, session, source, relay.clone(), expected).unwrap();
     assert_eq!(candidate.stage(), stage);
     assert_eq!(candidate.session(), session);
@@ -856,4 +873,47 @@ fn assert_recovery(
     bytes[100] ^= 1;
     std::fs::write(&canonical, bytes).unwrap();
     assert!(recover(pending, stage, session, source, relay, expected).is_ok());
+}
+
+fn assert_recovery_stream(
+    pending: &PendingCredentialStorage,
+    request: &crate::migration_transfer::RecoveryRequest,
+    expected: &[crate::config::WalletMetadata],
+) {
+    use crate::migration_transfer::{self, INSTALLER_LIMITS, TransferLimits};
+    let mut rejected = Vec::new();
+    assert!(
+        migration_transfer::send_recovery(
+            &mut rejected,
+            request,
+            expected,
+            TransferLimits {
+                total_metadata_bytes: 0,
+                ..INSTALLER_LIMITS
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        rejected.is_empty(),
+        "metadata rejection must precede relay transmission"
+    );
+    for _ in 0..2 {
+        let mut wire = Vec::new();
+        let session =
+            migration_transfer::send_recovery(&mut wire, request, expected, INSTALLER_LIMITS)
+                .unwrap();
+        wire.extend_from_slice(b"next recovery frame");
+        let mut input = wire.as_slice();
+        let candidate = migration_transfer::receive(pending, &mut input, INSTALLER_LIMITS).unwrap();
+        assert_eq!(input, b"next recovery frame");
+        assert_eq!(candidate.stage(), request.stage);
+        assert_eq!(candidate.session(), request.session);
+        let mut reply = Vec::new();
+        candidate.write_reply(&mut reply).unwrap();
+        let reply = migration_transfer::read_reply(&mut reply.as_slice(), session).unwrap();
+        assert_eq!(reply.session(), request.session);
+        assert_eq!(reply.stage(), request.stage);
+        assert_eq!(reply.relay().as_bytes(), request.relay.as_bytes());
+    }
 }

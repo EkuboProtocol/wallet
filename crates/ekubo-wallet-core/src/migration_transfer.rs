@@ -22,6 +22,10 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"EKUBOPR1";
 const MAX_HEADER_BYTES: u32 = 4096;
 
+#[path = "migration_recovery_transfer.rs"]
+mod recovery_transfer;
+pub use recovery_transfer::{RecoveryRequest, send_recovery};
+
 /// Admission policy comes from the host, never from the incoming stream.
 /// Separate account-count and aggregate-metadata bounds avoid many small frames
 /// defeating the per-frame limit. Database bytes are streamed, not accumulated.
@@ -325,7 +329,7 @@ pub fn read_reply(input: &mut impl Read, session: Uuid) -> Result<StagingReply> 
     })
 }
 
-/// Consume exactly one transfer from an already authorized native transport.
+/// Consume one transfer or recovery request from an already authorized transport.
 /// Trailing protocol bytes remain unread. Errors may leave immutable pending
 /// records, which require recovery; they never create active wallet state.
 pub fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
@@ -335,6 +339,9 @@ pub fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
 ) -> Result<ReceivedCandidate<'a, S>> {
     let mut magic = [0; 8];
     input.read_exact(&mut magic)?;
+    if &magic == recovery_transfer::MAGIC {
+        return recovery_transfer::receive(store, input, limits);
+    }
     ensure!(&magic == MAGIC, "unsupported provisioning protocol");
     let mut header_budget = u64::from(MAX_HEADER_BYTES);
     let header: Header = read_frame(input, MAX_HEADER_BYTES, &mut header_budget)?;
