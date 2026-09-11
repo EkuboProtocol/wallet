@@ -25,6 +25,7 @@ pub fn run() -> Result<()> {
         "source-owner" => source_owner(owner),
         "source-client" => source_client(owner),
         "source-recover" => source_recover(owner),
+        "verify-prepared" => verify_prepared(owner),
         _ => anyhow::bail!("unknown fixture mode"),
     }
 }
@@ -33,6 +34,19 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?)
+}
+
+fn verify_prepared(owner: u32) -> Result<()> {
+    let installer = ekubo_wallet_core::service_storage::installer_journal::acquire_installer()?;
+    let prepared = installer.verify_prepared(owner)?;
+    ensure!(
+        installer.verify_prepared(owner).is_err(),
+        "prepared verifier released the service lock"
+    );
+    drop(prepared);
+    drop(installer.verify_prepared(owner)?);
+    println!("Quiescent Linux runtime files match the protected checkpoint");
+    Ok(())
 }
 
 fn client(owner: u32) -> Result<()> {

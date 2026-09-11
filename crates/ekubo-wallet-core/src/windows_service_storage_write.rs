@@ -75,7 +75,16 @@ fn descriptor(owner_sid: &str) -> Result<Descriptor> {
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'S' | b'-')),
         "invalid private file owner SID"
     );
-    let sddl: Vec<u16> = format!("O:{owner_sid}D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY)")
+    // An elevated installer must be able to verify prepared service records
+    // after stopping the service. Administrators are already trusted machine
+    // principals; grant read only, and only for virtual-service-owned records.
+    // Ordinary/filtered tokens do not gain a grant for their user SID here.
+    let installer = if crate::windows_service_identity::is_virtual_service_sid(owner_sid) {
+        "(A;;GR;;;BA)"
+    } else {
+        ""
+    };
+    let sddl: Vec<u16> = format!("O:{owner_sid}D:P(A;;FA;;;{owner_sid})(A;;FA;;;SY){installer}")
         .encode_utf16()
         .chain(Some(0))
         .collect();

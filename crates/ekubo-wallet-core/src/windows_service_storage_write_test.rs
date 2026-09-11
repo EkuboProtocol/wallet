@@ -472,3 +472,26 @@ fn canonical_build_handles_allow_sqlite_style_access_and_refuse_replacement() {
     assert!(rename_new(&publication, "canonical.db").is_err());
     discard(&publication).unwrap();
 }
+
+#[test]
+fn service_record_descriptor_grants_installer_read_without_admin_write() {
+    let service = "S-1-5-80-1-2-3-4-5";
+    let descriptor = descriptor(service).unwrap();
+    // The native SDDL parser owns this descriptor for the entire inspection.
+    let (owner, entries) =
+        unsafe { crate::windows_security::read_descriptor(descriptor.0) }.unwrap();
+    assert_eq!(owner, service);
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().any(|entry| matches!(entry,
+        crate::windows_security::AccessEntry::Allow { sid, mask: 0x8000_0000, inherit_only: false, .. }
+            if sid == "S-1-5-32-544"
+    )));
+    for entry in entries {
+        match entry {
+            crate::windows_security::AccessEntry::Allow { sid, .. } => {
+                assert!(sid == service || sid == "S-1-5-18" || sid == "S-1-5-32-544");
+            }
+            _ => panic!("unexpected service record access entry"),
+        }
+    }
+}

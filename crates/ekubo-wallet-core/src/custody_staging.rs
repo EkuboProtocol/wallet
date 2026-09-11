@@ -72,3 +72,17 @@ impl CredentialStage {
         self.stage
     }
 }
+
+pub(crate) fn digest_record(
+    digest: &mut sha2::Sha256,
+    record: ServiceCredentialRecord,
+    bytes: &[u8],
+) -> Result<()> {
+    use sha2::Digest as _;
+    let name = record.file_name();
+    digest.update(u64::try_from(name.len())?.to_le_bytes());
+    digest.update(name.as_bytes());
+    digest.update(u64::try_from(bytes.len())?.to_le_bytes());
+    digest.update(bytes);
+    Ok(())
+}

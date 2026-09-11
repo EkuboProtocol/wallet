@@ -6,7 +6,9 @@
 //! and commit activation before removing any legacy credential. No deletion proof
 //! or authority to change an existing enrollment is produced here.
 
-use crate::custody_staging::{CredentialStage, CredentialStagingStore, StagedRecord};
+use crate::custody_staging::{
+    CredentialStage, CredentialStagingStore, StagedRecord, digest_record,
+};
 use crate::{
     config::{WalletMetadata, validate_wallet_id},
     custody_envelope::{
@@ -307,13 +309,4 @@ impl<'a, S: CredentialStagingStore> StageWriter<'a, S> {
         );
         Ok(stage)
     }
-}
-
-fn digest_record(digest: &mut Sha256, record: ServiceCredentialRecord, bytes: &[u8]) -> Result<()> {
-    let name = record.file_name();
-    digest.update(u64::try_from(name.len())?.to_le_bytes());
-    digest.update(name.as_bytes());
-    digest.update(u64::try_from(bytes.len())?.to_le_bytes());
-    digest.update(bytes);
-    Ok(())
 }

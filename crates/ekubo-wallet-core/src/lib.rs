@@ -48,6 +48,8 @@ pub mod linux_source_handoff;
 pub mod mcp_companions;
 pub mod message;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+mod migration_ready;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod migration_source;
 pub mod migration_transfer;
 pub mod networks;

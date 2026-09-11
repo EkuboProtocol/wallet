@@ -10,6 +10,56 @@ pub struct InstallerLease {
     _parent: File,
 }
 
+/// Verified pending files with the service's singleton lock retained. This is
+/// not activation authority: the live source and durable decision remain separate.
+pub struct QuiescentProfile<'a> {
+    _installer: &'a InstallerLease,
+    _lock: ProfileLock,
+    _directory: File,
+    _parent: File,
+}
+
+impl InstallerLease {
+    pub fn verify_prepared(&self, owner_uid: u32) -> Result<QuiescentProfile<'_>> {
+        use std::os::fd::AsRawFd as _;
+        require_installer()?;
+        let root = root_directory()?;
+        let configured = pending_configuration(&root, owner_uid, 0)?;
+        let checkpoint =
+            load_checkpoint(owner_uid)?.context("prepared verification requires a checkpoint")?;
+        let mut parent = directory(&root, "var", 0, false)?;
+        for component in ["lib", "ekubo-wallet", "pending"] {
+            parent = directory(&parent, component, 0, false)?;
+        }
+        let directory = directory(
+            &parent,
+            &configured.profile_id.to_string(),
+            configured.service_uid,
+            true,
+        )?;
+        // Never create a missing service lock: this must be an existing prepared
+        // profile. A running/cooperating service prevents verification here.
+        let lock = ProfileLock::acquire(open_regular(
+            &directory,
+            "service.lock",
+            configured.service_uid,
+            true,
+        )?)?;
+        let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
+        let accounts =
+            crate::migration_ready::account_instances(entries.map(|entry| Ok(entry?.file_name())))?;
+        crate::migration_ready::verify_ready(&checkpoint, &accounts, |name| {
+            open_regular(&directory, name, configured.service_uid, true)
+        })?;
+        Ok(QuiescentProfile {
+            _installer: self,
+            _lock: lock,
+            _directory: directory,
+            _parent: parent,
+        })
+    }
+}
+
 pub fn acquire_installer() -> Result<InstallerLease> {
     require_installer()?;
     acquire_under(&root_directory()?, 0)

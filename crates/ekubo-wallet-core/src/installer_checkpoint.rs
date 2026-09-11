@@ -1,9 +1,11 @@
 //! Shared data-only installer evidence. No transport, keys, or activation authority.
-use crate::database_staging::DatabaseTransfer;
+use crate::{custody_staging::CredentialStage, database_staging::DatabaseTransfer};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub(crate) const MAX_ACCOUNTS: u64 = 100_000;
 
 pub(crate) const MAX_DATABASE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -114,4 +116,20 @@ impl RecoveryCheckpoint {
         checkpoint.journal_bytes(destination)?;
         Ok(checkpoint)
     }
+}
+
+/// Durable staging evidence. Recovery must revalidate protected storage and its
+/// contents; this record does not prove live source validity or authorize cutover.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateRecord {
+    pub(crate) version: u8,
+    pub(crate) session: Uuid,
+    pub(crate) destination: Destination,
+    pub(crate) source: DatabaseTransfer,
+    pub(crate) credentials: CredentialStage,
+    pub(crate) canonical: DatabaseTransfer,
+    // Persist only the digest. The envelope must stay in the login keyring,
+    // separate from the service's wrapping key, including during recovery.
+    pub(crate) relay_digest: [u8; 32],
 }

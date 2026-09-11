@@ -13,6 +13,64 @@ pub struct InstallerLease {
     _ancestors: Vec<File>,
 }
 
+/// Verified files and retained service exclusion. All handles must be retired in
+/// a coordinated promotion phase; this guard itself permits no rename or cutover.
+pub struct QuiescentProfile<'a> {
+    _installer: &'a InstallerLease,
+    _lock: ProfileLock,
+    _directory: File,
+    _ancestors: Vec<File>,
+}
+
+impl InstallerLease {
+    pub fn verify_prepared(&self, owner_sid: &str) -> Result<QuiescentProfile<'_>> {
+        let identity = crate::windows_service_config::pending_installer_identity(owner_sid)?;
+        let checkpoint =
+            load_checkpoint(owner_sid)?.context("prepared verification requires a checkpoint")?;
+        let trusted = crate::windows_service_config::machine_trustees()?;
+        let mut ancestors = program_data_ancestors(&trusted)?;
+        for component in ["EkuboWallet", "Pending"] {
+            let parent = ancestors.last().context("machine parent is missing")?;
+            let child = open_relative(parent.as_handle(), component, StorageKind::Directory)?;
+            validate_machine_handle(child.as_handle(), &trusted, false)?;
+            ancestors.push(child);
+        }
+        let parent = ancestors.last().context("pending parent is missing")?;
+        let directory = open_relative(
+            parent.as_handle(),
+            &identity.profile_id().simple().to_string(),
+            StorageKind::Directory,
+        )?;
+        // Private validation is based on the protected service SID even though
+        // the actual reader is the elevated installer, never an owner RPC.
+        validate_private(&directory, identity.service_sid(), StorageKind::Directory)?;
+        let lock_file = open_relative(directory.as_handle(), "service.lock", StorageKind::File)?;
+        validate_private(&lock_file, identity.service_sid(), StorageKind::File)?;
+        let lock = ProfileLock::acquire(lock_file)?;
+        for ancestor in &ancestors {
+            read_security(ancestor.as_handle(), StorageKind::Directory)?;
+        }
+        let entries = std::fs::read_dir(pinned_directory_path(directory.as_handle())?)?;
+        let accounts =
+            crate::migration_ready::account_instances(entries.map(|entry| Ok(entry?.file_name())))?;
+        crate::migration_ready::verify_ready(&checkpoint, &accounts, |name| {
+            let file = open_relative(directory.as_handle(), name, StorageKind::File)?;
+            validate_private(&file, identity.service_sid(), StorageKind::File)?;
+            Ok(file)
+        })?;
+        Ok(QuiescentProfile {
+            _installer: self,
+            _lock: lock,
+            _directory: directory,
+            _ancestors: ancestors,
+        })
+    }
+}
+
+fn validate_private(file: &File, service: &str, kind: StorageKind) -> Result<()> {
+    validate_handle(file.as_handle(), service, kind)
+}
+
 pub fn acquire_installer() -> Result<InstallerLease> {
     crate::windows_service_identity::verify_installer_process()?;
     let trusted = crate::windows_service_config::machine_trustees()?;

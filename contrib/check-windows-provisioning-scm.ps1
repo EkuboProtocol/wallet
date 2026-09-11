@@ -107,6 +107,9 @@ try {
     if ($status.ExitCode -ne 0 -or $status.ServiceSpecificExitCode -ne 0) {
         throw "Service reported failure: $($status.ExitCode)/$($status.ServiceSpecificExitCode)"
     }
+    if (-not $serviceProcess.WaitForExit(30000)) { throw 'Pending service process has not exited.' }
+    & $binary verify-prepared $owner
+    if ($LASTEXITCODE -ne 0) { throw 'Quiescent prepared-file verification failed.' }
     Write-Output 'Production pending SCM bootstrap, protected storage and cross-account provisioning authentication passed.'
 } finally {
     if ($serviceCreated) {

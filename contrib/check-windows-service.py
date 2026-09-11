@@ -29,6 +29,7 @@ MODULES = (
     "database_staging",
     "pending_profile",
     "installer_checkpoint",
+    "migration_ready",
     "service_custody",
     "windows_service_custody",
     "windows_owner_pipe",

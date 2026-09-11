@@ -884,9 +884,23 @@ service grant. Untrusted grants are rejected even when marked inherit-only;
 the sole placeholder exception is inherit-only CREATOR OWNER inside the
 already-private directory. SYSTEM and Administrators remain trusted. Provision
 protected directory ACLs such as
-`O:<service SID>D:P(A;OICI;FA;;;<service SID>)(A;OICI;FA;;;SY)`.
+`O:<service SID>D:P(A;OICI;FA;;;<service SID>)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BA)`.
 File validation does not require inheritance flags. This check is a prerequisite
 for Windows database activation; it does not activate the service backend.
+
+The installer-side prepared-file verifier needs read/traverse access to that
+directory after stopping the service. Newly created virtual-service-owned files
+grant Administrators read access, while retaining service ownership and a protected
+DACL. This uses the existing trust in elevated administrators; it adds no grant for
+the desktop user's SID. Existing ACLs are not repaired during verification: older
+pending profiles without installer read access fail closed.
+
+`InstallerLease::verify_prepared` holds the service's singleton lock and validates
+runtime credentials, staging records, completion markers, and all three database
+copies against the protected checkpoint. The shared `migration_ready` module has no
+model or SQL dependency. It rejects changed inventories and runtime SQLite sidecars,
+including case aliases. The returned guard retains service exclusion but grants no
+activation authority and does not establish that the live legacy source is unchanged.
 
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData

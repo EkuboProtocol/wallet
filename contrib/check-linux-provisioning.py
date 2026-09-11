@@ -196,6 +196,8 @@ def exercise(binary, owner, source=False):
             if owner_process.wait(timeout=15) != 0:
                 raise RuntimeError("owner relay verification failed")
             check_raw_denial(private, owner)
+            stop_fixture(unit)
+            subprocess.run([str(executable), "verify-prepared", str(owner)], check=True, timeout=60)
         finally:
             stop_fixture(unit)
             run(["journalctl", "--unit", unit, "--no-pager", "--output", "cat"])

@@ -21,6 +21,7 @@ pub fn run() -> Result<()> {
         "relay-owner" => runtime()?.block_on(relay_owner(&args[1])),
         "source-client" => runtime()?.block_on(source::client(&args[1])),
         "source-owner" => source::owner(&args[1]),
+        "verify-prepared" => verify_prepared(&args[1]),
         _ => anyhow::bail!("unknown fixture mode"),
     };
     if args[0] == "service" {
@@ -162,6 +163,21 @@ fn restart_fixture_service(owner: &str) -> Result<()> {
         .arg(owner)
         .status()?;
     ensure!(status.success(), "synthetic service restart failed");
+    Ok(())
+}
+
+fn verify_prepared(owner: &str) -> Result<()> {
+    fixture_owner(owner)?;
+    let installer =
+        ekubo_wallet_core::windows_service_storage::installer_journal::acquire_installer()?;
+    let prepared = installer.verify_prepared(owner)?;
+    ensure!(
+        installer.verify_prepared(owner).is_err(),
+        "prepared verifier released the service lock"
+    );
+    drop(prepared);
+    drop(installer.verify_prepared(owner)?);
+    println!("Quiescent Windows runtime files match the protected checkpoint");
     Ok(())
 }
 

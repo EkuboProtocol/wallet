@@ -5,6 +5,7 @@
 //! overall deadline before calling it. Senders must authenticate the protected
 //! destination before sending ANY bytes: matching a header is not authentication.
 //! No ordinary owner RPC or MCP endpoint exposes this stream.
+use crate::installer_checkpoint::CandidateRecord;
 use crate::{
     config::WalletMetadata,
     custody_envelope::WrappedDataKey,
@@ -50,7 +51,7 @@ pub struct TransferLimits {
 
 /// Shared installer admission policy for native Linux and Windows hosts.
 pub const INSTALLER_LIMITS: TransferLimits = TransferLimits {
-    accounts: 100_000,
+    accounts: crate::installer_checkpoint::MAX_ACCOUNTS,
     metadata_bytes: 16 * 1024,
     total_metadata_bytes: 64 * 1024 * 1024,
     database_bytes: crate::installer_checkpoint::MAX_DATABASE_BYTES,
@@ -141,23 +142,6 @@ pub struct ReceivedCandidate<'a, S> {
     stage: CredentialStage,
     session: Uuid,
     canonical: DatabaseTransfer,
-}
-
-/// Durable staging evidence for later recovery. No field authorizes activation:
-/// recovery must revalidate protected storage, credentials and database contents.
-/// The source descriptor binds the frozen transfer, not a live source pathname.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CandidateRecord {
-    version: u8,
-    session: Uuid,
-    destination: Destination,
-    source: DatabaseTransfer,
-    credentials: CredentialStage,
-    canonical: DatabaseTransfer,
-    // Persist only the digest. The envelope must stay in the login keyring,
-    // separate from the service's wrapping key, including during recovery.
-    relay_digest: [u8; 32],
 }
 
 fn persist_candidate(store: &impl CredentialStagingStore, record: &CandidateRecord) -> Result<()> {
