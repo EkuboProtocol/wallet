@@ -1071,3 +1071,24 @@ Other connection/authentication failures are returned immediately. This avoids
 ordinary concurrent UI reads failing in the brief interval before the server
 creates its next listener instance. Desktop startup and SCM hosting still need
 to select this client and keep its existing DesktopSession supervisor alive.
+
+Windows initial owner and MCP connections now activate the installed service
+through local SCM before attempting the authenticated pipe handshake. The
+service name comes only from protected installer metadata for the actual owner.
+Activation requests `SC_MANAGER_CONNECT` and `SERVICE_QUERY_STATUS | SERVICE_START`;
+the installer must grant the owner those service rights without stop, deletion,
+configuration, or ACL mutation rights. No caller-selected start arguments are
+sent. A running service is left alone, an in-progress start is observed, and a
+stopped service gets one start attempt. A failed or stopping service is not
+automatically restarted. Existing connection clones do not reactivate or replay
+requests after a lost connection.
+
+Activation has a ten-second caller deadline and runs blocking SCM calls on a
+worker. Cancellation prevents further polling/start attempts, but cannot undo
+an SCM call already in progress or an accepted service start. Running status
+does not authenticate the endpoint or unlock custody: the existing pipe-object
+validation, service-instance pinning, and encrypted-envelope relay still apply.
+Tests cover the activation state machine and use a random nonexistent name for
+native SCM lookup; they do not provision or start an installed service. Packaged
+activation tests, installer grants, and Windows owner-presence proofs remain
+required before desktop cutover.

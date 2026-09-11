@@ -39,6 +39,7 @@ impl OwnerConnection<WindowsOwnerTransport> {
     pub async fn connect() -> Result<Self> {
         let identity =
             Arc::new(ekubo_wallet_core::windows_service_config::installed_service_identity()?);
+        ekubo_wallet_core::windows_service_manager::ensure_running(&identity).await?;
         let profile = identity.profile_id();
         let client = StreamOwnerClient::connect(WindowsConnector(identity), move || {
             Box::pin(async move {
@@ -77,6 +78,7 @@ pub async fn try_connect_agent_stream()
 async fn connect_installed_agent(
     identity: ekubo_wallet_core::windows_service_config::InstalledServiceIdentity,
 ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    ekubo_wallet_core::windows_service_manager::ensure_running(&identity).await?;
     let profile = identity.profile_id();
     crate::stream_owner_client::connect_agent(
         WindowsConnector(Arc::new(identity)),

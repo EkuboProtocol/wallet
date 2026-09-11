@@ -11,6 +11,11 @@ mod native;
 #[cfg(target_os = "windows")]
 pub use native::{Running, run};
 
+#[path = "windows_service_start.rs"]
+mod startup;
+#[cfg(target_os = "windows")]
+pub use startup::ensure_running;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Starting,
