@@ -11,10 +11,14 @@ use zeroize::Zeroizing;
 
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    ensure!(args.len() == 2, "expected service|client <owner SID>");
+    ensure!(
+        args.len() == 2,
+        "expected service|client|relay-owner <owner SID>"
+    );
     let result = match args[0].as_str() {
         "service" => windows_service_manager::run_pending(&args[1], host),
         "client" => client(&args[1]),
+        "relay-owner" => runtime()?.block_on(relay_owner(&args[1])),
         _ => anyhow::bail!("unknown fixture mode"),
     };
     if args[0] == "service" {
@@ -163,21 +167,79 @@ async fn deliver_owner_relay(
     owner: &str,
     relay: &ekubo_wallet_core::custody_envelope::WrappedDataKey,
 ) -> Result<ekubo_wallet_core::custody_envelope::WrappedDataKey> {
-    use ekubo_wallet_core::{
-        custody_relay, windows_relay_handoff, windows_service_config, windows_service_identity,
-    };
+    use ekubo_wallet_core::{custody_relay, windows_relay_handoff, windows_service_config};
+    use std::{process::Stdio, time::Duration};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    fixture_owner(owner)?;
+    let profile = windows_service_config::pending_installer_identity(owner)?.profile_id();
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["relay-owner", owner])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()?;
+    let result = async {
+        let mut stdout = child.stdout.take().context("missing relay owner stdout")?;
+        let mut ready = [0; 37];
+        tokio::time::timeout(Duration::from_secs(30), stdout.read_exact(&mut ready))
+            .await
+            .context("relay owner readiness timed out")??;
+        ensure!(ready[36] == b'\n', "invalid relay owner readiness frame");
+        let endpoint = std::str::from_utf8(&ready[..36])?.parse::<Uuid>()?;
+        ensure!(!endpoint.is_nil(), "invalid relay owner endpoint");
+        windows_relay_handoff::deliver(owner, endpoint, profile, relay).await?;
+        let mut stdin = child.stdin.take().context("missing relay owner stdin")?;
+        stdin.write_all(b"finish\n").await?;
+        drop(stdin);
+        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+            .await
+            .context("relay owner shutdown timed out")??;
+        ensure!(status.success(), "relay owner process failed");
+        // Reload only after the separate owner process has acknowledged the
+        // credential write and exited; no in-memory endpoint state survives.
+        custody_relay::load(profile)
+    }
+    .await;
+    if result.is_err() {
+        // Terminate/reap only this fixture's child, including readiness errors.
+        let _ = child.kill().await;
+    }
+    result
+}
+
+fn fixture_owner(owner: &str) -> Result<()> {
     ensure!(
-        windows_service_identity::current_process_identity()?.user_sid() == owner,
+        std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+            && std::env::var("RUNNER_OS").as_deref() == Ok("Windows"),
+        "disposable Windows CI only"
+    );
+    ensure!(
+        ekubo_wallet_core::windows_service_identity::current_process_identity()?.user_sid()
+            == owner,
         "fixture must run under its synthetic owner account"
     );
-    let profile = windows_service_config::pending_installer_identity(owner)?.profile_id();
+    Ok(())
+}
+
+async fn relay_owner(owner: &str) -> Result<()> {
+    use ekubo_wallet_core::windows_relay_handoff;
+    use std::{io::Write as _, time::Duration};
+    use tokio::io::AsyncReadExt as _;
+    fixture_owner(owner)?;
     let endpoint = windows_relay_handoff::OwnerRelayEndpoint::bind()?;
-    let endpoint_id = endpoint.endpoint_id();
+    println!("{}", endpoint.endpoint_id());
+    std::io::stdout().flush()?;
     let (stop, receiver) = watch::channel(false);
     let serving = tokio::spawn(endpoint.run(receiver));
-    let result = windows_relay_handoff::deliver(owner, endpoint_id, profile, relay).await;
+    let result = tokio::time::timeout(Duration::from_secs(360), async {
+        let mut finish = [0; 7];
+        tokio::io::stdin().read_exact(&mut finish).await?;
+        ensure!(&finish == b"finish\n", "invalid relay owner shutdown frame");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
     let _ = stop.send(true);
     serving.await??;
-    result?;
-    custody_relay::load(profile)
+    result.context("relay owner shutdown request timed out")?
 }

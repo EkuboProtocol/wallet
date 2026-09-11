@@ -8,7 +8,7 @@ license = "FSL-1.1-MIT"
 description = "Headless wallet authority for the isolated custody service"
 
 [features]
-migration-fixture = ["ekubo-wallet-core/test-hooks"]
+migration-fixture = ["ekubo-wallet-core/test-hooks", "tokio/process", "tokio/io-std", "tokio/io-util"]
 
 [[example]]
 name = "windows-migration-scm"

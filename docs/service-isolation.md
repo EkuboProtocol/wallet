@@ -1733,11 +1733,15 @@ the blocking worker retains its permit even if the request times out or the
 endpoint stops. Endpoint shutdown can cancel native I/O without admitting a
 replacement credential write while that worker is still running.
 
-The Windows SCM fixture now delivers the staged relay through this endpoint and
-reloads it from the fresh profile's credential entry before recovery. The client
-requires disposable GitHub Windows CI before accessing that entry. Installer and
-owner endpoint run under the same CI account; this does not test the separate
-administrator-account elevation case or production desktop launch. Native CI
+The Windows SCM fixture delivers the staged relay to an endpoint in a separate
+child process and reloads the fresh profile's credential entry after that process
+exits. The child announces only its fresh endpoint UUID through a bounded stdout
+frame; pipe authentication still establishes peer identity. Readiness and graceful
+shutdown have deadlines, and failures terminate/reap only that fixture child.
+Both client and child require disposable GitHub Windows CI before credential
+access. Installer and owner endpoint still use the same account and elevation;
+this does not test a medium-integrity desktop, separate administrator-account
+elevation, or production desktop launch. Native CI
 must still verify the full pipe/credential flow. Framing tests and native-pipe
 cross-compilation alone do not establish that result. No active profile or
 legacy credential is deleted by this fixture.
