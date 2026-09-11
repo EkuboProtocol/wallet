@@ -8,12 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct InstallerStream {
+pub struct InstallerStream {
     stream: UnixStream,
     deadline: Instant,
 }
 
-pub(super) struct CancelStream(UnixStream);
+pub struct CancelStream(UnixStream);
 impl Drop for CancelStream {
     fn drop(&mut self) {
         // Shutdown the same socket object, including a blocking worker's cloned
@@ -23,11 +23,21 @@ impl Drop for CancelStream {
 }
 
 impl InstallerStream {
-    pub(super) fn new(
-        fd: OwnedFd,
-        process_id: u32,
-        duration: Duration,
-    ) -> Result<(Self, CancelStream)> {
+    /// Create the installer side after elevation. Peer credentials on this pair
+    /// describe its root creator, so the destination must be authenticated on
+    /// D-Bus before handing it the other endpoint. This function grants no trust
+    /// to a destination by itself.
+    pub fn pair(duration: Duration) -> Result<(Self, OwnedFd, CancelStream)> {
+        ensure!(
+            rustix::process::getuid().as_raw() == 0 && rustix::process::geteuid().as_raw() == 0,
+            "provisioning channel requires the privileged installer"
+        );
+        let (local, remote) = UnixStream::pair()?;
+        let (stream, cancel) = Self::with_deadline(local, duration)?;
+        Ok((stream, remote.into(), cancel))
+    }
+
+    pub fn new(fd: OwnedFd, process_id: u32, duration: Duration) -> Result<(Self, CancelStream)> {
         validate_peer(&fd, 0, process_id)?;
         Self::with_deadline(UnixStream::from(fd), duration)
     }

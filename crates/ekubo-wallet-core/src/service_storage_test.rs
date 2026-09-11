@@ -403,6 +403,10 @@ fn pending_storage_stages_without_becoming_an_active_profile() {
             .unwrap()
             .is_none()
     );
+    let identity = read_pending_installer_identity(&handle, owner, uid).unwrap();
+    assert_eq!(identity.owner_uid(), owner);
+    assert_eq!(identity.service_uid(), uid);
+    assert_eq!(identity.profile_id(), profile);
     let staging = open_pending_storage(&handle, owner, uid).unwrap();
     assert_eq!(
         staging.identity(),
@@ -433,7 +437,9 @@ fn pending_storage_stages_without_becoming_an_active_profile() {
     let active = active.join(format!("{owner}.json"));
     std::fs::write(&active, &bytes).unwrap();
     assert!(open_pending_storage(&handle, owner, uid).is_err());
+    assert!(read_pending_installer_identity(&handle, owner, uid).is_err());
     std::fs::write(&active, b"invalid").unwrap();
+    assert!(read_pending_installer_identity(&handle, owner, uid).is_err());
     assert!(
         open_pending_storage(&handle, owner, uid).is_err(),
         "invalid active metadata must not permit pending fallback"
@@ -719,4 +725,11 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     drop(PolicyStore::open(&imported, &DatabaseKey::new(raw_key)).unwrap());
     assert!(PolicyStore::open(&imported, &DatabaseKey::new([0x55; 32])).is_err());
     assert!(!directory.path().join("wallet.db").exists());
+}
+
+#[test]
+fn ordinary_process_cannot_read_installer_identity() {
+    if rustix::process::geteuid().as_raw() != 0 {
+        assert!(pending_installer_identity(1000).is_err());
+    }
 }

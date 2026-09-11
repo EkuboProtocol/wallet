@@ -259,9 +259,27 @@ Linux pending store.
 The provisioning service unit and D-Bus policy are source assets, not installed
 release components. Windows still needs its authenticated pending SCM/pipe host;
 the wire format, limits, deadline policy and staging reply are shared core code.
-The privileged installer client and authorized legacy-desktop handoff must still
-be implemented. Senders must authenticate the protected service before sending
-any keys. Installer relay persistence, durable commit/recovery, activation and
+The Linux privileged client is now implemented in core's
+`linux_provisioning_client::transfer`. A root-only pending-identity reader checks
+protected configuration and rejects existing or damaged active metadata without
+reading credentials. The client connects to the real system bus, resolves the
+configured pending service once, verifies its UID and live process, installs a
+disconnection watch, then revalidates and addresses that exact unique recipient.
+Only then does it create the privileged socketpair and start the shared transfer.
+The descriptor method call and stream exchange run concurrently, with reply sender
+and session checks; both must succeed. Neither connection failure nor service
+replacement triggers replay or rediscovery. Client and host share core's native
+deadline/cancellation wrapper. Successful `StagedSource` retains the source snapshot
+fence and exact bus connection until installer commit/abort; the caller must also
+retain the source lifecycle lock. Cancellation wakes I/O and the worker retains the
+fence until it exits. Tests cover protected pending-identity reads and ordinary-user
+rejection, native I/O, and live recipient UID/replacement checks on an isolated bus.
+A packaged privileged round trip remains unverified.
+
+The client takes already-supplied keys and a frozen snapshot; it does not elevate,
+start a service, access the keyring, activate custody or delete legacy records.
+The authorized legacy-desktop handoff and privileged installer executable remain
+unfinished. Installer relay persistence, durable commit/recovery, activation and
 legacy cleanup remain unfinished on both platforms.
 
 ## Required outcome

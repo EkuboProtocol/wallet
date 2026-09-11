@@ -43,6 +43,47 @@ pub struct InstalledServiceIdentity {
     profile_id: uuid::Uuid,
 }
 
+/// Public pending identity read by the privileged installer. Distinct from
+/// active desktop discovery, and constructed only from protected configuration.
+pub struct PendingInstallerIdentity {
+    configured: OwnerConfiguration,
+}
+
+impl PendingInstallerIdentity {
+    #[must_use]
+    pub const fn owner_uid(&self) -> u32 {
+        self.configured.owner_uid
+    }
+    #[must_use]
+    pub const fn service_uid(&self) -> u32 {
+        self.configured.service_uid
+    }
+    #[must_use]
+    pub const fn profile_id(&self) -> uuid::Uuid {
+        self.configured.profile_id
+    }
+}
+
+/// Read pending public metadata without accessing either service or legacy keys.
+/// This cannot activate custody or fall back from an active/damaged installation.
+pub fn pending_installer_identity(owner_uid: u32) -> Result<PendingInstallerIdentity> {
+    ensure!(
+        rustix::process::getuid().as_raw() == 0 && rustix::process::geteuid().as_raw() == 0,
+        "pending identity lookup requires the privileged installer"
+    );
+    read_pending_installer_identity(&root_directory()?, owner_uid, 0)
+}
+
+fn read_pending_installer_identity(
+    root: &File,
+    owner_uid: u32,
+    system_uid: u32,
+) -> Result<PendingInstallerIdentity> {
+    Ok(PendingInstallerIdentity {
+        configured: pending_configuration(root, owner_uid, system_uid)?,
+    })
+}
+
 impl InstalledServiceIdentity {
     #[must_use]
     pub const fn profile_id(&self) -> uuid::Uuid {

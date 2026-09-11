@@ -51,8 +51,18 @@ One worker holds the root at a time. Deadline/disconnect cancellation shuts down
 native socket I/O; an in-flight SQLCipher operation retains the lock until it ends.
 It never starts active wallet authority. The installer must stop the pending host
 before later profile promotion. These assets are not installed by current packages;
-the privileged client, source handoff, durable activation and recovery remain
+the installer executable, source handoff, durable activation and recovery remain
 unfinished. Do not publish active metadata in response to a staging reply.
+
+Core now supplies `linux_provisioning_client::transfer` for the privileged
+installer. It reads only protected pending identity as UID 0, authenticates the
+actual service on the real bus before any key write, and exchanges the descriptor
+method call and bounded transfer concurrently. A successful result retains the
+source database fence and authenticated bus connection through later commit or
+abort; the caller must keep its source lifecycle lock too. The client never starts
+or reconnects a service, and does not grant activation/deletion authority. It takes
+already-held raw keys and a frozen snapshot; owner-authorized elevation, legacy
+source handoff and a packaged privileged round trip remain to be implemented/tested.
 
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is

@@ -73,7 +73,7 @@ windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials_
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures = "0.3.31"
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+rustix = { version = "1.1.4", features = ["fs", "process", "net"] }
 backhand = { version = "0.25.2", default-features = false, features = ["gzip", "xz", "zstd"] }
 keyring-core = "1.0.0"
 zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }

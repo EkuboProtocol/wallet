@@ -39,6 +39,10 @@ pub mod fourbyte;
 pub mod human_presence;
 pub mod input_validation;
 pub mod legal;
+#[cfg(target_os = "linux")]
+pub mod linux_provisioning_client;
+#[cfg(target_os = "linux")]
+pub mod linux_provisioning_io;
 pub mod mcp_companions;
 pub mod message;
 pub mod migration_transfer;

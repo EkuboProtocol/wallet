@@ -13,6 +13,7 @@ fn peer_validation_uses_kernel_identity_and_rejects_other_object_types() {
     assert!(validate_peer(&datagram.into(), uid, pid).is_err());
     assert!(validate_peer(&tempfile::tempfile().unwrap().into(), uid, pid).is_err());
     if uid != 0 {
+        assert!(InstallerStream::pair(Duration::from_secs(1)).is_err());
         assert!(InstallerStream::new(fd, pid, Duration::from_secs(1)).is_err());
     }
 }

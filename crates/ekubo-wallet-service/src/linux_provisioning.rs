@@ -6,8 +6,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use zbus::{Connection, fdo::DBusProxy, message::Header, zvariant::OwnedFd};
 
-#[path = "linux_provisioning_io.rs"]
-mod io;
+use ekubo_wallet_core::linux_provisioning_io as io;
 
 const OBJECT_PATH: &str = "/org/ekubo/Wallet/Provision";
 
