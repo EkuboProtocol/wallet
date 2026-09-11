@@ -11,7 +11,8 @@ use anyhow::{Result, ensure};
 mod native;
 #[cfg(target_os = "windows")]
 pub use native::{
-    PendingCredentialStorage, PrivateStorageRoot, open_private_child, validate_private_handle,
+    PendingCredentialStorage, PrivateStorageRoot, installer_journal, open_private_child,
+    validate_private_handle,
 };
 
 #[derive(Clone, Copy, Debug)]

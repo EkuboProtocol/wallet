@@ -1634,3 +1634,27 @@ This is checkpoint storage, not the full installer commit journal. Owner relay
 persistence and pre-reply/activation recovery remain missing. Windows needs its
 native protected journal writer using the same checkpoint validation and format;
 its fixture currently serializes checkpoint evidence in memory.
+
+### Protected Windows checkpoint publication
+
+`windows_service_storage::installer_journal` now uses the same bounded checkpoint
+codec as Linux. The data-only `installer_checkpoint` module is shared with the
+native harness; snapshot/transport recovery methods remain in the migration
+module. Existing public transfer type paths are preserved.
+
+Production journal entrypoints require the verified elevated installer and
+protected pending registry identity. They retain every validated ProgramData
+ancestor and use the fixed `EkuboWallet/Pending/<profile>.checkpoint.json` file.
+Publication reuses private temporary creation and atomic no-replace rename,
+with exact readback. A separate journal validator requires Administrators file
+ownership and restricts nonzero grants to Administrators and SYSTEM; service
+custody's dedicated-SID validator is unchanged. Reads reject reparses, hard links,
+non-files, unsafe ACLs and oversized evidence. The exact existing file handle is
+opened for read/write solely to permit flushing; no truncation, path reopen or
+content mutation occurs. Missing files are distinguished from other failures.
+
+The Windows SCM fixture now saves/reloads through these native APIs. Native
+execution is still required to verify administrative owner assignment and file
+publication/flush behavior at this revision. This does not implement relay
+persistence, pre-reply recovery, activation or legacy deletion. Earlier notes
+that Windows journal storage is missing describe the preceding checkpoints.

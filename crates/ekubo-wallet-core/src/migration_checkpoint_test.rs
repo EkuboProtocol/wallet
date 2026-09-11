@@ -1,5 +1,6 @@
 use super::*;
 use crate::policy_store::{DatabaseKey, PolicyStore};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 struct Stream {

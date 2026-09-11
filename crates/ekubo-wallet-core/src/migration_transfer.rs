@@ -29,7 +29,7 @@ pub use recovery_transfer::{RecoveryRequest, send_recovery};
 
 #[path = "migration_checkpoint.rs"]
 mod checkpoint;
-pub use checkpoint::RecoveryCheckpoint;
+pub use crate::installer_checkpoint::{Destination, RecoveryCheckpoint};
 
 /// Admission policy comes from the host, never from the incoming stream.
 /// Separate account-count and aggregate-metadata bounds avoid many small frames
@@ -47,20 +47,10 @@ pub const INSTALLER_LIMITS: TransferLimits = TransferLimits {
     accounts: 100_000,
     metadata_bytes: 16 * 1024,
     total_metadata_bytes: 64 * 1024 * 1024,
-    database_bytes: 16 * 1024 * 1024 * 1024,
+    database_bytes: crate::installer_checkpoint::MAX_DATABASE_BYTES,
 };
 /// Native adapters must cancel I/O on expiry, not merely abandon an async waiter.
 pub const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// Public identity obtained from protected installer configuration. These strings
-/// bind the transfer to its destination; they cannot establish peer provenance.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Destination {
-    pub owner: String,
-    pub service: String,
-    pub profile: Uuid,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

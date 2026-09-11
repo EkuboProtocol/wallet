@@ -354,6 +354,15 @@ fn open_relative(parent: BorrowedHandle<'_>, component: &str, kind: StorageKind)
 }
 
 fn open_native(parent: Option<BorrowedHandle<'_>>, name: &str, kind: StorageKind) -> Result<File> {
+    open_native_access(parent, name, kind, false)
+}
+
+fn open_native_access(
+    parent: Option<BorrowedHandle<'_>>,
+    name: &str,
+    kind: StorageKind,
+    journal_write: bool,
+) -> Result<File> {
     let mut wide_name: Vec<u16> = name.encode_utf16().collect();
     let length = u16::try_from(wide_name.len() * size_of::<u16>())?;
     let name = UNICODE_STRING {
@@ -380,7 +389,14 @@ fn open_native(parent: Option<BorrowedHandle<'_>>, name: &str, kind: StorageKind
             READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
             FILE_DIRECTORY_FILE,
         ),
-        StorageKind::File => (FILE_GENERIC_READ, FILE_NON_DIRECTORY_FILE),
+        StorageKind::File => (
+            if journal_write {
+                FILE_GENERIC_READ | windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE
+            } else {
+                FILE_GENERIC_READ
+            },
+            FILE_NON_DIRECTORY_FILE,
+        ),
     };
     let mut handle = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
@@ -682,3 +698,6 @@ impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
         record.verify(&mut self.0.open_file(&name)?)
     }
 }
+
+#[path = "windows_installer_journal.rs"]
+pub mod installer_journal;

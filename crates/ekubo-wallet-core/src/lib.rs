@@ -101,3 +101,5 @@ pub mod windows_provisioning_pipe;
 
 #[cfg(target_os = "windows")]
 pub mod windows_provisioning_client;
+
+mod installer_checkpoint;
