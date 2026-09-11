@@ -2899,6 +2899,8 @@ pub struct WalletWindow {
     guided_setup: GuidedSetup,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
+    appearance_saves: SettingQueue<AppearancePreference>,
+    testnet_saves: SettingQueue<bool>,
     testnet_mode: bool,
     portfolio: PortfolioState,
     portfolio_generation: u64,
@@ -6773,6 +6775,40 @@ async fn load_legal_review(
     }))
 }
 
+/// Settings writes are serialized, with the latest pending choice retained.
+/// This carries UI intent only; every write still goes through the owner API.
+struct SettingQueue<T> {
+    in_flight: bool,
+    next: Option<T>,
+}
+
+impl<T> Default for SettingQueue<T> {
+    fn default() -> Self {
+        Self {
+            in_flight: false,
+            next: None,
+        }
+    }
+}
+
+impl<T> SettingQueue<T> {
+    fn submit(&mut self, value: T) -> Option<T> {
+        if self.in_flight {
+            self.next = Some(value);
+            None
+        } else {
+            self.in_flight = true;
+            Some(value)
+        }
+    }
+
+    fn finish(&mut self) -> Option<T> {
+        let next = self.next.take();
+        self.in_flight = next.is_some();
+        next
+    }
+}
+
 struct InitialDesktopState {
     appearance: Result<AppearancePreference>,
     testnet_mode: Result<bool>,
@@ -6956,6 +6992,8 @@ impl WalletWindow {
             guided_setup,
             route_errors: BTreeMap::new(),
             appearance_preference,
+            appearance_saves: SettingQueue::default(),
+            testnet_saves: SettingQueue::default(),
             testnet_mode,
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
@@ -12331,16 +12369,57 @@ impl WalletWindow {
     fn set_appearance_preference(
         &mut self,
         preference: AppearancePreference,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.appearance_preference == preference {
+        if !self.appearance_saves.in_flight && self.appearance_preference == preference {
             return;
         }
-        match self.owner.set_appearance_preference(preference) {
+        if let Some(preference) = self.appearance_saves.submit(preference) {
+            self.save_appearance_preference(preference, cx);
+        }
+    }
+
+    fn save_appearance_preference(
+        &mut self,
+        preference: AppearancePreference,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.set_appearance_preference(preference).await
+        });
+        cx.spawn(async move |view, cx| {
+            let mut result = Some(task.await);
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.finish_appearance_preference(
+                    preference,
+                    result.take().unwrap(),
+                    Some(window),
+                    cx,
+                );
+            });
+            // Saving remains valid if the window closed while IPC was pending.
+            if let Some(result) = result {
+                let _ = view.update(cx, |view, cx| {
+                    view.finish_appearance_preference(preference, result, None, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn finish_appearance_preference(
+        &mut self,
+        preference: AppearancePreference,
+        result: Result<()>,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
             Ok(()) => {
                 self.appearance_preference = preference;
-                apply_appearance_preference(preference, Some(window), cx);
+                apply_appearance_preference(preference, window, cx);
                 if let Some(tray) = self.tray.borrow_mut().as_mut() {
                     tray.set_dark_mode(cx.theme().is_dark());
                 }
@@ -12348,17 +12427,46 @@ impl WalletWindow {
             }
             Err(error) => self.set_route_error(
                 Route::Settings,
-                format!("Could not save appearance preference: {error:#}"),
+                format!("Could not save appearance: {error:#}"),
             ),
+        }
+        if let Some(next) = self.appearance_saves.finish() {
+            self.save_appearance_preference(next, cx);
         }
         cx.notify();
     }
 
     fn set_testnet_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.testnet_mode == enabled {
+        if !self.testnet_saves.in_flight && self.testnet_mode == enabled {
             return;
         }
-        match self.owner.set_testnet_mode(enabled) {
+        if let Some(enabled) = self.testnet_saves.submit(enabled) {
+            self.save_testnet_mode(enabled, cx);
+        }
+    }
+
+    fn save_testnet_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.set_testnet_mode(enabled).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.finish_testnet_mode(enabled, result, cx);
+                if let Some(next) = view.testnet_saves.finish() {
+                    view.save_testnet_mode(next, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn finish_testnet_mode(&mut self, enabled: bool, result: Result<()>, cx: &mut Context<Self>) {
+        match result {
             Ok(()) => {
                 self.testnet_mode = enabled;
                 self.invalidate_portfolio();

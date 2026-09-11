@@ -5098,3 +5098,70 @@ fn asynchronous_legal_acceptance_failure_keeps_the_review_open(cx: &mut gpui::Te
     });
     release(cx, &view);
 }
+
+fn settle_setting_saves(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| {
+            !wallet.appearance_saves.in_flight && !wallet.testnet_saves.in_flight
+        }) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("settings writes did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_settings_preserve_the_latest_choice_in_storage_and_ui(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet.set_appearance_preference(AppearancePreference::Dark, window, cx);
+            wallet.set_appearance_preference(AppearancePreference::Light, window, cx);
+            wallet.set_appearance_preference(AppearancePreference::System, window, cx);
+            wallet.set_testnet_mode(true, cx);
+            wallet.set_testnet_mode(false, cx);
+            assert!(wallet.appearance_saves.in_flight && wallet.testnet_saves.in_flight);
+        });
+    })
+    .unwrap();
+    settle_setting_saves(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.appearance_preference, AppearancePreference::System);
+        assert_eq!(
+            wallet.owner.appearance_preference().unwrap(),
+            AppearancePreference::System
+        );
+        assert!(!wallet.testnet_mode);
+        assert!(!wallet.owner.testnet_mode().unwrap());
+        assert!(!wallet.route_errors.contains_key(&Route::Settings));
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_appearance_save_finishes_after_the_window_closes(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet.set_appearance_preference(AppearancePreference::Dark, window, cx);
+            wallet.set_appearance_preference(AppearancePreference::Light, window, cx);
+        });
+        window.remove_window();
+    })
+    .unwrap();
+    settle_setting_saves(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.appearance_preference, AppearancePreference::Light);
+        assert_eq!(
+            wallet.owner.appearance_preference().unwrap(),
+            AppearancePreference::Light
+        );
+    });
+    release(cx, &view);
+}
