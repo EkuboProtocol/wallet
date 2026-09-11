@@ -15,6 +15,13 @@ use std::{
 };
 use tokio::sync::watch;
 
+#[path = "windows_provisioning_access_test.rs"]
+#[allow(
+    unsafe_code,
+    reason = "fixture-only native token restriction and scoped impersonation"
+)]
+mod access;
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(args.len() == 2, "expected service|client <owner SID>");
@@ -85,6 +92,14 @@ async fn client(owner: &str) -> Result<()> {
         .await
         .context("fixture installer pipe connection")?;
     let (mut stream, _cancel) = provisioning_io::bridge(pipe, Duration::from_secs(10));
+    // Fixture location only, never production profile discovery. Readback of the
+    // exact random service-staged nonce below prevents testing a missing file.
+    let directory = std::path::PathBuf::from(
+        std::env::var_os("ProgramData").context("missing fixture ProgramData")?,
+    )
+    .join("EkuboWallet")
+    .join("Pending")
+    .join(identity.profile_id().simple().to_string());
     tokio::task::spawn_blocking(move || {
         let nonce = *uuid::Uuid::new_v4().as_bytes();
         stream
@@ -99,11 +114,14 @@ async fn client(owner: &str) -> Result<()> {
             reply == nonce.map(|byte| byte ^ 0xff),
             "invalid fixture reply"
         );
+        let record = StagedRecord::Credential(ServiceCredentialRecord::DatabaseKey);
+        let path = directory.join(record.file_name(uuid::Uuid::from_bytes(nonce))?);
+        access::ordinary_access_is_denied(&path, &nonce)?;
         Ok::<_, anyhow::Error>(())
     })
     .await??;
     println!(
-        "SCM provisioning exchange and protected storage staging passed with distinct installer and service SIDs"
+        "SCM provisioning exchange, protected staging and ordinary-token raw file denial passed with distinct installer and service SIDs"
     );
     Ok(())
 }
