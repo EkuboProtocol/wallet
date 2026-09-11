@@ -53,13 +53,15 @@ pub trait DatabaseStagingStore {
     ) -> Result<()>;
     fn open_staged_database(&self, stage: Uuid) -> Result<File>;
     fn staged_database(&self, stage: Uuid) -> Result<StagedDatabase<'_>>;
+    fn create_canonical_database(&self, stage: Uuid) -> Result<CanonicalDatabase<'_>>;
+    fn canonical_database(&self, stage: Uuid) -> Result<StagedDatabase<'_>>;
 }
 
 /// A native-validated read-only file pin and its protected pathname. Its borrow
 /// keeps the pending root (including Windows ancestor pins) alive during use.
 pub struct StagedDatabase<'a> {
     path: std::path::PathBuf,
-    _file: File,
+    file: File,
     _root: std::marker::PhantomData<&'a ()>,
 }
 impl<'a> StagedDatabase<'a> {
@@ -70,14 +72,73 @@ impl<'a> StagedDatabase<'a> {
     ) -> Self {
         Self {
             path,
-            _file: file,
+            file,
             _root: std::marker::PhantomData,
         }
+    }
+    pub(crate) fn transfer(&self) -> Result<DatabaseTransfer> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        DatabaseTransfer::describe(&mut file)
     }
     #[must_use]
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+}
+
+type Publish<'a> = Box<dyn FnOnce(&File, &mut bool) -> Result<()> + 'a>;
+type Discard<'a> = Box<dyn Fn(&File) -> Result<()> + 'a>;
+
+/// An unpublished native file. Only core can populate/publish it; dropping an
+/// unfinished build discards its temporary name. This is not activation authority.
+pub struct CanonicalDatabase<'a> {
+    path: std::path::PathBuf,
+    file: File,
+    publish: Option<Publish<'a>>,
+    discard: Discard<'a>,
+    published: bool,
+    _root: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> CanonicalDatabase<'a> {
+    pub(crate) fn new(
+        path: std::path::PathBuf,
+        file: File,
+        publish: impl FnOnce(&File, &mut bool) -> Result<()> + 'a,
+        discard: impl Fn(&File) -> Result<()> + 'a,
+        _root: &'a impl DatabaseStagingStore,
+    ) -> Self {
+        Self {
+            path,
+            file,
+            publish: Some(Box::new(publish)),
+            discard: Box::new(discard),
+            published: false,
+            _root: std::marker::PhantomData,
+        }
+    }
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+    pub(crate) fn file(&self) -> &File {
+        &self.file
+    }
+    pub(crate) fn publish(mut self) -> Result<()> {
+        self.file.sync_all()?;
+        self.publish.take().expect("publication is single-use")(&self.file, &mut self.published)
+    }
+}
+impl Drop for CanonicalDatabase<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = (self.discard)(&self.file);
+        }
+    }
+}
+
+pub(crate) fn canonical_file_name(stage: Uuid) -> Result<String> {
+    ensure!(!stage.is_nil(), "invalid canonical database stage identity");
+    Ok(format!("custody-stage-{stage}-canonical.db"))
 }
 
 pub(crate) fn file_name(stage: Uuid) -> Result<String> {

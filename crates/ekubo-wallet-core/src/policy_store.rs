@@ -2695,3 +2695,6 @@ mod tests;
 
 #[path = "migration_database.rs"]
 pub mod migration_database;
+
+#[path = "migration_rebuild.rs"]
+pub(crate) mod migration_rebuild;

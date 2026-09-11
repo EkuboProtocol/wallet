@@ -93,7 +93,7 @@ fn prepare_snapshot(
     Ok(())
 }
 
-fn open_existing(path: &Path, key: &DatabaseKey) -> Result<Connection> {
+pub(super) fn open_existing(path: &Path, key: &DatabaseKey) -> Result<Connection> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -133,7 +133,11 @@ pub(crate) fn verify_received(
     key: &DatabaseKey,
     expected: &std::collections::BTreeMap<uuid::Uuid, crate::config::WalletMetadata>,
 ) -> Result<()> {
-    use rusqlite::OptionalExtension as _;
+    let connection = open_checked_source(path, key)?;
+    verify_inventory(&connection, expected)
+}
+
+pub(super) fn open_checked_source(path: &Path, key: &DatabaseKey) -> Result<Connection> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -147,7 +151,7 @@ pub(crate) fn verify_received(
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("BEGIN")?;
     let executable_schema: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type IN ('view','trigger')",
+        "SELECT count(*) FROM sqlite_master WHERE type NOT IN ('table','index')",
         [],
         |row| row.get(0),
     )?;
@@ -160,11 +164,21 @@ pub(crate) fn verify_received(
         "received database schema is not current"
     );
     verify_integrity(&connection)?;
-    let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
-    ensure!(
-        foreign_keys.query([])?.next()?.is_none(),
-        "received database has broken references"
-    );
+    {
+        let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
+        ensure!(
+            foreign_keys.query([])?.next()?.is_none(),
+            "received database has broken references"
+        );
+    }
+    Ok(connection)
+}
+
+pub(super) fn verify_inventory(
+    connection: &Connection,
+    expected: &std::collections::BTreeMap<uuid::Uuid, crate::config::WalletMetadata>,
+) -> Result<()> {
+    use rusqlite::OptionalExtension as _;
     let encoded: Option<String> = connection
         .query_row(
             "SELECT value_json FROM application_settings WHERE key=?1",
@@ -187,7 +201,7 @@ pub(crate) fn verify_received(
         actual == *expected,
         "received database wallet metadata does not match credentials"
     );
-    verify_instances(&connection, expected)
+    verify_instances(connection, expected)
 }
 
 fn verify_instances(

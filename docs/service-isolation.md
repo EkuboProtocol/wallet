@@ -199,6 +199,24 @@ are not structural schema attestation: constraints and index definitions must
 also be validated against trusted schema or rebuilt from compiled definitions
 before activation. The copied source database cannot supply that trust itself.
 
+
+`PreparedServiceCredentials::rebuild_staged_database` now creates a separate
+candidate under the pending root using core's compiled current schema, then copies
+only data from the read-only received snapshot. It requires the exact known table
+and column inventory, permits historical column ordering, and enforces compiled
+checks, uniqueness and deferred foreign keys atomically. It preserves received
+rowids and application/user version headers, verifies integrity and account
+inventory, and publishes a fresh immutable canonical name. Source constraints and
+index SQL are never copied. Failed builds discard their temporary file; publication
+never replaces an existing candidate. A post-publication flush error preserves the
+ambiguous candidate for recovery. Both native stores implement the same opaque
+build contract. Windows obtains delete access through the pinned object only after
+SQLite closes, so its handle sharing permits the build. Tests cover weakened source
+constraints, invalid rows, reordered columns, unknown state, source preservation,
+Linux transfer/rebuild and native Windows publication handles. This candidate and
+its digest are still not activation or legacy-key deletion authority: authenticated
+transport, durable commit, recovery and installer integration remain unfinished.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

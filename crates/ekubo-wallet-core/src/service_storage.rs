@@ -717,6 +717,60 @@ impl crate::custody_staging::CredentialStagingStore for PendingCredentialStorage
     }
 }
 impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage {
+    fn create_canonical_database(
+        &self,
+        stage: uuid::Uuid,
+    ) -> Result<crate::database_staging::CanonicalDatabase<'_>> {
+        self.validate_process()?;
+        let destination = crate::database_staging::canonical_file_name(stage)?;
+        let temporary = format!(".database-build-{}", uuid::Uuid::new_v4());
+        let path = self.directory_path()?.join(&temporary);
+        let parent: &File = &self.0.directory;
+        let file = File::from(openat(
+            parent,
+            &temporary,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(PRIVATE_FILE_MODE),
+        )?);
+        let discarded = temporary.clone();
+        let candidate = crate::database_staging::CanonicalDatabase::new(
+            path,
+            file,
+            move |_, published| {
+                rustix::fs::renameat_with(
+                    parent,
+                    &temporary,
+                    parent,
+                    &destination,
+                    RenameFlags::NOREPLACE,
+                )?;
+                *published = true;
+                parent.sync_all()?;
+                Ok(())
+            },
+            move |_| {
+                rustix::fs::unlinkat(parent, &discarded, AtFlags::empty())?;
+                Ok(())
+            },
+            self,
+        );
+        validate_file(candidate.file(), self.0.service_uid, true)?;
+        Ok(candidate)
+    }
+    fn canonical_database(
+        &self,
+        stage: uuid::Uuid,
+    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
+        self.validate_process()?;
+        let name = crate::database_staging::canonical_file_name(stage)?;
+        let file = open_regular(&self.0.directory, &name, self.0.service_uid, true)?;
+        Ok(crate::database_staging::StagedDatabase::new(
+            self.directory_path()?.join(name),
+            file,
+            self,
+        ))
+    }
+
     fn receive_database(
         &self,
         stage: uuid::Uuid,
@@ -743,17 +797,11 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
         &self,
         stage: uuid::Uuid,
     ) -> Result<crate::database_staging::StagedDatabase<'_>> {
-        use std::os::fd::AsRawFd as _;
         let file = self.open_staged_database(stage)?;
         // Resolve only our kernel-owned directory descriptor, never an IPC path.
         // Its root-owned parent prevents service/desktop renames; stage records
         // are immutable while this pending profile's singleton lock is held.
-        let directory =
-            std::fs::read_link(format!("/proc/self/fd/{}", self.0.directory.as_raw_fd()))?;
-        ensure!(
-            directory.is_absolute(),
-            "pending directory path is not absolute"
-        );
+        let directory = self.directory_path()?;
         Ok(crate::database_staging::StagedDatabase::new(
             directory.join(crate::database_staging::file_name(stage)?),
             file,
@@ -762,6 +810,13 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
     }
 }
 impl PendingCredentialStorage {
+    fn directory_path(&self) -> Result<PathBuf> {
+        use std::os::fd::AsRawFd as _;
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", self.0.directory.as_raw_fd()))?;
+        ensure!(path.is_absolute(), "pending directory path is not absolute");
+        Ok(path)
+    }
+
     fn validate_process(&self) -> Result<()> {
         ensure!(
             rustix::process::geteuid().as_raw() == self.0.service_uid,

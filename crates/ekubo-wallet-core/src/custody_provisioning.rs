@@ -147,6 +147,42 @@ impl PreparedServiceCredentials {
         )
     }
 
+    /// Build a fresh candidate using only compiled DDL and the received data.
+    /// Successful publication is still not activation or legacy-deletion authority.
+    pub fn rebuild_staged_database(
+        &self,
+        store: &(impl CredentialStagingStore + crate::database_staging::DatabaseStagingStore),
+        stage: &CredentialStage,
+    ) -> Result<crate::database_staging::DatabaseTransfer> {
+        self.verify_staged_inventory(store, stage)?;
+        let (owner, service, profile) = store.identity();
+        let cipher = CustodyEnrollment::from_bytes(&self.enrollment)?.unlock(
+            &WrappingKey::from_material(self.wrapping.clone()),
+            &owner,
+            &service,
+            profile,
+            &self.relay,
+        )?;
+        let key = cipher.open_database_key(&self.database)?;
+        let database_key = crate::policy_store::DatabaseKey::new(*key);
+        let source = store.staged_database(stage.id())?;
+        let candidate = store.create_canonical_database(stage.id())?;
+        crate::policy_store::migration_rebuild::rebuild(
+            source.path(),
+            candidate.path(),
+            &database_key,
+            &self.wallets,
+        )?;
+        candidate.publish()?;
+        let canonical = store.canonical_database(stage.id())?;
+        crate::policy_store::migration_database::verify_received(
+            canonical.path(),
+            &database_key,
+            &self.wallets,
+        )?;
+        canonical.transfer()
+    }
+
     /// Ciphertext for the desktop login keyring only. Never store these bytes
     /// beside the service wrapping key. This is not an activation/cleanup receipt.
     #[must_use]

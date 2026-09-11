@@ -431,3 +431,44 @@ fn native_streamed_database_is_private_immutable_and_partial_frames_are_unpublis
             .starts_with(".key-stage-")
     }));
 }
+
+#[test]
+fn canonical_build_handles_allow_sqlite_style_access_and_refuse_replacement() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let fixture = Fixture::new();
+    let file = create_database_stage(
+        fixture.parent.as_handle(),
+        ".database-build-test",
+        &fixture.owner,
+    )
+    .unwrap();
+    fixture.validate(&file).unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .open(fixture.path.join(".database-build-test"))
+        .unwrap();
+    writer.write_all(b"synthetic database pages").unwrap();
+    assert!(
+        database_publication_handle(&file).is_err(),
+        "SQLite handles must close before publication"
+    );
+    drop(writer);
+    file.sync_all().unwrap();
+    rename_new(&database_publication_handle(&file).unwrap(), "canonical.db").unwrap();
+    drop(file);
+    assert_eq!(
+        std::fs::read(fixture.path.join("canonical.db")).unwrap(),
+        b"synthetic database pages"
+    );
+    let other = create_database_stage(
+        fixture.parent.as_handle(),
+        ".database-build-other",
+        &fixture.owner,
+    )
+    .unwrap();
+    let publication = database_publication_handle(&other).unwrap();
+    assert!(rename_new(&publication, "canonical.db").is_err());
+    discard(&publication).unwrap();
+}

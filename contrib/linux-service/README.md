@@ -31,7 +31,12 @@ contract as Windows: declared length and digest, fixed-size buffering, handle-ba
 readback, and publication under a new stage name only after verification. This
 checks transferred bytes, not SQLCipher contents or migration authorization. It
 does not write active `wallet.db`; the privileged provisioning transport and final
-database/key verification and activation remain unfinished.
+activation remain unfinished. Core now verifies the received SQLCipher database
+and key-bound account inventory, then rebuilds a separate candidate using compiled
+schema and data-only copy. Linux and Windows share this contract; source constraints
+and indexes cannot become service authority. Candidate publication does not
+authorize activation or legacy-key deletion; durable installer recovery is still
+required.
 
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is

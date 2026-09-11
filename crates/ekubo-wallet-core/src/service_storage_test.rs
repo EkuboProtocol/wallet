@@ -560,6 +560,30 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     prepared
         .verify_staged_inventory(&pending, &credentials)
         .unwrap();
+    let abandoned_stage = uuid::Uuid::new_v4();
+    let abandoned = pending.create_canonical_database(abandoned_stage).unwrap();
+    let temporary_path = abandoned.path().to_owned();
+    assert!(temporary_path.exists());
+    drop(abandoned);
+    assert!(!temporary_path.exists());
+    assert!(pending.canonical_database(abandoned_stage).is_err());
+    let canonical_transfer = prepared
+        .rebuild_staged_database(&pending, &credentials)
+        .unwrap();
+    let canonical = pending.canonical_database(stage).unwrap();
+    assert_eq!(canonical.transfer().unwrap(), canonical_transfer);
+    assert!(
+        prepared
+            .rebuild_staged_database(&pending, &credentials)
+            .is_err()
+    );
+    assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".database-build-")
+    }));
     let mut received = pending.open_staged_database(stage).unwrap();
     assert_eq!(DatabaseTransfer::describe(&mut received).unwrap(), transfer);
     received.seek(SeekFrom::Start(0)).unwrap();

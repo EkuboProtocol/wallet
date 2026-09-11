@@ -562,6 +562,56 @@ impl crate::custody_staging::CredentialStagingStore for PendingCredentialStorage
 }
 
 impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage {
+    fn create_canonical_database(
+        &self,
+        stage: uuid::Uuid,
+    ) -> Result<crate::database_staging::CanonicalDatabase<'_>> {
+        crate::windows_service_identity::verify_service_process(self.0.identity.service_sid())?;
+        validate_private_handle(
+            self.0.directory.as_handle(),
+            &self.0.identity,
+            StorageKind::Directory,
+        )?;
+        let destination = crate::database_staging::canonical_file_name(stage)?;
+        let temporary = format!(".database-build-{}", uuid::Uuid::new_v4());
+        let file = write::create_database_stage(
+            self.0.directory.as_handle(),
+            &temporary,
+            self.0.identity.service_sid(),
+        )?;
+        let candidate = crate::database_staging::CanonicalDatabase::new(
+            self.0.data_dir.join(temporary),
+            file,
+            move |file, published| {
+                let publication = write::database_publication_handle(file)?;
+                write::rename_new(&publication, &destination)?;
+                *published = true;
+                file.sync_all()?;
+                Ok(())
+            },
+            |file| write::discard(&write::database_publication_handle(file)?),
+            self,
+        );
+        validate_private_handle(
+            candidate.file().as_handle(),
+            &self.0.identity,
+            StorageKind::File,
+        )?;
+        Ok(candidate)
+    }
+    fn canonical_database(
+        &self,
+        stage: uuid::Uuid,
+    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
+        let name = crate::database_staging::canonical_file_name(stage)?;
+        let file = self.0.open_file(&name)?;
+        Ok(crate::database_staging::StagedDatabase::new(
+            self.0.data_dir.join(name),
+            file,
+            self,
+        ))
+    }
+
     fn receive_database(
         &self,
         stage: uuid::Uuid,

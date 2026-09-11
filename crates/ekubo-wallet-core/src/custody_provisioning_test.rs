@@ -333,6 +333,16 @@ fn staging_refuses_the_wrong_protected_profile_before_writing() {
 }
 
 impl crate::database_staging::DatabaseStagingStore for StageStore {
+    fn create_canonical_database(
+        &self,
+        _: Uuid,
+    ) -> Result<crate::database_staging::CanonicalDatabase<'_>> {
+        anyhow::bail!("fixture does not publish canonical files")
+    }
+    fn canonical_database(&self, _: Uuid) -> Result<crate::database_staging::StagedDatabase<'_>> {
+        anyhow::bail!("fixture does not publish canonical files")
+    }
+
     fn receive_database(
         &self,
         _: Uuid,

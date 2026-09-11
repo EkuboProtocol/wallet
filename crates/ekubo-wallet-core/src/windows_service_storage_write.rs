@@ -14,8 +14,9 @@ use windows::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         },
         Storage::FileSystem::{
-            DELETE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_SHARE_MODE, FILE_SHARE_WRITE,
-            FileDispositionInfo, SetFileInformationByHandle,
+            DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_WRITE_THROUGH, FILE_GENERIC_WRITE,
+            FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_WRITE, FileDispositionInfo, ReOpenFile,
+            SetFileInformationByHandle,
         },
     },
     core::PCWSTR,
@@ -93,16 +94,49 @@ fn descriptor(owner_sid: &str) -> Result<Descriptor> {
 }
 
 // Keep immutable credential publication exclusive. Database and lock handles
-// must permit SQLite/other service connections to write while denying deletion.
+// must permit SQLite/other service connections to write. Temporary database
+// build pins additionally share deletion for later same-object publication.
 #[derive(Clone, Copy)]
 enum OpenMode {
     NewCredential,
+    DatabaseBuild,
     DeleteCredential,
     Database,
 }
 
 fn create(parent: BorrowedHandle<'_>, component: &str, owner_sid: &str) -> Result<File> {
     open_handle(parent, component, owner_sid, OpenMode::NewCredential)
+}
+
+pub(super) fn create_database_stage(
+    parent: BorrowedHandle<'_>,
+    component: &str,
+    owner_sid: &str,
+) -> Result<File> {
+    open_handle(parent, component, owner_sid, OpenMode::DatabaseBuild)
+}
+
+// Acquire DELETE access to the same pinned object only after SQLite closes.
+// The build pin shares deletion, but requests no DELETE access itself, allowing
+// SQLite's ordinary READ|WRITE sharing mode. Private ACLs and the pending root's
+// singleton lock prevent outside writers from renaming the temporary name.
+pub(super) fn database_publication_handle(file: &File) -> Result<File> {
+    // SAFETY: the original file stays live. ReOpenFile addresses its object,
+    // never a pathname; OS sharing checks reject any remaining SQLite handle.
+    let handle = unsafe {
+        ReOpenFile(
+            HANDLE(file.as_raw_handle()),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_WRITE_THROUGH,
+        )
+    }?;
+    ensure!(
+        !handle.is_invalid(),
+        "database reopen returned an invalid handle"
+    );
+    // SAFETY: transfer ownership of the newly opened handle exactly once.
+    Ok(unsafe { File::from_raw_handle(handle.0) })
 }
 
 pub(super) fn open_database_file(
@@ -171,7 +205,9 @@ fn open_handle(
             match mode {
                 OpenMode::NewCredential => FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
                 OpenMode::DeleteCredential => FILE_GENERIC_READ | DELETE,
-                OpenMode::Database => FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                OpenMode::Database | OpenMode::DatabaseBuild => {
+                    FILE_GENERIC_READ | FILE_GENERIC_WRITE
+                }
             },
             &raw const attributes,
             &raw mut status,
@@ -180,9 +216,10 @@ fn open_handle(
             match mode {
                 OpenMode::NewCredential | OpenMode::DeleteCredential => FILE_SHARE_MODE(0),
                 OpenMode::Database => FILE_SHARE_READ | FILE_SHARE_WRITE,
+                OpenMode::DatabaseBuild => FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             },
             match mode {
-                OpenMode::NewCredential => FILE_CREATE,
+                OpenMode::NewCredential | OpenMode::DatabaseBuild => FILE_CREATE,
                 OpenMode::DeleteCredential => FILE_OPEN,
                 OpenMode::Database => FILE_OPEN_IF,
             },
@@ -203,7 +240,7 @@ fn open_handle(
     Ok(unsafe { File::from_raw_handle(handle.0) })
 }
 
-fn rename_new(file: &File, destination: &str) -> Result<()> {
+pub(super) fn rename_new(file: &File, destination: &str) -> Result<()> {
     // repr(C) preserves the native header's alignment and flexible-name offset.
     // Our validated names fit this fixed allocation; no unaligned cast is used.
     #[repr(C)]
@@ -240,8 +277,8 @@ fn rename_new(file: &File, destination: &str) -> Result<()> {
     let mut status = IO_STATUS_BLOCK::default();
     // SAFETY: the aligned structure and source handle remain live. The name is
     // a validated single component, so NULL RootDirectory uses the file's own
-    // directory, never cwd. The source denies delete sharing and its parent is
-    // pinned by publish; replacement and cross-directory moves are disabled.
+    // directory, never cwd. Its parent is pinned and private; replacement and
+    // cross-directory moves are disabled.
     unsafe {
         NtSetInformationFile(
             HANDLE(file.as_raw_handle()),
@@ -255,7 +292,7 @@ fn rename_new(file: &File, destination: &str) -> Result<()> {
     Ok(())
 }
 
-fn discard(file: &File) -> Result<()> {
+pub(super) fn discard(file: &File) -> Result<()> {
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: the owned handle has DELETE access; only this open object is
     // marked for deletion. No path is reopened and no replacement is followed.
