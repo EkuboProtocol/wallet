@@ -468,6 +468,19 @@ These diagnostics passed the full local gate and Windows GNU Clippy. Logs:
 `~/Documents/wallet-native-acl-diagnostic-gate.log` and
 `~/Documents/wallet-native-acl-diagnostic-cross.log`.
 
+Native diagnostic run `34544772632` identified the rejected entry as
+`BUILTIN\Users` (`S-1-5-32-545`), mask `0x116`, on `C:\ProgramData`.
+This includes attribute-write permission. It cannot be dismissed as cosmetic:
+[MS-FSA's reparse-point operation](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165)
+accepts either data-write or attribute-write access, and requires a directory
+to be empty before setting a reparse point. A native synthetic-directory test
+now exercises an attribute-only writer alongside the actual retained-handle
+open mode, attempts to delete the pinned child and redirect its parent, and
+uses the same reparse request on the emptied parent as a positive control.
+Native execution of this new test is pending. The machine-directory policy
+remains strict until the protection and traversal races are validated; the
+ProgramData compatibility failure remains unresolved.
+
 ## Work still required before completion
 
 1. Bootstrap Linux and Windows service identities, protected executable paths,

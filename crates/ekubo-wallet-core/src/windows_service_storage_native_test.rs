@@ -97,6 +97,93 @@ fn native_child_open_rejects_a_concurrent_writer() {
     assert!(open_relative(parent.as_handle(), "state", StorageKind::File).is_ok());
 }
 
+fn attribute_writer(path: &std::path::Path) -> File {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES.0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .open(path)
+        .unwrap()
+}
+
+fn set_junction(handle: &File, target: &std::path::Path) -> windows::core::Result<()> {
+    // REPARSE_DATA_BUFFER, MountPointReparseBuffer layout from MS-FSCC 2.1.2.2.
+    // These fixed SDK constants avoid adding production features for a test.
+    const SET_REPARSE_POINT: u32 = 0x0009_00a4;
+    const MOUNT_POINT_TAG: u32 = 0xa000_0003;
+    let target = target.to_str().unwrap();
+    let substitute: Vec<u16> = format!(r"\??\{target}").encode_utf16().collect();
+    let print: Vec<u16> = target.encode_utf16().collect();
+    let substitute_bytes = u16::try_from(substitute.len() * 2).unwrap();
+    let print_bytes = u16::try_from(print.len() * 2).unwrap();
+    let data_length = 8 + substitute_bytes + 2 + print_bytes + 2;
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(&MOUNT_POINT_TAG.to_le_bytes());
+    for value in [
+        data_length,
+        0, // reserved
+        0, // substitute offset
+        substitute_bytes,
+        substitute_bytes + 2, // print offset
+        print_bytes,
+    ] {
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+    for unit in substitute.into_iter().chain([0]).chain(print).chain([0]) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut returned = 0;
+    // SAFETY: the live synchronous handle and correctly sized input buffer
+    // remain borrowed through this call. No output buffer is requested.
+    unsafe {
+        windows::Win32::System::IO::DeviceIoControl(
+            HANDLE(handle.as_raw_handle()),
+            SET_REPARSE_POINT,
+            Some(buffer.as_ptr().cast()),
+            u32::try_from(buffer.len()).unwrap(),
+            None,
+            0,
+            Some(&raw mut returned),
+            None,
+        )
+    }
+}
+
+#[test]
+fn native_attribute_writer_cannot_redirect_a_directory_with_a_pinned_child() {
+    use windows::Win32::Foundation::ERROR_DIR_NOT_EMPTY;
+    let dir = Directory::new();
+    let target = dir.0.join("target");
+    let parent_path = dir.0.join("parent");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::create_dir(&parent_path).unwrap();
+    let writer = attribute_writer(&parent_path);
+    let fixture = directory_handle(&dir.0);
+    let parent = open_relative(fixture.as_handle(), "parent", StorageKind::Directory).unwrap();
+    // Attribute-only handles coexist with the production no-write/delete
+    // sharing mode. A retained child must supply the nonempty invariant.
+    std::fs::create_dir(parent_path.join("child")).unwrap();
+    let child = open_relative(parent.as_handle(), "child", StorageKind::Directory).unwrap();
+    assert!(std::fs::remove_dir(parent_path.join("child")).is_err());
+    let error = set_junction(&writer, &target).unwrap_err();
+    assert_eq!(error.code(), ERROR_DIR_NOT_EMPTY.to_hresult());
+    read_security(parent.as_handle(), StorageKind::Directory).unwrap();
+
+    drop(child);
+    std::fs::remove_dir(parent_path.join("child")).unwrap();
+    // Positive control: the same attribute-only handle and request can redirect
+    // an empty parent, even while its production handle remains open.
+    set_junction(&writer, &target).unwrap();
+    assert!(read_security(parent.as_handle(), StorageKind::Directory).is_err());
+    drop(writer);
+    drop(parent);
+    std::fs::remove_dir(parent_path).unwrap();
+}
+
 fn validate_sddl(sddl: &str) -> Result<()> {
     let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
