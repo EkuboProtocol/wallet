@@ -21,6 +21,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[path = "custody_recovery.rs"]
+mod recovery;
+
 /// A supplied key and the existing metadata whose identity must remain unchanged.
 /// Preparation consumes and zeroizes supplied bytes. Opaque core key types cannot
 /// be passed here, and no existing credential is retrieved or exported.
@@ -281,12 +284,7 @@ impl<'a, S: CredentialStagingStore> StageWriter<'a, S> {
             read.as_slice() == bytes,
             "staged credential readback mismatch"
         );
-        let name = record.file_name();
-        self.digest.update(u64::try_from(name.len())?.to_le_bytes());
-        self.digest.update(name.as_bytes());
-        self.digest
-            .update(u64::try_from(bytes.len())?.to_le_bytes());
-        self.digest.update(bytes);
+        digest_record(&mut self.digest, record, bytes)?;
         self.count = self
             .count
             .checked_add(1)
@@ -309,4 +307,13 @@ impl<'a, S: CredentialStagingStore> StageWriter<'a, S> {
         );
         Ok(stage)
     }
+}
+
+fn digest_record(digest: &mut Sha256, record: ServiceCredentialRecord, bytes: &[u8]) -> Result<()> {
+    let name = record.file_name();
+    digest.update(u64::try_from(name.len())?.to_le_bytes());
+    digest.update(name.as_bytes());
+    digest.update(u64::try_from(bytes.len())?.to_le_bytes());
+    digest.update(bytes);
+    Ok(())
 }

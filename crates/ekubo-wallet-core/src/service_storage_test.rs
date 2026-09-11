@@ -703,6 +703,18 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
         candidate.relay().as_bytes().len(),
         crate::custody_envelope::SEALED_KEY_BYTES
     );
+    let recovered_stage = candidate.stage();
+    let recovery_relay = candidate.relay().clone();
+    drop(candidate);
+    assert_recovery(
+        &pending,
+        directory.path(),
+        recovered_stage,
+        session,
+        &transfer,
+        recovery_relay,
+        &wallet,
+    );
     let mut received = pending.open_staged_database(stage).unwrap();
     assert_eq!(DatabaseTransfer::describe(&mut received).unwrap(), transfer);
     received.seek(SeekFrom::Start(0)).unwrap();
@@ -779,4 +791,68 @@ fn assert_candidate_record(
         record["destination"],
         serde_json::json!({"owner":owner,"service":service,"profile":profile})
     );
+}
+
+fn assert_recovery(
+    pending: &PendingCredentialStorage,
+    directory: &std::path::Path,
+    stage: uuid::Uuid,
+    session: uuid::Uuid,
+    source: &crate::database_staging::DatabaseTransfer,
+    relay: crate::custody_envelope::WrappedDataKey,
+    wallet: &crate::config::WalletMetadata,
+) {
+    use crate::{custody_staging::StagedRecord, migration_transfer::recover};
+    let expected = std::slice::from_ref(wallet);
+    let candidate = recover(pending, stage, session, source, relay.clone(), expected).unwrap();
+    assert_eq!(candidate.stage(), stage);
+    assert_eq!(candidate.session(), session);
+    drop(candidate);
+    assert!(
+        recover(
+            pending,
+            stage,
+            uuid::Uuid::new_v4(),
+            source,
+            relay.clone(),
+            expected
+        )
+        .is_err()
+    );
+    assert!(recover(pending, stage, session, source, relay.clone(), &[]).is_err());
+    let mut changed_source = source.clone();
+    changed_source.sha256[0] ^= 1;
+    assert!(
+        recover(
+            pending,
+            stage,
+            session,
+            &changed_source,
+            relay.clone(),
+            expected
+        )
+        .is_err()
+    );
+    let name = directory.join(StagedRecord::Candidate.file_name(stage).unwrap());
+    let original = std::fs::read(&name).unwrap();
+    for field in ["relay", "version", "relay_digest", "credentials"] {
+        let mut record: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        match field {
+            "relay" => record[field] = serde_json::json!(hex::encode(relay.as_bytes())),
+            "version" => record[field] = serde_json::json!(99),
+            "relay_digest" => record[field] = serde_json::to_value([0_u8; 32]).unwrap(),
+            _ => record[field]["digest"] = serde_json::to_value([0_u8; 32]).unwrap(),
+        }
+        std::fs::write(&name, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(recover(pending, stage, session, source, relay.clone(), expected).is_err());
+    }
+    std::fs::write(&name, original).unwrap();
+    let canonical = directory.join(crate::database_staging::canonical_file_name(stage).unwrap());
+    let mut bytes = std::fs::read(&canonical).unwrap();
+    bytes[100] ^= 1;
+    std::fs::write(&canonical, &bytes).unwrap();
+    assert!(recover(pending, stage, session, source, relay.clone(), expected).is_err());
+    bytes[100] ^= 1;
+    std::fs::write(&canonical, bytes).unwrap();
+    assert!(recover(pending, stage, session, source, relay, expected).is_ok());
 }

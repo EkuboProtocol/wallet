@@ -139,23 +139,21 @@ pub struct ReceivedCandidate<'a, S> {
 /// Durable staging evidence for later recovery. No field authorizes activation:
 /// recovery must revalidate protected storage, credentials and database contents.
 /// The source descriptor binds the frozen transfer, not a live source pathname.
-#[derive(Serialize)]
-struct CandidateRecord<'a> {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateRecord {
     version: u8,
     session: Uuid,
-    destination: &'a Destination,
-    source: &'a DatabaseTransfer,
-    credentials: &'a CredentialStage,
-    canonical: &'a DatabaseTransfer,
+    destination: Destination,
+    source: DatabaseTransfer,
+    credentials: CredentialStage,
+    canonical: DatabaseTransfer,
     // Persist only the digest. The envelope must stay in the login keyring,
     // separate from the service's wrapping key, including during recovery.
     relay_digest: [u8; 32],
 }
 
-fn persist_candidate(
-    store: &impl CredentialStagingStore,
-    record: &CandidateRecord<'_>,
-) -> Result<()> {
+fn persist_candidate(store: &impl CredentialStagingStore, record: &CandidateRecord) -> Result<()> {
     let bytes = encode(record, MAX_HEADER_BYTES)?;
     let stage = record.credentials.id();
     store.create_new(stage, StagedRecord::Candidate, &bytes)?;
@@ -164,6 +162,68 @@ fn persist_candidate(
         "migration candidate readback mismatch"
     );
     Ok(())
+}
+
+/// Revalidate an existing stage after losing in-memory preparation. The host must
+/// authenticate the installer and hold the native pending root lock. Session and
+/// source describe the original transfer; this does not fence/revalidate the live
+/// legacy wallet, persist the login relay, activate custody, or authorize deletion.
+/// The relay must be supplied separately, never recovered from service storage.
+pub fn recover<'a, S: CredentialStagingStore + DatabaseStagingStore>(
+    store: &'a S,
+    stage: Uuid,
+    session: Uuid,
+    source: &DatabaseTransfer,
+    relay: WrappedDataKey,
+    expected: &[WalletMetadata],
+) -> Result<ReceivedCandidate<'a, S>> {
+    ensure!(
+        !stage.is_nil()
+            && !session.is_nil()
+            && u64::try_from(expected.len())? <= INSTALLER_LIMITS.accounts,
+        "invalid recovery request"
+    );
+    let bytes = store.read(stage, StagedRecord::Candidate)?;
+    ensure!(
+        bytes.len() <= MAX_HEADER_BYTES as usize,
+        "recovery record is oversized"
+    );
+    let record: CandidateRecord = serde_json::from_slice(&bytes)?;
+    let (owner, service, profile) = store.identity();
+    ensure!(
+        record.version == 1
+            && record.session == session
+            && record.credentials.id() == stage
+            && record.destination
+                == Destination {
+                    owner,
+                    service,
+                    profile
+                }
+            && record.source == *source
+            && record.source.bytes != 0
+            && record.canonical.bytes != 0
+            && record.relay_digest == relay.digest(),
+        "recovery candidate binding mismatch"
+    );
+    ensure!(
+        store.staged_database(stage)?.transfer()? == record.source,
+        "recovery source snapshot changed"
+    );
+    let prepared = PreparedServiceCredentials::restore(
+        store,
+        &record.credentials,
+        relay,
+        expected,
+        &record.canonical,
+    )?;
+    Ok(ReceivedCandidate {
+        _store: store,
+        prepared,
+        stage: record.credentials,
+        session,
+        canonical: record.canonical,
+    })
 }
 
 impl<S> ReceivedCandidate<'_, S> {
@@ -314,10 +374,10 @@ pub fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
         &CandidateRecord {
             version: 1,
             session: header.session,
-            destination: &header.destination,
-            source: &header.database,
-            credentials: &stage,
-            canonical: &canonical,
+            destination: header.destination.clone(),
+            source: header.database.clone(),
+            credentials: stage.clone(),
+            canonical: canonical.clone(),
             relay_digest: prepared.relay().digest(),
         },
     )?;

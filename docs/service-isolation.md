@@ -328,6 +328,19 @@ activation/deletion authority. Recovery still needs to revalidate the actual
 protected credentials and database, persist the login relay and coordinate the
 source fence with durable activation.
 
+The shared `migration_transfer::recover` operation can revalidate a stage after
+its in-memory preparation is lost. It reads a bounded, strict candidate record
+(unknown fields, including the superseded relay field, are rejected), checks the
+expected session, destination, stage, source descriptor and separately supplied
+relay digest, and hashes the retained source snapshot. Inside core it unlocks the
+staged enrollment, checks every account key against the expected metadata,
+recomputes the credential marker and verifies both received and canonical database
+inventories and the canonical digest. Its result retains the pending-root borrow
+and exposes no raw-record visitor. This is a service-side primitive with no RPC
+entry point yet: the host still must authenticate the installer, bound execution,
+and revalidate/quiesce the live legacy source before any later activation. It
+cannot recover a missing relay from service storage or authorize key deletion.
+
 The full Windows matrix also builds the service's `windows-migration-scm` example
 with the test-only `migration-fixture` feature. The disposable SCM setup runs the
 actual `windows_provisioning::run` host and `windows_provisioning_client::transfer`

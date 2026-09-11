@@ -58,7 +58,8 @@ pub trait CredentialStagingStore {
     fn read(&self, stage: Uuid, record: StagedRecord) -> Result<Zeroizing<Vec<u8>>>;
 }
 
-#[derive(serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialStage {
     pub(crate) version: u8,
     pub(crate) stage: Uuid,

@@ -202,10 +202,10 @@ fn candidate_publication_rejects_write_failure_corrupt_readback_and_replacement(
     let record = CandidateRecord {
         version: 1,
         session: header.session,
-        destination: &header.destination,
-        source: &header.database,
-        credentials: &credentials,
-        canonical: &header.database,
+        destination: header.destination.clone(),
+        source: header.database.clone(),
+        credentials,
+        canonical: header.database.clone(),
         relay_digest: [0x55; 32],
     };
     for (fail_write, corrupt_read) in [(true, false), (false, true), (false, false)] {
