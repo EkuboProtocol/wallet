@@ -67,3 +67,25 @@ async fn supervisor_opens_storage_only_when_a_desktop_is_active() {
     drop(active);
     assert_eq!(*sessions.active.borrow(), 0);
 }
+
+#[test]
+fn agent_connections_are_bound_to_an_active_period_and_quick_reopen_cannot_revive_them() {
+    let sessions = DesktopSessions::default();
+    assert!(sessions.agent_period().is_err());
+    let reserved = sessions.reserve().unwrap();
+    assert!(sessions.agent_period().is_err());
+    let first = reserved.activate();
+    let second = sessions.reserve().unwrap().activate();
+    let old = sessions.agent_period().unwrap();
+    drop(first);
+    assert!(!old.is_cancelled());
+    drop(second);
+    let reopened = sessions.reserve().unwrap().activate();
+    let new = sessions.agent_period().unwrap();
+    assert!(old.is_cancelled());
+    assert!(!new.is_cancelled());
+    new.cancel();
+    assert!(!sessions.agent_period().unwrap().is_cancelled());
+    drop(reopened);
+    assert!(sessions.agent_period().is_err());
+}

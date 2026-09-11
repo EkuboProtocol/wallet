@@ -34,9 +34,10 @@ async fn rpc(
 }
 
 #[tokio::test]
-async fn relayed_mcp_preserves_discovery_and_calls_without_a_desktop_lease() {
+async fn relayed_mcp_preserves_discovery_and_calls_without_acquiring_an_extra_desktop_lease() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(dir.path());
+    let _desktop = runtime.reserve_desktop().unwrap().activate();
     let (service, mut startup) = OwnerStreamService::new();
     let service = Arc::new(service);
     let (peer, mut client, checked) = pair(true);
@@ -71,6 +72,7 @@ async fn relayed_mcp_preserves_discovery_and_calls_without_a_desktop_lease() {
         agent,
         Arc::new(AtomicUsize::new(0)),
         events,
+        tokio_util::sync::CancellationToken::new(),
     ));
     baseline
         .write_all(b"{\"client\":\"codex\"}\n")
@@ -106,20 +108,10 @@ async fn relayed_mcp_preserves_discovery_and_calls_without_a_desktop_lease() {
     }
     assert_eq!(checked.load(Ordering::SeqCst), 2);
     assert_eq!(service.mcp_active.load(Ordering::SeqCst), 1);
-    let reservations: Vec<_> = (0..32)
+    let reservations: Vec<_> = (0..31)
         .map(|_| runtime.reserve_desktop().unwrap())
         .collect();
-    assert!(
-        runtime
-            .owner
-            .encode(Request::BeginDappSession {
-                uri: "not-a-pairing".into()
-            })
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("no desktop session is active")
-    );
+    assert!(runtime.reserve_desktop().is_err());
     drop(reservations);
     drop(client);
     drop(baseline);
@@ -180,7 +172,9 @@ async fn locked_or_malformed_handoff_never_switches_to_mcp() {
 async fn cancelling_the_service_task_closes_mcp_and_releases_its_active_count() {
     let dir = tempfile::tempdir().unwrap();
     let (service, _startup) = OwnerStreamService::new();
-    service.publish(runtime(dir.path())).unwrap();
+    let runtime = runtime(dir.path());
+    let _desktop = runtime.reserve_desktop().unwrap().activate();
+    service.publish(runtime).unwrap();
     let service = Arc::new(service);
     let (peer, mut client, _) = pair(true);
     let serving = service.clone();
@@ -208,4 +202,64 @@ async fn cancelling_the_service_task_closes_mcp_and_releases_its_active_count() 
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn an_unlocked_service_without_a_desktop_rejects_mcp_before_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _startup) = OwnerStreamService::new();
+    service.publish(runtime(dir.path())).unwrap();
+    let (peer, mut client, _) = pair(true);
+    let task =
+        tokio::spawn(async move { service.serve(peer, |_| panic!("unexpected unlock")).await });
+    wire::read_hello(&mut client).await.unwrap();
+    wire::write(&mut client, Kind::Agent, &[]).await.unwrap();
+    let reply = wire::read(&mut client).await.unwrap().unwrap();
+    assert_eq!(reply.kind, Kind::Error);
+    assert!(
+        std::str::from_utf8(reply.body())
+            .unwrap()
+            .contains("no desktop session is active")
+    );
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn quitting_then_reopening_closes_old_mcp_streams_and_allows_new_connections() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(dir.path());
+    let desktop = runtime.reserve_desktop().unwrap().activate();
+    let (service, _startup) = OwnerStreamService::new();
+    service.publish(runtime.clone()).unwrap();
+    let service = Arc::new(service);
+    let (peer, mut client, _) = pair(true);
+    let serving = service.clone();
+    let task =
+        tokio::spawn(async move { serving.serve(peer, |_| panic!("unexpected unlock")).await });
+    wire::read_hello(&mut client).await.unwrap();
+    wire::write(&mut client, Kind::Agent, &[]).await.unwrap();
+    assert_eq!(
+        wire::read(&mut client).await.unwrap().unwrap().kind,
+        Kind::Ok
+    );
+    client.write_all(b"{\"client\":\"codex\"}\n").await.unwrap();
+    let mut client = BufReader::new(client);
+    assert!(rpc(&mut client, 1, "tools/list", json!({})).await["result"]["tools"].is_array());
+    drop(desktop);
+    let _reopened = runtime.reserve_desktop().unwrap().activate();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(service.mcp_active.load(Ordering::SeqCst), 0);
+    let mut line = String::new();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), client.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    assert!(runtime.agent_connection().is_ok());
 }

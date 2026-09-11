@@ -78,7 +78,15 @@ impl McpIpcServer {
                     let events = listener_events.clone();
                     let active = connection_count.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = serve_connection(stream, agent, active, events).await {
+                        if let Err(error) = serve_connection(
+                            stream,
+                            agent,
+                            active,
+                            events,
+                            CancellationToken::new(),
+                        )
+                        .await
+                        {
                             tracing::warn!(%error, "local MCP bridge disconnected");
                         }
                     });
@@ -138,7 +146,15 @@ impl McpIpcServer {
                     let events = listener_events.clone();
                     let active = connection_count.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = serve_connection(server, agent, active, events).await {
+                        if let Err(error) = serve_connection(
+                            server,
+                            agent,
+                            active,
+                            events,
+                            CancellationToken::new(),
+                        )
+                        .await
+                        {
                             tracing::warn!(%error, "local MCP bridge disconnected");
                         }
                     });

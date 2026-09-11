@@ -1,7 +1,6 @@
 //! Shared owner dispatch over a stream whose OS adapter authenticates each read.
 
 use crate::{
-    authority::AgentApi,
     custody_bootstrap::{CustodyBootstrap, Startup},
     runtime::ServiceRuntime,
 };
@@ -30,7 +29,7 @@ pub(crate) struct OwnerStreamService {
 
 enum Next {
     Finished,
-    Mcp(AgentApi),
+    Mcp(crate::runtime::ServiceAgentConnection),
 }
 
 impl OwnerStreamService {
@@ -75,13 +74,9 @@ impl OwnerStreamService {
             Ok(Next::Mcp(agent)) => {
                 // After the empty acknowledgement, this stream is exclusively
                 // MCP. Never write owner frames into it or accept owner calls.
-                crate::mcp_transport::serve_connection(
-                    peer.into_stream(),
-                    agent,
-                    self.mcp_active.clone(),
-                    self.runtime()?.events(),
-                )
-                .await
+                agent
+                    .serve(peer.into_stream(), self.mcp_active.clone())
+                    .await
             }
             Err(error) => {
                 let message =
@@ -103,7 +98,7 @@ impl OwnerStreamService {
             Kind::Call => self.call(peer, &frame).await?,
             Kind::Agent => {
                 ensure!(frame.body().is_empty(), "MCP handoff request has a payload");
-                let agent = self.runtime()?.agent_api();
+                let agent = self.runtime()?.agent_connection()?;
                 wire::write(peer.stream(), Kind::Ok, &[]).await?;
                 return Ok(Next::Mcp(agent));
             }

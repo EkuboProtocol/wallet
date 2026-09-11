@@ -79,12 +79,11 @@ pub async fn run(owner_uid: u32) -> Result<()> {
                     continue;
                 }
                 let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
-                let agent = service.agent_api();
+                let Ok(agent) = service.agent_connection() else { continue };
                 let active = active.clone();
-                let events = events.clone();
                 connections.spawn(async move {
                     let _slot = slot;
-                    if let Err(error) = crate::mcp_transport::serve_connection(stream, agent, active, events).await {
+                    if let Err(error) = agent.serve(stream, active).await {
                         tracing::debug!(%error, "wallet service MCP session ended");
                     }
                 });

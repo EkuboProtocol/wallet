@@ -23,6 +23,32 @@ pub struct ServiceRuntime {
     dapps: Arc<DappRuntime>,
 }
 
+pub(crate) struct ServiceAgentConnection {
+    agent: AgentApi,
+    events: EventBus,
+    stopped: tokio_util::sync::CancellationToken,
+}
+
+impl ServiceAgentConnection {
+    pub(crate) async fn serve<S>(
+        self,
+        stream: S,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        crate::mcp_transport::serve_connection(
+            stream,
+            self.agent,
+            active,
+            self.events,
+            self.stopped,
+        )
+        .await
+    }
+}
+
 impl ServiceRuntime {
     /// Accept only authority opened after the platform's identity and custody
     /// bootstrap. No local-store fallback or platform selection occurs here.
@@ -43,9 +69,17 @@ impl ServiceRuntime {
         }
     }
 
-    #[must_use]
-    pub fn agent_api(&self) -> AgentApi {
+    #[cfg(test)]
+    pub(crate) fn agent_api(&self) -> AgentApi {
         self.authority.agent_api()
+    }
+
+    pub(crate) fn agent_connection(&self) -> Result<ServiceAgentConnection> {
+        Ok(ServiceAgentConnection {
+            stopped: self.sessions.agent_period()?,
+            agent: self.authority.agent_api(),
+            events: self.events(),
+        })
     }
 
     #[must_use]

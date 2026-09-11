@@ -79,6 +79,17 @@ protected service installer is implemented. No desktop authorization proof is cr
 for a service profile. Full packaged service behavior, installation/migration, protected updates, and
 Windows native owner authorization remain to be completed.
 
+Service MCP admission now also follows desktop lifetime on Linux and Windows.
+The runtime issues a connection bound to the current active period only after OS
+peer authentication. Pending desktop reservations do not enable MCP. Closing the
+last active desktop cancels that period permanently, including clients waiting
+for their initial handshake and running MCP sessions; quick reopen creates a new
+period and cannot revive old connections. Cancellation reaches rmcp's own service
+task and cleanup, and a dropped connection cannot cancel other clients. The
+production service no longer exposes an unrestricted `AgentApi` to platform hosts.
+This is availability control, not owner authorization, and cannot undo a transaction
+already submitted. Native packaged lifetime behavior remains to be verified.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

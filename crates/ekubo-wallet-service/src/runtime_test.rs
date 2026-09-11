@@ -42,3 +42,26 @@ async fn runtime_desktop_leases_gate_dapp_admission_until_the_last_disconnect() 
     runtime.close_owner_reviews().unwrap();
     runtime.shutdown_dapps().await.unwrap();
 }
+
+#[tokio::test]
+async fn ending_the_desktop_period_closes_an_agent_waiting_for_its_first_handshake() {
+    use tokio::io::AsyncReadExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let runtime = ServiceRuntime::new(ApplicationAuthority::open(owner.config().clone()).unwrap());
+    assert!(runtime.agent_connection().is_err());
+    let desktop = runtime.reserve_desktop().unwrap().activate();
+    let agent = runtime.agent_connection().unwrap();
+    let (mut client, stream) = tokio::io::duplex(1024);
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task = tokio::spawn(agent.serve(stream, active.clone()));
+    tokio::task::yield_now().await;
+    drop(desktop);
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+    assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

@@ -47,15 +47,20 @@ pub(crate) async fn serve_connection<S>(
     agent: AgentApi,
     active: Arc<AtomicUsize>,
     events: EventBus,
+    stopped: tokio_util::sync::CancellationToken,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    let _cancel_on_drop = stopped.clone().drop_guard();
     let (read, write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
-    let hello = read_bounded_line(&mut read)
-        .await?
-        .context("bridge closed before its handshake")?;
+    let hello = tokio::select! {
+        biased;
+        () = stopped.cancelled() => return Ok(()),
+        hello = read_bounded_line(&mut read) => hello?,
+    }
+    .context("bridge closed before its handshake")?;
     let hello: BridgeHello = serde_json::from_slice(&hello).context("invalid bridge handshake")?;
     ensure!(
         matches!(
@@ -84,7 +89,7 @@ where
     let server = agent.server(session_id, harness)?;
     let _active = ActiveConnection::begin(active, events);
     let result = server
-        .serve((read, write))
+        .serve_with_ct((read, write), stopped)
         .await
         .context("MCP initialization failed")?
         .waiting()
