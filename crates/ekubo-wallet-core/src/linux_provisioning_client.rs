@@ -19,13 +19,29 @@ use zeroize::Zeroizing;
 /// alive too. Dropping this object aborts retention; it cannot undo staged files.
 /// No method authorizes activation or deletion of legacy credentials.
 pub struct StagedSource {
-    _snapshot: MigrationDatabaseSnapshot,
+    snapshot: MigrationDatabaseSnapshot,
     _bus: Connection,
     reply: StagingReply,
     destination: Destination,
+    checkpoint: Option<migration_transfer::RecoveryCheckpoint>,
 }
 
 impl StagedSource {
+    /// Capture journal evidence while retaining the source fence. The caller
+    /// must durably persist it in protected storage and the relay separately.
+    pub fn checkpoint(&mut self) -> Result<migration_transfer::RecoveryCheckpoint> {
+        if let Some(checkpoint) = &self.checkpoint {
+            return Ok(checkpoint.clone());
+        }
+        let checkpoint = migration_transfer::RecoveryCheckpoint::capture(
+            self.destination.clone(),
+            &self.reply,
+            &mut self.snapshot,
+        )?;
+        self.checkpoint = Some(checkpoint.clone());
+        Ok(checkpoint)
+    }
+
     #[must_use]
     pub const fn reply(&self) -> &StagingReply {
         &self.reply
@@ -42,16 +58,27 @@ impl StagedSource {
             anyhow::bail!("pending recovery profile changed");
         }
         let Self {
-            _snapshot: snapshot,
+            snapshot,
             _bus: old_bus,
             reply: previous,
+            checkpoint,
             ..
         } = self;
+        let recovery_checkpoint = checkpoint.clone();
         let result = exchange(
             &bus,
             &identity,
             snapshot,
             move |stream, destination, snapshot| {
+                if let Some(checkpoint) = recovery_checkpoint {
+                    return checkpoint.exchange(
+                        stream,
+                        destination,
+                        snapshot,
+                        previous.relay().clone(),
+                        &expected,
+                    );
+                }
                 migration_transfer::recover_exchange(
                     stream,
                     destination,
@@ -65,10 +92,11 @@ impl StagedSource {
         let _ = old_bus.close().await;
         match result {
             Ok((snapshot, reply)) => Ok(Self {
-                _snapshot: snapshot,
+                snapshot,
                 _bus: bus,
                 reply,
                 destination,
+                checkpoint,
             }),
             Err(error) => {
                 let _ = bus.close().await;
@@ -111,10 +139,11 @@ pub async fn transfer(
     .await;
     match result {
         Ok((snapshot, reply)) => Ok(StagedSource {
-            _snapshot: snapshot,
+            snapshot,
             _bus: bus,
             reply,
             destination,
+            checkpoint: None,
         }),
         Err(error) => {
             let _ = bus.close().await;
@@ -233,6 +262,43 @@ async fn exchange(
         _ = departed.next() => Err(anyhow::anyhow!("pending service disconnected")),
         () = bus.closed() => Err(anyhow::anyhow!("provisioning bus disconnected")),
         () = tokio::time::sleep(migration_transfer::INSTALLER_TIMEOUT) => Err(anyhow::anyhow!("provisioning timed out")),
+    }
+}
+
+/// Resume from protected journal evidence after re-quiescing and freezing the
+/// legacy source. The caller retains lifecycle exclusion through commit/abort.
+/// The relay must come from the actual owner's separate login credential store.
+pub async fn resume(
+    owner_uid: u32,
+    checkpoint: migration_transfer::RecoveryCheckpoint,
+    snapshot: MigrationDatabaseSnapshot,
+    relay: crate::custody_envelope::WrappedDataKey,
+    expected: Vec<WalletMetadata>,
+) -> Result<StagedSource> {
+    let (identity, bus) = connect(owner_uid).await?;
+    let destination = destination(&identity);
+    let evidence = checkpoint.clone();
+    let result = exchange(
+        &bus,
+        &identity,
+        snapshot,
+        move |stream, destination, snapshot| {
+            evidence.exchange(stream, destination, snapshot, relay, &expected)
+        },
+    )
+    .await;
+    match result {
+        Ok((snapshot, reply)) => Ok(StagedSource {
+            snapshot,
+            _bus: bus,
+            reply,
+            destination,
+            checkpoint: Some(checkpoint),
+        }),
+        Err(error) => {
+            let _ = bus.close().await;
+            Err(error)
+        }
     }
 }
 

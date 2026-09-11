@@ -1590,3 +1590,23 @@ to activate or delete anything: the durable installer journal, destination
 validation, credential inventory binding, and commit protocol remain required.
 Tests cover independently salted exports and changes to rows, rowids, schema,
 header fields, and SQLite value types.
+
+### Recovery checkpoint and native resume
+
+The privileged Linux and Windows clients expose `StagedSource::checkpoint` and
+`resume`. A checkpoint serializes version, destination, original session/stage,
+original encrypted source descriptor, logical source fingerprint, canonical
+candidate descriptor and relay digest. It contains neither relay ciphertext nor
+raw keys. The installer must persist it in protected storage and retain the
+relay separately under the actual owner; these persistence steps are not yet
+implemented. Serialized fields are evidence, never activation authority.
+
+Resume reuses each platform's authenticated provisioning endpoint and bounded
+worker, retaining the newly frozen source through completion/cancellation. It
+rejects a changed logical source, destination or relay before sending recovery
+payload, sends the original ciphertext descriptor, and validates the returned
+candidate. Subsequent checkpoints and reconnections preserve that original
+identity. The fixtures now serialize evidence, discard the original snapshot,
+freeze again and resume before another recovery call. This simulates loss of
+installer memory; it is not a test of a durable journal or actual installer
+process crash. The Windows fixture also retains its real SCM restart test.

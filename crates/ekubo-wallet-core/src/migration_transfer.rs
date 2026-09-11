@@ -27,6 +27,10 @@ mod recovery_transfer;
 pub(crate) use recovery_transfer::exchange as recover_exchange;
 pub use recovery_transfer::{RecoveryRequest, send_recovery};
 
+#[path = "migration_checkpoint.rs"]
+mod checkpoint;
+pub use checkpoint::RecoveryCheckpoint;
+
 /// Admission policy comes from the host, never from the incoming stream.
 /// Separate account-count and aggregate-metadata bounds avoid many small frames
 /// defeating the per-frame limit. Database bytes are streamed, not accumulated.

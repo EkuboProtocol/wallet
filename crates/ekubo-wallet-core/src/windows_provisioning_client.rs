@@ -15,12 +15,28 @@ use zeroize::Zeroizing;
 /// The caller must retain its lifecycle lock too. A staging reply grants no
 /// activation or legacy deletion authority and is not a durable commit receipt.
 pub struct StagedSource {
-    _snapshot: MigrationDatabaseSnapshot,
+    snapshot: MigrationDatabaseSnapshot,
     reply: StagingReply,
     destination: Destination,
+    checkpoint: Option<migration_transfer::RecoveryCheckpoint>,
 }
 
 impl StagedSource {
+    /// Capture journal evidence while retaining the source fence. The caller
+    /// must durably persist it in protected storage and the relay separately.
+    pub fn checkpoint(&mut self) -> Result<migration_transfer::RecoveryCheckpoint> {
+        if let Some(checkpoint) = &self.checkpoint {
+            return Ok(checkpoint.clone());
+        }
+        let checkpoint = migration_transfer::RecoveryCheckpoint::capture(
+            self.destination.clone(),
+            &self.reply,
+            &mut self.snapshot,
+        )?;
+        self.checkpoint = Some(checkpoint.clone());
+        Ok(checkpoint)
+    }
+
     #[must_use]
     pub const fn reply(&self) -> &StagingReply {
         &self.reply
@@ -40,11 +56,21 @@ impl StagedSource {
             provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
         tokio::task::spawn_blocking(move || {
             stream.write_all(windows_provisioning_pipe::PREFACE)?;
+            if let Some(checkpoint) = &self.checkpoint {
+                self.reply = checkpoint.exchange(
+                    &mut stream,
+                    self.destination.clone(),
+                    &self.snapshot,
+                    self.reply.relay().clone(),
+                    &expected,
+                )?;
+                return Ok(self);
+            }
             self.reply = migration_transfer::recover_exchange(
                 &mut stream,
                 self.destination.clone(),
                 &self.reply,
-                &mut self._snapshot,
+                &mut self.snapshot,
                 &expected,
             )?;
             Ok(self)
@@ -91,9 +117,44 @@ pub async fn transfer(
         )?;
         let reply = migration_transfer::read_reply(&mut stream, session)?;
         Ok(StagedSource {
-            _snapshot: snapshot,
+            snapshot,
             reply,
             destination,
+            checkpoint: None,
+        })
+    })
+    .await?
+}
+
+/// Resume from protected journal evidence after re-quiescing and freezing the
+/// legacy source. The caller retains lifecycle exclusion through commit/abort.
+/// The relay must come from the actual owner's separate login credential store.
+pub async fn resume(
+    owner_sid: &str,
+    checkpoint: migration_transfer::RecoveryCheckpoint,
+    snapshot: MigrationDatabaseSnapshot,
+    relay: crate::custody_envelope::WrappedDataKey,
+    expected: Vec<WalletMetadata>,
+) -> Result<StagedSource> {
+    let identity = windows_service_config::pending_installer_identity(owner_sid)?;
+    let pipe = windows_provisioning_pipe::connect(&identity).await?;
+    let destination = destination(&identity);
+    let (mut stream, _cancel) =
+        provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
+    tokio::task::spawn_blocking(move || {
+        stream.write_all(windows_provisioning_pipe::PREFACE)?;
+        let reply = checkpoint.exchange(
+            &mut stream,
+            destination.clone(),
+            &snapshot,
+            relay,
+            &expected,
+        )?;
+        Ok(StagedSource {
+            snapshot,
+            reply,
+            destination,
+            checkpoint: Some(checkpoint),
         })
     })
     .await?

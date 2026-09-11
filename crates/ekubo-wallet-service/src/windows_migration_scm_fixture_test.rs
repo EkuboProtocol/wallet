@@ -76,7 +76,7 @@ fn client(owner: &str) -> Result<()> {
     let runtime = runtime()?;
     config.with_lifecycle_lock(|| {
         let snapshot = MigrationDatabaseSnapshot::freeze(&database, Zeroizing::new(key))?;
-        let staged = runtime.block_on(windows_provisioning_client::transfer(
+        let mut staged = runtime.block_on(windows_provisioning_client::transfer(
             owner,
             Zeroizing::new(key),
             vec![wallet.clone()],
@@ -92,6 +92,18 @@ fn client(owner: &str) -> Result<()> {
             "missing canonical database"
         );
         restart_fixture_service(owner)?;
+        let checkpoint = serde_json::to_vec(&staged.checkpoint()?)?;
+        let relay = staged.reply().relay().clone();
+        drop(staged);
+        let snapshot = MigrationDatabaseSnapshot::freeze(&database, Zeroizing::new(key))?;
+        let checkpoint = serde_json::from_slice(&checkpoint)?;
+        let staged = runtime.block_on(windows_provisioning_client::resume(
+            owner,
+            checkpoint,
+            snapshot,
+            relay,
+            vec![wallet.clone()],
+        ))?;
         let staged = runtime.block_on(staged.recover(owner, vec![wallet.clone()]))?;
         // Keep the source fence and lifecycle lock through reply validation.
         // No activation or deletion is performed by this fixture.
