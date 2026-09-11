@@ -92,8 +92,8 @@ async fn client(owner: &str) -> Result<()> {
         .await
         .context("fixture installer pipe connection")?;
     let (mut stream, _cancel) = provisioning_io::bridge(pipe, Duration::from_secs(10));
-    // Fixture location only, never production profile discovery. Readback of the
-    // exact random service-staged nonce below prevents testing a missing file.
+    // Fixture location only, never production profile discovery. Enumeration of the
+    // exact random service-staged filename below prevents testing a missing file.
     let directory = std::path::PathBuf::from(
         std::env::var_os("ProgramData").context("missing fixture ProgramData")?,
     )
@@ -116,7 +116,7 @@ async fn client(owner: &str) -> Result<()> {
         );
         let record = StagedRecord::Credential(ServiceCredentialRecord::DatabaseKey);
         let path = directory.join(record.file_name(uuid::Uuid::from_bytes(nonce))?);
-        access::ordinary_access_is_denied(&path, &nonce)?;
+        access::ordinary_access_is_denied(&path)?;
         Ok::<_, anyhow::Error>(())
     })
     .await??;

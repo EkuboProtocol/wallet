@@ -353,6 +353,13 @@ or deletion. This full fixture's native result is still required separately from
 the lightweight storage/pipe harness. Its feature enables core `test-hooks`,
 which are forbidden in release builds.
 
+The full Windows matrix at `2b93a3c` passed the encrypted migration step in
+[run 34613887975](https://github.com/EkuboProtocol/wallet/actions/runs/34613887975).
+This is native evidence for the production host/client transfer, credential
+staging, inventory validation and canonical SQLCipher reconstruction under the
+actual virtual service account. It does not establish the later recovery changes,
+activation, legacy-key deletion or packaged desktop behavior.
+
 The SCM fixture exposed a `CREATOR OWNER` (`S-1-3-0`) ACE on the Windows runner's
 machine `SOFTWARE` key without the inherit-only flag. Registry validation now
 recognizes this exact inheritance placeholder, while still requiring a trusted
