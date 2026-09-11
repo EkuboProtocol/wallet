@@ -989,3 +989,16 @@ passed in addition to that suite. Formatting, workspace Clippy, Ruff, generated
 licenses, vulnerability scanning, and license policy passed. Logs use the
 `~/Documents/wallet-session-` prefix with `workspace-tests.log`, `clippy.log`,
 `private-bus.log`, `osv.log`, and `licenses.log`; `gate-exit.txt` records exit 0.
+
+The Windows private root exposes typed opens for `wallet.db` and `wallet.lock`.
+These use relative `NtCreateFile` with `FILE_OPEN_IF`, an explicit private DACL
+at creation, and handle validation before returning. Existing files are neither
+truncated nor repaired. The returned handle permits concurrent readers/writers
+but denies deletion; callers must retain it for the lifetime of the corresponding
+SQLite connection. This storage primitive does not yet route `PolicyStore` or
+desktop startup through the Windows service backend.
+
+The root also exposes its OS-resolved volume GUID path, obtained from the retained
+profile handle after ancestor validation. This gives the later SQLite adapter a
+Win32 path tied to the pinned profile rather than a new environment-based lookup.
+The root must outlive every connection using that path.

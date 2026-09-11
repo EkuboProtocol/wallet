@@ -6,16 +6,16 @@ use super::*;
 use std::io::Write as _;
 use windows::{
     Wdk::Storage::FileSystem::{
-        FILE_CREATE, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_0, FILE_WRITE_THROUGH,
-        FileRenameInformation, NtSetInformationFile,
+        FILE_CREATE, FILE_OPEN_IF, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_0,
+        FILE_WRITE_THROUGH, FileRenameInformation, NtSetInformationFile,
     },
     Win32::{
         Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         },
         Storage::FileSystem::{
-            DELETE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
-            FileDispositionInfo, SetFileInformationByHandle,
+            DELETE, FILE_ACCESS_RIGHTS, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
+            FILE_SHARE_WRITE, FileDispositionInfo, SetFileInformationByHandle,
         },
     },
     core::PCWSTR,
@@ -79,7 +79,41 @@ fn descriptor(owner_sid: &str) -> Result<Descriptor> {
     Ok(Descriptor(descriptor))
 }
 
+// Keep immutable credential publication exclusive. Database and lock handles
+// must permit SQLite/other service connections to write while denying deletion.
+#[derive(Clone, Copy)]
+enum OpenMode {
+    NewCredential,
+    Database,
+}
+
 fn create(parent: BorrowedHandle<'_>, component: &str, owner_sid: &str) -> Result<File> {
+    open_handle(parent, component, owner_sid, OpenMode::NewCredential)
+}
+
+pub(super) fn open_database_file(
+    parent: BorrowedHandle<'_>,
+    component: &str,
+    owner_sid: &str,
+    validate: impl FnOnce(&File) -> Result<()>,
+) -> Result<File> {
+    ensure!(
+        matches!(component, "wallet.db" | "wallet.lock"),
+        "invalid database file name"
+    );
+    let file = open_handle(parent, component, owner_sid, OpenMode::Database)?;
+    // FILE_OPEN_IF never truncates or repairs existing state. Validate its
+    // actual handle before exposing write access to the rest of core.
+    validate(&file)?;
+    Ok(file)
+}
+
+fn open_handle(
+    parent: BorrowedHandle<'_>,
+    component: &str,
+    owner_sid: &str,
+    mode: OpenMode,
+) -> Result<File> {
     validate_component(component)?;
     let descriptor = descriptor(owner_sid)?;
     let mut wide: Vec<u16> = component.encode_utf16().collect();
@@ -100,18 +134,30 @@ fn create(parent: BorrowedHandle<'_>, component: &str, owner_sid: &str) -> Resul
     let mut handle = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
     // SAFETY: all input allocations and the borrowed parent outlive the call.
-    // FILE_CREATE cannot open or truncate a preexisting name. A protected DACL
-    // is applied at creation, before bytes exist. No sharing is granted.
+    // Neither mode truncates an existing file. A protected DACL is applied on
+    // creation, before bytes exist. Database mode validates existing objects
+    // before returning; credential mode creates a new, exclusively held file.
     unsafe {
         NtCreateFile(
             &raw mut handle,
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+            FILE_GENERIC_READ
+                | FILE_GENERIC_WRITE
+                | match mode {
+                    OpenMode::NewCredential => DELETE,
+                    OpenMode::Database => FILE_ACCESS_RIGHTS::default(),
+                },
             &raw const attributes,
             &raw mut status,
             None,
             FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_MODE(0),
-            FILE_CREATE,
+            match mode {
+                OpenMode::NewCredential => FILE_SHARE_MODE(0),
+                OpenMode::Database => FILE_SHARE_READ | FILE_SHARE_WRITE,
+            },
+            match mode {
+                OpenMode::NewCredential => FILE_CREATE,
+                OpenMode::Database => FILE_OPEN_IF,
+            },
             FILE_NON_DIRECTORY_FILE
                 | FILE_OPEN_REPARSE_POINT
                 | FILE_SYNCHRONOUS_IO_NONALERT

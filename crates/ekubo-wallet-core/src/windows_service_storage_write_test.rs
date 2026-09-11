@@ -178,3 +178,96 @@ fn native_competing_writers_publish_one_complete_encrypted_key() {
     assert!(bytes == first || bytes == second);
     assert_eq!(std::fs::read_dir(&fixture.path).unwrap().count(), 1);
 }
+
+#[test]
+fn native_database_handles_allow_writers_but_pin_private_files_against_replacement() {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let fixture = Fixture::new();
+    let pin = open_native(
+        None,
+        &format!("\\??\\{}", fixture.path.display()),
+        StorageKind::Directory,
+    )
+    .unwrap();
+    for name in ["wallet.db", "wallet.lock"] {
+        let mut first = open_database_file(pin.as_handle(), name, &fixture.owner, |file| {
+            fixture.validate(file)
+        })
+        .unwrap();
+        first.write_all(b"synthetic database bytes").unwrap();
+        let mut second = open_database_file(pin.as_handle(), name, &fixture.owner, |file| {
+            fixture.validate(file)
+        })
+        .unwrap();
+        let mut contents = Vec::new();
+        second.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"synthetic database bytes");
+        second.seek(SeekFrom::Start(0)).unwrap();
+        second.write_all(b"S").unwrap();
+        assert!(std::fs::remove_file(fixture.path.join(name)).is_err());
+        assert!(std::fs::rename(fixture.path.join(name), fixture.path.join("moved")).is_err());
+        drop(first);
+        assert!(std::fs::remove_file(fixture.path.join(name)).is_err());
+        drop(second);
+        std::fs::remove_file(fixture.path.join(name)).unwrap();
+    }
+}
+
+#[test]
+fn native_database_open_does_not_truncate_repair_or_follow_linked_state() {
+    let fixture = Fixture::new();
+    let path = fixture.path.join("wallet.db");
+    let mut file = open_database_file(
+        fixture.parent.as_handle(),
+        "wallet.db",
+        &fixture.owner,
+        |file| fixture.validate(file),
+    )
+    .unwrap();
+    file.write_all(b"preserve existing database").unwrap();
+    drop(file);
+    assert!(
+        open_database_file(
+            fixture.parent.as_handle(),
+            "wallet.db",
+            &fixture.owner,
+            |_| anyhow::bail!("refused existing descriptor")
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"preserve existing database");
+    std::fs::hard_link(&path, fixture.path.join("alias")).unwrap();
+    assert!(
+        open_database_file(
+            fixture.parent.as_handle(),
+            "wallet.db",
+            &fixture.owner,
+            |file| fixture.validate(file)
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"preserve existing database");
+}
+
+#[test]
+fn native_database_opener_rejects_credential_and_arbitrary_names() {
+    let fixture = Fixture::new();
+    for name in [
+        "wrapping.key",
+        "key-database",
+        "service.lock",
+        "../wallet.db",
+        "wallet.db:stream",
+    ] {
+        assert!(
+            open_database_file(
+                fixture.parent.as_handle(),
+                name,
+                &fixture.owner,
+                |_| panic!("invalid name reached handle validation")
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(std::fs::read_dir(&fixture.path).unwrap().count(), 0);
+}

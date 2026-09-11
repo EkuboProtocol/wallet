@@ -3,7 +3,7 @@
 #![allow(unsafe_code)]
 
 use super::{
-    StorageKind, machine_path, validate_component, validate_directory_inheritance,
+    DatabaseFile, StorageKind, machine_path, validate_component, validate_directory_inheritance,
     validate_machine_security, validate_metadata, validate_security,
 };
 use crate::service_profile_lock::ProfileLock;
@@ -13,6 +13,7 @@ use std::{
     fs::File,
     mem::size_of,
     os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, FromRawHandle as _},
+    path::{Path, PathBuf},
 };
 use windows::Win32::{
     Foundation::{
@@ -25,7 +26,7 @@ use windows::Win32::{
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ, FILE_TRAVERSE, FILE_TYPE_DISK, GetFileInformationByHandle, GetFileType,
-        READ_CONTROL, SYNCHRONIZE,
+        GetFinalPathNameByHandleW, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_GUID,
     },
     System::IO::IO_STATUS_BLOCK,
 };
@@ -56,6 +57,7 @@ impl Drop for Descriptor {
 /// enrollment to unlock. It grants no owner-operation authorization.
 pub struct PrivateStorageRoot {
     directory: File,
+    data_dir: PathBuf,
     _ancestors: Vec<File>,
     identity: InstalledServiceIdentity,
     _lock: ProfileLock,
@@ -98,13 +100,21 @@ impl PrivateStorageRoot {
         for ancestor in &ancestors {
             read_security(ancestor.as_handle(), StorageKind::Directory)?;
         }
+        let data_dir = pinned_directory_path(directory.as_handle())?;
         Ok(Self {
             directory,
+            data_dir,
             _ancestors: ancestors,
             identity,
             _lock: lock,
             custody: crate::service_custody::ServiceCustody::default(),
         })
+    }
+
+    /// OS-resolved volume path for this retained profile. Use only while the
+    /// root remains alive; all ancestors are pinned against replacement.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     pub fn open_file(&self, component: &str) -> Result<File> {
@@ -113,6 +123,28 @@ impl PrivateStorageRoot {
             component,
             &self.identity,
             StorageKind::File,
+        )
+    }
+
+    /// Open the fixed `SQLCipher` database or its lock relative to this pinned
+    /// profile. New files start private; existing files must already be safe.
+    /// Keep the returned handle alive while SQLite uses its pathname so the
+    /// database cannot be replaced. This does not open a SQLite connection.
+    pub fn open_database_file(&self, file: DatabaseFile) -> Result<File> {
+        crate::windows_service_identity::verify_service_process(self.identity.service_sid())?;
+        validate_private_handle(
+            self.directory.as_handle(),
+            &self.identity,
+            StorageKind::Directory,
+        )?;
+        write::open_database_file(
+            self.directory.as_handle(),
+            match file {
+                DatabaseFile::Database => "wallet.db",
+                DatabaseFile::Lock => "wallet.lock",
+            },
+            self.identity.service_sid(),
+            |file| validate_private_handle(file.as_handle(), &self.identity, StorageKind::File),
         )
     }
 
@@ -341,6 +373,31 @@ fn open_native(parent: Option<BorrowedHandle<'_>>, name: &str, kind: StorageKind
     // SAFETY: NtCreateFile returned a new owned synchronous file handle; no
     // other guard owns it. File closes it on every subsequent error path.
     Ok(unsafe { File::from_raw_handle(handle.0) })
+}
+
+fn pinned_directory_path(handle: BorrowedHandle<'_>) -> Result<PathBuf> {
+    let mut buffer = vec![0u16; 32_768];
+    // SAFETY: the handle and the writable buffer remain live for this query.
+    // Use the volume GUID, not a drive-letter mapping or an NT device path
+    // which SQLite would interpret as a relative Windows path.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(handle.as_raw_handle()),
+            &mut buffer,
+            VOLUME_NAME_GUID,
+        )
+    };
+    if length == 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot resolve pinned profile path");
+    }
+    let length = usize::try_from(length)?;
+    ensure!(length < buffer.len(), "pinned profile path is too long");
+    let path = String::from_utf16(&buffer[..length])?;
+    ensure!(
+        path.starts_with(r"\\?\Volume{"),
+        "profile has no local volume GUID path"
+    );
+    Ok(PathBuf::from(path))
 }
 
 fn validate_handle(handle: BorrowedHandle<'_>, service_sid: &str, kind: StorageKind) -> Result<()> {

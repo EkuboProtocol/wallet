@@ -274,3 +274,21 @@ fn native_directory_descriptor_requires_private_file_inheritance() {
         );
     }
 }
+
+#[test]
+fn native_volume_path_resolves_the_held_directory_after_rename() {
+    let dir = Directory::new();
+    let original = dir.0.join("original");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("state"), b"pinned profile").unwrap();
+    let handle = directory_handle(&original);
+    std::fs::rename(&original, dir.0.join("moved")).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("state"), b"replacement").unwrap();
+    let resolved = pinned_directory_path(handle.as_handle()).unwrap();
+    assert_eq!(
+        std::fs::read(resolved.join("state")).unwrap(),
+        b"pinned profile"
+    );
+    assert!(resolved.to_str().unwrap().starts_with(r"\\?\Volume{"));
+}

@@ -18,6 +18,13 @@ pub enum StorageKind {
     File,
 }
 
+/// Fixed mutable files used by `SQLCipher` and its initialization lock.
+#[derive(Clone, Copy, Debug)]
+pub enum DatabaseFile {
+    Database,
+    Lock,
+}
+
 fn machine_path(path: &str) -> Result<(String, Vec<&str>)> {
     let bytes = path.as_bytes();
     ensure!(
