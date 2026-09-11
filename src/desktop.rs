@@ -2897,6 +2897,8 @@ pub struct WalletWindow {
     legal_load_generation: u64,
     legal_accepting: bool,
     guided_setup: GuidedSetup,
+    guided_setup_loading: bool,
+    guided_setup_saves: SettingQueue<GuidedSetupState>,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
     appearance_saves: SettingQueue<AppearancePreference>,
@@ -6990,6 +6992,8 @@ impl WalletWindow {
             legal_load_generation: 0,
             legal_accepting: false,
             guided_setup,
+            guided_setup_loading: false,
+            guided_setup_saves: SettingQueue::default(),
             route_errors: BTreeMap::new(),
             appearance_preference,
             appearance_saves: SettingQueue::default(),
@@ -7858,14 +7862,12 @@ impl WalletWindow {
     /// detection, and the session list all end by asking for a redraw. Doing
     /// it in each of those instead would mean a checklist that is right about
     /// whichever one happened to fire last.
-    fn refresh_guided_setup(&mut self) {
+    fn refresh_guided_setup(&mut self, cx: &mut Context<Self>) {
         if !self.guided_setup.is_loaded() {
-            // Retry the read that startup could not complete. Until it lands
-            // there is nothing to fold a reading into, and nothing is drawn.
-            let Ok(state) = self.owner.guided_setup() else {
-                return;
-            };
-            self.guided_setup.load(state);
+            if !self.guided_setup_loading {
+                self.load_guided_setup(cx);
+            }
+            return;
         }
         // A dismissed card keeps latching, and for two reasons now. It is
         // coming back — at the next launch, or the moment a task is finished —
@@ -7894,8 +7896,50 @@ impl WalletWindow {
             // Best effort. A checklist that redraws correctly but forgets by
             // tomorrow is far better than one that refuses to advance because
             // the settings store is momentarily unavailable.
-            let _ = self.owner.set_guided_setup(state);
+            if let Some(state) = self.guided_setup_saves.submit(state.clone()) {
+                self.save_guided_setup(state, cx);
+            }
         }
+    }
+
+    fn load_guided_setup(&mut self, cx: &mut Context<Self>) {
+        self.guided_setup_loading = true;
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.guided_setup().await });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.guided_setup_loading = false;
+                if let Ok(state) = result {
+                    if !view.guided_setup.is_loaded() {
+                        view.guided_setup.load(state);
+                    }
+                    view.refresh_guided_setup(cx);
+                    cx.notify();
+                }
+                // A failed read waits for another ordinary redraw to retry.
+                // Notifying here would turn a storage outage into a hot loop.
+            });
+        })
+        .detach();
+    }
+
+    fn save_guided_setup(&mut self, state: GuidedSetupState, cx: &mut Context<Self>) {
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.set_guided_setup(&state).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let _ = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if let Some(next) = view.guided_setup_saves.finish() {
+                    view.save_guided_setup(next, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Send the checklist away until the next task is finished.
@@ -10081,14 +10125,37 @@ impl WalletWindow {
         }
         let mut selection = self.companion_servers.clone();
         selection.set_enabled(slug, enabled);
-        if let Err(error) = self.owner.set_companion_servers(&selection) {
-            self.set_route_error(
-                Route::Settings,
-                format!("Could not save the MCP server selection: {error:#}"),
-            );
-            cx.notify();
-            return;
-        }
+        self.agent_reinstall = AgentReinstallState::Running;
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task_selection = selection.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.set_companion_servers(&task_selection).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                match result {
+                    Ok(()) => view.sync_saved_companion_selection(slug, enabled, selection, cx),
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not save the MCP server selection: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_saved_companion_selection(
+        &mut self,
+        slug: &'static str,
+        enabled: bool,
+        selection: CompanionSelection,
+        cx: &mut Context<Self>,
+    ) {
         self.companion_servers = selection.clone();
         let title = companion_by_slug(slug).map_or(slug, |server| server.title);
         self.run_agent_configuration(
@@ -20481,7 +20548,7 @@ impl Render for WalletWindow {
         let policy_editor_layout = self.route == Route::Policies
             && self.policy_editor.is_some()
             && self.policy_json_input.is_some();
-        self.refresh_guided_setup();
+        self.refresh_guided_setup(cx);
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
@@ -21354,7 +21421,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             .detach();
             let mut view_events = events.subscribe();
             let event_view = wallet_view.clone();
-            let event_owner = owner.clone();
+            let event_owner = crate::desktop_owner::DesktopOwner::from(owner.clone());
             let event_tray = tray.clone();
             let event_walletconnect = walletconnect.clone();
             let event_tokio = gpui_tokio::Tokio::handle(cx);
@@ -21424,14 +21491,14 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         let owner = event_owner.clone();
                         let walletconnect = event_walletconnect.clone();
                         let counts = event_tokio
-                            .spawn_blocking(move || {
+                            .spawn(async move {
                                 let sessions = walletconnect
                                     .lock()
                                     .map_or_else(|_| Vec::new(), |manager| manager.sessions());
-                                let networks = owner.networks().unwrap_or_default();
-                                let testnet_mode = owner.testnet_mode().unwrap_or(false);
+                                let networks = owner.networks().await.unwrap_or_default();
+                                let testnet_mode = owner.testnet_mode().await.unwrap_or(false);
                                 (
-                                    owner.reviews(None).map_or(0, |queues| {
+                                    owner.reviews(None).await.map_or(0, |queues| {
                                         review_queue_decision_count(
                                             &queues,
                                             &networks,

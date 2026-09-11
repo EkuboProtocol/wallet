@@ -5165,3 +5165,49 @@ fn asynchronous_appearance_save_finishes_after_the_window_closes(cx: &mut gpui::
     });
     release(cx, &view);
 }
+
+#[gpui::test]
+fn asynchronous_guided_setup_load_preserves_stored_progress_and_saves_new_observations(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_entity(&view, |wallet, cx| {
+        wallet
+            .owner
+            .set_guided_setup(&GuidedSetupState {
+                completed: [SetupTask::InstallAgent.key().to_owned()].into(),
+            })
+            .unwrap();
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![wallet.owner.account("primary").unwrap()]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.guided_setup = GuidedSetup::unloaded();
+        wallet.refresh_guided_setup(cx);
+        wallet.refresh_guided_setup(cx);
+        assert!(wallet.guided_setup_loading);
+        assert!(
+            !wallet.guided_setup.is_loaded(),
+            "the checklist must wait for stored history"
+        );
+    });
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(&view, |wallet, _| {
+            !wallet.guided_setup_loading && !wallet.guided_setup_saves.in_flight
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    cx.read_entity(&view, |wallet, _| {
+        assert!(!wallet.guided_setup_loading && !wallet.guided_setup_saves.in_flight);
+        assert!(wallet.guided_setup.is_complete(SetupTask::InstallAgent));
+        assert!(wallet.guided_setup.is_complete(SetupTask::CreateAccount));
+        let stored = wallet.owner.guided_setup().unwrap();
+        assert!(stored.completed.contains(SetupTask::InstallAgent.key()));
+        assert!(stored.completed.contains(SetupTask::CreateAccount.key()));
+    });
+    release(cx, &view);
+}
