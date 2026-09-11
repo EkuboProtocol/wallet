@@ -206,7 +206,7 @@ fn candidate_publication_rejects_write_failure_corrupt_readback_and_replacement(
         source: &header.database,
         credentials: &credentials,
         canonical: &header.database,
-        relay: "synthetic ciphertext".into(),
+        relay_digest: [0x55; 32],
     };
     for (fail_write, corrupt_read) in [(true, false), (false, true), (false, false)] {
         let store = Store {

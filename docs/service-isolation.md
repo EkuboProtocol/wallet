@@ -318,7 +318,9 @@ After canonical reconstruction, the shared receiver publishes an immutable
 `custody-stage-<stage>-candidate.json` record through the protected native store.
 It binds the protocol version, transfer session, destination identity, source
 snapshot digest/length, credential-stage marker, canonical digest/length and
-relay ciphertext. Publication and exact readback must succeed before returning a
+relay digest. The relay ciphertext must remain separate in the login keyring;
+the service must never persist it beside its wrapping key, including in recovery
+records. Publication and exact readback must succeed before returning a
 candidate or sending its staging reply. A truncated transfer cannot create this
 record; a publication or readback error leaves ambiguous pending state for later
 recovery. This supplies durable staging evidence, not a commit journal or

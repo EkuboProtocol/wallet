@@ -764,7 +764,16 @@ fn assert_candidate_record(
         record["canonical"],
         serde_json::to_value(candidate.canonical()).unwrap()
     );
-    assert_eq!(record["relay"], hex::encode(candidate.relay().as_bytes()));
+    assert_eq!(
+        record["relay_digest"],
+        serde_json::to_value(candidate.relay().digest()).unwrap()
+    );
+    assert!(record.get("relay").is_none());
+    assert!(
+        !record
+            .to_string()
+            .contains(&hex::encode(candidate.relay().as_bytes()))
+    );
     let (owner, service, profile) = pending.identity();
     assert_eq!(
         record["destination"],

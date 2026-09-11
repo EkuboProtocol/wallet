@@ -147,7 +147,9 @@ struct CandidateRecord<'a> {
     source: &'a DatabaseTransfer,
     credentials: &'a CredentialStage,
     canonical: &'a DatabaseTransfer,
-    relay: String,
+    // Persist only the digest. The envelope must stay in the login keyring,
+    // separate from the service's wrapping key, including during recovery.
+    relay_digest: [u8; 32],
 }
 
 fn persist_candidate(
@@ -316,7 +318,7 @@ pub fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
             source: &header.database,
             credentials: &stage,
             canonical: &canonical,
-            relay: hex::encode(prepared.relay().as_bytes()),
+            relay_digest: prepared.relay().digest(),
         },
     )?;
     Ok(ReceivedCandidate {
