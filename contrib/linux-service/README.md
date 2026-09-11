@@ -26,6 +26,13 @@ rejects pending bootstrap, so this is not a replacement/rotation path. The insta
 must still implement verified transfer, durable activation and interruption recovery;
 these paths are not an instruction to publish active metadata early.
 
+The returned pending handle also supports streamed database receipt with the same
+contract as Windows: declared length and digest, fixed-size buffering, handle-based
+readback, and publication under a new stage name only after verification. This
+checks transferred bytes, not SQLCipher contents or migration authorization. It
+does not write active `wallet.db`; the privileged provisioning transport and final
+database/key verification and activation remain unfinished.
+
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is
 `/usr/lib/ekubo-wallet/ekubo-wallet-service`. Install the unit under

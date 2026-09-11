@@ -409,7 +409,7 @@ pub fn credential_staging_root() -> Result<CredentialStagingRoot> {
 
 /// Open only pending installer storage, without initializing global custody or
 /// publishing an installed identity. No owner or agent endpoint is activated.
-pub fn pending_credential_staging_root(owner_uid: u32) -> Result<CredentialStagingRoot> {
+pub fn pending_credential_staging_root(owner_uid: u32) -> Result<PendingCredentialStorage> {
     let service_uid = rustix::process::geteuid().as_raw();
     ensure!(
         service_uid != 0
@@ -425,7 +425,7 @@ fn open_pending_storage(
     root: &File,
     owner_uid: u32,
     system_uid: u32,
-) -> Result<CredentialStagingRoot> {
+) -> Result<PendingCredentialStorage> {
     let service_uid = rustix::process::geteuid().as_raw();
     let configured = pending_configuration(root, owner_uid, system_uid)?;
     ensure!(
@@ -443,13 +443,13 @@ fn open_pending_storage(
         true,
     )?);
     let lock = lock_profile(&directory, service_uid)?;
-    Ok(CredentialStagingRoot {
+    Ok(PendingCredentialStorage(CredentialStagingRoot {
         directory,
         owner_uid,
         service_uid,
         profile_id: configured.profile_id,
         _lock: Some(lock),
-    })
+    }))
 }
 
 fn pending_configuration(
@@ -666,15 +666,23 @@ mod tests;
 mod unlock_tests;
 
 fn publish_private_record(parent: &File, name: &str, bytes: &[u8]) -> Result<()> {
+    publish_private_with(parent, name, |file| Ok(file.write_all(bytes)?))
+}
+
+fn publish_private_with(
+    parent: &File,
+    name: &str,
+    populate: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
     let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
     let mut file = File::from(openat(
         parent,
         &temporary,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(PRIVATE_FILE_MODE),
     )?);
     let result = (|| {
-        file.write_all(bytes)?;
+        populate(&mut file)?;
         file.sync_all()?;
         rustix::fs::renameat_with(parent, &temporary, parent, name, RenameFlags::NOREPLACE)?;
         parent.sync_all()?;
@@ -684,4 +692,60 @@ fn publish_private_record(parent: &File, name: &str, bytes: &[u8]) -> Result<()>
     // remove only the exact temporary entry created by this operation.
     let _ = rustix::fs::unlinkat(parent, &temporary, AtFlags::empty());
     result
+}
+
+/// Pending storage cannot initialize active custody or owner/agent endpoints.
+pub struct PendingCredentialStorage(CredentialStagingRoot);
+impl crate::custody_staging::CredentialStagingStore for PendingCredentialStorage {
+    fn identity(&self) -> (String, String, uuid::Uuid) {
+        self.0.identity()
+    }
+    fn create_new(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.0.create_new(stage, record, bytes)
+    }
+    fn read(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.0.read(stage, record)
+    }
+}
+impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage {
+    fn receive_database(
+        &self,
+        stage: uuid::Uuid,
+        transfer: &crate::database_staging::DatabaseTransfer,
+        input: &mut dyn std::io::Read,
+    ) -> Result<()> {
+        self.validate_process()?;
+        publish_private_with(
+            &self.0.directory,
+            &crate::database_staging::file_name(stage)?,
+            |file| crate::database_staging::receive(transfer, input, file),
+        )
+    }
+    fn open_staged_database(&self, stage: uuid::Uuid) -> Result<File> {
+        self.validate_process()?;
+        open_regular(
+            &self.0.directory,
+            &crate::database_staging::file_name(stage)?,
+            self.0.service_uid,
+            true,
+        )
+    }
+}
+impl PendingCredentialStorage {
+    fn validate_process(&self) -> Result<()> {
+        ensure!(
+            rustix::process::geteuid().as_raw() == self.0.service_uid,
+            "service process identity changed"
+        );
+        validate_directory(&self.0.directory, self.0.service_uid, true)
+    }
 }

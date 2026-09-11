@@ -29,6 +29,18 @@ pub(super) fn publish(
     validate: impl FnOnce(&File) -> Result<()>,
 ) -> Result<()> {
     ensure!(sealed.len() <= 4096, "private publication is oversized");
+    publish_with(parent, destination, owner_sid, validate, |file| {
+        Ok(file.write_all(sealed)?)
+    })
+}
+
+pub(super) fn publish_with(
+    parent: &File,
+    destination: &str,
+    owner_sid: &str,
+    validate: impl FnOnce(&File) -> Result<()>,
+    populate: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
     validate_component(destination)?;
     let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
     let mut file = create(parent.as_handle(), &temporary, owner_sid)
@@ -36,7 +48,7 @@ pub(super) fn publish(
     let mut published = false;
     let result = (|| {
         validate(&file)?;
-        file.write_all(sealed)?;
+        populate(&mut file)?;
         file.sync_all()?;
         rename_new(&file, destination).context("cannot publish encrypted credential name")?;
         published = true;

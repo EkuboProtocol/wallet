@@ -27,6 +27,7 @@ pub mod custody_envelope;
 pub mod custody_provisioning;
 pub mod custody_relay;
 pub mod custody_staging;
+pub mod database_staging;
 pub mod default_tokens;
 pub mod desktop_store;
 /// Debug-build-only scratch sessions. Never compiled into a release binary.

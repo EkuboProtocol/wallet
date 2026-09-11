@@ -460,3 +460,91 @@ fn pending_configuration_requires_protected_valid_metadata() {
             .is_none()
     );
 }
+
+#[test]
+fn protected_database_receive_publishes_only_complete_verified_frames() {
+    use crate::database_staging::{DatabaseStagingStore as _, DatabaseTransfer};
+    let (directory, entry) = fixture();
+    let pending = PendingCredentialStorage(CredentialStagingRoot {
+        directory: entry.directory.clone(),
+        owner_uid: 1001,
+        service_uid: entry.service_uid,
+        profile_id: uuid::Uuid::new_v4(),
+        _lock: Some(lock_profile(&entry.directory, entry.service_uid).unwrap()),
+    });
+    let payload = vec![0x77; 100_003];
+    let transfer = DatabaseTransfer::describe(&mut payload.as_slice()).unwrap();
+    let stage = uuid::Uuid::new_v4();
+    pending
+        .receive_database(stage, &transfer, &mut payload.as_slice())
+        .unwrap();
+    let mut file = pending.open_staged_database(stage).unwrap();
+    assert_eq!(DatabaseTransfer::describe(&mut file).unwrap(), transfer);
+    assert!(
+        pending
+            .receive_database(stage, &transfer, &mut payload.as_slice())
+            .is_err()
+    );
+    assert!(!directory.path().join("wallet.db").exists());
+    for mut input in [&payload[..40_000], &vec![0x33; payload.len()][..]] {
+        let failed = uuid::Uuid::new_v4();
+        assert!(
+            pending
+                .receive_database(failed, &transfer, &mut input)
+                .is_err()
+        );
+        assert!(
+            !directory
+                .path()
+                .join(crate::database_staging::file_name(failed).unwrap())
+                .exists()
+        );
+    }
+    assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".key-stage-")
+    }));
+}
+
+#[test]
+fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_original_key() {
+    use crate::database_staging::{DatabaseStagingStore as _, DatabaseTransfer};
+    use crate::policy_store::{
+        DatabaseKey, PolicyStore, migration_database::MigrationDatabaseSnapshot,
+    };
+    use std::io::{Seek as _, SeekFrom};
+    let (directory, entry) = fixture();
+    let pending = PendingCredentialStorage(CredentialStagingRoot {
+        directory: entry.directory.clone(),
+        owner_uid: 1001,
+        service_uid: entry.service_uid,
+        profile_id: uuid::Uuid::new_v4(),
+        _lock: Some(lock_profile(&entry.directory, entry.service_uid).unwrap()),
+    });
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("source.db");
+    let raw_key = [0x44; 32];
+    drop(PolicyStore::open(&source, &DatabaseKey::new(raw_key)).unwrap());
+    let mut snapshot = MigrationDatabaseSnapshot::freeze(&source, Zeroizing::new(raw_key)).unwrap();
+    let transfer = snapshot.transfer().unwrap();
+    let mut stream = tempfile::tempfile().unwrap();
+    snapshot.write_to(&mut stream).unwrap();
+    stream.seek(SeekFrom::Start(0)).unwrap();
+    let stage = uuid::Uuid::new_v4();
+    pending
+        .receive_database(stage, &transfer, &mut stream)
+        .unwrap();
+    let mut received = pending.open_staged_database(stage).unwrap();
+    assert_eq!(DatabaseTransfer::describe(&mut received).unwrap(), transfer);
+    received.seek(SeekFrom::Start(0)).unwrap();
+    let imported = source_dir.path().join("imported.db");
+    let mut output = std::fs::File::create(&imported).unwrap();
+    std::io::copy(&mut received, &mut output).unwrap();
+    drop(output);
+    drop(PolicyStore::open(&imported, &DatabaseKey::new(raw_key)).unwrap());
+    assert!(PolicyStore::open(&imported, &DatabaseKey::new([0x55; 32])).is_err());
+    assert!(!directory.path().join("wallet.db").exists());
+}

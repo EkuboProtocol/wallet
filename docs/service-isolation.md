@@ -158,6 +158,25 @@ profile. No fallback from damaged active custody is added. The installer must
 provision these separate locations and implement verified transfer, activation,
 recovery and exact legacy deletion; bootstrap alone performs none of those steps.
 
+Both native pending-storage types now receive encrypted database frames through
+`DatabaseStagingStore`. The source snapshot supplies a length and SHA-256 digest;
+the receiver copies with a fixed 16 KiB buffer, checks the digest, flushes and
+reads back the actual temporary file handle before immutable publication as
+`custody-stage-<uuid>-wallet.db`. It consumes exactly the declared frame length,
+leaving subsequent protocol bytes unread. The eventual provisioning transport must
+authenticate the sender and impose admission/time bounds. A short stream, digest
+mismatch or failed write leaves no published database name before rename; errors
+after publication can be ambiguous and must never trigger replacement or activation.
+The active `wallet.db` is not written. Only pending roots expose this receiving
+interface; staged reads return a validated read-only handle. Length/digest prove
+transfer integrity, not a valid database or owner authorization. Protected SQLCipher
+and complete credential-inventory verification, provisioning transport, durable
+activation and recovery still need integration. Tests include a real encrypted
+source snapshot transferred into a temporary protected Linux root and reopened with
+its original key, rejection of a different key, frame boundaries, truncation,
+corruption, immutable publication and cleanup; Windows tests exercise the same
+receiver through native private-file publication.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

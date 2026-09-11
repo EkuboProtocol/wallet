@@ -60,6 +60,12 @@ impl MigrationDatabaseSnapshot {
         })
     }
 
+    /// Length and digest for the transfer frame, not an activation receipt.
+    pub fn transfer(&mut self) -> Result<crate::database_staging::DatabaseTransfer> {
+        self.snapshot.as_file_mut().seek(SeekFrom::Start(0))?;
+        crate::database_staging::DatabaseTransfer::describe(self.snapshot.as_file_mut())
+    }
+
     /// Stream the complete encrypted snapshot while retaining the source fence.
     /// On failure the receiver may contain a prefix; callers must never activate
     /// it. Retrying starts at byte zero and requires a fresh receiver.

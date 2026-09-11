@@ -382,3 +382,52 @@ fn variable_length_staging_records_publish_privately_without_replacement() {
         );
     }
 }
+
+#[test]
+fn native_streamed_database_is_private_immutable_and_partial_frames_are_unpublished() {
+    use crate::database_staging::{DatabaseTransfer, file_name, receive};
+    let fixture = Fixture::new();
+    let payload = vec![0x77; 100_003];
+    let transfer = DatabaseTransfer::describe(&mut payload.as_slice()).unwrap();
+    let name = file_name(Uuid::new_v4()).unwrap();
+    publish_with(
+        &fixture.parent,
+        &name,
+        &fixture.owner,
+        |file| fixture.validate(file),
+        |file| receive(&transfer, &mut payload.as_slice(), file),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(fixture.path.join(&name)).unwrap(), payload);
+    assert!(
+        publish_with(
+            &fixture.parent,
+            &name,
+            &fixture.owner,
+            |file| fixture.validate(file),
+            |file| receive(&transfer, &mut payload.as_slice(), file)
+        )
+        .is_err()
+    );
+    for mut input in [&payload[..40_000], &vec![0x33; payload.len()][..]] {
+        let failed = file_name(Uuid::new_v4()).unwrap();
+        assert!(
+            publish_with(
+                &fixture.parent,
+                &failed,
+                &fixture.owner,
+                |file| fixture.validate(file),
+                |file| receive(&transfer, &mut input, file)
+            )
+            .is_err()
+        );
+        assert!(!fixture.path.join(&failed).exists());
+    }
+    assert!(std::fs::read_dir(&fixture.path).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".key-stage-")
+    }));
+}

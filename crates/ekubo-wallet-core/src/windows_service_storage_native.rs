@@ -560,3 +560,30 @@ impl crate::custody_staging::CredentialStagingStore for PendingCredentialStorage
         self.0.read(stage, record)
     }
 }
+
+impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage {
+    fn receive_database(
+        &self,
+        stage: uuid::Uuid,
+        transfer: &crate::database_staging::DatabaseTransfer,
+        input: &mut dyn std::io::Read,
+    ) -> Result<()> {
+        crate::windows_service_identity::verify_service_process(self.0.identity.service_sid())?;
+        validate_private_handle(
+            self.0.directory.as_handle(),
+            &self.0.identity,
+            StorageKind::Directory,
+        )?;
+        write::publish_with(
+            &self.0.directory,
+            &crate::database_staging::file_name(stage)?,
+            self.0.identity.service_sid(),
+            |file| validate_private_handle(file.as_handle(), &self.0.identity, StorageKind::File),
+            |file| crate::database_staging::receive(transfer, input, file),
+        )
+    }
+    fn open_staged_database(&self, stage: uuid::Uuid) -> Result<File> {
+        self.0
+            .open_file(&crate::database_staging::file_name(stage)?)
+    }
+}

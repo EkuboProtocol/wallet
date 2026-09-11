@@ -37,8 +37,13 @@ fn encrypted_snapshot_preserves_schema_data_and_header_while_source_remains_fenc
     let observer = observer(&source);
     let mut snapshot = MigrationDatabaseSnapshot::freeze(&source, Zeroizing::new(KEY)).unwrap();
     assert_fenced(&observer);
+    let transfer = snapshot.transfer().unwrap();
     let mut bytes = Vec::new();
     assert_eq!(snapshot.write_to(&mut bytes).unwrap(), bytes.len() as u64);
+    assert_eq!(
+        crate::database_staging::DatabaseTransfer::describe(&mut bytes.as_slice()).unwrap(),
+        transfer
+    );
     assert_ne!(&bytes[..16], b"SQLite format 3\0");
     let target = dir.path().join("received.db");
     fs::write(&target, &bytes).unwrap();
