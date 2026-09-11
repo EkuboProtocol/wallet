@@ -2698,3 +2698,6 @@ pub mod migration_database;
 
 #[path = "migration_rebuild.rs"]
 pub(crate) mod migration_rebuild;
+
+#[path = "migration_fingerprint.rs"]
+mod migration_fingerprint;

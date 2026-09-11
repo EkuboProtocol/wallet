@@ -22,10 +22,18 @@ use zeroize::Zeroizing;
 pub struct MigrationDatabaseSnapshot {
     // Keep the fence until after the temporary snapshot is cleaned up.
     snapshot: NamedTempFile,
-    _source: Connection,
+    source: Connection,
 }
 
 impl MigrationDatabaseSnapshot {
+    /// Logical source identity for an installer recovery journal. Computed using
+    /// the retained SQLite fence, without opening another source descriptor.
+    /// This is not an authorization or deletion receipt; recovery must also
+    /// validate the protected destination and account credential inventory.
+    pub fn source_fingerprint(&self) -> Result<[u8; 32]> {
+        super::migration_fingerprint::describe(&self.source)
+    }
+
     /// Open an existing source without creating or upgrading it. The destination
     /// is a fresh private temporary file encrypted under the supplied source key.
     /// Source locking is connection-local and released on error or drop. Path
@@ -62,7 +70,7 @@ impl MigrationDatabaseSnapshot {
         }
         Ok(Self {
             snapshot,
-            _source: connection,
+            source: connection,
         })
     }
 

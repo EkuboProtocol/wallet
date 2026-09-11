@@ -1572,3 +1572,21 @@ The installer still needs durable journal/relay persistence, live-source
 revalidation, protected promotion and activation before cleanup can be allowed.
 The native Linux/Windows migration fixtures exercise this step through their
 production hosts; a native result at this new revision remains required.
+
+### Source identity after an installer restart
+
+`MigrationDatabaseSnapshot::source_fingerprint` computes a domain-separated
+SHA-256 identity through the retained SQLite connection. It opens no additional
+source descriptor, preserving the POSIX source fence. It includes schema text,
+application/user header versions, and every compiled table's rows in rowid order,
+with explicit value types and length framing. Unknown tables, executable schema,
+and generated/hidden columns are rejected. The current schema has no internal
+sequence tables; such tables are rejected rather than silently omitted.
+
+This identity is stable across newly salted SQLCipher exports of unchanged
+logical state. The encrypted transfer digest remains necessary to authenticate
+the exact bytes received by the service. A fingerprint alone is not permission
+to activate or delete anything: the durable installer journal, destination
+validation, credential inventory binding, and commit protocol remain required.
+Tests cover independently salted exports and changes to rows, rowids, schema,
+header fields, and SQLite value types.

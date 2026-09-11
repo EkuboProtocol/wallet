@@ -62,7 +62,7 @@ pub(crate) fn rebuild(
     Ok(())
 }
 
-fn table_names(connection: &Connection) -> Result<BTreeSet<String>> {
+pub(super) fn table_names(connection: &Connection) -> Result<BTreeSet<String>> {
     let mut statement = connection.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'",
     )?;
@@ -71,7 +71,7 @@ fn table_names(connection: &Connection) -> Result<BTreeSet<String>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn column_names(connection: &Connection, table: &str) -> Result<Vec<String>> {
+pub(super) fn column_names(connection: &Connection, table: &str) -> Result<Vec<String>> {
     let mut statement =
         connection.prepare("SELECT name,hidden FROM pragma_table_xinfo(?1) ORDER BY cid")?;
     let mut rows = statement.query([table])?;
@@ -87,7 +87,7 @@ fn column_names(connection: &Connection, table: &str) -> Result<Vec<String>> {
     Ok(columns)
 }
 
-fn identifier(name: &str) -> String {
+pub(super) fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
