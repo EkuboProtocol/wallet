@@ -1,8 +1,10 @@
 # Linux authority service assets
 
 These assets are not yet included in release packages or installed by the
-application. Do not start this service against real accounts: at-rest key
-wrapping, transactional migration, and desktop remote startup remain unfinished.
+application. Do not start this service against real accounts: key enrollment,
+transactional migration, and desktop remote startup remain unfinished. Storage
+now requires encrypted credentials and starts locked. The host's bootstrap
+unlock relay is still missing, so authority creation currently fails closed.
 
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is
@@ -15,8 +17,9 @@ be installed; its service-owner annotation names the same `ekubo-wallet` account
 Provisioning one owner requires a canonical, nonzero numeric owner UID, distinct
 from the resolved service UID. Write root-owned, non-writable-by-others public
 metadata at `/etc/ekubo-wallet/owners/<uid>.json`, matching core's closed JSON
-schema: `{"owner_uid":1000,"service_uid":999}` (values here are illustrative).
-Neither value may come from an untrusted IPC claim. Create new private state at
+schema: `{"owner_uid":1000,"service_uid":999,"profile_id":"00000000-0000-0000-0000-000000000001"}`
+(values here are illustrative; provision a fresh nonzero profile UUID).
+None of these values may come from an untrusted IPC claim. Create new private state at
 `/var/lib/ekubo-wallet/<uid>` with mode 0700 and the service UID. Create the runtime
 directory `/run/ekubo-wallet/<uid>` with mode 0711 and the service UID; it must be
 recreated after reboot by validated provisioning. Clients need directory search

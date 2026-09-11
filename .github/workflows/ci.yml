@@ -65,7 +65,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}${{ inputs.windows_primitives_only && '-native' || '' }}
+  group: ci-${{ github.workflow }}-${{ inputs.windows_primitives_only && 'native' || 'full' }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

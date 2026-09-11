@@ -2,21 +2,44 @@ use super::*;
 
 #[test]
 fn installer_configuration_requires_distinct_nonroot_matching_identities() {
-    let valid = br#"{"owner_uid":1000,"service_uid":2000}"#;
-    assert_eq!(decode_configuration(valid, 1000).unwrap().service_uid, 2000);
-    assert!(decode_configuration(valid, 1001).is_err());
-    for invalid in [
-        br#"{"owner_uid":1000,"service_uid":0}"#.as_slice(),
-        br#"{"owner_uid":1000,"service_uid":1000}"#.as_slice(),
-        br#"{"owner_uid":0,"service_uid":2000}"#.as_slice(),
-        br#"{"owner_uid":1000,"service_uid":2000,"bus_address":"/tmp/fake"}"#.as_slice(),
+    let valid = serde_json::json!({"owner_uid":1000,"service_uid":2000,
+        "profile_id": uuid::Uuid::from_u128(1)});
+    let bytes = serde_json::to_vec(&valid).unwrap();
+    let configured = decode_configuration(&bytes, 1000).unwrap();
+    assert_eq!(configured.service_uid, 2000);
+    assert_eq!(configured.profile_id, uuid::Uuid::from_u128(1));
+    assert!(decode_configuration(&bytes, 1001).is_err());
+    for (field, value) in [
+        ("service_uid", serde_json::json!(0)),
+        ("service_uid", serde_json::json!(1000)),
+        ("owner_uid", serde_json::json!(0)),
+        ("profile_id", serde_json::json!(uuid::Uuid::nil())),
+        ("bus_address", serde_json::json!("/tmp/fake")),
     ] {
-        assert!(decode_configuration(invalid, 1000).is_err());
+        let mut invalid = valid.clone();
+        invalid[field] = value;
+        assert!(decode_configuration(&serde_json::to_vec(&invalid).unwrap(), 1000).is_err());
     }
-    let mut oversized = valid.to_vec();
+    assert!(decode_configuration(br#"{"owner_uid":1000,"service_uid":2000}"#, 1000).is_err());
+    let mut oversized = bytes;
     oversized.resize(usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1, b' ');
     assert!(decode_configuration(&oversized, 1000).is_err());
 }
+
+fn cipher_fixture() -> Arc<DataCipher> {
+    let binding = crate::custody_envelope::CustodyBinding::new(
+        "linux:uid:1000",
+        "linux:uid:2000",
+        uuid::Uuid::from_u128(1),
+        uuid::Uuid::from_u128(2),
+    )
+    .unwrap();
+    let (cipher, _) = WrappingKey::from_material(Zeroizing::new([0x44; 32]))
+        .enroll(binding)
+        .unwrap();
+    Arc::new(cipher)
+}
+
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 fn fixture() -> (tempfile::TempDir, Entry) {
@@ -31,6 +54,8 @@ fn fixture() -> (tempfile::TempDir, Entry) {
             directory: Arc::new(handle),
             service_uid: uid,
             name: "key-account-test".to_owned(),
+            cipher: cipher_fixture(),
+            instance: Some(uuid::Uuid::from_u128(3)),
         },
     )
 }
@@ -50,6 +75,8 @@ fn keys_survive_reopening_and_cannot_be_overwritten() {
         directory: Arc::new(File::open(directory.path()).unwrap()),
         service_uid: entry.service_uid,
         name: entry.name.clone(),
+        cipher: entry.cipher.clone(),
+        instance: entry.instance,
     };
     assert_eq!(reopened.get_secret().unwrap(), [0x11; KEY_BYTES]);
     assert_eq!(
@@ -71,6 +98,8 @@ fn concurrent_creators_publish_one_complete_key() {
         directory: first.directory.clone(),
         service_uid: first.service_uid,
         name: first.name.clone(),
+        cipher: first.cipher.clone(),
+        instance: first.instance,
     };
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let other_barrier = barrier.clone();
@@ -100,6 +129,7 @@ fn permissive_files_symlinks_and_hardlinks_are_rejected() {
     let (directory, entry) = fixture();
     let path = directory.path().join(&entry.name);
     entry.set_secret(&[0x11; KEY_BYTES]).unwrap();
+    let sealed = std::fs::read(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
     assert!(entry.get_secret().is_err());
     assert!(entry.delete_credential().is_err());
@@ -112,7 +142,7 @@ fn permissive_files_symlinks_and_hardlinks_are_rejected() {
     symlink(&other, &path).unwrap();
     assert!(entry.get_secret().is_err());
     assert!(entry.delete_credential().is_err());
-    assert_eq!(std::fs::read(&other).unwrap(), [0x11; KEY_BYTES]);
+    assert_eq!(std::fs::read(&other).unwrap(), sealed);
 }
 
 #[test]
@@ -176,6 +206,8 @@ fn open_directory_descriptor_does_not_follow_replaced_paths() {
         directory: Arc::new(File::open(&original).unwrap()),
         service_uid: rustix::process::geteuid().as_raw(),
         name: "key-account-test".into(),
+        cipher: cipher_fixture(),
+        instance: Some(uuid::Uuid::from_u128(3)),
     };
     let moved = parent.path().join("moved");
     std::fs::rename(&original, &moved).unwrap();
@@ -183,7 +215,8 @@ fn open_directory_descriptor_does_not_follow_replaced_paths() {
     entry.set_secret(&[0x11; KEY_BYTES]).unwrap();
     assert_eq!(std::fs::read_dir(&original).unwrap().count(), 0);
     assert_eq!(
-        std::fs::read(moved.join(&entry.name)).unwrap(),
-        [0x11; KEY_BYTES]
+        std::fs::read(moved.join(&entry.name)).unwrap().len(),
+        SEALED_KEY_BYTES
     );
+    assert_eq!(entry.get_secret().unwrap(), [0x11; KEY_BYTES]);
 }

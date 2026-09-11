@@ -606,7 +606,8 @@ arbitrary-signing oracle and does not satisfy this objective.
 The at-rest design splits protection across the two OS identities. The shared
 `custody_envelope` primitive now implements symmetric key wrapping: only the
 service creates and unwraps data keys, so public-key distribution is unnecessary.
-It is not connected to the current file backend or desktop keyring yet.
+The Linux protected-file backend now uses it. The desktop keyring relay and
+Windows file-backend activation are not connected yet.
 
 - The service owns a random 256-bit wrapping key in its private directory.
 - The desktop credential store contains only an authenticated envelope of the
@@ -649,12 +650,30 @@ and its tests with the exact locked dependency declarations. The independent
 vector generator is `~/Documents/wallet-custody-vector.py`, using the documented
 [libsodium API](https://doc.libsodium.org/doc/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction).
 
+Linux storage initializes locked and reads enrollment metadata (`custody.json`)
+and the wrapping key (`wrapping.key`) only through its pinned private directory,
+with ownership, mode, file-type, link-count, and size checks. Its root-owned
+configuration now also requires the profile UUID. Unlock consumes only the
+enrolled ciphertext; repeated unlock cannot replace an active data cipher.
+Database/account key files contain authenticated 82-byte ciphertext, including
+temporary files. Corrupt or legacy plaintext files fail instead of falling back
+to the desktop credential store. Synthetic storage tests cover reopening,
+substitution, locked access, permission failures, and enrollment replacement.
+
+Both platforms use the same `CustodyEnrollment`, `WrappedDataKey`, and
+`DataCipher` implementation. A shared test exercises successful enrollment and
+restart with Linux UID and Windows SID bindings. Platform adapters supply the
+verified identities, protected file operations, and authenticated IPC; the shared
+cryptographic module does not establish OS identity. This avoids a separate
+Windows cryptographic format or unlock policy.
+
 Protected wrapping-key provisioning, transactional digest enrollment/rotation,
-the login-keyring ciphertext relay, encrypted file-backend activation, and crash
-recovery/migration remain unimplemented. The primitive alone supplies no deployed
-at-rest guarantee. The current protected-file backend is an intermediate
-storage/identity implementation and must not be deployed with real accounts
-before the at-rest requirement is resolved.
+the login-keyring ciphertext relay, Windows backend activation, and crash
+recovery/migration remain unimplemented. In particular, the prototype Linux host
+still constructs authority before an unlock relay exists, so it currently fails
+closed at locked custody and cannot serve accounts. These assets remain excluded
+from release installation; desktop custody and UX are unchanged. Do not deploy
+this intermediate backend with real accounts.
 
 ## Latest checkpoint verification
 

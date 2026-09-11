@@ -17,6 +17,9 @@ use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+use crate::custody_envelope::{
+    CustodyEnrollment, DataCipher, SEALED_KEY_BYTES, WrappedDataKey, WrappingKey,
+};
 use crate::service_profile_lock::ProfileLock;
 
 static STORAGE: OnceLock<Storage> = OnceLock::new();
@@ -30,6 +33,7 @@ const KEY_BYTES: usize = 32;
 struct OwnerConfiguration {
     owner_uid: u32,
     service_uid: u32,
+    profile_id: uuid::Uuid,
 }
 
 /// Installer-attested identity for the current desktop user's service.
@@ -37,9 +41,14 @@ struct OwnerConfiguration {
 pub struct InstalledServiceIdentity {
     owner_uid: u32,
     service_uid: u32,
+    profile_id: uuid::Uuid,
 }
 
 impl InstalledServiceIdentity {
+    #[must_use]
+    pub const fn profile_id(&self) -> uuid::Uuid {
+        self.profile_id
+    }
     #[must_use]
     pub const fn owner_uid(&self) -> u32 {
         self.owner_uid
@@ -63,6 +72,7 @@ pub fn installed_service_identity() -> Result<InstalledServiceIdentity> {
     Ok(InstalledServiceIdentity {
         owner_uid,
         service_uid: configured.service_uid,
+        profile_id: configured.profile_id,
     })
 }
 
@@ -100,7 +110,8 @@ fn decode_configuration(bytes: &[u8], owner_uid: u32) -> Result<OwnerConfigurati
         configured.owner_uid == owner_uid
             && owner_uid != 0
             && configured.service_uid != 0
-            && configured.service_uid != owner_uid,
+            && configured.service_uid != owner_uid
+            && !configured.profile_id.is_nil(),
         "wallet service identity does not match installer configuration"
     );
     Ok(configured)
@@ -112,6 +123,13 @@ struct Storage {
     directory: Arc<File>,
     data_dir: PathBuf,
     service_uid: u32,
+    profile_id: uuid::Uuid,
+    custody: OnceLock<ActiveCustody>,
+}
+
+struct ActiveCustody {
+    cipher: Arc<DataCipher>,
+    envelope_digest: [u8; 32],
 }
 
 /// Activate only after the installer has provisioned this owner's root-owned
@@ -121,7 +139,9 @@ struct Storage {
 ///
 /// One service process serves one owner. Activation is single-use; subsequent
 /// attempts cannot replace the active custody store. The host must exit if
-/// activation fails, before accepting any IPC connection.
+/// activation fails, before accepting any IPC connection. Custody remains
+/// locked until `unlock` validates the enrolled keyring ciphertext; the host
+/// must not construct wallet authority before then.
 pub fn initialize(owner_uid: u32) -> Result<PathBuf> {
     let service_uid = rustix::process::geteuid().as_raw();
     ensure!(
@@ -156,6 +176,8 @@ pub fn initialize(owner_uid: u32) -> Result<PathBuf> {
             directory,
             data_dir: data_dir.clone(),
             service_uid,
+            profile_id: configured.profile_id,
+            custody: OnceLock::new(),
         })
         .map_err(|_| anyhow::anyhow!("wallet service storage was already initialized"))?;
     Ok(data_dir)
@@ -232,43 +254,115 @@ pub(crate) fn require_data_dir(data_dir: &Path) -> Result<()> {
 }
 
 pub(crate) fn entry(service: &str, user: &str) -> Option<Result<Entry>> {
-    STORAGE.get().map(|storage| {
-        let name = match (service, user) {
-            ("org.ekubo.wallet.db", "default") => "key-database".to_owned(),
+    STORAGE.get().map(|storage| storage.entry(service, user))
+}
+
+/// The host must authenticate the desktop OS peer before calling this bootstrap
+/// operation. Only ciphertext crosses that transport; metadata and the wrapping
+/// key are read through the service's pinned private directory.
+pub fn unlock(wrapped: &WrappedDataKey) -> Result<()> {
+    STORAGE
+        .get()
+        .context("service storage is not initialized")?
+        .unlock(wrapped)
+}
+
+impl Storage {
+    fn unlock(&self, wrapped: &WrappedDataKey) -> Result<()> {
+        let file = open_regular(&self.directory, "custody.json", self.service_uid, true)?;
+        ensure!(
+            file.metadata()?.len() <= MAX_CONFIG_BYTES,
+            "custody enrollment is oversized"
+        );
+        let mut bytes = Vec::new();
+        file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
+        let enrollment = CustodyEnrollment::from_bytes(&bytes)?;
+        let wrapping = WrappingKey::from_material(read_fixed::<KEY_BYTES>(
+            &self.directory,
+            "wrapping.key",
+            self.service_uid,
+        )?);
+        let cipher = enrollment.unlock(
+            &wrapping,
+            &format!("linux:uid:{}", self.owner_uid),
+            &format!("linux:uid:{}", self.service_uid),
+            self.profile_id,
+            wrapped,
+        )?;
+        let active = ActiveCustody {
+            cipher: Arc::new(cipher),
+            envelope_digest: wrapped.digest(),
+        };
+        if let Err(active) = self.custody.set(active) {
+            ensure!(
+                self.custody
+                    .get()
+                    .expect("already initialized")
+                    .envelope_digest
+                    == active.envelope_digest,
+                "service custody cannot change enrollment without restart"
+            );
+        }
+        Ok(())
+    }
+
+    fn entry(&self, service: &str, user: &str) -> Result<Entry> {
+        let cipher = self
+            .custody
+            .get()
+            .context("service custody is locked")?
+            .cipher
+            .clone();
+        let (name, instance) = match (service, user) {
+            ("org.ekubo.wallet.db", "default") => ("key-database".to_owned(), None),
             ("org.ekubo.wallet.private-key.instance", id) => {
                 let id = uuid::Uuid::parse_str(id).context("invalid wallet instance identifier")?;
-                format!("key-account-{id}")
+                ensure!(!id.is_nil(), "invalid wallet instance identifier");
+                (format!("key-account-{id}"), Some(id))
             }
             _ => anyhow::bail!("unsupported service credential namespace"),
         };
         Ok(Entry {
-            directory: storage.directory.clone(),
-            service_uid: storage.service_uid,
+            directory: self.directory.clone(),
+            service_uid: self.service_uid,
             name,
+            cipher,
+            instance,
         })
-    })
+    }
 }
 
 pub(crate) struct Entry {
     directory: Arc<File>,
     service_uid: u32,
     name: String,
+    cipher: Arc<DataCipher>,
+    instance: Option<uuid::Uuid>,
+}
+
+fn read_fixed<const N: usize>(parent: &File, name: &str, uid: u32) -> Result<Zeroizing<[u8; N]>> {
+    let mut file = open_regular(parent, name, uid, true)?;
+    ensure!(
+        file.metadata()?.len() == N as u64,
+        "invalid service credential length"
+    );
+    let mut bytes = Zeroizing::new([0; N]);
+    file.read_exact(bytes.as_mut_slice())?;
+    ensure!(
+        file.read(&mut [0_u8; 1])? == 0,
+        "service credential grew while being read"
+    );
+    Ok(bytes)
 }
 
 impl Entry {
     pub(crate) fn get_secret(&self) -> Result<Vec<u8>> {
-        let mut file = open_regular(&self.directory, &self.name, self.service_uid, true)?;
-        ensure!(
-            file.metadata()?.len() == KEY_BYTES as u64,
-            "invalid service credential length"
-        );
-        let mut bytes = Zeroizing::new(vec![0; KEY_BYTES]);
-        file.read_exact(&mut bytes)?;
-        ensure!(
-            file.read(&mut [0_u8; 1])? == 0,
-            "service credential grew while being read"
-        );
-        Ok(bytes.to_vec())
+        let bytes = read_fixed::<SEALED_KEY_BYTES>(&self.directory, &self.name, self.service_uid)?;
+        let material = match self.instance {
+            Some(instance) => self.cipher.open_account_key(instance, bytes.as_slice())?,
+            None => self.cipher.open_database_key(bytes.as_slice())?,
+        };
+        Ok(material.to_vec())
     }
 
     /// Keys are immutable. Publish a fully synced inode without replacing any
@@ -278,6 +372,11 @@ impl Entry {
             bytes.len() == KEY_BYTES,
             "invalid service credential length"
         );
+        let material: &[u8; KEY_BYTES] = bytes.try_into().expect("validated key length");
+        let sealed = match self.instance {
+            Some(instance) => self.cipher.seal_account_key(instance, material)?,
+            None => self.cipher.seal_database_key(material)?,
+        };
         let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
         let mut file = File::from(openat(
             &self.directory,
@@ -286,7 +385,7 @@ impl Entry {
             Mode::from_raw_mode(PRIVATE_FILE_MODE),
         )?);
         let result = (|| {
-            file.write_all(bytes)?;
+            file.write_all(&sealed)?;
             file.sync_all()?;
             rustix::fs::renameat_with(
                 &self.directory,
@@ -376,3 +475,7 @@ fn validate_file(file: &File, uid: u32, private: bool) -> Result<()> {
 #[cfg(test)]
 #[path = "service_storage_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "service_storage_unlock_test.rs"]
+mod unlock_tests;

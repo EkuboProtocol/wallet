@@ -15,6 +15,89 @@ fn wrapping() -> WrappingKey {
 }
 
 #[test]
+fn linux_and_windows_use_the_same_enrollment_and_credential_contract() {
+    for (owner, service) in [
+        ("linux:uid:1000", "linux:uid:2000"),
+        (
+            "windows:sid:S-1-5-21-1-2-3-1000",
+            "windows:sid:S-1-5-80-1-2-3-4-5",
+        ),
+    ] {
+        let profile = Uuid::new_v4();
+        let generation = Uuid::new_v4();
+        let instance = Uuid::new_v4();
+        let binding = CustodyBinding::new(owner, service, profile, generation).unwrap();
+        let (data, wrapped) = wrapping().enroll(binding).unwrap();
+        let account = data.seal_account_key(instance, &[0x22; 32]).unwrap();
+        let database = data.seal_database_key(&[0x33; 32]).unwrap();
+        let metadata =
+            serde_json::to_vec(&CustodyEnrollment::new(generation, &wrapped).unwrap()).unwrap();
+        let ciphertext = wrapped.as_bytes().to_vec();
+        drop(data);
+
+        // Simulate restart: the OS adapter reloads protected metadata and KEK;
+        // the desktop supplies only the opaque envelope, with no key export.
+        let enrollment = CustodyEnrollment::from_bytes(&metadata).unwrap();
+        let wrapped = WrappedDataKey::from_bytes(&ciphertext).unwrap();
+        let data = enrollment
+            .unlock(&wrapping(), owner, service, profile, &wrapped)
+            .unwrap();
+        assert_eq!(
+            *data.open_account_key(instance, &account).unwrap(),
+            [0x22; 32]
+        );
+        assert_eq!(*data.open_database_key(&database).unwrap(), [0x33; 32]);
+        assert!(data.open_database_key(&account).is_err());
+        assert!(data.open_account_key(Uuid::new_v4(), &account).is_err());
+        assert!(
+            enrollment
+                .unlock(&wrapping(), service, owner, profile, &wrapped)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn enrollment_metadata_is_bounded_versioned_and_bound_at_unlock() {
+    let wrapping = wrapping();
+    let (_, wrapped) = wrapping.enroll(binding()).unwrap();
+    let enrolled = CustodyEnrollment::new(Uuid::from_u128(2), &wrapped).unwrap();
+    let encoded = serde_json::to_vec(&enrolled).unwrap();
+    let read = CustodyEnrollment::from_bytes(&encoded).unwrap();
+    assert!(
+        read.unlock(
+            &wrapping,
+            "linux:uid:1000",
+            "linux:uid:2000",
+            Uuid::from_u128(1),
+            &wrapped
+        )
+        .is_ok()
+    );
+    assert!(
+        read.unlock(
+            &wrapping,
+            "linux:uid:1001",
+            "linux:uid:2000",
+            Uuid::from_u128(1),
+            &wrapped
+        )
+        .is_err()
+    );
+    for (field, value) in [
+        ("version", serde_json::json!(2)),
+        ("generation", serde_json::json!(Uuid::nil())),
+        ("untrusted", serde_json::json!(true)),
+        ("wrapped_key_digest", serde_json::json!([1, 2])),
+    ] {
+        let mut altered = serde_json::to_value(&enrolled).unwrap();
+        altered[field] = value;
+        assert!(CustodyEnrollment::from_bytes(&serde_json::to_vec(&altered).unwrap()).is_err());
+    }
+    assert!(CustodyEnrollment::from_bytes(&vec![b' '; 4097]).is_err());
+}
+
+#[test]
 fn v1_format_matches_an_independent_libsodium_vector() {
     // Independently produced with libsodium 1.0.22's
     // crypto_aead_xchacha20poly1305_ietf_encrypt (combined mode).

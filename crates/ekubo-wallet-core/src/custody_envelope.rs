@@ -61,6 +61,54 @@ impl CustodyBinding {
 #[derive(Clone)]
 pub struct WrappedDataKey([u8; SEALED_KEY_BYTES]);
 
+/// Public metadata with protected-state authority. Only read it from an
+/// OS-validated service file; neither this metadata nor the expected identities
+/// may be supplied by the desktop's unlock request.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyEnrollment {
+    version: u8,
+    generation: Uuid,
+    wrapped_key_digest: [u8; 32],
+}
+
+impl CustodyEnrollment {
+    pub fn new(generation: Uuid, wrapped: &WrappedDataKey) -> Result<Self> {
+        ensure!(!generation.is_nil(), "invalid custody generation");
+        Ok(Self {
+            version: VERSION,
+            generation,
+            wrapped_key_digest: wrapped.digest(),
+        })
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        ensure!(bytes.len() <= 4096, "custody enrollment is oversized");
+        let enrollment: Self = serde_json::from_slice(bytes)?;
+        ensure!(
+            enrollment.version == VERSION && !enrollment.generation.is_nil(),
+            "invalid custody enrollment"
+        );
+        Ok(enrollment)
+    }
+
+    pub fn unlock(
+        &self,
+        wrapping: &WrappingKey,
+        owner: &str,
+        service: &str,
+        profile: Uuid,
+        wrapped: &WrappedDataKey,
+    ) -> Result<DataCipher> {
+        ensure!(
+            self.version == VERSION,
+            "unsupported custody enrollment version"
+        );
+        let binding = CustodyBinding::new(owner, service, profile, self.generation)?;
+        wrapping.unlock(binding, wrapped, &self.wrapped_key_digest)
+    }
+}
+
 impl WrappedDataKey {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         validate_header(bytes, Purpose::Data)?;
