@@ -688,6 +688,15 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     assert_eq!(candidate.session(), session);
     assert_eq!(input, b"next protocol frame");
     assert_ne!(candidate.stage(), stage);
+    let mut reply = Vec::new();
+    candidate.write_reply(&mut reply).unwrap();
+    let decoded = crate::migration_transfer::read_reply(&mut reply.as_slice(), session).unwrap();
+    assert_eq!(decoded.stage(), candidate.stage());
+    assert_eq!(decoded.canonical(), candidate.canonical());
+    assert_eq!(decoded.relay().as_bytes(), candidate.relay().as_bytes());
+    assert!(
+        crate::migration_transfer::read_reply(&mut reply.as_slice(), uuid::Uuid::new_v4()).is_err()
+    );
     assert_eq!(
         pending
             .canonical_database(candidate.stage())

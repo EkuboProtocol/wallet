@@ -33,6 +33,16 @@ pub struct TransferLimits {
     pub database_bytes: u64,
 }
 
+/// Shared installer admission policy for native Linux and Windows hosts.
+pub const INSTALLER_LIMITS: TransferLimits = TransferLimits {
+    accounts: 100_000,
+    metadata_bytes: 16 * 1024,
+    total_metadata_bytes: 64 * 1024 * 1024,
+    database_bytes: 16 * 1024 * 1024 * 1024,
+};
+/// Native adapters must cancel I/O on expiry, not merely abandon an async waiter.
+pub const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Public identity obtained from protected installer configuration. These strings
 /// bind the transfer to its destination; they cannot establish peer provenance.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +137,19 @@ pub struct ReceivedCandidate<'a, S> {
 }
 
 impl<S> ReceivedCandidate<'_, S> {
+    /// Send only a staged result over the same authenticated provisioning stream.
+    /// A successful reply is not permission to activate or delete legacy keys.
+    pub fn write_reply(&self, output: &mut impl Write) -> Result<()> {
+        let reply = Reply {
+            session: self.session,
+            stage: self.stage.id(),
+            canonical: self.canonical.clone(),
+            relay: hex::encode(self.prepared.relay().as_bytes()),
+        };
+        write_frame(output, &encode(&reply, MAX_HEADER_BYTES)?)?;
+        output.flush()?;
+        Ok(())
+    }
     #[must_use]
     pub const fn session(&self) -> Uuid {
         self.session
@@ -144,6 +167,63 @@ impl<S> ReceivedCandidate<'_, S> {
     pub fn relay(&self) -> &WrappedDataKey {
         self.prepared.relay()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reply {
+    session: Uuid,
+    stage: Uuid,
+    canonical: DatabaseTransfer,
+    relay: String,
+}
+
+/// Installer-visible staged result. Contains only relay ciphertext, never a
+/// usable key. Not an activation, recovery or legacy-credential deletion proof.
+pub struct StagingReply {
+    stage: Uuid,
+    canonical: DatabaseTransfer,
+    relay: WrappedDataKey,
+}
+
+impl StagingReply {
+    #[must_use]
+    pub const fn stage(&self) -> Uuid {
+        self.stage
+    }
+    #[must_use]
+    pub const fn canonical(&self) -> &DatabaseTransfer {
+        &self.canonical
+    }
+    #[must_use]
+    pub const fn relay(&self) -> &WrappedDataKey {
+        &self.relay
+    }
+}
+
+/// Read the reply from the already authenticated destination, binding it to the
+/// exact session returned by send. A missing reply leaves an ambiguous stage.
+pub fn read_reply(input: &mut impl Read, session: Uuid) -> Result<StagingReply> {
+    let mut budget = u64::from(MAX_HEADER_BYTES);
+    let reply: Reply = read_frame(input, MAX_HEADER_BYTES, &mut budget)?;
+    ensure!(
+        !session.is_nil() && reply.session == session,
+        "provisioning reply session mismatch"
+    );
+    ensure!(
+        !reply.stage.is_nil() && reply.canonical.bytes != 0,
+        "invalid provisioning reply"
+    );
+    ensure!(
+        reply.relay.len() == crate::custody_envelope::SEALED_KEY_BYTES * 2,
+        "invalid provisioning relay length"
+    );
+    let relay = WrappedDataKey::from_bytes(&hex::decode(reply.relay)?)?;
+    Ok(StagingReply {
+        stage: reply.stage,
+        canonical: reply.canonical,
+        relay,
+    })
 }
 
 /// Consume exactly one transfer from an already authorized native transport.

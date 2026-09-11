@@ -134,3 +134,33 @@ fn invalid_account_key_never_creates_a_stage() {
     bytes.extend_from_slice(&[0; 32]);
     assert!(receive(&UnusedStore, &mut bytes.as_slice(), limits()).is_err());
 }
+
+#[test]
+fn reply_rejects_wrong_session_invalid_stage_database_and_relay() {
+    use crate::custody_envelope::{CustodyBinding, WrappingKey};
+    let session = Uuid::new_v4();
+    let (_, relay) = WrappingKey::from_material(Zeroizing::new([0x44; 32]))
+        .enroll(CustodyBinding::new("owner", "service", Uuid::new_v4(), Uuid::new_v4()).unwrap())
+        .unwrap();
+    for mutation in 0..5 {
+        let mut reply = Reply {
+            session,
+            stage: Uuid::new_v4(),
+            canonical: DatabaseTransfer {
+                bytes: 1024,
+                sha256: [0; 32],
+            },
+            relay: hex::encode(relay.as_bytes()),
+        };
+        match mutation {
+            0 => reply.session = Uuid::new_v4(),
+            1 => reply.stage = Uuid::nil(),
+            2 => reply.canonical.bytes = 0,
+            3 => reply.relay.truncate(20),
+            _ => reply.relay = "00".repeat(crate::custody_envelope::SEALED_KEY_BYTES),
+        }
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &encode(&reply, MAX_HEADER_BYTES).unwrap()).unwrap();
+        assert!(read_reply(&mut bytes.as_slice(), session).is_err());
+    }
+}

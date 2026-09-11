@@ -232,14 +232,37 @@ synthetic account through native Linux pending storage, sender preflight, trunca
 keys/database, invalid account keys, destination mismatch, unknown header fields,
 frame budgets, and preservation of following protocol bytes.
 
-This codec is not yet connected to a listening provisioning endpoint. It does not
-establish OS identity or human authorization from a header. Platform hosts must
-authenticate the transport and provisioning handoff, enforce admission and an
-overall deadline, and keep the source lifecycle lock/fence alive through durable
-commit or abort. Senders must authenticate the protected service before sending any
-key bytes. On interruption, credential records may remain staged; they do not
-activate custody. The actual privileged installer, relay persistence and durable
-commit/recovery remain required on both platforms.
+Linux now has a separate pending host selected by `--provision-owner-uid`,
+advertising `org.ekubo.Wallet.Provision.u<uid>` at
+`/org/ekubo/Wallet/Provision` after native pending-root validation. Its
+`org.ekubo.Wallet.Provision1.Transfer` method accepts a socket descriptor from
+the privileged installer. It verifies the actual system-bus sender is UID 0 and
+matches that sender's process ID against the connected Unix stream's kernel peer
+credentials before reading any transfer bytes. The installer must create the
+socketpair while privileged and retain the other end; Linux records these peer
+credentials at connection/socketpair creation ([unix(7)](https://man7.org/linux/man-pages/man7/unix.7.html)).
+The separate bus policy denies ordinary desktop callers. Only one worker can own
+the pending root at a time; no active owner RPC, authority, scheduler or MCP starts.
+
+The native stream uses one absolute five-minute I/O deadline. Installer disconnect,
+bus loss, timeout or handler cancellation shuts down the same socket object,
+waking blocked native I/O. A worker retains the profile lock until its current
+SQLCipher operation finishes, including after cancellation; this prevents overlap,
+but does not forcibly interrupt a database rebuild already in progress. The shared
+staging reply contains session/stage IDs, canonical database descriptor and desktop
+relay ciphertext only. Its parser validates the session and envelope format. A
+reply still does not authorize activation or legacy-key removal. Tests exercise
+kernel peer/type rejection, native read deadlines and cancellation, live identity
+checks on an isolated test bus, and a full synthetic transfer/reply through the
+Linux pending store.
+
+The provisioning service unit and D-Bus policy are source assets, not installed
+release components. Windows still needs its authenticated pending SCM/pipe host;
+the wire format, limits, deadline policy and staging reply are shared core code.
+The privileged installer client and authorized legacy-desktop handoff must still
+be implemented. Senders must authenticate the protected service before sending
+any keys. Installer relay persistence, durable commit/recovery, activation and
+legacy cleanup remain unfinished on both platforms.
 
 ## Required outcome
 

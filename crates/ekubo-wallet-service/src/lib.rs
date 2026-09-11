@@ -22,6 +22,8 @@ pub mod linux;
 mod linux_custody_rpc;
 #[cfg(target_os = "linux")]
 mod linux_owner_rpc;
+#[cfg(target_os = "linux")]
+pub mod linux_provisioning;
 #[path = "../../../src/mcp_transport.rs"]
 mod mcp_transport;
 mod owner_activity_batch;

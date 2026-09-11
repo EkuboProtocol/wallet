@@ -1,0 +1,34 @@
+[Unit]
+Description=Ekubo Wallet pending provisioning for owner UID %i
+Requires=dbus.socket
+After=dbus.socket
+ConditionPathExists=/etc/ekubo-wallet/pending/%i.json
+
+[Service]
+Type=dbus
+BusName=org.ekubo.Wallet.Provision.u%i
+User=ekubo-wallet
+Group=ekubo-wallet
+ExecStart=/usr/lib/ekubo-wallet/ekubo-wallet-service --provision-owner-uid %i
+WorkingDirectory=/
+UMask=0077
+Restart=no
+TimeoutStopSec=30s
+KillMode=control-group
+
+# The installer creates and validates the exact pending profile first. Native
+# storage validation still restricts the host to its configured profile.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ekubo-wallet/pending
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+LimitCORE=0

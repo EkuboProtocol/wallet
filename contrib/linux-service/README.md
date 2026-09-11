@@ -38,6 +38,22 @@ and indexes cannot become service authority. Candidate publication does not
 authorize activation or legacy-key deletion; durable installer recovery is still
 required.
 
+A separate pending host is now implemented in the service binary:
+`--provision-owner-uid <uid>`. The new `ekubo-wallet-provision@.service` and
+`org.ekubo.Wallet.Provision.conf` are source assets for its installer-only system-bus
+endpoint. The installer creates a connected Unix socketpair while privileged and
+passes one descriptor to `org.ekubo.Wallet.Provision1.Transfer` at
+`/org/ekubo/Wallet/Provision`, destination `org.ekubo.Wallet.Provision.u<uid>`.
+Core validates pending identity/storage before the endpoint is advertised. The host
+requires actual D-Bus UID 0 and socket peer UID 0 with the same process ID, then
+runs the shared bounded provisioning transfer and returns only a staging reply.
+One worker holds the root at a time. Deadline/disconnect cancellation shuts down
+native socket I/O; an in-flight SQLCipher operation retains the lock until it ends.
+It never starts active wallet authority. The installer must stop the pending host
+before later profile promotion. These assets are not installed by current packages;
+the privileged client, source handoff, durable activation and recovery remain
+unfinished. Do not publish active metadata in response to a staging reply.
+
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is
 `/usr/lib/ekubo-wallet/ekubo-wallet-service`. Install the unit under

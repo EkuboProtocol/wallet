@@ -4,16 +4,24 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
+    let mode = args.next();
     anyhow::ensure!(
-        args.next().as_deref() == Some("--owner-uid"),
-        "expected --owner-uid <uid>"
+        matches!(
+            mode.as_deref(),
+            Some("--owner-uid" | "--provision-owner-uid")
+        ),
+        "expected --owner-uid <uid> or --provision-owner-uid <uid>"
     );
     let owner_uid: u32 = args
         .next()
         .ok_or_else(|| anyhow::anyhow!("missing owner UID"))?
         .parse()?;
     anyhow::ensure!(args.next().is_none(), "unexpected service argument");
-    ekubo_wallet_service::linux::run(owner_uid).await
+    if mode.as_deref() == Some("--provision-owner-uid") {
+        ekubo_wallet_service::linux_provisioning::run(owner_uid).await
+    } else {
+        ekubo_wallet_service::linux::run(owner_uid).await
+    }
 }
 
 #[cfg(target_os = "windows")]
