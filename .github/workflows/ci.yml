@@ -200,7 +200,9 @@ jobs:
         env:
           RUST_MIN_STACK: 67108864
           CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
-        run: cargo test --locked --workspace --all-features --lib owner_client::tests -- --ignored
+        run: |
+          cargo test --locked --workspace --all-features --lib owner_client::tests -- --ignored
+          cargo test --locked --workspace --all-features --lib linux_relay_handoff::tests::installer_policy -- --ignored
 
       - name: Test encrypted migration through the Windows service
         if: runner.os == 'Windows'
