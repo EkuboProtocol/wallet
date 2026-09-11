@@ -19,6 +19,7 @@ CORE = ROOT / "crates" / "ekubo-wallet-core"
 NAME = "ekubo-wallet-native-check"
 MODULES = (
     "windows_service_identity",
+    "windows_service_manager",
     "windows_security",
     "windows_service_config",
     "windows_service_storage",
