@@ -22,6 +22,10 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"EKUBOPR1";
 const MAX_HEADER_BYTES: u32 = 4096;
 
+#[path = "migration_forward.rs"]
+mod forwarding;
+pub use forwarding::{RelayedRequest, relay_request};
+
 #[path = "migration_recovery_transfer.rs"]
 mod recovery_transfer;
 pub(crate) use recovery_transfer::exchange as recover_exchange;

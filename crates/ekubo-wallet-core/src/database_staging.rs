@@ -5,7 +5,7 @@ use anyhow::{Result, ensure};
 use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
-    io::{Read, Seek as _, SeekFrom, Write as _},
+    io::{Read, Seek as _, SeekFrom},
 };
 use uuid::Uuid;
 
@@ -160,6 +160,23 @@ pub(crate) fn receive(
     input: &mut dyn Read,
     output: &mut File,
 ) -> Result<()> {
+    copy_checked(transfer, input, output)?;
+    output.sync_all()?;
+    output.seek(SeekFrom::Start(0))?;
+    ensure!(
+        DatabaseTransfer::describe(output)? == *transfer,
+        "database transfer readback mismatch"
+    );
+    Ok(())
+}
+
+/// Bounded ciphertext forwarding; storage publication additionally requires
+/// native durability and same-handle readback in `receive` above.
+pub(crate) fn copy_checked(
+    transfer: &DatabaseTransfer,
+    input: &mut dyn Read,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
     ensure!(transfer.bytes != 0, "database transfer is empty");
     let mut remaining = transfer.bytes;
     let mut sha = Sha256::new();
@@ -174,12 +191,6 @@ pub(crate) fn receive(
     ensure!(
         <[u8; 32]>::from(sha.finalize()) == transfer.sha256,
         "database transfer digest mismatch"
-    );
-    output.sync_all()?;
-    output.seek(SeekFrom::Start(0))?;
-    ensure!(
-        DatabaseTransfer::describe(output)? == *transfer,
-        "database transfer readback mismatch"
     );
     Ok(())
 }
