@@ -135,7 +135,7 @@ fn validate_registry_security(
                 *inherit_only
                     || mask & !READ_ONLY == 0
                     || trusted.iter().any(|writer| writer == sid),
-                "registry key grants mutation rights to an untrusted principal"
+                "registry key grants mutation rights to untrusted principal {sid} (mask {mask:#010x})"
             ),
             RegistryAce::Deny => {}
             RegistryAce::Unsupported => {

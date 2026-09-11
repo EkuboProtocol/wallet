@@ -198,7 +198,9 @@ fn read_configuration_at(
     let mut keys = Vec::new();
     let mut parent = root;
     for component in ["SOFTWARE", "EkuboWallet", collection, owner] {
-        let Some(key) = open_component(parent, component, trusted)? else {
+        let Some(key) = open_component(parent, component, trusted)
+            .with_context(|| format!("unsafe service registry component {component}"))?
+        else {
             ensure!(
                 component != "SOFTWARE",
                 "machine software registry is missing"
