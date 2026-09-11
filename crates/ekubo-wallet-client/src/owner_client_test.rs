@@ -1,4 +1,7 @@
 struct Bus(std::process::Child);
+
+#[path = "owner_activation_test.rs"]
+mod activation;
 impl Drop for Bus {
     fn drop(&mut self) {
         let _ = self.0.kill();

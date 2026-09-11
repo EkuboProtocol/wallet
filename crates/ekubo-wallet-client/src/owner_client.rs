@@ -35,6 +35,18 @@ impl OwnerConnection<LinuxOwnerTransport> {
 }
 
 impl LinuxOwnerTransport {
+    async fn activate(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
+        let registry = DBusProxy::new(&bus).await?;
+        if !registry.name_has_owner(name.try_into()?).await? {
+            let reply = registry.start_service_by_name(name.try_into()?, 0).await?;
+            let _ = zbus::fdo::StartServiceReply::try_from(reply)?;
+        }
+        // Activation only establishes availability. Resolve and authenticate
+        // the actual unique owner before touching the login keyring. Existing
+        // transports never activate again after an interrupted operation.
+        Self::authenticate(bus, name, expected_uid).await
+    }
+
     async fn authenticate(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
         let registry = DBusProxy::new(&bus).await?;
         let service = registry.get_name_owner(name.try_into()?).await?;
@@ -120,7 +132,7 @@ async fn connect_custody(
     )
     .build()
     .await?;
-    let transport = LinuxOwnerTransport::authenticate(
+    let transport = LinuxOwnerTransport::activate(
         bus,
         &format!("org.ekubo.Wallet.Owner.u{}", identity.owner_uid()),
         identity.service_uid(),

@@ -35,6 +35,22 @@ lease. Enabling/activation, boot-time runtime-directory creation, installation
 rollback, upgrade coordination, and removal still need installer implementation.
 The install target is intentionally omitted until those steps are implemented.
 
+For on-demand startup, substitute the validated canonical owner UID for every
+`@OWNER_UID@` in `org.ekubo.Wallet.Owner.service.in` and install it as the
+root-owned `/usr/share/dbus-1/system-services/org.ekubo.Wallet.Owner.u<uid>.service`.
+The resulting `SystemdService` must be `ekubo-wallet@<uid>.service`. Register
+activation only after the matching protected state, metadata, runtime-directory
+provisioning, executable, and unit are ready. The `Exec=/usr/bin/false` fallback
+deliberately refuses activation without systemd rather than launching the service
+outside its unit's sandbox. Do not install the unexpanded template.
+
+Initial Linux owner and MCP connections request `StartServiceByName` on the
+pinned system bus if the name is unowned, then resolve and authenticate the
+service's unique name, UID, and PID. Activation failure returns an error; it never permits local-custody
+fallback for an installed profile. Existing connections do not activate again or
+replay interrupted requests. The activation reply is availability only, so the
+client still authenticates the endpoint before reading enrollment ciphertext.
+
 The unit deliberately avoids systemd's automatic state-directory ownership
 repair. See [systemd's directory semantics](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml).
 The D-Bus policy permits only the dedicated account to own the wallet namespace;

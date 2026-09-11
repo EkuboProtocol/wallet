@@ -4591,6 +4591,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid 1.26.0",
  "zbus",

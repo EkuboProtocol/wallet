@@ -146,7 +146,7 @@ jobs:
 
       - name: Install GPUI and tray dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus gnome-keyring
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus dbus-tests gnome-keyring
 
       - name: Refuse GTK tray dependencies on Linux
         if: runner.os == 'Linux'
@@ -193,7 +193,7 @@ jobs:
         run: cargo test --locked -p ekubo-wallet-core --all-features --lib --jobs ${{ matrix.test_jobs }} windows_service_
 
       - name: Test isolated owner transport and custody relay
-        # Private buses exercise authentication, ciphertext relay readiness,
+        # Private buses exercise activation, authentication, ciphertext relay readiness,
         # name replacement, and disconnects without desktop credentials.
         # Keep these ignored tests explicitly enabled in the Linux gate.
         if: runner.os == 'Linux'

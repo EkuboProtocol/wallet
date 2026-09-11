@@ -1,0 +1,6 @@
+[D-BUS Service]
+Name=org.ekubo.Wallet.Owner.u@OWNER_UID@
+User=ekubo-wallet
+# Activation must go through the sandboxed unit, never a direct daemon launch.
+Exec=/usr/bin/false
+SystemdService=ekubo-wallet@@OWNER_UID@.service
