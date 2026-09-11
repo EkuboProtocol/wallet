@@ -257,8 +257,30 @@ checks on an isolated test bus, and a full synthetic transfer/reply through the
 Linux pending store.
 
 The provisioning service unit and D-Bus policy are source assets, not installed
-release components. Windows still needs its authenticated pending SCM/pipe host;
-the wire format, limits, deadline policy and staging reply are shared core code.
+release components. Windows now has an explicit `windows_service_manager::run_pending`
+SCM bootstrap alongside active startup. The mode is fixed before dispatcher entry;
+it selects only protected pending metadata, rejects active-profile conflicts, and
+still verifies the SCM-supplied service name and actual virtual-account primary
+token/session before invoking its host. A console cannot enter either mode. The
+Windows provisioning pipe host and installer client remain unfinished; the wire
+format, limits, deadline policy and staging reply are shared core code.
+
+Native Windows installer checks now distinguish privileged installation from an
+ordinary administrator-account desktop process. They require enabled Builtin
+Administrators membership (including restricted-token checks) and high or system
+integrity; mere group presence, deny-only membership, or medium integrity fails.
+The primary-process check rejects thread impersonation and queries a read-only
+copy of the actual primary token. The synchronous pipe-client helper requires an
+existing thread token and has no primary-token fallback. It must be called inside
+a native impersonation/revert guard after the pipe read; the pipe host has not yet
+been wired. These checks recognize existing administrator authority, grant no
+elevation or fresh wallet-owner presence, and access no credentials. Tests include
+native self-impersonation, a separately created token with its Administrators SID
+made deny-only, and isolated pending-mode console rejection. Native Windows CI is
+required in addition to cross-compilation. The token checks follow Microsoft's
+[CheckTokenMembership](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-checktokenmembership)
+and [integrity-control](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control)
+contracts.
 The Linux privileged client is now implemented in core's
 `linux_provisioning_client::transfer`. A root-only pending-identity reader checks
 protected configuration and rejects existing or damaged active metadata without

@@ -64,3 +64,30 @@ fn a_console_process_cannot_enter_the_service_host() {
         windows::Win32::Foundation::ERROR_FAILED_SERVICE_CONTROLLER_CONNECT.to_hresult()
     );
 }
+
+#[test]
+fn a_console_process_cannot_enter_the_pending_host() {
+    const CHILD: &str = "EKUBO_TEST_PENDING_SCM_CONSOLE";
+    fn never(_: &str, _: Running, _: watch::Receiver<bool>) -> Result<()> {
+        panic!("console process entered pending provisioning");
+    }
+    if std::env::var_os(CHILD).is_none() {
+        // SCM context is process-global. Isolate this case from the active-mode
+        // console test, and ensure the child actually ran the selected test.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "windows_service_manager::native::tests::a_console_process_cannot_enter_the_pending_host", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let error = run_pending("S-1-5-21-1-2-3-1001", never).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<windows::core::Error>().unwrap().code(),
+        windows::Win32::Foundation::ERROR_FAILED_SERVICE_CONTROLLER_CONNECT.to_hresult()
+    );
+}

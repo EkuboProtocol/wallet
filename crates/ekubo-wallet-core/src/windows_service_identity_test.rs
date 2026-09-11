@@ -1,5 +1,24 @@
 use super::*;
 
+#[test]
+fn installer_authority_requires_enabled_administrators_and_high_or_system_integrity() {
+    for integrity in ["S-1-16-12288", "S-1-16-16384"] {
+        assert!(require_installer_context(true, integrity).is_ok());
+        assert!(require_installer_context(false, integrity).is_err());
+    }
+    for integrity in [
+        "S-1-16-0",
+        "S-1-16-4096",
+        "S-1-16-8192",
+        "S-1-16-8448",
+        "S-1-16-12288-extra",
+        "S-1-16-99999",
+        "S-1-5-18",
+    ] {
+        assert!(require_installer_context(true, integrity).is_err());
+    }
+}
+
 const SERVICE: &str = "S-1-5-80-123-456-789-10-11";
 
 #[test]

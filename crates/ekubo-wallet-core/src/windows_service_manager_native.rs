@@ -28,10 +28,17 @@ use windows::{
     core::{PCWSTR, PWSTR, w},
 };
 
+#[derive(Clone, Copy)]
+enum StoragePhase {
+    Active,
+    Pending,
+}
+
 type Host = fn(&str, Running, watch::Receiver<bool>) -> Result<()>;
 
 struct Context {
     owner_sid: String,
+    storage_phase: StoragePhase,
     host: Host,
     stop: watch::Sender<bool>,
     control: Mutex<Option<Control<NativeReporter>>>,
@@ -67,10 +74,21 @@ fn context() -> Result<&'static Context> {
 /// arguments cannot select custody: only the fixed owner selector is used,
 /// and its protected metadata and actual primary token are validated first.
 pub fn run(owner_sid: &str, host: Host) -> Result<()> {
+    run_with_phase(owner_sid, host, StoragePhase::Active)
+}
+
+/// Dispatch a pending provisioning host under the same SCM/token checks, using
+/// only protected pending metadata. No active discovery or fallback is allowed.
+pub fn run_pending(owner_sid: &str, host: Host) -> Result<()> {
+    run_with_phase(owner_sid, host, StoragePhase::Pending)
+}
+
+fn run_with_phase(owner_sid: &str, host: Host, storage_phase: StoragePhase) -> Result<()> {
     let (stop, _) = watch::channel(false);
     CONTEXT
         .set(Context {
             owner_sid: owner_sid.to_owned(),
+            storage_phase,
             host,
             stop,
             control: Mutex::new(None),
@@ -174,7 +192,14 @@ fn run_registered(handle: SERVICE_STATUS_HANDLE, name: PWSTR) -> Result<()> {
         *slot = Some(Control::new(NativeReporter(handle), context.stop.clone()));
         slot.as_mut().context("SCM control missing")?.initialize()?;
     }
-    let identity = crate::windows_service_config::service_identity(&context.owner_sid)?;
+    let identity = match context.storage_phase {
+        StoragePhase::Active => {
+            crate::windows_service_config::service_identity(&context.owner_sid)?
+        }
+        StoragePhase::Pending => {
+            crate::windows_service_config::pending_service_identity(&context.owner_sid)?
+        }
+    };
     let expected: Vec<u16> = identity
         .service_name()
         .encode_utf16()
@@ -184,7 +209,7 @@ fn run_registered(handle: SERVICE_STATUS_HANDLE, name: PWSTR) -> Result<()> {
     // its terminator, and bound comparison by the fixed expected service name.
     ensure!(
         unsafe { name_matches(name, &expected) },
-        "SCM service name does not match installed identity"
+        "SCM service name does not match protected identity"
     );
     (context.host)(&context.owner_sid, Running(()), context.stop.subscribe())
 }

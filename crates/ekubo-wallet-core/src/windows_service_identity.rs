@@ -10,7 +10,10 @@ use anyhow::{Result, ensure};
 #[path = "windows_service_identity_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub use native::{current_process_identity, verify_service_process};
+pub use native::{
+    current_process_identity, verify_installer_process, verify_installer_thread,
+    verify_service_process,
+};
 #[cfg(target_os = "windows")]
 pub(crate) use native::{current_thread_user_sid, sid_string};
 
@@ -69,3 +72,15 @@ pub(crate) fn is_virtual_service_sid(value: &str) -> bool {
 #[cfg(test)]
 #[path = "windows_service_identity_test.rs"]
 mod tests;
+
+fn require_installer_context(administrator_enabled: bool, integrity_sid: &str) -> Result<()> {
+    ensure!(
+        administrator_enabled,
+        "installer token has no enabled administrator authority"
+    );
+    ensure!(
+        matches!(integrity_sid, "S-1-16-12288" | "S-1-16-16384"),
+        "installer token must have high or system integrity"
+    );
+    Ok(())
+}

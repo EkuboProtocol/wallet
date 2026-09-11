@@ -4,8 +4,12 @@
 // Keep those unsafe operations inside this small native boundary.
 #![allow(unsafe_code)]
 
-use super::ProcessIdentity;
+use super::{ProcessIdentity, require_installer_context};
+
+#[path = "windows_installer_identity_native.rs"]
+mod installer;
 use anyhow::{Context as _, Result, bail, ensure};
+pub use installer::{verify_installer_process, verify_installer_thread};
 use std::mem::size_of;
 use windows::{
     Win32::{
@@ -97,8 +101,12 @@ fn user_sid(token: &Token) -> Result<String> {
     let data = token_data(token, TokenUser, size_of::<TOKEN_USER>())?;
     // SAFETY: token_data checked size/alignment; TOKEN_USER is a plain C struct.
     let user = unsafe { &*data.words.as_ptr().cast::<TOKEN_USER>() };
+    sid_in_data(&data, user.User.Sid)
+}
+
+fn sid_in_data(data: &TokenData, pointer: windows::Win32::Security::PSID) -> Result<String> {
     let base = data.words.as_ptr() as usize;
-    let offset = (user.User.Sid.0 as usize)
+    let offset = (pointer.0 as usize)
         .checked_sub(base)
         .context("token SID lies outside its buffer")?;
     // SAFETY: the vector is initialized for at least data.bytes bytes.
@@ -116,7 +124,7 @@ fn user_sid(token: &Token) -> Result<String> {
     );
     // SAFETY: the SID is wholly inside the live token buffer and has a valid
     // revision/count. The API validates its contents before allocating text.
-    unsafe { sid_string(user.User.Sid) }
+    unsafe { sid_string(pointer) }
 }
 
 /// Convert an OS-provided SID without leaking its allocated text.

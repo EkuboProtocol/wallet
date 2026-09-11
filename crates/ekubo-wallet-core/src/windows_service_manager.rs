@@ -9,7 +9,7 @@ use tokio::sync::watch;
 #[path = "windows_service_manager_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
-pub use native::{Running, run};
+pub use native::{Running, run, run_pending};
 
 #[path = "windows_service_start.rs"]
 mod startup;
