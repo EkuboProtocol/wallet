@@ -120,6 +120,14 @@ pub fn find_installed_service_identity() -> Result<Option<InstalledServiceIdenti
     }))
 }
 
+/// Read the pending profile for the actual desktop owner, without elevation or
+/// access to the service's private storage. Active profiles cannot fall back.
+pub fn pending_owner_profile() -> Result<uuid::Uuid> {
+    let owner = client_uid()?;
+    ensure!(owner != 0, "root cannot persist a desktop custody relay");
+    Ok(pending_configuration(&root_directory()?, owner, 0)?.profile_id)
+}
+
 fn client_uid() -> Result<u32> {
     let owner_uid = rustix::process::geteuid().as_raw();
     ensure!(

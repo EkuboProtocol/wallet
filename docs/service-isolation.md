@@ -1658,3 +1658,25 @@ execution is still required to verify administrative owner assignment and file
 publication/flush behavior at this revision. This does not implement relay
 persistence, pre-reply recovery, activation or legacy deletion. Earlier notes
 that Windows journal storage is missing describe the preceding checkpoints.
+
+### Owner-bound pending relay persistence
+
+`custody_relay::persist_pending` writes only a typed opaque `WrappedDataKey` to
+its fixed credential namespace. Before opening the credential store it reads
+protected pending configuration for the actual owner and exact-matches the
+profile. Linux rejects root and set-user-ID callers; Windows reads the primary
+owner token and rejects thread impersonation and service-account owner identities.
+Both reject active-profile fallback. The selected entry must be the platform
+credential store, never the active service backend.
+
+An identical existing entry succeeds without writing. Conflicts and read errors
+stop the operation; only confirmed absence permits a write, followed by exact
+readback. This does not claim atomic compare-and-set semantics for the owner's
+mutable login keyring. It creates no signing rights, owner proof, enrollment or
+activation/deletion authority. Unit tests exercise retry, conflict, read failure,
+write failure and mismatched readback without accessing real credentials.
+
+The authenticated installer-to-desktop relay handoff and its verified receipt
+are still missing. This operation is not yet connected to the installer or its
+native migration fixtures. A successful checkpoint write alone still cannot
+permit activation or legacy cleanup.

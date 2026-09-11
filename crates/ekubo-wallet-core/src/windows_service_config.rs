@@ -12,7 +12,7 @@ mod native;
 #[cfg(target_os = "windows")]
 pub use native::{
     find_installed_service_identity, installed_service_identity, pending_installer_identity,
-    service_identity,
+    pending_owner_profile, service_identity,
 };
 #[cfg(target_os = "windows")]
 pub(crate) use native::{machine_trustees, pending_service_identity};
