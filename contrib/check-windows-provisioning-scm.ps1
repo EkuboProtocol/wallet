@@ -56,7 +56,13 @@ try {
     $registryCreated = $true
     $registrySecurity = [Security.AccessControl.RegistrySecurity]::new()
     $registrySecurity.SetSecurityDescriptorSddlForm("O:BAD:P(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KR;;;$serviceSid)")
-    Set-Acl -LiteralPath $registryPath -AclObject $registrySecurity
+    $machine = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $machine.OpenSubKey('SOFTWARE\EkuboWallet', [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [Security.AccessControl.RegistryRights]::FullControl)
+        if ($null -eq $key) { throw 'The fixture registry key was not created.' }
+        try { [Microsoft.Win32.RegistryAclExtensions]::SetAccessControl($key, $registrySecurity) }
+        finally { $key.Dispose() }
+    } finally { $machine.Dispose() }
     $pendingPath = Join-Path $registryPath ('Pending\' + $owner)
     New-Item -Path $pendingPath -Force | Out-Null
     $metadata = @{ owner_sid = $owner; service_sid = $serviceSid; profile_id = $profile.ToString() } | ConvertTo-Json -Compress
