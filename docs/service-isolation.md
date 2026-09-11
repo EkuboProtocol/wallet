@@ -330,6 +330,14 @@ actual kernel pipe label. Microsoft's
 [mandatory integrity control documentation](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control)
 explains why a permitted DACL alone does not establish client write access.
 
+The client access mask uses standard `FILE_GENERIC_READ` plus the specific
+`FILE_WRITE_DATA` right. This includes read-only pipe attribute/extended-attribute
+queries while excluding attribute writes, extended-attribute writes, security
+changes and `FILE_CREATE_PIPE_INSTANCE`. Native descriptor tests compare the mask
+against Windows' definitions, and negative tests reject the excluded write rights.
+Cross-account SCM execution remains required; same-account fixtures also receive
+the server owner's full-access grant and cannot prove narrow client sufficiency.
+
 The Linux privileged client is now implemented in core's
 `linux_provisioning_client::transfer`. A root-only pending-identity reader checks
 protected configuration and rejects existing or damaged active metadata without

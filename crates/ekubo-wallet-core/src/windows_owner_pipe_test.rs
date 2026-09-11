@@ -24,6 +24,8 @@ fn desktop_pipe_rights_cannot_create_servers_or_change_security() {
     );
     for mask in [
         4,
+        0x10,  // FILE_WRITE_EA
+        0x100, // FILE_WRITE_ATTRIBUTES
         0x4000_0000,
         0x1000_0000,
         0x40000,

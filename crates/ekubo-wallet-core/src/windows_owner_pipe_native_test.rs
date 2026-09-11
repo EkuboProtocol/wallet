@@ -139,6 +139,11 @@ async fn native_installer_pipe_checks_privilege_and_runs_the_shared_io_bridge() 
 
 #[test]
 fn native_installer_descriptor_does_not_grant_admin_server_creation() {
+    assert_eq!(
+        CLIENT_ACCESS,
+        windows::Win32::Storage::FileSystem::FILE_GENERIC_READ.0
+            | windows::Win32::Storage::FileSystem::FILE_WRITE_DATA.0
+    );
     let descriptor = descriptor("S-1-5-80-1-2-3-4-5", "S-1-5-32-544").unwrap();
     // SAFETY: the guard retains the complete native descriptor allocation.
     let (owner, entries) =

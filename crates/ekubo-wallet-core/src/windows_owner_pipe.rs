@@ -15,9 +15,10 @@ pub(crate) use native::{
     open_available as open_private_pipe,
 };
 
-// Avoid FILE_GENERIC_WRITE: its FILE_APPEND_DATA bit also authorizes creating
-// server instances. Clients need only data I/O, synchronization, and ACL reads.
-const CLIENT_ACCESS: u32 = 0x0012_0003;
+// FILE_GENERIC_READ plus FILE_WRITE_DATA: include the standard read-side pipe
+// attribute/EA queries. Avoid FILE_GENERIC_WRITE: its FILE_APPEND_DATA bit also
+// authorizes server-instance creation. No client attribute/EA/security writes.
+const CLIENT_ACCESS: u32 = 0x0012_008b;
 
 fn name(profile: uuid::Uuid) -> Result<String> {
     ensure!(!profile.is_nil(), "invalid owner pipe profile");
