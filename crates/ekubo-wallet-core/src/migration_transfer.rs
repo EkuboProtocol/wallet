@@ -29,6 +29,8 @@ pub use forwarding::{RelayedRequest, relay_request, relay_request_with_intent};
 #[path = "migration_recovery_transfer.rs"]
 mod recovery_transfer;
 pub(crate) use recovery_transfer::exchange as recover_exchange;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) use recovery_transfer::relay_request as relay_recovery_request;
 pub use recovery_transfer::{RecoveryRequest, send_recovery};
 
 #[path = "migration_checkpoint.rs"]

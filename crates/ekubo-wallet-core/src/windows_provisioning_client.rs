@@ -40,6 +40,24 @@ impl ForwardedSource {
 /// Intent is durable before forwarding; the completed checkpoint is durable
 /// before success. Incomplete intent does not authorize replay or activation.
 pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
+    handoff_from_owner(owner_sid, endpoint, None).await
+}
+
+/// Revalidate the completed protected checkpoint using the real owner's frozen
+/// source and stored relay. Incomplete intent cannot be recovered through this API.
+pub async fn recover_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
+    let checkpoint = crate::windows_service_storage::installer_journal::load_checkpoint(owner_sid)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("source recovery requires a completed installer checkpoint")
+        })?;
+    handoff_from_owner(owner_sid, endpoint, Some(checkpoint)).await
+}
+
+async fn handoff_from_owner(
+    owner_sid: &str,
+    endpoint: uuid::Uuid,
+    previous: Option<migration_transfer::RecoveryCheckpoint>,
+) -> Result<ForwardedSource> {
     let identity = windows_service_config::pending_installer_identity(owner_sid)?;
     let pipe = crate::windows_relay_pipe::connect_source(&identity, endpoint).await?;
     let (source, cancel) = provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
@@ -52,16 +70,36 @@ pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result
             source
                 .0
                 .write_all(crate::windows_relay_pipe::SOURCE_PREFACE)?;
-            let request = migration_transfer::relay_request_with_intent(
-                &mut source.0,
-                stream,
-                &destination,
-                migration_transfer::INSTALLER_LIMITS,
-                |intent| {
-                    crate::windows_service_storage::installer_journal::save_intent(&owner, intent)
-                },
-            )?;
+            crate::migration_source::request(&mut source.0, previous.as_ref())?;
+            let request = if let Some(checkpoint) = &previous {
+                migration_transfer::relay_recovery_request(
+                    &mut source.0,
+                    stream,
+                    &destination,
+                    checkpoint,
+                    migration_transfer::INSTALLER_LIMITS,
+                )?
+            } else {
+                migration_transfer::relay_request_with_intent(
+                    &mut source.0,
+                    stream,
+                    &destination,
+                    migration_transfer::INSTALLER_LIMITS,
+                    |intent| {
+                        crate::windows_service_storage::installer_journal::save_intent(
+                            &owner, intent,
+                        )
+                    },
+                )?
+            };
             let (reply, checkpoint) = request.finish(stream, &mut source.0)?;
+            if let Some(previous) = &previous {
+                ensure!(
+                    checkpoint.journal_bytes(&destination)?
+                        == previous.journal_bytes(&destination)?,
+                    "owner recovery checkpoint changed"
+                );
+            }
             crate::windows_service_storage::installer_journal::save_checkpoint(
                 &owner,
                 &checkpoint,

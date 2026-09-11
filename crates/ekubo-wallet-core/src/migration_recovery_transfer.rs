@@ -58,6 +58,49 @@ impl Header {
     }
 }
 
+/// Forward a recovery request only after matching its bounded header and relay
+/// digest to the installer's protected checkpoint. No source keys are forwarded.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn relay_request(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    destination: &Destination,
+    checkpoint: &super::RecoveryCheckpoint,
+    limits: TransferLimits,
+) -> Result<super::RelayedRequest> {
+    checkpoint.journal_bytes(destination)?;
+    let mut magic = [0; 8];
+    input.read_exact(&mut magic)?;
+    ensure!(&magic == MAGIC, "unsupported source recovery protocol");
+    let header: Header = read_frame(input, MAX_HEADER_BYTES, &mut u64::from(MAX_HEADER_BYTES))?;
+    header.validate(limits)?;
+    let relay = WrappedDataKey::from_bytes(&hex::decode(&header.relay)?)?;
+    ensure!(
+        &header.destination == destination
+            && header.session == checkpoint.session
+            && header.stage == checkpoint.stage
+            && header.source == checkpoint.source
+            && relay.digest() == checkpoint.relay_digest,
+        "source recovery differs from installer checkpoint"
+    );
+    output.write_all(MAGIC)?;
+    write_frame(output, &encode(&header, MAX_HEADER_BYTES)?)?;
+    let mut remaining = limits.total_metadata_bytes;
+    let mut wallets = Vec::new();
+    for _ in 0..header.accounts {
+        let wallet: WalletMetadata = read_frame(input, limits.metadata_bytes, &mut remaining)?;
+        write_frame(output, &encode(&wallet, limits.metadata_bytes)?)?;
+        wallets.push(wallet);
+    }
+    output.flush()?;
+    Ok(super::RelayedRequest {
+        destination: header.destination,
+        session: header.session,
+        source: header.source,
+        wallets,
+    })
+}
+
 /// Authenticate the protected destination before calling this codec. Preflight
 /// all bounded metadata before sending the relay. Read the reply on the same
 /// connection using the returned original session; recovery revalidates that

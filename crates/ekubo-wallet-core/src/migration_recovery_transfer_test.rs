@@ -105,3 +105,50 @@ fn recovery_reply_must_match_the_original_staged_result() {
         assert!(validate_reply(&previous, &reply).is_err());
     }
 }
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[test]
+fn recovery_forwarding_rejects_checkpoint_substitution_before_service_output() {
+    let header = header();
+    let checkpoint = super::super::RecoveryCheckpoint {
+        version: 1,
+        destination: header.destination.clone(),
+        session: header.session,
+        stage: header.stage,
+        source: header.source.clone(),
+        source_fingerprint: [0x66; 32],
+        canonical: header.source.clone(),
+        relay_digest: WrappedDataKey::from_bytes(&hex::decode(&header.relay).unwrap())
+            .unwrap()
+            .digest(),
+    };
+    for mutation in 0..6 {
+        let mut value = serde_json::to_value(&header).unwrap();
+        match mutation {
+            0 => value["destination"]["profile"] = serde_json::json!(Uuid::new_v4()),
+            1 => value["session"] = serde_json::json!(Uuid::new_v4()),
+            2 => value["stage"] = serde_json::json!(Uuid::new_v4()),
+            3 => value["source"]["bytes"] = serde_json::json!(2048),
+            4 => value["relay"] = serde_json::json!(self::header().relay),
+            _ => value["accounts"] = serde_json::json!(INSTALLER_LIMITS.accounts + 1),
+        }
+        let mut bytes = MAGIC.to_vec();
+        write_frame(&mut bytes, &serde_json::to_vec(&value).unwrap()).unwrap();
+        let boundary = bytes.len();
+        bytes.extend_from_slice(b"unread metadata");
+        let mut input = std::io::Cursor::new(bytes);
+        let mut output = Vec::new();
+        assert!(
+            relay_request(
+                &mut input,
+                &mut output,
+                &checkpoint.destination,
+                &checkpoint,
+                INSTALLER_LIMITS
+            )
+            .is_err()
+        );
+        assert_eq!(input.position(), u64::try_from(boundary).unwrap());
+        assert!(output.is_empty());
+    }
+}

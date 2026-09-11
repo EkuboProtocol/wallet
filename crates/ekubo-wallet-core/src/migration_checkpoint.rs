@@ -7,6 +7,27 @@ use std::io::{Read, Write};
 use crate::installer_checkpoint::RecoveryCheckpoint;
 
 impl RecoveryCheckpoint {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn write_source_request(&self, output: &mut impl Write) -> Result<()> {
+        super::write_frame(output, &super::encode(self, super::MAX_HEADER_BYTES)?)?;
+        output.flush()?;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn read_source_request(
+        input: &mut impl Read,
+        destination: &Destination,
+    ) -> Result<Self> {
+        let checkpoint: Self = super::read_frame(
+            input,
+            super::MAX_HEADER_BYTES,
+            &mut u64::from(super::MAX_HEADER_BYTES),
+        )?;
+        checkpoint.journal_bytes(destination)?;
+        Ok(checkpoint)
+    }
+
     pub(crate) fn capture(
         destination: Destination,
         reply: &StagingReply,

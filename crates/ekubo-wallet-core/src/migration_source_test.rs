@@ -224,3 +224,146 @@ fn missing_or_mismatched_account_key_fails_before_transmitting_database_key() {
         assert!(stream.into_inner().is_empty());
     }
 }
+
+fn recovery_fixture(
+    config: &ConfigStore,
+    destination: &Destination,
+) -> (
+    RecoveryCheckpoint,
+    crate::custody_envelope::WrappedDataKey,
+    Vec<u8>,
+) {
+    let mut snapshot = MigrationDatabaseSnapshot::freeze(
+        &config.data_dir().join(policy_store::DATABASE_FILE),
+        Zeroizing::new(KEY),
+    )
+    .unwrap();
+    let (_, relay) =
+        crate::custody_envelope::WrappingKey::from_material(Zeroizing::new([0x44; 32]))
+            .enroll(
+                crate::custody_envelope::CustodyBinding::new(
+                    &destination.owner,
+                    &destination.service,
+                    destination.profile,
+                    Uuid::new_v4(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    let session = Uuid::new_v4();
+    let reply = serde_json::to_vec(&serde_json::json!({
+        "session": session, "stage": Uuid::new_v4(),
+        "canonical": snapshot.transfer().unwrap(), "relay": hex::encode(relay.as_bytes()),
+    }))
+    .unwrap();
+    let mut wire = u32::try_from(reply.len()).unwrap().to_le_bytes().to_vec();
+    wire.extend(reply);
+    let reply = migration_transfer::read_reply(&mut wire.as_slice(), session).unwrap();
+    let checkpoint =
+        RecoveryCheckpoint::capture(destination.clone(), &reply, &mut snapshot).unwrap();
+    (checkpoint, relay, wire)
+}
+
+#[test]
+fn source_recovery_refreezes_without_reading_account_keys_and_retains_the_fence() {
+    let (_dir, config, wallet) = fixture();
+    let path = config.data_dir().join(policy_store::DATABASE_FILE);
+    let before = std::fs::read(&path).unwrap();
+    let destination = destination();
+    let (checkpoint, relay, reply) = recovery_fixture(&config, &destination);
+    let target = destination.clone();
+    let (mut owner, mut installer) = streams();
+    let worker = std::thread::spawn(move || {
+        config.with_lifecycle_lock(|| {
+            let mut command = [0];
+            owner.read_exact(&mut command)?;
+            ensure!(command == [1], "expected recovery request");
+            let checkpoint = RecoveryCheckpoint::read_source_request(&mut owner, &target)?;
+            recover_source(
+                &mut owner,
+                config.data_dir(),
+                target,
+                &checkpoint,
+                relay,
+                |service, user| {
+                    assert_eq!(
+                        (service, user),
+                        (policy_store::KEYRING_SERVICE, policy_store::KEYRING_USER)
+                    );
+                    Ok(Zeroizing::new(KEY))
+                },
+            )
+        })
+    });
+    request(&mut installer, Some(&checkpoint)).unwrap();
+    let mut forwarded = Vec::new();
+    let request = migration_transfer::relay_recovery_request(
+        &mut installer,
+        &mut forwarded,
+        &destination,
+        &checkpoint,
+        INSTALLER_LIMITS,
+    )
+    .unwrap();
+    assert_eq!(&forwarded[..8], b"EKUBORC1");
+    assert_eq!(request.source(), &checkpoint.source);
+    assert_eq!(request.wallets(), &[wallet]);
+    let (_, recovered) = request
+        .finish(&mut reply.as_slice(), &mut installer)
+        .unwrap();
+    assert_eq!(
+        recovered.journal_bytes(&destination).unwrap(),
+        checkpoint.journal_bytes(&destination).unwrap()
+    );
+    assert!(!worker.is_finished());
+    assert!(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "policy_store::migration_database::tests::independent_process_observes_source_fence"
+            ])
+            .env("EKUBO_TEST_MIGRATION_FENCE_SOURCE", &path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    installer.write_all(&[0]).unwrap();
+    worker.join().unwrap().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn source_recovery_refuses_changed_source_missing_key_or_wrong_relay_before_output() {
+    for mutation in 0..3 {
+        let (_dir, config, _) = fixture();
+        let destination = destination();
+        let (mut checkpoint, relay, _) = recovery_fixture(&config, &destination);
+        if mutation == 0 {
+            config
+                .update_for_test(|state| {
+                    state.wallets[0].id = "changed-after-staging".into();
+                    Ok(())
+                })
+                .unwrap();
+        } else if mutation == 2 {
+            checkpoint.relay_digest[0] ^= 1;
+        }
+        let mut output = Cursor::new(Vec::new());
+        assert!(
+            config
+                .with_lifecycle_lock(|| recover_source(
+                    &mut output,
+                    config.data_dir(),
+                    destination,
+                    &checkpoint,
+                    relay,
+                    |_, _| {
+                        ensure!(mutation != 1, "synthetic missing database key");
+                        Ok(Zeroizing::new(KEY))
+                    },
+                ))
+                .is_err()
+        );
+        assert!(output.into_inner().is_empty());
+    }
+}

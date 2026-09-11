@@ -189,6 +189,8 @@ def exercise(binary, owner, source=False):
             environment = dict(os.environ, **{variable: recipient})
             subprocess.run([str(executable), "source-client" if source else "client", str(owner)],
                            env=environment, check=True, timeout=420)
+            if source:
+                recover_source(executable, owner_process, owner, unit)
             owner_process.stdin.write(b"finish\n")
             owner_process.stdin.flush()
             if owner_process.wait(timeout=15) != 0:
@@ -199,6 +201,19 @@ def exercise(binary, owner, source=False):
             run(["journalctl", "--unit", unit, "--no-pager", "--output", "cat"])
         label = "owner-keyring source forwarding" if source else "migration/recovery"
         print(f"Production Linux systemd {label} and ordinary-owner raw file denial passed.")
+
+
+def recover_source(executable, child, owner, unit):
+    child.stdin.write(b"recover\n")
+    child.stdin.flush()
+    recipient = read_line(child, 30)
+    if re.fullmatch(r":[0-9]+\.[0-9]+", recipient) is None:
+        raise RuntimeError("owner recovery returned an invalid unique name")
+    subprocess.run(["systemctl", "restart", unit], check=True, timeout=45)
+    wait_ready(unit, owner)
+    subprocess.run([str(executable), "source-recover", str(owner)],
+                   env=dict(os.environ, EKUBO_FIXTURE_SOURCE_RECIPIENT=recipient),
+                   check=True, timeout=420)
 
 
 def main():

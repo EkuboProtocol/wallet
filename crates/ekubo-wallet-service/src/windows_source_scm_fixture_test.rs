@@ -32,11 +32,7 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         .spawn()?;
     let result = async {
         let mut stdout = child.stdout.take().context("missing source stdout")?;
-        let mut ready = [0; 37];
-        tokio::time::timeout(Duration::from_secs(30), stdout.read_exact(&mut ready)).await??;
-        ensure!(ready[36] == b'\n', "invalid source readiness frame");
-        let endpoint = std::str::from_utf8(&ready[..36])?.parse::<Uuid>()?;
-        ensure!(!endpoint.is_nil(), "invalid source endpoint");
+        let endpoint = read_endpoint(&mut stdout).await?;
         // Neither a source snapshot nor its keys are supplied to this adapter.
         let staged = windows_provisioning_client::forward_from_owner(owner, endpoint).await?;
         ensure!(
@@ -54,6 +50,15 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         drop(staged);
         let mut stdin = child.stdin.take().context("missing source stdin")?;
         stdin.write_all(b"finish\n").await?;
+        let endpoint = read_endpoint(&mut stdout).await?;
+        super::restart_fixture_service(owner)?;
+        let recovered = windows_provisioning_client::recover_from_owner(owner, endpoint).await?;
+        ensure!(
+            serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&checkpoint)?,
+            "native recovery changed the checkpoint"
+        );
+        drop(recovered);
+        stdin.write_all(b"finish\n").await?;
         drop(stdin);
         let status = tokio::time::timeout(Duration::from_secs(15), child.wait()).await??;
         ensure!(status.success(), "source owner failed");
@@ -68,6 +73,15 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         let _ = child.kill().await;
     }
     result
+}
+
+async fn read_endpoint(stdout: &mut tokio::process::ChildStdout) -> Result<Uuid> {
+    let mut ready = [0; 37];
+    tokio::time::timeout(Duration::from_secs(30), stdout.read_exact(&mut ready)).await??;
+    ensure!(ready[36] == b'\n', "invalid source readiness frame");
+    let endpoint = std::str::from_utf8(&ready[..36])?.parse::<Uuid>()?;
+    ensure!(!endpoint.is_nil(), "invalid source endpoint");
+    Ok(endpoint)
 }
 
 /// Never overwrite an existing entry. Cleanup only matches this fixture's exact
@@ -180,6 +194,10 @@ pub(super) fn owner(owner: &str) -> Result<()> {
     PolicyStore::open(&path, &DatabaseKey::new([0x43; 32]))?
         .register_wallet_without_policy(&wallet)?;
     let before = std::fs::read(&path)?;
+    runtime()?.block_on(serve())?;
+    // Complete cancellation before publishing a fresh recovery endpoint; no
+    // timing-based retry can race the previous collector's admission permit.
+    config.with_lifecycle_lock(|| Ok(()))?;
     runtime()?.block_on(serve())?;
     // Wait for the blocking collector to release both locks before reopening
     // the source. No test cleanup can race its in-flight credential reads.

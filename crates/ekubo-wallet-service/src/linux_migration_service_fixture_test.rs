@@ -24,6 +24,7 @@ pub fn run() -> Result<()> {
         "relay-owner" => relay_owner(owner),
         "source-owner" => source_owner(owner),
         "source-client" => source_client(owner),
+        "source-recover" => source_recover(owner),
         _ => anyhow::bail!("unknown fixture mode"),
     }
 }
@@ -228,17 +229,22 @@ fn source_owner(owner: u32) -> Result<()> {
     )?;
     account_key.set_secret(&[0x11; 32])?;
     let runtime = runtime()?;
-    let endpoint =
-        runtime.block_on(ekubo_wallet_core::linux_source_handoff::OwnerSourceEndpoint::bind())?;
-    println!("{}", endpoint.unique_name()?);
-    std::io::stdout().flush()?;
-    let mut command = String::new();
-    std::io::stdin().read_line(&mut command)?;
-    ensure!(
-        command == "finish\n",
-        "source fixture did not receive completion"
-    );
-    runtime.block_on(endpoint.close())?;
+    for expected in ["recover\n", "finish\n"] {
+        let endpoint = runtime
+            .block_on(ekubo_wallet_core::linux_source_handoff::OwnerSourceEndpoint::bind())?;
+        println!("{}", endpoint.unique_name()?);
+        std::io::stdout().flush()?;
+        let mut command = String::new();
+        std::io::stdin().read_line(&mut command)?;
+        ensure!(
+            command == expected,
+            "source fixture did not receive completion"
+        );
+        runtime.block_on(endpoint.close())?;
+        // Retire the old endpoint and wait out its source fence before binding
+        // the recovery endpoint. No arbitrary sleep or automatic replay.
+        explicit.with_lifecycle_lock(|| Ok(()))?;
+    }
     // Wait for the collector to release its lifecycle/SQLite fence before any
     // same-process source descriptor is reopened for validation.
     explicit.with_lifecycle_lock(|| {
@@ -265,6 +271,22 @@ fn source_owner(owner: u32) -> Result<()> {
         ekubo_wallet_core::custody_relay::load(profile)?;
         Ok(())
     })
+}
+
+fn source_recover(owner: u32) -> Result<()> {
+    let runtime = runtime()?;
+    let previous = ekubo_wallet_core::service_storage::installer_journal::load_checkpoint(owner)?
+        .context("missing original source checkpoint")?;
+    let recipient = std::env::var("EKUBO_FIXTURE_SOURCE_RECIPIENT")?.try_into()?;
+    let recovered = runtime.block_on(linux_provisioning_client::recover_from_owner(
+        owner, recipient,
+    ))?;
+    ensure!(
+        serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&previous)?,
+        "native recovery changed the checkpoint"
+    );
+    drop(recovered);
+    Ok(())
 }
 
 async fn reject_ordinary_relay_caller(recipient: zbus::names::OwnedUniqueName) -> Result<()> {

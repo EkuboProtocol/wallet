@@ -12,10 +12,10 @@ use uuid::Uuid;
 /// Public source evidence from one forwarded request. This establishes neither
 /// source provenance nor durable staging; the service must still validate it.
 pub struct RelayedRequest {
-    destination: Destination,
-    session: Uuid,
-    source: DatabaseTransfer,
-    wallets: Vec<WalletMetadata>,
+    pub(super) destination: Destination,
+    pub(super) session: Uuid,
+    pub(super) source: DatabaseTransfer,
+    pub(super) wallets: Vec<WalletMetadata>,
 }
 
 impl RelayedRequest {

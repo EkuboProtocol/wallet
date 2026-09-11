@@ -44,6 +44,26 @@ pub async fn forward_from_owner(
     owner_uid: u32,
     recipient: OwnedUniqueName,
 ) -> Result<ForwardedSource> {
+    handoff_from_owner(owner_uid, recipient, None).await
+}
+
+/// Recover only the completed checkpoint in protected installer storage. The
+/// owner refreezes its existing source and supplies its separately stored relay.
+/// Missing/incomplete evidence fails; this never retries a transfer or activates.
+pub async fn recover_from_owner(
+    owner_uid: u32,
+    recipient: OwnedUniqueName,
+) -> Result<ForwardedSource> {
+    let checkpoint = service_storage::installer_journal::load_checkpoint(owner_uid)?
+        .context("source recovery requires a completed installer checkpoint")?;
+    handoff_from_owner(owner_uid, recipient, Some(checkpoint)).await
+}
+
+async fn handoff_from_owner(
+    owner_uid: u32,
+    recipient: OwnedUniqueName,
+    previous: Option<migration_transfer::RecoveryCheckpoint>,
+) -> Result<ForwardedSource> {
     let (identity, bus) = connect(owner_uid).await?;
     let (owner, cancel) = crate::linux_source_handoff::connect(owner_uid, recipient).await?;
     let result = exchange(
@@ -51,14 +71,32 @@ pub async fn forward_from_owner(
         &identity,
         (owner, None),
         move |stream, destination, source| {
-            let request = migration_transfer::relay_request_with_intent(
-                &mut source.0.stream,
-                stream,
-                &destination,
-                migration_transfer::INSTALLER_LIMITS,
-                |intent| service_storage::installer_journal::save_intent(owner_uid, intent),
-            )?;
+            crate::migration_source::request(&mut source.0.stream, previous.as_ref())?;
+            let request = if let Some(checkpoint) = &previous {
+                migration_transfer::relay_recovery_request(
+                    &mut source.0.stream,
+                    stream,
+                    &destination,
+                    checkpoint,
+                    migration_transfer::INSTALLER_LIMITS,
+                )?
+            } else {
+                migration_transfer::relay_request_with_intent(
+                    &mut source.0.stream,
+                    stream,
+                    &destination,
+                    migration_transfer::INSTALLER_LIMITS,
+                    |intent| service_storage::installer_journal::save_intent(owner_uid, intent),
+                )?
+            };
             let (reply, checkpoint) = request.finish(stream, &mut source.0.stream)?;
+            if let Some(previous) = &previous {
+                ensure!(
+                    checkpoint.journal_bytes(&destination)?
+                        == previous.journal_bytes(&destination)?,
+                    "owner recovery checkpoint changed"
+                );
+            }
             service_storage::installer_journal::save_checkpoint(owner_uid, &checkpoint)?;
             source.1 = Some(checkpoint);
             Ok(reply)

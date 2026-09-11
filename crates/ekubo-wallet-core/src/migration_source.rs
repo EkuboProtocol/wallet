@@ -4,7 +4,7 @@
 use crate::{
     config::ConfigStore,
     custody_provisioning::MigrationAccount,
-    migration_transfer::{self, Destination, INSTALLER_LIMITS},
+    migration_transfer::{self, Destination, INSTALLER_LIMITS, RecoveryCheckpoint},
     policy_store::{self, migration_database::MigrationDatabaseSnapshot},
 };
 use anyhow::{Result, ensure};
@@ -61,16 +61,72 @@ pub(crate) fn serve(stream: &mut (impl Read + Write)) -> Result<()> {
             self::destination()? == destination,
             "pending source profile changed"
         );
-        collect_and_transfer(
-            stream,
-            // Resolve the directory before freezing, without opening another
-            // source file descriptor. Existing relative home overrides work too.
-            &config.data_dir().canonicalize()?,
-            destination,
-            existing_key,
-            crate::custody_relay::persist_pending,
-        )
+        let directory = config.data_dir().canonicalize()?;
+        let mut command = [0; 1];
+        stream.read_exact(&mut command)?;
+        match command[0] {
+            0 => collect_and_transfer(
+                stream,
+                // Resolve the directory before freezing, without opening another
+                // source file descriptor. Existing relative home overrides work too.
+                &directory,
+                destination,
+                existing_key,
+                crate::custody_relay::persist_pending,
+            ),
+            1 => {
+                let checkpoint = RecoveryCheckpoint::read_source_request(stream, &destination)?;
+                let relay = crate::custody_relay::load(destination.profile)?;
+                recover_source(
+                    stream,
+                    &directory,
+                    destination,
+                    &checkpoint,
+                    relay,
+                    existing_key,
+                )
+            }
+            _ => anyhow::bail!("unsupported source request"),
+        }
     })
+}
+
+/// Called only by authenticated native installer adapters. This request selects
+/// staging or recovery; it grants neither source access nor commit authority.
+pub(crate) fn request(
+    stream: &mut impl Write,
+    checkpoint: Option<&RecoveryCheckpoint>,
+) -> Result<()> {
+    if let Some(checkpoint) = checkpoint {
+        stream.write_all(&[1])?;
+        checkpoint.write_source_request(stream)?;
+    } else {
+        stream.write_all(&[0])?;
+        stream.flush()?;
+    }
+    Ok(())
+}
+
+fn recover_source(
+    stream: &mut (impl Read + Write),
+    data_dir: &Path,
+    destination: Destination,
+    checkpoint: &RecoveryCheckpoint,
+    relay: crate::custody_envelope::WrappedDataKey,
+    mut read: impl FnMut(&str, &str) -> Result<Zeroizing<[u8; 32]>>,
+) -> Result<()> {
+    checkpoint.journal_bytes(&destination)?;
+    let database_key = read(policy_store::KEYRING_SERVICE, policy_store::KEYRING_USER)?;
+    let snapshot = MigrationDatabaseSnapshot::freeze(
+        &data_dir.join(policy_store::DATABASE_FILE),
+        database_key,
+    )?;
+    let expected = snapshot.wallet_inventory()?;
+    // The existing checkpoint exchange checks the live logical fingerprint
+    // before sending any relay, preserving the original ciphertext descriptor.
+    checkpoint.exchange(stream, destination, &snapshot, relay, &expected)?;
+    checkpoint.write_source_request(stream)?;
+    retain_until_abort(stream)
 }
 
 // Dependency injection stays private to core. Tests use synthetic keys and an
@@ -119,6 +175,10 @@ fn collect_and_transfer(
     // Staging is not cutover. Retain both locks until explicit abort, stream
     // failure or the native deadline. No commit command exists yet, and the
     // installer must not promote a profile using this temporary retention.
+    retain_until_abort(stream)
+}
+
+fn retain_until_abort(stream: &mut impl Read) -> Result<()> {
     let mut command = [0; 1];
     stream.read_exact(&mut command)?;
     ensure!(command == [0], "unsupported source control command");
