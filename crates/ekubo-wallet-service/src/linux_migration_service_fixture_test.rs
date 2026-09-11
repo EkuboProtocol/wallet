@@ -74,11 +74,16 @@ fn client(owner: u32) -> Result<()> {
             staged.reply().canonical().bytes > 0,
             "missing canonical database"
         );
-        let checkpoint = serde_json::to_vec(&staged.checkpoint()?)?;
+        ekubo_wallet_core::service_storage::installer_journal::save_checkpoint(
+            owner,
+            &staged.checkpoint()?,
+        )?;
         let relay = staged.reply().relay().clone();
         drop(staged);
         let snapshot = MigrationDatabaseSnapshot::freeze(&database, Zeroizing::new(key))?;
-        let checkpoint = serde_json::from_slice(&checkpoint)?;
+        let checkpoint =
+            ekubo_wallet_core::service_storage::installer_journal::load_checkpoint(owner)?
+                .context("fixture checkpoint is missing")?;
         let staged = runtime.block_on(linux_provisioning_client::resume(
             owner,
             checkpoint,

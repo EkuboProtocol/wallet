@@ -1610,3 +1610,27 @@ identity. The fixtures now serialize evidence, discard the original snapshot,
 freeze again and resume before another recovery call. This simulates loss of
 installer memory; it is not a test of a durable journal or actual installer
 process crash. The Windows fixture also retains its real SCM restart test.
+
+### Protected Linux checkpoint publication
+
+`service_storage::installer_journal` reads and publishes the immutable checkpoint
+at `/etc/ekubo-wallet/pending/<owner-uid>.checkpoint.json`. Production entrypoints
+require real and effective UID 0, validate the protected pending identity, and
+reject active-profile fallback. Paths are fixed and traversed through checked
+no-follow directory handles. The checkpoint file must be root-owned, private,
+regular, and singly linked; reads are bounded to 4096 bytes and verify destination
+and format. No relay ciphertext or key is written there.
+
+Publication uses a fresh private temporary file, file sync, atomic no-replace
+rename, directory sync and exact readback. Existing identical evidence is an
+idempotent retry; conflicts are never overwritten. Reading an existing checkpoint
+also syncs the file and directory to finish an interrupted publication. There is
+no journal deletion, phase advancement, profile activation or legacy cleanup API.
+The Linux fixture now saves/reloads through these production entrypoints, while
+local tests cover conflicts, unsafe permissions, symlinks, bounds and active
+profile refusal. A native CI result for this revision is still required.
+
+This is checkpoint storage, not the full installer commit journal. Owner relay
+persistence and pre-reply/activation recovery remain missing. Windows needs its
+native protected journal writer using the same checkpoint validation and format;
+its fixture currently serializes checkpoint evidence in memory.

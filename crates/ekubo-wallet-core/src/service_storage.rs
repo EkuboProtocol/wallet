@@ -888,3 +888,6 @@ impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
         )?)
     }
 }
+
+#[path = "linux_installer_journal.rs"]
+pub mod installer_journal;
