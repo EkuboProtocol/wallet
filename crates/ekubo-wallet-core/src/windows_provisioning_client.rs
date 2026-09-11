@@ -37,27 +37,40 @@ impl ForwardedSource {
 /// Stage from the actual owner's authenticated endpoint learned during launch.
 /// The caller must already be elevated; no path/raw key/writer is accepted or
 /// exposed, and both destination identities come from protected pending metadata.
+/// Intent is durable before forwarding; the completed checkpoint is durable
+/// before success. Incomplete intent does not authorize replay or activation.
 pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
     let identity = windows_service_config::pending_installer_identity(owner_sid)?;
     let pipe = crate::windows_relay_pipe::connect_source(&identity, endpoint).await?;
     let (source, cancel) = provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
+    let owner = owner_sid.to_owned();
     // Keep cancellation in this awaiting task, not the blocking worker.
-    let ((source, checkpoint), reply) =
-        exchange(&identity, (source, None), |stream, destination, source| {
+    let ((source, checkpoint), reply) = exchange(
+        &identity,
+        (source, None),
+        move |stream, destination, source| {
             source
                 .0
                 .write_all(crate::windows_relay_pipe::SOURCE_PREFACE)?;
-            let request = migration_transfer::relay_request(
+            let request = migration_transfer::relay_request_with_intent(
                 &mut source.0,
                 stream,
                 &destination,
                 migration_transfer::INSTALLER_LIMITS,
+                |intent| {
+                    crate::windows_service_storage::installer_journal::save_intent(&owner, intent)
+                },
             )?;
             let (reply, checkpoint) = request.finish(stream, &mut source.0)?;
+            crate::windows_service_storage::installer_journal::save_checkpoint(
+                &owner,
+                &checkpoint,
+            )?;
             source.1 = Some(checkpoint);
             Ok(reply)
-        })
-        .await?;
+        },
+    )
+    .await?;
     Ok(ForwardedSource {
         _source: source,
         _cancel: cancel,

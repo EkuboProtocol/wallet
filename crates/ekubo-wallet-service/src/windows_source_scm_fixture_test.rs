@@ -39,13 +39,17 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         ensure!(!endpoint.is_nil(), "invalid source endpoint");
         // Neither a source snapshot nor its keys are supplied to this adapter.
         let staged = windows_provisioning_client::forward_from_owner(owner, endpoint).await?;
-        windows_service_storage::installer_journal::save_checkpoint(owner, staged.checkpoint())?;
+        ensure!(
+            windows_service_storage::installer_journal::load_intent(owner)?.is_some(),
+            "forwarding did not persist intent"
+        );
         let checkpoint = windows_service_storage::installer_journal::load_checkpoint(owner)?
             .context("missing forwarded checkpoint")?;
         ensure!(
             serde_json::to_vec(&checkpoint)? == serde_json::to_vec(staged.checkpoint())?,
             "forwarded checkpoint changed"
         );
+        windows_service_storage::installer_journal::save_checkpoint(owner, staged.checkpoint())?;
         let expected = staged.reply().relay().clone();
         drop(staged);
         let mut stdin = child.stdin.take().context("missing source stdin")?;

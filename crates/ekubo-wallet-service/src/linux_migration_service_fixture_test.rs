@@ -158,16 +158,20 @@ fn source_client(owner: u32) -> Result<()> {
         owner, recipient,
     ))?;
     ensure!(!staged.reply().stage().is_nil(), "missing forwarded stage");
-    ekubo_wallet_core::service_storage::installer_journal::save_checkpoint(
-        owner,
-        staged.checkpoint(),
-    )?;
+    ensure!(
+        ekubo_wallet_core::service_storage::installer_journal::load_intent(owner)?.is_some(),
+        "forwarding did not persist intent"
+    );
     let stored = ekubo_wallet_core::service_storage::installer_journal::load_checkpoint(owner)?
         .context("forwarded checkpoint was not persisted")?;
     ensure!(
         serde_json::to_vec(&stored)? == serde_json::to_vec(staged.checkpoint())?,
         "forwarded checkpoint changed"
     );
+    ekubo_wallet_core::service_storage::installer_journal::save_checkpoint(
+        owner,
+        staged.checkpoint(),
+    )?;
     // Source credentials and snapshot were never supplied to this process. The
     // retained channel closes here; this is an abort of retention, not cutover.
     drop(staged);

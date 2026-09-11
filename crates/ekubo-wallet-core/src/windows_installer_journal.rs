@@ -1,10 +1,33 @@
 //! Administrative checkpoint publication; no service-custody authorization.
 use super::*;
-use crate::installer_checkpoint::{Destination, RecoveryCheckpoint};
+use crate::installer_checkpoint::{Destination, RecoveryCheckpoint, TransferIntent};
 use crate::windows_security::AccessEntry;
 use std::io::Read as _;
 
 const ADMINISTRATORS: &str = "S-1-5-32-544";
+
+/// Record an attempt before forwarding its header or keys. A conflicting intent
+/// cannot be replaced by retrying; recovery/abort must resolve the earlier attempt.
+pub fn save_intent(owner_sid: &str, intent: &TransferIntent) -> Result<()> {
+    let (ancestors, destination) = journal_parent(owner_sid)?;
+    let parent = ancestors.last().context("journal parent is missing")?;
+    if let Some(checkpoint) = read(parent, &destination)? {
+        intent.validate_checkpoint(&checkpoint)?;
+    }
+    save_record(
+        parent,
+        &intent_name(&destination),
+        &intent.journal_bytes(&destination)?,
+    )
+}
+
+pub fn load_intent(owner_sid: &str) -> Result<Option<TransferIntent>> {
+    let (ancestors, destination) = journal_parent(owner_sid)?;
+    read_intent(
+        ancestors.last().context("journal parent is missing")?,
+        &destination,
+    )
+}
 
 /// Publish immutable evidence under the fixed machine pending directory. Actual
 /// elevated installer identity is required. No relay or key belongs in this file.
@@ -12,25 +35,25 @@ pub fn save_checkpoint(owner_sid: &str, checkpoint: &RecoveryCheckpoint) -> Resu
     let (ancestors, destination) = journal_parent(owner_sid)?;
     let parent = ancestors.last().context("journal parent is missing")?;
     let bytes = checkpoint.journal_bytes(&destination)?;
-    if let Some(existing) = read(parent, &destination)? {
+    if let Some(intent) = read_intent(parent, &destination)? {
+        intent.validate_checkpoint(checkpoint)?;
+    }
+    save_record(parent, &name(&destination), &bytes)
+}
+
+fn save_record(parent: &File, name: &str, bytes: &[u8]) -> Result<()> {
+    if let Some(existing) = read_record(parent, name)? {
         ensure!(
-            existing.journal_bytes(&destination)? == bytes,
+            existing == bytes,
             "installer checkpoint conflicts with existing evidence"
         );
         return Ok(());
     }
-    write::publish(
-        parent,
-        &name(&destination),
-        ADMINISTRATORS,
-        &bytes,
-        |file| validate_journal(file.as_handle()),
-    )?;
-    let stored = read(parent, &destination)?.context("published checkpoint is missing")?;
-    ensure!(
-        stored.journal_bytes(&destination)? == bytes,
-        "installer checkpoint readback mismatch"
-    );
+    write::publish(parent, name, ADMINISTRATORS, bytes, |file| {
+        validate_journal(file.as_handle())
+    })?;
+    let stored = read_record(parent, name)?.context("published checkpoint is missing")?;
+    ensure!(stored == bytes, "installer checkpoint readback mismatch");
     Ok(())
 }
 
@@ -68,6 +91,10 @@ fn name(destination: &Destination) -> String {
     format!("{}.checkpoint.json", destination.profile.simple())
 }
 
+fn intent_name(destination: &Destination) -> String {
+    format!("{}.intent.json", destination.profile.simple())
+}
+
 fn validate_journal(handle: BorrowedHandle<'_>) -> Result<()> {
     // read_security validates regular file type, reparse attributes and link count.
     let (owner, entries) = read_security(handle, StorageKind::File)?;
@@ -95,12 +122,23 @@ fn validate_journal_entries(owner: &str, entries: &[AccessEntry]) -> Result<()> 
 }
 
 fn read(parent: &File, destination: &Destination) -> Result<Option<RecoveryCheckpoint>> {
-    let file = match open_native_access(
-        Some(parent.as_handle()),
-        &name(destination),
-        StorageKind::File,
-        true,
-    ) {
+    let checkpoint = read_record(parent, &name(destination))?
+        .map(|bytes| RecoveryCheckpoint::from_journal(&bytes, destination))
+        .transpose()?;
+    if let (Some(checkpoint), Some(intent)) = (&checkpoint, read_intent(parent, destination)?) {
+        intent.validate_checkpoint(checkpoint)?;
+    }
+    Ok(checkpoint)
+}
+
+fn read_intent(parent: &File, destination: &Destination) -> Result<Option<TransferIntent>> {
+    read_record(parent, &intent_name(destination))?
+        .map(|bytes| TransferIntent::from_journal(&bytes, destination))
+        .transpose()
+}
+
+fn read_record(parent: &File, name: &str) -> Result<Option<Vec<u8>>> {
+    let file = match open_native_access(Some(parent.as_handle()), name, StorageKind::File, true) {
         Ok(file) => file,
         Err(error)
             if error
@@ -121,11 +159,10 @@ fn read(parent: &File, destination: &Destination) -> Result<Option<RecoveryCheck
     );
     let mut bytes = Vec::new();
     (&file).take(4097).read_to_end(&mut bytes)?;
-    let checkpoint = RecoveryCheckpoint::from_journal(&bytes, destination)?;
     // This exact handle was opened for write as well as read so Windows can
     // flush it. No path reopen, truncation or checkpoint mutation occurs.
     file.sync_all()?;
-    Ok(Some(checkpoint))
+    Ok(Some(bytes))
 }
 
 #[cfg(test)]

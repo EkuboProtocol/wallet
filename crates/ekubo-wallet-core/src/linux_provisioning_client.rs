@@ -38,6 +38,8 @@ impl ForwardedSource {
 /// Root installer staging from the exact owner endpoint learned during launch.
 /// Both peers and protected pending metadata are checked before forwarding keys.
 /// No source path, raw key or generic writer is accepted or exposed by this API.
+/// Intent is persisted before forwarding; a completed checkpoint is persisted
+/// before returning. Neither record authorizes activation or an automatic replay.
 pub async fn forward_from_owner(
     owner_uid: u32,
     recipient: OwnedUniqueName,
@@ -48,14 +50,16 @@ pub async fn forward_from_owner(
         &bus,
         &identity,
         (owner, None),
-        |stream, destination, source| {
-            let request = migration_transfer::relay_request(
+        move |stream, destination, source| {
+            let request = migration_transfer::relay_request_with_intent(
                 &mut source.0.stream,
                 stream,
                 &destination,
                 migration_transfer::INSTALLER_LIMITS,
+                |intent| service_storage::installer_journal::save_intent(owner_uid, intent),
             )?;
             let (reply, checkpoint) = request.finish(stream, &mut source.0.stream)?;
+            service_storage::installer_journal::save_checkpoint(owner_uid, &checkpoint)?;
             source.1 = Some(checkpoint);
             Ok(reply)
         },

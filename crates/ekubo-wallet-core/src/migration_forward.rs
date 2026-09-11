@@ -1,8 +1,8 @@
 //! Bounded request forwarding for the owner -> installer -> service path.
 //! No credential lookup, peer authentication, recovery or activation occurs here.
 use super::{
-    Destination, Header, MAGIC, MAX_HEADER_BYTES, RecoveryCheckpoint, StagingReply, TransferLimits,
-    encode, read_frame, read_key, read_reply, write_frame,
+    Destination, Header, MAGIC, MAX_HEADER_BYTES, RecoveryCheckpoint, StagingReply, TransferIntent,
+    TransferLimits, encode, read_frame, read_key, read_reply, write_frame,
 };
 use crate::{config::WalletMetadata, database_staging::DatabaseTransfer};
 use anyhow::{Result, ensure};
@@ -80,6 +80,21 @@ pub fn relay_request(
     destination: &Destination,
     limits: TransferLimits,
 ) -> Result<RelayedRequest> {
+    relay_request_with_intent(input, output, destination, limits, |_| Ok(()))
+}
+
+/// Native source adapters use this form to durably record intent before any
+/// transfer byte reaches the service. The callback receives only public evidence;
+/// no key or stream capability is supplied. A callback error consumes the bounded
+/// header only, leaving the output untouched. This codec does not select storage
+/// or confer authority on a callback; native callers supply the protected journal.
+pub fn relay_request_with_intent(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    destination: &Destination,
+    limits: TransferLimits,
+    persist: impl FnOnce(&TransferIntent) -> Result<()>,
+) -> Result<RelayedRequest> {
     let mut magic = [0; 8];
     input.read_exact(&mut magic)?;
     ensure!(&magic == MAGIC, "unsupported source forwarding protocol");
@@ -90,6 +105,12 @@ pub fn relay_request(
         &header.destination == destination,
         "source forwarding destination mismatch"
     );
+    persist(&TransferIntent {
+        version: 1,
+        destination: header.destination.clone(),
+        session: header.session,
+        source: header.database.clone(),
+    })?;
     output.write_all(MAGIC)?;
     write_frame(output, &encode(&header, MAX_HEADER_BYTES)?)?;
     copy_key(input, output)?;

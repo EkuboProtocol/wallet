@@ -24,7 +24,7 @@ const MAX_HEADER_BYTES: u32 = 4096;
 
 #[path = "migration_forward.rs"]
 mod forwarding;
-pub use forwarding::{RelayedRequest, relay_request};
+pub use forwarding::{RelayedRequest, relay_request, relay_request_with_intent};
 
 #[path = "migration_recovery_transfer.rs"]
 mod recovery_transfer;
@@ -33,7 +33,7 @@ pub use recovery_transfer::{RecoveryRequest, send_recovery};
 
 #[path = "migration_checkpoint.rs"]
 mod checkpoint;
-pub use crate::installer_checkpoint::{Destination, RecoveryCheckpoint};
+pub use crate::installer_checkpoint::{Destination, RecoveryCheckpoint, TransferIntent};
 
 /// Admission policy comes from the host, never from the incoming stream.
 /// Separate account-count and aggregate-metadata bounds avoid many small frames

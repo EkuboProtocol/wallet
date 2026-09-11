@@ -17,6 +17,57 @@ pub struct Destination {
     pub profile: Uuid,
 }
 
+/// Durable evidence that an installer was about to forward this exact transfer.
+/// It contains no key, relay, or staging result. Without a completed checkpoint,
+/// this is an incomplete attempt, never permission to replay, activate or delete.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferIntent {
+    pub(crate) version: u8,
+    pub(crate) destination: Destination,
+    pub(crate) session: Uuid,
+    pub(crate) source: DatabaseTransfer,
+}
+
+impl TransferIntent {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn journal_bytes(&self, destination: &Destination) -> Result<Vec<u8>> {
+        ensure!(
+            self.version == 1 && &self.destination == destination,
+            "transfer intent destination or version mismatch"
+        );
+        ensure!(
+            !self.session.is_nil()
+                && !destination.profile.is_nil()
+                && self.source.bytes > 0
+                && self.source.bytes <= MAX_DATABASE_BYTES,
+            "invalid transfer intent"
+        );
+        let bytes = serde_json::to_vec(self)?;
+        ensure!(bytes.len() <= 4096, "transfer intent is oversized");
+        Ok(bytes)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn from_journal(bytes: &[u8], destination: &Destination) -> Result<Self> {
+        ensure!(bytes.len() <= 4096, "transfer intent is oversized");
+        let intent: Self = serde_json::from_slice(bytes)?;
+        intent.journal_bytes(destination)?;
+        Ok(intent)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub(crate) fn validate_checkpoint(&self, checkpoint: &RecoveryCheckpoint) -> Result<()> {
+        ensure!(
+            self.destination == checkpoint.destination
+                && self.session == checkpoint.session
+                && self.source == checkpoint.source,
+            "checkpoint differs from recorded transfer intent"
+        );
+        Ok(())
+    }
+}
+
 /// Persist only in protected installer storage. The login relay must be retained
 /// separately under the actual owner. Deserialization does not authenticate this
 /// evidence; native peer authentication and service candidate validation remain

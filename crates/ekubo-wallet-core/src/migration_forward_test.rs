@@ -1,5 +1,5 @@
 use super::*;
-use crate::migration_transfer::INSTALLER_LIMITS;
+use crate::migration_transfer::{INSTALLER_LIMITS, relay_request_with_intent};
 use std::io::Cursor;
 
 fn request() -> (Header, WalletMetadata, Vec<u8>) {
@@ -130,6 +130,64 @@ fn truncated_keys_ciphertext_and_wrong_digest_never_complete_forwarding() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn journal_failure_cannot_consume_keys_or_forward_any_transfer_bytes() {
+    let (header, wallet, database) = request();
+    let mut input = Cursor::new(wire(&header, &wallet, &database));
+    let mut output = Vec::new();
+    let mut called = false;
+    assert!(
+        relay_request_with_intent(
+            &mut input,
+            &mut output,
+            &header.destination,
+            INSTALLER_LIMITS,
+            |intent| {
+                called = true;
+                assert_eq!(intent.session, header.session);
+                assert!(intent.destination == header.destination);
+                assert_eq!(intent.source, header.database);
+                anyhow::bail!("synthetic journal failure")
+            }
+        )
+        .is_err()
+    );
+    assert!(called);
+    assert_eq!(input.position(), prefix(&header).len() as u64);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn failed_service_write_leaves_an_intent_without_consuming_source_keys() {
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (header, wallet, database) = request();
+    let mut input = Cursor::new(wire(&header, &wallet, &database));
+    let mut recorded = None;
+    assert!(
+        relay_request_with_intent(
+            &mut input,
+            &mut Broken,
+            &header.destination,
+            INSTALLER_LIMITS,
+            |intent| {
+                recorded = Some(intent.clone());
+                Ok(())
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(recorded.unwrap().session, header.session);
+    assert_eq!(input.position(), prefix(&header).len() as u64);
 }
 
 struct OwnerStream {
