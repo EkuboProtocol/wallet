@@ -39,6 +39,7 @@ pub struct PreparedServiceCredentials {
     database: [u8; SEALED_KEY_BYTES],
     accounts: BTreeMap<Uuid, [u8; SEALED_KEY_BYTES]>,
     relay: WrappedDataKey,
+    wallets: BTreeMap<Uuid, WalletMetadata>,
 }
 
 impl PreparedServiceCredentials {
@@ -66,11 +67,13 @@ impl PreparedServiceCredentials {
         drop(database);
         let database = sealed_database;
         let mut sealed = BTreeMap::new();
+        let mut wallets = BTreeMap::new();
         for account in accounts {
             sealed.insert(
                 account.wallet.instance_id,
                 cipher.seal_account_key(account.wallet.instance_id, &account.key)?,
             );
+            wallets.insert(account.wallet.instance_id, account.wallet);
         }
         Ok(Self {
             wrapping,
@@ -78,6 +81,7 @@ impl PreparedServiceCredentials {
             database,
             accounts: sealed,
             relay,
+            wallets,
         })
     }
 
@@ -99,6 +103,48 @@ impl PreparedServiceCredentials {
         let mut stage = StageWriter::new(store);
         self.visit_service_records(|record, bytes| stage.record(record, bytes))?;
         stage.finish()
+    }
+
+    /// Verify the received database against this preparation and its immutable
+    /// staged records. No schema writes, activation, owner proof, or deletion
+    /// receipt result from this check. Recovery must revalidate the source too.
+    /// Schema constraints/indexes still need trusted validation or reconstruction
+    /// before activation; a schema-version number is not structural attestation.
+    pub fn verify_staged_inventory(
+        &self,
+        store: &(impl CredentialStagingStore + crate::database_staging::DatabaseStagingStore),
+        stage: &CredentialStage,
+    ) -> Result<()> {
+        ensure!(
+            store.read(stage.id(), StagedRecord::Complete)?.as_slice()
+                == serde_json::to_vec(stage)?,
+            "credential stage completion changed"
+        );
+        self.visit_service_records(|record, bytes| {
+            ensure!(
+                store
+                    .read(stage.id(), StagedRecord::Credential(record))?
+                    .as_slice()
+                    == bytes,
+                "staged credential changed"
+            );
+            Ok(())
+        })?;
+        let (owner, service, profile) = store.identity();
+        let cipher = CustodyEnrollment::from_bytes(&self.enrollment)?.unlock(
+            &WrappingKey::from_material(self.wrapping.clone()),
+            &owner,
+            &service,
+            profile,
+            &self.relay,
+        )?;
+        let key = cipher.open_database_key(&self.database)?;
+        let database = store.staged_database(stage.id())?;
+        crate::policy_store::migration_database::verify_received(
+            database.path(),
+            &crate::policy_store::DatabaseKey::new(*key),
+            &self.wallets,
+        )
     }
 
     /// Ciphertext for the desktop login keyring only. Never store these bytes

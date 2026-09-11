@@ -247,7 +247,7 @@ pub struct WalletConfig {
     pub networks: Vec<NetworkConfig>,
 }
 
-const WALLET_CONFIGURATION_SETTING: &str = "wallet_configuration";
+pub(crate) const WALLET_CONFIGURATION_SETTING: &str = "wallet_configuration";
 
 #[derive(Clone)]
 pub struct ConfigStore {

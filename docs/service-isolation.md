@@ -177,6 +177,28 @@ its original key, rejection of a different key, frame boundaries, truncation,
 corruption, immutable publication and cleanup; Windows tests exercise the same
 receiver through native private-file publication.
 
+`PreparedServiceCredentials::verify_staged_inventory` now connects credential
+preparation to received-database verification. It rechecks the exact immutable
+credential records and completion marker, validates the protected destination
+identity/enrollment, and unwraps the database key internally. The native pending
+root supplies a read-only file pin and protected pathname whose lifetime retains
+the root (including Windows ancestor pins). Verification opens SQLCipher READ_ONLY
+without CREATE or schema migration, checks the current schema version, page/logical
+integrity and foreign keys, validates wallet configuration, and compares its full
+wallet metadata with the prepared account inventory. The active signing-instance
+rows must also match canonical UUID, name, address and creation time exactly;
+retired history remains valid without requiring retired account keys. Verification
+does not rewrite, rekey, activate or authorize deletion. It is not a durable
+receipt: source revalidation, authenticated provisioning transport and a durable
+migration commit/recovery protocol remain required. Tests cover the native Linux
+snapshot/transfer/verification path, wrong database keys, changed enrollment or
+credential records, missing/changed metadata, missing or extra active instances,
+older schema versions, unsupported views/triggers and broken references, with
+byte-identical databases after checks. Schema-version and inventory checks alone
+are not structural schema attestation: constraints and index definitions must
+also be validated against trusted schema or rebuilt from compiled definitions
+before activation. The copied source database cannot supply that trust itself.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

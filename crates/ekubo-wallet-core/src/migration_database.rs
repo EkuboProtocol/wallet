@@ -127,6 +127,97 @@ fn export(source: &Connection, snapshot: &NamedTempFile, key: &DatabaseKey) -> R
     Ok(())
 }
 
+/// Called only with the native pending root's retained, read-only file pin.
+pub(crate) fn verify_received(
+    path: &Path,
+    key: &DatabaseKey,
+    expected: &std::collections::BTreeMap<uuid::Uuid, crate::config::WalletMetadata>,
+) -> Result<()> {
+    use rusqlite::OptionalExtension as _;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    connection.pragma_update(None, "cipher_log_level", "NONE")?;
+    key.with_sqlcipher_literal(|literal| connection.pragma_update(None, "key", literal))?;
+    connection.pragma_update(None, "cipher_memory_security", "ON")?;
+    connection.pragma_update(None, "trusted_schema", "OFF")?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("BEGIN")?;
+    let executable_schema: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type IN ('view','trigger')",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        executable_schema == 0,
+        "received database contains unsupported views or triggers"
+    );
+    ensure!(
+        schema_version(&connection)? == Some(SCHEMA_VERSION),
+        "received database schema is not current"
+    );
+    verify_integrity(&connection)?;
+    let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
+    ensure!(
+        foreign_keys.query([])?.next()?.is_none(),
+        "received database has broken references"
+    );
+    let encoded: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM application_settings WHERE key=?1",
+            [crate::config::WALLET_CONFIGURATION_SETTING],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let wallets = if let Some(encoded) = encoded {
+        let config: crate::config::WalletConfig = serde_json::from_str(&encoded)?;
+        crate::config::validate_config(&config)?;
+        config.wallets
+    } else {
+        Vec::new()
+    };
+    let actual: std::collections::BTreeMap<_, _> = wallets
+        .into_iter()
+        .map(|wallet| (wallet.instance_id, wallet))
+        .collect();
+    ensure!(
+        actual == *expected,
+        "received database wallet metadata does not match credentials"
+    );
+    verify_instances(&connection, expected)
+}
+
+fn verify_instances(
+    connection: &Connection,
+    expected: &std::collections::BTreeMap<uuid::Uuid, crate::config::WalletMetadata>,
+) -> Result<()> {
+    let mut statement = connection.prepare("SELECT instance_id,wallet_id,wallet_address,created_at FROM wallet_instances WHERE retired_at IS NULL")?;
+    let mut rows = statement.query([])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let instance: String = row.get(0)?;
+        let wallet = expected
+            .get(&instance.parse()?)
+            .context("received database has an unexpected active account")?;
+        ensure!(
+            instance == wallet.instance_id.to_string()
+                && row.get::<_, String>(1)? == wallet.id
+                && row.get::<_, String>(2)? == format!("{:#x}", wallet.address)
+                && row.get::<_, i64>(3)? == wallet.created_at.timestamp_millis(),
+            "received database signing identity changed"
+        );
+        count += 1;
+    }
+    ensure!(
+        count == expected.len(),
+        "received database is missing an active account"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "migration_database_test.rs"]
 mod tests;

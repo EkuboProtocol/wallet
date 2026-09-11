@@ -52,6 +52,32 @@ pub trait DatabaseStagingStore {
         input: &mut dyn Read,
     ) -> Result<()>;
     fn open_staged_database(&self, stage: Uuid) -> Result<File>;
+    fn staged_database(&self, stage: Uuid) -> Result<StagedDatabase<'_>>;
+}
+
+/// A native-validated read-only file pin and its protected pathname. Its borrow
+/// keeps the pending root (including Windows ancestor pins) alive during use.
+pub struct StagedDatabase<'a> {
+    path: std::path::PathBuf,
+    _file: File,
+    _root: std::marker::PhantomData<&'a ()>,
+}
+impl<'a> StagedDatabase<'a> {
+    pub(crate) fn new(
+        path: std::path::PathBuf,
+        file: File,
+        _root: &'a impl DatabaseStagingStore,
+    ) -> Self {
+        Self {
+            path,
+            _file: file,
+            _root: std::marker::PhantomData,
+        }
+    }
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
 }
 
 pub(crate) fn file_name(stage: Uuid) -> Result<String> {

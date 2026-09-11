@@ -467,7 +467,11 @@ fn protected_database_receive_publishes_only_complete_verified_frames() {
     let (directory, entry) = fixture();
     let pending = PendingCredentialStorage(CredentialStagingRoot {
         directory: entry.directory.clone(),
-        owner_uid: 1001,
+        owner_uid: if entry.service_uid == 1001 {
+            1002
+        } else {
+            1001
+        },
         service_uid: entry.service_uid,
         profile_id: uuid::Uuid::new_v4(),
         _lock: Some(lock_profile(&entry.directory, entry.service_uid).unwrap()),
@@ -511,6 +515,7 @@ fn protected_database_receive_publishes_only_complete_verified_frames() {
 
 #[test]
 fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_original_key() {
+    use crate::custody_staging::CredentialStagingStore as _;
     use crate::database_staging::{DatabaseStagingStore as _, DatabaseTransfer};
     use crate::policy_store::{
         DatabaseKey, PolicyStore, migration_database::MigrationDatabaseSnapshot,
@@ -519,7 +524,11 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     let (directory, entry) = fixture();
     let pending = PendingCredentialStorage(CredentialStagingRoot {
         directory: entry.directory.clone(),
-        owner_uid: 1001,
+        owner_uid: if entry.service_uid == 1001 {
+            1002
+        } else {
+            1001
+        },
         service_uid: entry.service_uid,
         profile_id: uuid::Uuid::new_v4(),
         _lock: Some(lock_profile(&entry.directory, entry.service_uid).unwrap()),
@@ -533,9 +542,23 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     let mut stream = tempfile::tempfile().unwrap();
     snapshot.write_to(&mut stream).unwrap();
     stream.seek(SeekFrom::Start(0)).unwrap();
-    let stage = uuid::Uuid::new_v4();
+    let (owner, service, profile) = pending.identity();
+    let prepared = crate::custody_provisioning::PreparedServiceCredentials::prepare(
+        &owner,
+        &service,
+        profile,
+        Zeroizing::new(raw_key),
+        &[],
+        vec![],
+    )
+    .unwrap();
+    let credentials = prepared.stage(&pending).unwrap();
+    let stage = credentials.id();
     pending
         .receive_database(stage, &transfer, &mut stream)
+        .unwrap();
+    prepared
+        .verify_staged_inventory(&pending, &credentials)
         .unwrap();
     let mut received = pending.open_staged_database(stage).unwrap();
     assert_eq!(DatabaseTransfer::describe(&mut received).unwrap(), transfer);

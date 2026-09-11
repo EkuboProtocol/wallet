@@ -582,6 +582,19 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
             |file| crate::database_staging::receive(transfer, input, file),
         )
     }
+    fn staged_database(
+        &self,
+        stage: uuid::Uuid,
+    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
+        let file = self.open_staged_database(stage)?;
+        Ok(crate::database_staging::StagedDatabase::new(
+            self.0
+                .data_dir
+                .join(crate::database_staging::file_name(stage)?),
+            file,
+            self,
+        ))
+    }
     fn open_staged_database(&self, stage: uuid::Uuid) -> Result<File> {
         self.0
             .open_file(&crate::database_staging::file_name(stage)?)

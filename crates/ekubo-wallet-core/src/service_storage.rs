@@ -739,6 +739,27 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
             true,
         )
     }
+    fn staged_database(
+        &self,
+        stage: uuid::Uuid,
+    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
+        use std::os::fd::AsRawFd as _;
+        let file = self.open_staged_database(stage)?;
+        // Resolve only our kernel-owned directory descriptor, never an IPC path.
+        // Its root-owned parent prevents service/desktop renames; stage records
+        // are immutable while this pending profile's singleton lock is held.
+        let directory =
+            std::fs::read_link(format!("/proc/self/fd/{}", self.0.directory.as_raw_fd()))?;
+        ensure!(
+            directory.is_absolute(),
+            "pending directory path is not absolute"
+        );
+        Ok(crate::database_staging::StagedDatabase::new(
+            directory.join(crate::database_staging::file_name(stage)?),
+            file,
+            self,
+        ))
+    }
 }
 impl PendingCredentialStorage {
     fn validate_process(&self) -> Result<()> {
