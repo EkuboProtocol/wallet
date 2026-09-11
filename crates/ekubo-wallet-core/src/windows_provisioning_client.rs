@@ -22,6 +22,7 @@ pub struct ForwardedSource {
     _cancel: provisioning_io::CancelTransfer,
     reply: StagingReply,
     checkpoint: migration_transfer::RecoveryCheckpoint,
+    _installer: crate::windows_service_storage::installer_journal::InstallerLease,
 }
 impl ForwardedSource {
     #[must_use]
@@ -40,32 +41,36 @@ impl ForwardedSource {
 /// Intent is durable before forwarding; the completed checkpoint is durable
 /// before success. Incomplete intent does not authorize replay or activation.
 pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
-    handoff_from_owner(owner_sid, endpoint, None).await
+    let installer = crate::windows_service_storage::installer_journal::acquire_installer()?;
+    handoff_from_owner(owner_sid, endpoint, None, installer).await
 }
 
 /// Revalidate the completed protected checkpoint using the real owner's frozen
 /// source and stored relay. Incomplete intent cannot be recovered through this API.
 pub async fn recover_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
+    let installer = crate::windows_service_storage::installer_journal::acquire_installer()?;
     let checkpoint = crate::windows_service_storage::installer_journal::load_checkpoint(owner_sid)?
         .ok_or_else(|| {
             anyhow::anyhow!("source recovery requires a completed installer checkpoint")
         })?;
-    handoff_from_owner(owner_sid, endpoint, Some(checkpoint)).await
+    handoff_from_owner(owner_sid, endpoint, Some(checkpoint), installer).await
 }
 
 async fn handoff_from_owner(
     owner_sid: &str,
     endpoint: uuid::Uuid,
     previous: Option<migration_transfer::RecoveryCheckpoint>,
+    installer: crate::windows_service_storage::installer_journal::InstallerLease,
 ) -> Result<ForwardedSource> {
     let identity = windows_service_config::pending_installer_identity(owner_sid)?;
     let pipe = crate::windows_relay_pipe::connect_source(&identity, endpoint).await?;
     let (source, cancel) = provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
     let owner = owner_sid.to_owned();
     // Keep cancellation in this awaiting task, not the blocking worker.
-    let ((source, checkpoint), reply) = exchange(
+    let ((source, checkpoint, installer), reply) = exchange(
         &identity,
-        (source, None),
+        // Keep installer exclusion in the real worker across caller cancellation.
+        (source, None, installer),
         move |stream, destination, source| {
             source
                 .0
@@ -114,6 +119,7 @@ async fn handoff_from_owner(
         _cancel: cancel,
         reply,
         checkpoint: checkpoint.ok_or_else(|| anyhow::anyhow!("source checkpoint is missing"))?,
+        _installer: installer,
     })
 }
 

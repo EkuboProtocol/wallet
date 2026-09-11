@@ -6,6 +6,43 @@ use std::io::Read as _;
 
 const ADMINISTRATORS: &str = "S-1-5-32-544";
 
+/// Exclusive installer lifetime, separate from the pending service's own lock.
+/// All ancestors stay pinned; the permanent empty file is never a PID record.
+pub struct InstallerLease {
+    _lock: ProfileLock,
+    _ancestors: Vec<File>,
+}
+
+pub fn acquire_installer() -> Result<InstallerLease> {
+    crate::windows_service_identity::verify_installer_process()?;
+    let trusted = crate::windows_service_config::machine_trustees()?;
+    let mut ancestors = program_data_ancestors(&trusted)?;
+    for component in ["EkuboWallet", "Pending"] {
+        let parent = ancestors.last().context("machine parent is missing")?;
+        let child = open_relative(parent.as_handle(), component, StorageKind::Directory)?;
+        validate_machine_handle(child.as_handle(), &trusted, false)?;
+        ancestors.push(child);
+    }
+    let parent = ancestors.last().context("installer parent is missing")?;
+    let lock = lock_parent(parent)?;
+    // A retained child prevents an ancestor from becoming an empty-directory
+    // reparse point. Recheck after the entire handle chain has been pinned.
+    for ancestor in &ancestors {
+        read_security(ancestor.as_handle(), StorageKind::Directory)?;
+    }
+    Ok(InstallerLease {
+        _lock: lock,
+        _ancestors: ancestors,
+    })
+}
+
+fn lock_parent(parent: &File) -> Result<ProfileLock> {
+    let file = write::open_installer_lock(parent.as_handle(), ADMINISTRATORS)?;
+    validate_journal(file.as_handle())?;
+    ensure!(file.metadata()?.len() == 0, "installer lock is not empty");
+    ProfileLock::acquire(file).context("another wallet installer may be running")
+}
+
 /// Record an attempt before forwarding its header or keys. A conflicting intent
 /// cannot be replaced by retrying; recovery/abort must resolve the earlier attempt.
 pub fn save_intent(owner_sid: &str, intent: &TransferIntent) -> Result<()> {

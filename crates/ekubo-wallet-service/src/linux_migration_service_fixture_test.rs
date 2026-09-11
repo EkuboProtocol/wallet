@@ -160,6 +160,10 @@ fn source_client(owner: u32) -> Result<()> {
     ))?;
     ensure!(!staged.reply().stage().is_nil(), "missing forwarded stage");
     ensure!(
+        ekubo_wallet_core::service_storage::installer_journal::acquire_installer().is_err(),
+        "forwarded source released installer exclusion"
+    );
+    ensure!(
         ekubo_wallet_core::service_storage::installer_journal::load_intent(owner)?.is_some(),
         "forwarding did not persist intent"
     );
@@ -176,6 +180,7 @@ fn source_client(owner: u32) -> Result<()> {
     // Source credentials and snapshot were never supplied to this process. The
     // retained channel closes here; this is an abort of retention, not cutover.
     drop(staged);
+    drop(ekubo_wallet_core::service_storage::installer_journal::acquire_installer()?);
     println!("Authenticated owner-keyring source staged through the Linux service");
     Ok(())
 }
@@ -284,6 +289,10 @@ fn source_recover(owner: u32) -> Result<()> {
     ensure!(
         serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&previous)?,
         "native recovery changed the checkpoint"
+    );
+    ensure!(
+        ekubo_wallet_core::service_storage::installer_journal::acquire_installer().is_err(),
+        "recovered source released installer exclusion"
     );
     drop(recovered);
     Ok(())

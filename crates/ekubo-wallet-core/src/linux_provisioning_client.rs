@@ -23,6 +23,7 @@ pub struct ForwardedSource {
     _service: Connection,
     reply: StagingReply,
     checkpoint: migration_transfer::RecoveryCheckpoint,
+    _installer: service_storage::installer_journal::InstallerLease,
 }
 impl ForwardedSource {
     #[must_use]
@@ -44,7 +45,8 @@ pub async fn forward_from_owner(
     owner_uid: u32,
     recipient: OwnedUniqueName,
 ) -> Result<ForwardedSource> {
-    handoff_from_owner(owner_uid, recipient, None).await
+    let installer = service_storage::installer_journal::acquire_installer()?;
+    handoff_from_owner(owner_uid, recipient, None, installer).await
 }
 
 /// Recover only the completed checkpoint in protected installer storage. The
@@ -54,22 +56,26 @@ pub async fn recover_from_owner(
     owner_uid: u32,
     recipient: OwnedUniqueName,
 ) -> Result<ForwardedSource> {
+    let installer = service_storage::installer_journal::acquire_installer()?;
     let checkpoint = service_storage::installer_journal::load_checkpoint(owner_uid)?
         .context("source recovery requires a completed installer checkpoint")?;
-    handoff_from_owner(owner_uid, recipient, Some(checkpoint)).await
+    handoff_from_owner(owner_uid, recipient, Some(checkpoint), installer).await
 }
 
 async fn handoff_from_owner(
     owner_uid: u32,
     recipient: OwnedUniqueName,
     previous: Option<migration_transfer::RecoveryCheckpoint>,
+    installer: service_storage::installer_journal::InstallerLease,
 ) -> Result<ForwardedSource> {
     let (identity, bus) = connect(owner_uid).await?;
     let (owner, cancel) = crate::linux_source_handoff::connect(owner_uid, recipient).await?;
     let result = exchange(
         &bus,
         &identity,
-        (owner, None),
+        // Move the installer guard into the blocking worker's source state.
+        // Cancelling this awaiting task cannot release it before that worker exits.
+        (owner, None, installer),
         move |stream, destination, source| {
             crate::migration_source::request(&mut source.0.stream, previous.as_ref())?;
             let request = if let Some(checkpoint) = &previous {
@@ -104,12 +110,13 @@ async fn handoff_from_owner(
     )
     .await;
     match result {
-        Ok(((owner, checkpoint), reply)) => Ok(ForwardedSource {
+        Ok(((owner, checkpoint, installer), reply)) => Ok(ForwardedSource {
             _owner: owner,
             _cancel: cancel,
             _service: bus,
             reply,
             checkpoint: checkpoint.context("source checkpoint is missing")?,
+            _installer: installer,
         }),
         Err(error) => {
             let _ = bus.close().await;

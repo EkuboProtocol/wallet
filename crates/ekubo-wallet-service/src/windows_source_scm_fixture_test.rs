@@ -36,6 +36,10 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         // Neither a source snapshot nor its keys are supplied to this adapter.
         let staged = windows_provisioning_client::forward_from_owner(owner, endpoint).await?;
         ensure!(
+            windows_service_storage::installer_journal::acquire_installer().is_err(),
+            "forwarded source released installer exclusion"
+        );
+        ensure!(
             windows_service_storage::installer_journal::load_intent(owner)?.is_some(),
             "forwarding did not persist intent"
         );
@@ -48,11 +52,16 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         windows_service_storage::installer_journal::save_checkpoint(owner, staged.checkpoint())?;
         let expected = staged.reply().relay().clone();
         drop(staged);
+        drop(windows_service_storage::installer_journal::acquire_installer()?);
         let mut stdin = child.stdin.take().context("missing source stdin")?;
         stdin.write_all(b"finish\n").await?;
         let endpoint = read_endpoint(&mut stdout).await?;
         super::restart_fixture_service(owner)?;
         let recovered = windows_provisioning_client::recover_from_owner(owner, endpoint).await?;
+        ensure!(
+            windows_service_storage::installer_journal::acquire_installer().is_err(),
+            "recovered source released installer exclusion"
+        );
         ensure!(
             serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&checkpoint)?,
             "native recovery changed the checkpoint"

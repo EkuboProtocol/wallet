@@ -135,3 +135,72 @@ fn intent_is_private_immutable_and_rejects_a_checkpoint_for_another_attempt() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(save_under(&handle, 1000, uid, &checkpoint).is_err());
 }
+
+#[test]
+fn installer_lease_excludes_other_processes_and_preserves_its_rendezvous_file() {
+    let root = tempfile::tempdir().unwrap();
+    let pending = root.path().join("etc/ekubo-wallet/pending");
+    std::fs::create_dir_all(&pending).unwrap();
+    let handle = File::open(root.path()).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let path = pending.join("installer.lock");
+    let lease = acquire_under(&handle, uid).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(acquire_under(&handle, uid).is_err());
+    let probe = |expected| {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "service_profile_lock::tests::child_probe",
+                "--ignored",
+            ])
+            .env("EKUBO_TEST_SERVICE_LOCK_PATH", &path)
+            .env("EKUBO_TEST_SERVICE_LOCK_EXPECTED", expected)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    };
+    probe("locked");
+    drop(lease);
+    assert!(path.exists());
+    probe("available");
+    drop(acquire_under(&handle, uid).unwrap());
+    assert!(std::fs::read(path).unwrap().is_empty());
+}
+
+#[test]
+fn installer_lease_rejects_unsafe_objects_without_repairing_them() {
+    let root = tempfile::tempdir().unwrap();
+    let pending = root.path().join("etc/ekubo-wallet/pending");
+    std::fs::create_dir_all(&pending).unwrap();
+    let handle = File::open(root.path()).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let path = pending.join("installer.lock");
+    std::fs::write(&path, b"not a PID lease").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(acquire_under(&handle, uid).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"not a PID lease");
+    std::fs::write(&path, b"").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(acquire_under(&handle, uid).is_err());
+    std::fs::remove_file(&path).unwrap();
+    let outside = root.path().join("outside");
+    std::fs::write(&outside, b"").unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&outside, &path).unwrap();
+    assert!(acquire_under(&handle, uid).is_err());
+    std::fs::remove_file(&path).unwrap();
+    std::fs::hard_link(&outside, &path).unwrap();
+    assert!(acquire_under(&handle, uid).is_err());
+    std::fs::remove_file(&path).unwrap();
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(acquire_under(&handle, uid).is_err());
+    assert!(!path.exists());
+}

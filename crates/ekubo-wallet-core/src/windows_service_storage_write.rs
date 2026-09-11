@@ -159,6 +159,12 @@ pub(super) fn open_database_file(
     Ok(file)
 }
 
+/// Fixed administrative rendezvous file. `FILE_OPEN_IF` never truncates/repairs an
+/// existing object; the installer validates its actual owner/DACL before locking.
+pub(super) fn open_installer_lock(parent: BorrowedHandle<'_>, owner: &str) -> Result<File> {
+    open_handle(parent, "installer.lock", owner, OpenMode::Database)
+}
+
 pub(super) fn remove_credential(
     parent: BorrowedHandle<'_>,
     component: &str,

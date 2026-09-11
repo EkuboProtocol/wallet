@@ -2,6 +2,40 @@
 use super::*;
 use crate::migration_transfer::{Destination, RecoveryCheckpoint, TransferIntent};
 
+/// Serializes privileged installer operations across profiles. The file is a
+/// permanent rendezvous point, never a PID record to remove after a crash.
+/// Holding this guard does not establish source validity or authorize cutover.
+pub struct InstallerLease {
+    _lock: ProfileLock,
+    _parent: File,
+}
+
+pub fn acquire_installer() -> Result<InstallerLease> {
+    require_installer()?;
+    acquire_under(&root_directory()?, 0)
+}
+
+fn acquire_under(root: &File, system_uid: u32) -> Result<InstallerLease> {
+    let mut parent = directory(root, "etc", system_uid, false)?;
+    for component in ["ekubo-wallet", "pending"] {
+        parent = directory(&parent, component, system_uid, false)?;
+    }
+    let file = File::from(openat(
+        &parent,
+        "installer.lock",
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::from_raw_mode(PRIVATE_FILE_MODE),
+    )?);
+    validate_file(&file, system_uid, true)?;
+    ensure!(file.metadata()?.len() == 0, "installer lock is not empty");
+    let lock = ProfileLock::acquire(file).context("another wallet installer may be running")?;
+    parent.sync_all()?;
+    Ok(InstallerLease {
+        _lock: lock,
+        _parent: parent,
+    })
+}
+
 /// Record an attempt before forwarding its header or keys. Existing conflicting
 /// intent requires explicit recovery/abort; it is never overwritten here.
 pub fn save_intent(owner_uid: u32, intent: &TransferIntent) -> Result<()> {
