@@ -26,6 +26,20 @@ pub struct MigrationDatabaseSnapshot {
 }
 
 impl MigrationDatabaseSnapshot {
+    /// Read validated public account metadata through the retained source
+    /// connection. This never initializes missing configuration or opens another
+    /// source descriptor, which could release SQLite's process-wide POSIX locks.
+    /// Active signing identities must match before callers collect account keys.
+    pub fn wallet_inventory(&self) -> Result<Vec<crate::config::WalletMetadata>> {
+        let wallets = read_wallet_inventory(&self.source)?;
+        let expected = wallets
+            .iter()
+            .map(|wallet| (wallet.instance_id, wallet.clone()))
+            .collect();
+        verify_instances(&self.source, &expected)?;
+        Ok(wallets)
+    }
+
     /// Logical source identity for an installer recovery journal. Computed using
     /// the retained SQLite fence, without opening another source descriptor.
     /// This is not an authorization or deletion receipt; recovery must also
@@ -192,22 +206,7 @@ pub(super) fn verify_inventory(
     connection: &Connection,
     expected: &std::collections::BTreeMap<uuid::Uuid, crate::config::WalletMetadata>,
 ) -> Result<()> {
-    use rusqlite::OptionalExtension as _;
-    let encoded: Option<String> = connection
-        .query_row(
-            "SELECT value_json FROM application_settings WHERE key=?1",
-            [crate::config::WALLET_CONFIGURATION_SETTING],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let wallets = if let Some(encoded) = encoded {
-        let config: crate::config::WalletConfig = serde_json::from_str(&encoded)?;
-        crate::config::validate_config(&config)?;
-        config.wallets
-    } else {
-        Vec::new()
-    };
-    let actual: std::collections::BTreeMap<_, _> = wallets
+    let actual: std::collections::BTreeMap<_, _> = read_wallet_inventory(connection)?
         .into_iter()
         .map(|wallet| (wallet.instance_id, wallet))
         .collect();
@@ -216,6 +215,24 @@ pub(super) fn verify_inventory(
         "received database wallet metadata does not match credentials"
     );
     verify_instances(connection, expected)
+}
+
+fn read_wallet_inventory(connection: &Connection) -> Result<Vec<crate::config::WalletMetadata>> {
+    use rusqlite::OptionalExtension as _;
+    let encoded: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM application_settings WHERE key=?1",
+            [crate::config::WALLET_CONFIGURATION_SETTING],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(encoded) = encoded {
+        let config: crate::config::WalletConfig = serde_json::from_str(&encoded)?;
+        crate::config::validate_config(&config)?;
+        Ok(config.wallets)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn verify_instances(

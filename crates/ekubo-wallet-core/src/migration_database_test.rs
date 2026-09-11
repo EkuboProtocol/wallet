@@ -36,6 +36,7 @@ fn encrypted_snapshot_preserves_schema_data_and_header_while_source_remains_fenc
     let before = fs::read(&source).unwrap();
     let observer = observer(&source);
     let mut snapshot = MigrationDatabaseSnapshot::freeze(&source, Zeroizing::new(KEY)).unwrap();
+    assert!(snapshot.wallet_inventory().unwrap().is_empty());
     assert_fenced(&observer);
     let transfer = snapshot.transfer().unwrap();
     let mut bytes = Vec::new();
@@ -168,4 +169,68 @@ fn independent_process_observes_source_fence() {
         return;
     };
     assert_fenced(&observer(Path::new(&path)));
+}
+
+fn inventory_wallet() -> crate::config::WalletMetadata {
+    crate::config::WalletMetadata {
+        instance_id: uuid::Uuid::new_v4(),
+        id: "migration-source".into(),
+        address: alloy::primitives::Address::repeat_byte(0x11),
+        created_at: chrono::DateTime::from_timestamp_millis(1000).unwrap(),
+        source: crate::config::WalletSource::Imported,
+        exported_at: None,
+    }
+}
+
+#[test]
+fn source_inventory_reads_existing_metadata_without_changing_bytes_or_releasing_the_fence() {
+    let (dir, source) = fixture();
+    let wallet = inventory_wallet();
+    crate::config::ConfigStore::open(dir.path(), DatabaseKey::new(KEY))
+        .update_for_test(|config| {
+            config.wallets = vec![wallet.clone()];
+            Ok(())
+        })
+        .unwrap();
+    PolicyStore::open(&source, &DatabaseKey::new(KEY))
+        .unwrap()
+        .register_wallet_without_policy(&wallet)
+        .unwrap();
+    let before = fs::read(&source).unwrap();
+    let snapshot = MigrationDatabaseSnapshot::freeze(&source, Zeroizing::new(KEY)).unwrap();
+    assert_eq!(snapshot.wallet_inventory().unwrap(), vec![wallet]);
+    assert!(std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "policy_store::migration_database::tests::independent_process_observes_source_fence",
+        ])
+        .env("EKUBO_TEST_MIGRATION_FENCE_SOURCE", &source)
+        .status()
+        .unwrap()
+        .success());
+    drop(snapshot);
+    assert_eq!(fs::read(&source).unwrap(), before);
+}
+
+#[test]
+fn source_inventory_refuses_orphan_signing_identity_without_initializing_configuration() {
+    let (_dir, source) = fixture();
+    PolicyStore::open(&source, &DatabaseKey::new(KEY))
+        .unwrap()
+        .register_wallet_without_policy(&inventory_wallet())
+        .unwrap();
+    let before = fs::read(&source).unwrap();
+    let snapshot = MigrationDatabaseSnapshot::freeze(&source, Zeroizing::new(KEY)).unwrap();
+    assert!(snapshot.wallet_inventory().is_err());
+    let configured: i64 = snapshot
+        .source
+        .query_row(
+            "SELECT count(*) FROM application_settings WHERE key=?1",
+            [crate::config::WALLET_CONFIGURATION_SETTING],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(configured, 0);
+    drop(snapshot);
+    assert_eq!(fs::read(&source).unwrap(), before);
 }
