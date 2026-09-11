@@ -4,7 +4,7 @@
 
 use std::mem::size_of;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use windows::{
     Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS},
@@ -41,11 +41,17 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 pub fn installed_service_identity() -> Result<InstalledServiceIdentity> {
+    find_installed_service_identity()?.context("wallet service is not installed")
+}
+
+/// Only absence of the protected installation keys means uninstalled. A
+/// present owner key with missing, unreadable, or invalid metadata is an error.
+pub fn find_installed_service_identity() -> Result<Option<InstalledServiceIdentity>> {
     read_configuration(current_process_identity()?.user_sid())
 }
 
 pub fn service_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
-    let identity = read_configuration(owner_sid)?;
+    let identity = read_configuration(owner_sid)?.context("wallet service is not installed")?;
     verify_service_process(identity.service_sid())?;
     Ok(identity)
 }
@@ -92,10 +98,10 @@ fn account_sid(account: &str) -> Result<String> {
     unsafe { sid_string(pointer) }
 }
 
-fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<Key> {
+fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<Option<Key>> {
     let name = wide(component);
     let mut handle = HKEY::default();
-    unsafe {
+    let status = unsafe {
         RegOpenKeyExW(
             parent,
             PCWSTR(name.as_ptr()),
@@ -103,8 +109,11 @@ fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<K
             KEY_READ | KEY_WOW64_64KEY,
             &raw mut handle,
         )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
     }
-    .ok()?;
+    status.ok()?;
     let key = Key(handle);
     let link = wide("SymbolicLinkValue");
     let mut size = 0;
@@ -123,7 +132,7 @@ fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<K
         "registry links are not supported"
     );
     validate_key(&key, trusted)?;
-    Ok(key)
+    Ok(Some(key))
 }
 
 pub(crate) fn machine_trustees() -> Result<Vec<String>> {
@@ -134,13 +143,28 @@ pub(crate) fn machine_trustees() -> Result<Vec<String>> {
     ])
 }
 
-fn read_configuration(owner: &str) -> Result<InstalledServiceIdentity> {
+fn read_configuration(owner: &str) -> Result<Option<InstalledServiceIdentity>> {
+    read_configuration_under(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?)
+}
+
+// The public reader always uses HKLM. An explicit root permits native tests
+// against disposable registry trees without provisioning a machine service.
+fn read_configuration_under(
+    root: HKEY,
+    owner: &str,
+    trusted: &[String],
+) -> Result<Option<InstalledServiceIdentity>> {
     validate_owner_component(owner)?;
-    let trusted = machine_trustees()?;
     let mut keys = Vec::new();
-    let mut parent = HKEY_LOCAL_MACHINE;
+    let mut parent = root;
     for component in ["SOFTWARE", "EkuboWallet", "Owners", owner] {
-        let key = open_component(parent, component, &trusted)?;
+        let Some(key) = open_component(parent, component, trusted)? else {
+            ensure!(
+                component != "SOFTWARE",
+                "machine software registry is missing"
+            );
+            return Ok(None);
+        };
         parent = key.0;
         keys.push(key);
     }
@@ -186,7 +210,7 @@ fn read_configuration(owner: &str) -> Result<InstalledServiceIdentity> {
     );
     // Keep every validated ancestor open until all metadata has been checked.
     drop(keys);
-    Ok(identity)
+    Ok(Some(identity))
 }
 
 fn validate_key(key: &Key, trusted: &[String]) -> Result<()> {

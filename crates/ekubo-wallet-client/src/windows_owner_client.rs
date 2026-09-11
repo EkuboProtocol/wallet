@@ -56,11 +56,34 @@ pub type OwnerClient = OwnerConnection<WindowsOwnerTransport>;
 /// Connect the stdio bridge to the protected service MCP runtime. The returned
 /// stream speaks the existing bridge handshake and MCP protocol exclusively.
 pub async fn connect_agent_stream() -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    let identity =
-        Arc::new(ekubo_wallet_core::windows_service_config::installed_service_identity()?);
+    connect_installed_agent(
+        ekubo_wallet_core::windows_service_config::installed_service_identity()?,
+    )
+    .await
+}
+
+/// `None` means the protected installation does not exist. Once installed,
+/// connection, registry, and custody errors must never trigger legacy fallback.
+pub async fn try_connect_agent_stream()
+-> Result<Option<tokio::net::windows::named_pipe::NamedPipeClient>> {
+    let Some(identity) =
+        ekubo_wallet_core::windows_service_config::find_installed_service_identity()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(connect_installed_agent(identity).await?))
+}
+
+async fn connect_installed_agent(
+    identity: ekubo_wallet_core::windows_service_config::InstalledServiceIdentity,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
     let profile = identity.profile_id();
-    crate::stream_owner_client::connect_agent(WindowsConnector(identity), move || async move {
-        tokio::task::spawn_blocking(move || ekubo_wallet_core::custody_relay::load(profile)).await?
-    })
+    crate::stream_owner_client::connect_agent(
+        WindowsConnector(Arc::new(identity)),
+        move || async move {
+            tokio::task::spawn_blocking(move || ekubo_wallet_core::custody_relay::load(profile))
+                .await?
+        },
+    )
     .await
 }

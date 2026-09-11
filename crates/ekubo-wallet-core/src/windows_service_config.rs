@@ -12,7 +12,7 @@ mod native;
 #[cfg(target_os = "windows")]
 pub(crate) use native::machine_trustees;
 #[cfg(target_os = "windows")]
-pub use native::{installed_service_identity, service_identity};
+pub use native::{find_installed_service_identity, installed_service_identity, service_identity};
 
 const MAX_CONFIG_BYTES: usize = 4096;
 

@@ -258,7 +258,10 @@ async fn connect(client: ClientKind) -> Result<tokio::net::UnixStream> {
 async fn connect(client: ClientKind) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
     use tokio::net::windows::named_pipe::ClientOptions;
 
-    let mut stream = ClientOptions::new().open(windows_pipe_name()?)?;
+    let mut stream = match ekubo_wallet_client::try_connect_agent_stream().await? {
+        Some(stream) => stream,
+        None => ClientOptions::new().open(windows_pipe_name()?)?,
+    };
     let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
     stream.write_all(&hello).await?;
     stream.write_all(b"\n").await?;
