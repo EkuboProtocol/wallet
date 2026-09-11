@@ -536,7 +536,40 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
     let source_dir = tempfile::tempdir().unwrap();
     let source = source_dir.path().join("source.db");
     let raw_key = [0x44; 32];
-    drop(PolicyStore::open(&source, &DatabaseKey::new(raw_key)).unwrap());
+    let wallet = crate::config::WalletMetadata {
+        instance_id: uuid::Uuid::new_v4(),
+        id: "migrated".into(),
+        address: alloy::signers::local::PrivateKeySigner::from_slice(&[0x22; 32])
+            .unwrap()
+            .address(),
+        created_at: chrono::Utc::now(),
+        source: crate::config::WalletSource::Imported,
+        exported_at: None,
+    };
+    let account = || crate::custody_provisioning::MigrationAccount {
+        wallet: wallet.clone(),
+        key: Zeroizing::new([0x22; 32]),
+    };
+    let mut source_store = PolicyStore::open(&source, &DatabaseKey::new(raw_key)).unwrap();
+    source_store
+        .register_wallet_without_policy(&wallet)
+        .unwrap();
+    let config = crate::config::WalletConfig {
+        version: 3,
+        wallets: vec![wallet.clone()],
+        networks: vec![],
+    };
+    source_store
+        .connection
+        .execute(
+            "INSERT INTO application_settings(key,value_json,updated_at) VALUES(?1,?2,0)",
+            rusqlite::params![
+                crate::config::WALLET_CONFIGURATION_SETTING,
+                serde_json::to_string(&config).unwrap()
+            ],
+        )
+        .unwrap();
+    drop(source_store);
     let mut snapshot = MigrationDatabaseSnapshot::freeze(&source, Zeroizing::new(raw_key)).unwrap();
     let transfer = snapshot.transfer().unwrap();
     let mut stream = tempfile::tempfile().unwrap();
@@ -548,8 +581,8 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
         &service,
         profile,
         Zeroizing::new(raw_key),
-        &[],
-        vec![],
+        std::slice::from_ref(&wallet),
+        vec![account()],
     )
     .unwrap();
     let credentials = prepared.stage(&pending).unwrap();
@@ -584,6 +617,89 @@ fn encrypted_source_snapshot_transfers_into_pending_storage_and_reopens_with_ori
             .to_string_lossy()
             .starts_with(".database-build-")
     }));
+    let limits = crate::migration_transfer::TransferLimits {
+        accounts: 10,
+        metadata_bytes: 4096,
+        total_metadata_bytes: 40960,
+        database_bytes: 64 * 1024 * 1024,
+    };
+    let (owner, service, profile) = pending.identity();
+    let mut wire = Zeroizing::new(Vec::new());
+    let mut rejected_output = Vec::new();
+    assert!(
+        crate::migration_transfer::send(
+            &mut rejected_output,
+            crate::migration_transfer::Destination {
+                owner: owner.clone(),
+                service: service.clone(),
+                profile
+            },
+            Zeroizing::new(raw_key),
+            std::slice::from_ref(&wallet),
+            vec![account()],
+            &mut snapshot,
+            crate::migration_transfer::TransferLimits {
+                total_metadata_bytes: 1,
+                ..limits
+            },
+        )
+        .is_err()
+    );
+    assert!(rejected_output.is_empty());
+    let session = crate::migration_transfer::send(
+        &mut *wire,
+        crate::migration_transfer::Destination {
+            owner,
+            service,
+            profile,
+        },
+        Zeroizing::new(raw_key),
+        std::slice::from_ref(&wallet),
+        vec![account()],
+        &mut snapshot,
+        limits,
+    )
+    .unwrap();
+    let canonical_count = || {
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("-canonical.db")
+            })
+            .count()
+    };
+    let before_interruption = canonical_count();
+    assert!(
+        crate::migration_transfer::receive(&pending, &mut &wire[..wire.len() - 1], limits).is_err()
+    );
+    assert_eq!(
+        canonical_count(),
+        before_interruption,
+        "truncated transfer cannot publish a candidate"
+    );
+    wire.extend_from_slice(b"next protocol frame");
+    let mut input = wire.as_slice();
+    let candidate = crate::migration_transfer::receive(&pending, &mut input, limits).unwrap();
+    assert_eq!(candidate.session(), session);
+    assert_eq!(input, b"next protocol frame");
+    assert_ne!(candidate.stage(), stage);
+    assert_eq!(
+        pending
+            .canonical_database(candidate.stage())
+            .unwrap()
+            .transfer()
+            .unwrap(),
+        *candidate.canonical()
+    );
+    assert_eq!(
+        candidate.relay().as_bytes().len(),
+        crate::custody_envelope::SEALED_KEY_BYTES
+    );
     let mut received = pending.open_staged_database(stage).unwrap();
     assert_eq!(DatabaseTransfer::describe(&mut received).unwrap(), transfer);
     received.seek(SeekFrom::Start(0)).unwrap();

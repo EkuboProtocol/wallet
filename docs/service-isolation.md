@@ -217,6 +217,30 @@ Linux transfer/rebuild and native Windows publication handles. This candidate an
 its digest are still not activation or legacy-key deletion authority: authenticated
 transport, durable commit, recovery and installer integration remain unfinished.
 
+The shared `migration_transfer` codec now connects a frozen source to those
+pending-store primitives. Its versioned stream binds an installer-provided
+owner/service/profile and fresh session ID, then sends fixed-width key bytes,
+individually framed account metadata, and the length/digest-bound encrypted
+snapshot. Host-selected limits separately bound account count, metadata frame and
+aggregate sizes, and database size. The receiver compares destination identity and
+admission limits before reading keys, validates the supplied account keys, stages
+credentials, receives the exact database frame and rebuilds the canonical candidate.
+It returns an opaque result retaining the pending-root borrow and service custody;
+only the session/stage IDs, canonical digest and desktop relay ciphertext are
+available. It exposes no activation or deletion capability. Tests include a real
+synthetic account through native Linux pending storage, sender preflight, truncated
+keys/database, invalid account keys, destination mismatch, unknown header fields,
+frame budgets, and preservation of following protocol bytes.
+
+This codec is not yet connected to a listening provisioning endpoint. It does not
+establish OS identity or human authorization from a header. Platform hosts must
+authenticate the transport and provisioning handoff, enforce admission and an
+overall deadline, and keep the source lifecycle lock/fence alive through durable
+commit or abort. Senders must authenticate the protected service before sending any
+key bytes. On interruption, credential records may remain staged; they do not
+activate custody. The actual privileged installer, relay persistence and durable
+commit/recovery remain required on both platforms.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

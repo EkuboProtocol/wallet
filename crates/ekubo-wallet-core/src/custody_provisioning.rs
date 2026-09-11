@@ -211,7 +211,10 @@ impl PreparedServiceCredentials {
     }
 }
 
-fn validate_accounts(expected: &[WalletMetadata], accounts: &[MigrationAccount]) -> Result<()> {
+pub(crate) fn validate_accounts(
+    expected: &[WalletMetadata],
+    accounts: &[MigrationAccount],
+) -> Result<()> {
     ensure!(
         expected.len() == accounts.len(),
         "migration account inventory is incomplete"

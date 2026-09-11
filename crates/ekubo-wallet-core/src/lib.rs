@@ -41,6 +41,7 @@ pub mod input_validation;
 pub mod legal;
 pub mod mcp_companions;
 pub mod message;
+pub mod migration_transfer;
 pub mod networks;
 pub mod orchestrator;
 pub mod pending;
