@@ -14,6 +14,68 @@ use std::time::Duration;
 use zbus::{Connection, fdo::DBusProxy, names::OwnedUniqueName};
 use zeroize::Zeroizing;
 
+/// A staged remote source, with its authenticated owner stream retained. The
+/// source fence is temporary and may be lost on disconnect/deadline: this type
+/// deliberately has no activation method. Drop aborts retention, not staging.
+pub struct ForwardedSource {
+    _owner: crate::linux_source_handoff::OwnerChannel,
+    _cancel: crate::linux_provisioning_io::CancelStream,
+    _service: Connection,
+    reply: StagingReply,
+    checkpoint: migration_transfer::RecoveryCheckpoint,
+}
+impl ForwardedSource {
+    #[must_use]
+    pub const fn reply(&self) -> &StagingReply {
+        &self.reply
+    }
+    #[must_use]
+    pub const fn checkpoint(&self) -> &migration_transfer::RecoveryCheckpoint {
+        &self.checkpoint
+    }
+}
+
+/// Root installer staging from the exact owner endpoint learned during launch.
+/// Both peers and protected pending metadata are checked before forwarding keys.
+/// No source path, raw key or generic writer is accepted or exposed by this API.
+pub async fn forward_from_owner(
+    owner_uid: u32,
+    recipient: OwnedUniqueName,
+) -> Result<ForwardedSource> {
+    let (identity, bus) = connect(owner_uid).await?;
+    let (owner, cancel) = crate::linux_source_handoff::connect(owner_uid, recipient).await?;
+    let result = exchange(
+        &bus,
+        &identity,
+        (owner, None),
+        |stream, destination, source| {
+            let request = migration_transfer::relay_request(
+                &mut source.0.stream,
+                stream,
+                &destination,
+                migration_transfer::INSTALLER_LIMITS,
+            )?;
+            let (reply, checkpoint) = request.finish(stream, &mut source.0.stream)?;
+            source.1 = Some(checkpoint);
+            Ok(reply)
+        },
+    )
+    .await;
+    match result {
+        Ok(((owner, checkpoint), reply)) => Ok(ForwardedSource {
+            _owner: owner,
+            _cancel: cancel,
+            _service: bus,
+            reply,
+            checkpoint: checkpoint.context("source checkpoint is missing")?,
+        }),
+        Err(error) => {
+            let _ = bus.close().await;
+            Err(error)
+        }
+    }
+}
+
 /// Successful staging keeps the source fence and exact service connection alive
 /// through the installer's later commit/abort. Keep the source lifecycle lock
 /// alive too. Dropping this object aborts retention; it cannot undo staged files.

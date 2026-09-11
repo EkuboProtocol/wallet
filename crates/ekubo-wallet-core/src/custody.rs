@@ -13,7 +13,7 @@ use std::{fmt, sync::Arc};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.instance";
+pub(crate) const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.instance";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyMaterial([u8; 32]);

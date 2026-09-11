@@ -43,8 +43,12 @@ pub mod legal;
 pub mod linux_provisioning_client;
 #[cfg(target_os = "linux")]
 pub mod linux_provisioning_io;
+#[cfg(target_os = "linux")]
+pub mod linux_source_handoff;
 pub mod mcp_companions;
 pub mod message;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod migration_source;
 pub mod migration_transfer;
 pub mod networks;
 pub mod orchestrator;
@@ -83,6 +87,8 @@ pub mod windows_service_config;
 pub mod windows_service_identity;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_service_manager;
+#[cfg(target_os = "windows")]
+pub mod windows_source_handoff;
 
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_owner_pipe;

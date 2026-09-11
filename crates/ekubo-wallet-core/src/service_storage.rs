@@ -123,9 +123,18 @@ pub fn find_installed_service_identity() -> Result<Option<InstalledServiceIdenti
 /// Read the pending profile for the actual desktop owner, without elevation or
 /// access to the service's private storage. Active profiles cannot fall back.
 pub fn pending_owner_profile() -> Result<uuid::Uuid> {
+    Ok(pending_owner_identity()?.profile_id())
+}
+
+pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     let owner = client_uid()?;
     ensure!(owner != 0, "root cannot persist a desktop custody relay");
-    Ok(pending_configuration(&root_directory()?, owner, 0)?.profile_id)
+    let configured = pending_configuration(&root_directory()?, owner, 0)?;
+    Ok(InstalledServiceIdentity {
+        owner_uid: owner,
+        service_uid: configured.service_uid,
+        profile_id: configured.profile_id,
+    })
 }
 
 fn client_uid() -> Result<u32> {

@@ -74,13 +74,9 @@ pub fn pending_installer_identity(owner: &str) -> Result<super::PendingInstaller
     ))
 }
 
-/// Read protected pending metadata for the actual primary-token owner. The
-/// identity reader rejects thread impersonation; service SIDs are not owners.
-pub fn pending_owner_profile() -> Result<uuid::Uuid> {
+pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     let current = current_process_identity()?;
-    let identity =
-        pending_configuration_under(HKEY_LOCAL_MACHINE, current.user_sid(), &machine_trustees()?)?;
-    Ok(identity.profile_id())
+    pending_configuration_under(HKEY_LOCAL_MACHINE, current.user_sid(), &machine_trustees()?)
 }
 
 fn pending_configuration_under(

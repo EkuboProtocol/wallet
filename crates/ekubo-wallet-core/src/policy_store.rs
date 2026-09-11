@@ -44,8 +44,8 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// queues and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
-const KEYRING_USER: &str = "default";
+pub(crate) const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
+pub(crate) const KEYRING_USER: &str = "default";
 
 #[cfg(any(test, feature = "test-hooks"))]
 static TEST_DATABASE_KEYS: LazyLock<Mutex<HashMap<PathBuf, [u8; 32]>>> =

@@ -12,10 +12,17 @@ mod native;
 #[cfg(target_os = "windows")]
 pub use native::{
     find_installed_service_identity, installed_service_identity, pending_installer_identity,
-    pending_owner_profile, service_identity,
+    service_identity,
 };
 #[cfg(target_os = "windows")]
-pub(crate) use native::{machine_trustees, pending_service_identity};
+pub(crate) use native::{machine_trustees, pending_owner_identity, pending_service_identity};
+
+/// Read protected pending metadata for the actual primary-token owner. The
+/// identity reader rejects thread impersonation; service SIDs are not owners.
+#[cfg(target_os = "windows")]
+pub fn pending_owner_profile() -> Result<Uuid> {
+    Ok(pending_owner_identity()?.profile_id())
+}
 
 const MAX_CONFIG_BYTES: usize = 4096;
 

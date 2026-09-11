@@ -23,6 +23,14 @@ impl PolicyEndpoint {
     }
 }
 
+struct SourcePolicyEndpoint(&'static str);
+#[zbus::interface(name = "org.ekubo.Wallet.InstallerSource1")]
+impl SourcePolicyEndpoint {
+    fn start(&self) -> &'static str {
+        self.0
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires dbus-daemon; tests production rules on an isolated bus"]
 async fn installer_policy_admits_only_the_exact_relay_method() {
@@ -79,6 +87,11 @@ async fn installer_policy_admits_only_the_exact_relay_method() {
         .unwrap()
         .serve_at(PATH, PolicyEndpoint("policy admitted the call"))
         .unwrap()
+        .serve_at(
+            "/org/ekubo/Wallet/InstallerSource",
+            SourcePolicyEndpoint("source admitted"),
+        )
+        .unwrap()
         .build()
         .await
         .unwrap();
@@ -96,10 +109,30 @@ async fn installer_policy_admits_only_the_exact_relay_method() {
         reply.body().deserialize::<String>().unwrap(),
         "policy admitted the call"
     );
+    let reply = client
+        .call_method(
+            Some(destination),
+            "/org/ekubo/Wallet/InstallerSource",
+            Some("org.ekubo.Wallet.InstallerSource1"),
+            "Start",
+            &(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reply.body().deserialize::<String>().unwrap(),
+        "source admitted"
+    );
     for (path, interface, member) in [
         ("/org/ekubo/Wallet/Other", INTERFACE, "Persist"),
         (PATH, INTERFACE, "Other"),
         (PATH, "org.ekubo.Wallet.Other", "Persist"),
+        (PATH, "org.ekubo.Wallet.InstallerSource1", "Start"),
+        (
+            "/org/ekubo/Wallet/InstallerSource",
+            "org.ekubo.Wallet.InstallerSource1",
+            "Persist",
+        ),
     ] {
         let error = client
             .call_method(Some(destination), path, Some(interface), member, &())

@@ -11,6 +11,61 @@ use anyhow::{Result, ensure};
 use std::io::Write as _;
 use zeroize::Zeroizing;
 
+type SourceStream = tokio_util::io::SyncIoBridge<
+    provisioning_io::DeadlineStream<tokio::net::windows::named_pipe::NamedPipeClient>,
+>;
+
+/// Retains the owner channel after staging, but does not authorize activation.
+/// Disconnect or deadline can release the source fence; no commit API exists.
+pub struct ForwardedSource {
+    _source: SourceStream,
+    _cancel: provisioning_io::CancelTransfer,
+    reply: StagingReply,
+    checkpoint: migration_transfer::RecoveryCheckpoint,
+}
+impl ForwardedSource {
+    #[must_use]
+    pub const fn reply(&self) -> &StagingReply {
+        &self.reply
+    }
+    #[must_use]
+    pub const fn checkpoint(&self) -> &migration_transfer::RecoveryCheckpoint {
+        &self.checkpoint
+    }
+}
+
+/// Stage from the actual owner's authenticated endpoint learned during launch.
+/// The caller must already be elevated; no path/raw key/writer is accepted or
+/// exposed, and both destination identities come from protected pending metadata.
+pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
+    let identity = windows_service_config::pending_installer_identity(owner_sid)?;
+    let pipe = crate::windows_relay_pipe::connect_source(&identity, endpoint).await?;
+    let (source, cancel) = provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
+    // Keep cancellation in this awaiting task, not the blocking worker.
+    let ((source, checkpoint), reply) =
+        exchange(&identity, (source, None), |stream, destination, source| {
+            source
+                .0
+                .write_all(crate::windows_relay_pipe::SOURCE_PREFACE)?;
+            let request = migration_transfer::relay_request(
+                &mut source.0,
+                stream,
+                &destination,
+                migration_transfer::INSTALLER_LIMITS,
+            )?;
+            let (reply, checkpoint) = request.finish(stream, &mut source.0)?;
+            source.1 = Some(checkpoint);
+            Ok(reply)
+        })
+        .await?;
+    Ok(ForwardedSource {
+        _source: source,
+        _cancel: cancel,
+        reply,
+        checkpoint: checkpoint.ok_or_else(|| anyhow::anyhow!("source checkpoint is missing"))?,
+    })
+}
+
 /// Retains the source database fence through the installer's later commit/abort.
 /// The caller must retain its lifecycle lock too. A staging reply grants no
 /// activation or legacy deletion authority and is not a durable commit receipt.
