@@ -4794,8 +4794,7 @@ fn seed_policy_loading_accounts(view: &Entity<WalletWindow>, cx: &mut gpui::Test
             source: ekubo_wallet_core::config::WalletSource::Created,
             exported_at: None,
         });
-        wallet
-            .owner
+        fixture_owner(&wallet.owner)
             .config()
             .update_for_test(|config| {
                 config.wallets.extend(accounts.clone());
@@ -4803,7 +4802,7 @@ fn seed_policy_loading_accounts(view: &Entity<WalletWindow>, cx: &mut gpui::Test
             })
             .unwrap();
         let mut store = ekubo_wallet_core::policy_store::PolicyStore::production(
-            wallet.owner.config().data_dir(),
+            fixture_owner(&wallet.owner).config().data_dir(),
         )
         .unwrap();
         for account in accounts {
@@ -5005,8 +5004,7 @@ fn asynchronous_account_removal_retains_the_review_and_rechecks_before_authoriza
         assert_eq!(active.state.document().identity, reviewed.document.identity);
         // Only synthetic public metadata exists. Removing it makes the held
         // review stale, so the approval path must fail before native custody.
-        wallet
-            .owner
+        fixture_owner(&wallet.owner)
             .config()
             .update_for_test(|config| {
                 config.wallets.retain(|account| account.id != "primary");
@@ -5022,7 +5020,7 @@ fn asynchronous_account_removal_retains_the_review_and_rechecks_before_authoriza
     cx.read_entity(&view, |wallet, _| {
         assert!(wallet.active_review.is_none());
         assert!(wallet.account_action_errors["primary"].contains("Could not remove account"));
-        assert!(wallet.owner.account("savings").is_ok());
+        assert!(fixture_owner(&wallet.owner).account("savings").is_ok());
     });
     release(cx, &view);
 }
@@ -5062,7 +5060,7 @@ fn asynchronous_legal_acceptance_keeps_the_gate_until_both_documents_are_accepte
     cx.read_entity(&view, |wallet, _| {
         assert!(!wallet.legal_gate);
         assert!(wallet.legal_review.is_none());
-        let status = wallet.owner.legal_status().unwrap();
+        let status = fixture_owner(&wallet.owner).legal_status().unwrap();
         assert!(status.terms_of_service.accepted && status.privacy_policy.accepted);
     });
     release(cx, &view);
@@ -5090,8 +5088,7 @@ fn asynchronous_legal_acceptance_failure_keeps_the_review_open(cx: &mut gpui::Te
                 .contains("Could not accept document")
         );
         assert!(
-            !wallet
-                .owner
+            !fixture_owner(&wallet.owner)
                 .legal_status()
                 .unwrap()
                 .terms_of_service
@@ -5135,11 +5132,13 @@ fn asynchronous_settings_preserve_the_latest_choice_in_storage_and_ui(
     cx.read_entity(&view, |wallet, _| {
         assert_eq!(wallet.appearance_preference, AppearancePreference::System);
         assert_eq!(
-            wallet.owner.appearance_preference().unwrap(),
+            fixture_owner(&wallet.owner)
+                .appearance_preference()
+                .unwrap(),
             AppearancePreference::System
         );
         assert!(!wallet.testnet_mode);
-        assert!(!wallet.owner.testnet_mode().unwrap());
+        assert!(!fixture_owner(&wallet.owner).testnet_mode().unwrap());
         assert!(!wallet.route_errors.contains_key(&Route::Settings));
     });
     release(cx, &view);
@@ -5161,7 +5160,9 @@ fn asynchronous_appearance_save_finishes_after_the_window_closes(cx: &mut gpui::
     cx.read_entity(&view, |wallet, _| {
         assert_eq!(wallet.appearance_preference, AppearancePreference::Light);
         assert_eq!(
-            wallet.owner.appearance_preference().unwrap(),
+            fixture_owner(&wallet.owner)
+                .appearance_preference()
+                .unwrap(),
             AppearancePreference::Light
         );
     });
@@ -5176,14 +5177,15 @@ fn asynchronous_guided_setup_load_preserves_stored_progress_and_saves_new_observ
     settle(cx, &view);
     seed_policy_loading_accounts(&view, cx);
     cx.update_entity(&view, |wallet, cx| {
-        wallet
-            .owner
+        fixture_owner(&wallet.owner)
             .set_guided_setup(&GuidedSetupState {
                 completed: [SetupTask::InstallAgent.key().to_owned()].into(),
             })
             .unwrap();
         let mut snapshot = quiet_snapshot();
-        snapshot.accounts = Ok(vec![wallet.owner.account("primary").unwrap()]);
+        snapshot.accounts = Ok(vec![
+            fixture_owner(&wallet.owner).account("primary").unwrap(),
+        ]);
         wallet.desktop_snapshot = Some(Arc::new(snapshot));
         wallet.guided_setup = GuidedSetup::unloaded();
         wallet.refresh_guided_setup(cx);
@@ -5207,7 +5209,7 @@ fn asynchronous_guided_setup_load_preserves_stored_progress_and_saves_new_observ
         assert!(!wallet.guided_setup_loading && !wallet.guided_setup_saves.in_flight);
         assert!(wallet.guided_setup.is_complete(SetupTask::InstallAgent));
         assert!(wallet.guided_setup.is_complete(SetupTask::CreateAccount));
-        let stored = wallet.owner.guided_setup().unwrap();
+        let stored = fixture_owner(&wallet.owner).guided_setup().unwrap();
         assert!(stored.completed.contains(SetupTask::InstallAgent.key()));
         assert!(stored.completed.contains(SetupTask::CreateAccount.key()));
     });
@@ -5263,8 +5265,11 @@ fn asynchronous_dapp_disconnect_removes_only_its_session_and_preserves_read_fail
     let (_second, second_summary) = manager.lock().unwrap().begin_uri(&uri("33")).unwrap();
     let (presenter, _incoming) = ProposalPresenter::channel();
     cx.update_entity(&view, |wallet, cx| {
-        wallet.walletconnect =
-            DesktopDapps::local(wallet.owner.clone(), manager.clone(), presenter);
+        wallet.walletconnect = DesktopDapps::local(
+            fixture_owner(&wallet.owner).clone(),
+            manager.clone(),
+            presenter,
+        );
         wallet.set_walletconnect_sessions(manager.lock().unwrap().sessions());
         wallet.walletconnect_connecting = Some(first_summary.id);
         wallet.update_walletconnect_sessions(
@@ -5382,5 +5387,44 @@ fn expired_dapp_reviews_retire_without_reopening_the_wallet_and_advance_the_queu
         assert!(wallet.walletconnect_reviews_error.is_some());
     });
     assert!(measure(cx, window, &view, &["walletconnect-reviews-error"])[0].is_some());
+    release(cx, &view);
+}
+
+// Fixture storage access stays explicit and test-only. The production window
+// must never unwrap a service owner into local wallet authority.
+fn fixture_owner(owner: &crate::desktop_owner::DesktopOwner) -> &OwnerApi {
+    match owner {
+        crate::desktop_owner::DesktopOwner::Local(owner) => owner,
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        crate::desktop_owner::DesktopOwner::Service(_) => {
+            panic!("expected synthetic local fixture")
+        }
+    }
+}
+
+#[gpui::test]
+fn stale_transaction_inspection_cannot_replace_a_newer_read_or_repopulate_cleared_history(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    let replaced = uuid::Uuid::new_v4();
+    let cleared = uuid::Uuid::new_v4();
+    let older = uuid::Uuid::new_v4();
+    let newer = uuid::Uuid::new_v4();
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.activity_inspections.insert(replaced, ActivityInspectionState::Loading(newer));
+        wallet.activity_inspections.insert(cleared, ActivityInspectionState::Loading(older));
+        wallet.activity_inspections.remove(&cleared);
+        for request_id in [replaced, cleared] {
+            wallet.finish_transaction_inspection(request_id, older, Err(anyhow::anyhow!("old response")), cx);
+        }
+        assert!(matches!(wallet.activity_inspections.get(&replaced),
+            Some(ActivityInspectionState::Loading(current)) if *current == newer));
+        assert!(!wallet.activity_inspections.contains_key(&cleared));
+        wallet.finish_transaction_inspection(replaced, newer, Err(anyhow::anyhow!("current response")), cx);
+        assert!(matches!(wallet.activity_inspections.get(&replaced),
+            Some(ActivityInspectionState::Failed(message)) if message.contains("current response")));
+    });
     release(cx, &view);
 }

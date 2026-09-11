@@ -69,8 +69,15 @@ selected-transaction reads, without manufacturing historical notifications. Actu
 events retain their service timestamps and ordering. Reset batches carry the latest
 informational MCP listener status even after the corresponding event has expired from
 the journal. Transport failure ends the feed without reconnecting or replaying calls.
-Production still constructs the local owner; installed-profile startup selection and
-full packaged service behavior remain to be completed.
+The window now retains `DesktopOwner` and all normal reads, reviews, and settings use
+that selected backend; test fixture storage access remains test-only. Transaction
+inspection results must match their active load identity, so service latency cannot
+let an older reply overwrite a refresh or repopulate cleared history. Production
+startup still constructs the local owner. Update authorization delegates to the existing
+local core path only; service-backed update installation explicitly fails until the
+protected service installer is implemented. No desktop authorization proof is created
+for a service profile. Installed-profile startup selection and full packaged service
+behavior remain to be completed.
 
 ## Required outcome
 

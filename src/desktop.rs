@@ -3,7 +3,7 @@ use crate::{
     agent_config::AgentAdapter,
     assets::{PENCIL_ICON, REFRESH_ICON, WalletAssets},
     authority::{
-        ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerApi,
+        ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord,
         OwnerPortfolioAccount, OwnerPortfolioSnapshot, OwnerReviewQueues,
         OwnerTransactionInspection, PRIVATE_KEY_REVEAL_DURATION,
     },
@@ -2781,7 +2781,7 @@ fn reset_route_scroll_if_changed(current: Route, next: Route, scroll: &ScrollHan
 // the state safer.
 #[allow(clippy::struct_excessive_bools)]
 pub struct WalletWindow {
-    owner: OwnerApi,
+    owner: crate::desktop_owner::DesktopOwner,
     desktop_snapshot: Option<Arc<DesktopSnapshot>>,
     desktop_snapshot_generation: u64,
     /// How many snapshots have actually been published, as opposed to
@@ -4142,7 +4142,7 @@ impl ActivityFeedback {
 }
 
 enum ActivityInspectionState {
-    Loading,
+    Loading(uuid::Uuid),
     Ready(Rc<ReadyActivityInspection>),
     Failed(SharedString),
 }
@@ -6847,7 +6847,7 @@ impl InitialDesktopState {
 
 impl WalletWindow {
     fn new(
-        owner: OwnerApi,
+        owner: impl Into<crate::desktop_owner::DesktopOwner>,
         initial: InitialDesktopState,
         review_presenter: GuiReviewPresenter,
         walletconnect: DesktopDapps,
@@ -6856,6 +6856,7 @@ impl WalletWindow {
         data_dir: &Path,
         cx: &mut Context<Self>,
     ) -> Self {
+        let owner = owner.into();
         let appearance_preference = initial.appearance.unwrap_or_default();
         let testnet_mode = initial.testnet_mode.unwrap_or(false);
         // A store that cannot be read yields nothing rather than a default,
@@ -7709,7 +7710,7 @@ impl WalletWindow {
         let generation = self.desktop_snapshot_generation;
         self.desktop_snapshot_loading = true;
         self.desktop_snapshot_error = None;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             Ok(DesktopSnapshot::capture(&owner).await)
         });
@@ -7789,7 +7790,7 @@ impl WalletWindow {
         if records.is_empty() {
             return;
         }
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let (pending, history): (Vec<_>, Vec<_>) = records
@@ -7910,7 +7911,7 @@ impl WalletWindow {
 
     fn load_guided_setup(&mut self, cx: &mut Context<Self>) {
         self.guided_setup_loading = true;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.guided_setup().await });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -7931,7 +7932,7 @@ impl WalletWindow {
     }
 
     fn save_guided_setup(&mut self, state: GuidedSetupState, cx: &mut Context<Self>) {
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
                 cx,
@@ -8077,7 +8078,7 @@ impl WalletWindow {
             cx.notify();
         });
         let list = list.downgrade();
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             collect_token_inventory(|limit, offset| owner.tokens(None, limit, offset)).await
         });
@@ -8579,7 +8580,7 @@ impl WalletWindow {
         };
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_price_busy = true;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             match target {
                 PriceEditorTarget::Token(token) => owner.set_token_price(&token, price).await,
@@ -8683,7 +8684,7 @@ impl WalletWindow {
 
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_editor_busy = true;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(cx, async move { owner.add_token(token, price).await });
         cx.spawn(async move |view, cx| {
@@ -9192,7 +9193,7 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.account_operation = Some(AccountOperation::Creating);
         self.account_status = None;
         let task =
@@ -9260,7 +9261,7 @@ impl WalletWindow {
                 return;
             }
         };
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.account_operation = Some(AccountOperation::Importing);
         self.account_status = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -9318,7 +9319,7 @@ impl WalletWindow {
         export.error = None;
         let token = export.token;
         let wallet_id = export.wallet_id.clone();
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, {
             let wallet_id = wallet_id.clone();
             async move { owner.begin_private_key_export(&wallet_id).await }
@@ -9463,7 +9464,7 @@ impl WalletWindow {
         self.policy_load_generation = self.policy_load_generation.wrapping_add(1);
         let generation = self.policy_load_generation;
         self.policy_loading = Some(generation);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task_wallet = wallet_id.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
@@ -9655,7 +9656,7 @@ impl WalletWindow {
         let generation = self.policy_load_generation;
         let proposal = proposal.clone();
         let task_proposal = proposal.clone();
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.reject_policy_proposal(&task_proposal).await
         });
@@ -9935,7 +9936,7 @@ impl WalletWindow {
         }
         let review = review.clone();
         let proposal = editor.proposal.clone();
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let proposal_is_exact = proposal.as_ref().is_some_and(|proposal| {
             proposal.wallet_id == review.wallet_id
                 && Some(proposal.source_revision) == review.source_revision
@@ -10024,7 +10025,7 @@ impl WalletWindow {
             return;
         }
         self.review_flow = ReviewFlowState::Busy;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task_wallet = wallet_id.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.account_removal_document(&task_wallet).await
@@ -10065,7 +10066,7 @@ impl WalletWindow {
         }
         self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
         let generation = self.legal_load_generation;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             load_legal_review(&owner, Some(document)).await
         });
@@ -10154,7 +10155,7 @@ impl WalletWindow {
         let digest = review.digest.clone();
         self.legal_accepting = true;
         self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.accept_legal(document, &digest).await?;
             load_legal_review(&owner, None).await
@@ -10262,7 +10263,7 @@ impl WalletWindow {
         let mut selection = self.companion_servers.clone();
         selection.set_enabled(slug, enabled);
         self.agent_reinstall = AgentReinstallState::Running;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task_selection = selection.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.set_companion_servers(&task_selection).await
@@ -10386,7 +10387,7 @@ impl WalletWindow {
         self.portfolio_generation = self.portfolio_generation.wrapping_add(1);
         let generation = self.portfolio_generation;
         self.portfolio = PortfolioState::Loading;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let refreshed_account = wallet_id.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
@@ -10919,7 +10920,7 @@ impl WalletWindow {
             return;
         };
         self.network_editor_busy = true;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let original = self.network_editor_original.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             match original {
@@ -10963,7 +10964,7 @@ impl WalletWindow {
             return;
         }
         self.network_action_errors.remove(&name);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let action_name = name.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.set_network_disabled(&reviewed, disabled).await
@@ -11022,7 +11023,7 @@ impl WalletWindow {
         if self.network_proposal_busy {
             return;
         }
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.network_proposal_busy = true;
         self.network_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -11052,7 +11053,7 @@ impl WalletWindow {
         }
         self.network_proposal_busy = true;
         let proposal = proposal.clone();
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.reject_network_proposal(&proposal).await
         });
@@ -11144,7 +11145,7 @@ impl WalletWindow {
                 return;
             }
         };
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let proposal_list = self.token_proposal_list.clone();
         self.token_import_state = TokenImportState::Fetching;
         self.token_import_error = None;
@@ -11233,7 +11234,7 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.token_proposal_busy = true;
         self.token_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -11273,7 +11274,7 @@ impl WalletWindow {
         let Some(_source) = source else {
             return;
         };
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.token_proposal_busy = true;
         self.token_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -11304,7 +11305,7 @@ impl WalletWindow {
             return;
         }
         self.selected_record = Some(request_id);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.discard_unsent_transaction(request_id).await
         });
@@ -11391,30 +11392,47 @@ impl WalletWindow {
     }
 
     fn load_transaction_inspection(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let load_id = uuid::Uuid::new_v4();
         self.activity_inspections
-            .insert(request_id, ActivityInspectionState::Loading);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+            .insert(request_id, ActivityInspectionState::Loading(load_id));
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.transaction_inspection(request_id).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.activity_inspections.insert(
-                    request_id,
-                    match result {
-                        Ok(inspection) => ActivityInspectionState::Ready(Rc::new(
-                            ReadyActivityInspection::new(inspection),
-                        )),
-                        Err(error) => ActivityInspectionState::Failed(
-                            format!("Could not inspect transaction: {error:#}").into(),
-                        ),
-                    },
-                );
-                cx.notify();
+                view.finish_transaction_inspection(request_id, load_id, result, cx);
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn finish_transaction_inspection(
+        &mut self,
+        request_id: uuid::Uuid,
+        load_id: uuid::Uuid,
+        result: Result<OwnerTransactionInspection>,
+        cx: &mut Context<Self>,
+    ) {
+        // A newer read or cache invalidation retires this response.
+        if !matches!(self.activity_inspections.get(&request_id),
+            Some(ActivityInspectionState::Loading(current)) if *current == load_id)
+        {
+            return;
+        }
+        self.activity_inspections.insert(
+            request_id,
+            match result {
+                Ok(inspection) => ActivityInspectionState::Ready(Rc::new(
+                    ReadyActivityInspection::new(inspection),
+                )),
+                Err(error) => ActivityInspectionState::Failed(
+                    format!("Could not inspect transaction: {error:#}").into(),
+                ),
+            },
+        );
         cx.notify();
     }
 
@@ -11488,7 +11506,7 @@ impl WalletWindow {
         }
         self.activity_refreshing.insert(request_id);
         self.activity_feedback.remove(&request_id);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.refresh_transaction(request_id).await
         });
@@ -11511,7 +11529,7 @@ impl WalletWindow {
             return;
         }
         self.activity_feedback.remove(&request_id);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.rebroadcast_transaction(request_id).await
         });
@@ -11586,7 +11604,7 @@ impl WalletWindow {
             return;
         }
         self.activity_feedback.remove(&request_id);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.attempt_transaction_cancellation(request_id).await
         });
@@ -11658,7 +11676,7 @@ impl WalletWindow {
         }
         self.history_clearing = true;
         self.history_clear_error = None;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
                 cx,
@@ -11880,7 +11898,7 @@ impl WalletWindow {
             "Preparing message review"
         });
         self.clear_route_error(Route::Activity);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             if typed {
                 owner.typed_data_review_document(request_id).await
@@ -11926,7 +11944,7 @@ impl WalletWindow {
             return;
         }
         self.clear_route_error(Route::Activity);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.notification_record_loading = None;
         let presenter = self.review_presenter.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -12099,7 +12117,6 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 wait_for_flow = true;
-                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
                     owner.reject_message(request_id).await
                 });
@@ -12125,7 +12142,6 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 wait_for_flow = true;
-                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
                     owner.reject_typed_data(request_id).await
                 });
@@ -12151,7 +12167,6 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
                     owner.sign_message(request_id, &digest).await
                 });
@@ -12177,7 +12192,6 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
                     owner.sign_typed_data(request_id, &digest).await
                 });
@@ -12204,7 +12218,6 @@ impl WalletWindow {
                 wait_for_flow = true;
                 self.active_review = None;
                 let wallet_id = reviewed.wallet.id.clone();
-                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
                     owner.remove_account(&reviewed).await
                 });
@@ -12248,7 +12261,6 @@ impl WalletWindow {
                     GuiReviewCommand::Close => DappDecision::Close,
                     GuiReviewCommand::Refresh => unreachable!(),
                 };
-                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
                     response.respond(&owner, decision).await
                 });
@@ -12456,7 +12468,7 @@ impl WalletWindow {
         self.notification_record_loading = Some(request_id);
         self.notification_load_generation = self.notification_load_generation.wrapping_add(1);
         let generation = self.notification_load_generation;
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
                 cx,
@@ -12555,7 +12567,7 @@ impl WalletWindow {
         preference: AppearancePreference,
         cx: &mut Context<Self>,
     ) {
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.set_appearance_preference(preference).await
         });
@@ -12616,7 +12628,7 @@ impl WalletWindow {
     }
 
     fn save_testnet_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
                 cx,
@@ -13448,7 +13460,7 @@ impl WalletWindow {
                         cx,
                     ));
                 match self.activity_inspections.get(&request_id) {
-                    Some(ActivityInspectionState::Loading) => {
+                    Some(ActivityInspectionState::Loading(_)) => {
                         detail = detail.child(
                             h_flex()
                                 .gap_2()
@@ -13721,13 +13733,15 @@ impl WalletWindow {
             return div().into_any_element();
         };
         let variable_detail_list = match record {
-            OwnerActivityRecord::Transaction(_) => self
-                .activity_inspections
-                .get(&request_id)
-                .and_then(|state| match state {
-                    ActivityInspectionState::Ready(ready) => Some(ready.detail_list.clone()),
-                    ActivityInspectionState::Loading | ActivityInspectionState::Failed(_) => None,
-                }),
+            OwnerActivityRecord::Transaction(_) => {
+                self.activity_inspections
+                    .get(&request_id)
+                    .and_then(|state| match state {
+                        ActivityInspectionState::Ready(ready) => Some(ready.detail_list.clone()),
+                        ActivityInspectionState::Loading(_)
+                        | ActivityInspectionState::Failed(_) => None,
+                    })
+            }
             OwnerActivityRecord::Message(_) | OwnerActivityRecord::TypedData(_) => None,
         };
         if self.activity_detail_record.get() != Some(request_id) {
@@ -15975,7 +15989,7 @@ impl WalletWindow {
 
     /// Stop one automation, at the owner's request.
     fn stop_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.automation_busy = Some(automation_id);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.disable_automation(automation_id).await
@@ -15995,7 +16009,7 @@ impl WalletWindow {
 
     /// Start one again under the policy that is active now.
     fn relink_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.automation_busy = Some(automation_id);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.relink_automation(automation_id).await
@@ -16048,7 +16062,7 @@ impl WalletWindow {
     }
 
     fn delete_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         self.automation_busy = Some(automation_id);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.delete_automation(automation_id).await
@@ -16078,7 +16092,7 @@ impl WalletWindow {
     fn dry_run_automation(&mut self, automation_id: uuid::Uuid, cx: &mut Context<Self>) {
         self.automation_dry_runs
             .insert(automation_id, AutomationDryRunState::Running);
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.dry_run_automation(automation_id).await
         });
@@ -16124,7 +16138,7 @@ impl WalletWindow {
             self.show_activity_record(request_id, cx);
             return;
         }
-        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
                 cx,

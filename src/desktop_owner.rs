@@ -37,6 +37,20 @@ impl From<OwnerApi> for DesktopOwner {
     )
 )]
 impl DesktopOwner {
+    /// The local installer consumes an in-process core authorization. A service
+    /// profile must eventually install through its protected service updater;
+    /// never mint a desktop proof or serialize this capability across IPC.
+    pub async fn authorize_update_install(
+        &self,
+        review: &ekubo_wallet_core::update_trust::UpdateReview,
+    ) -> Result<ekubo_wallet_core::update_trust::UpdateAuthorization> {
+        match self {
+            Self::Local(owner) => owner.authorize_update_install(review).await,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Self::Service(_) => anyhow::bail!("service update installation is not implemented"),
+        }
+    }
+
     pub async fn portfolio(
         &self,
         wallet_id: Option<&str>,
