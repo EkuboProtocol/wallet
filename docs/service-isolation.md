@@ -120,6 +120,28 @@ recovery must inspect it before proceeding. Database copy/verification, durable
 migration commit, recovery, activation, and exact legacy-credential deletion still
 require installer integration.
 
+Source database transfer now has a shared SQLCipher snapshot component,
+`policy_store::migration_database::MigrationDatabaseSnapshot`. It requires the
+already-held raw database key, opens without CREATE or schema upgrades, rejects
+non-current schemas and non-DELETE journal mode, and takes a connection-local
+exclusive lock. It exports to a fresh private encrypted temporary file, preserves
+the schema/data and application/user version headers, then verifies the detached
+copy while retaining the source lock. Streaming or retrying the ciphertext keeps
+that lock alive; dropping the snapshot releases it. A transfer failure is not an
+activation receipt. The installer must still quiesce workers, hold the account
+lifecycle lock, validate source path provenance and the complete key inventory,
+verify protected destination storage, and durably commit or recover activation.
+The snapshot is temporary transfer material, not crash-recovery state.
+
+This uses [SQLCipher's export function](https://www.zetetic.net/sqlcipher/sqlcipher-api/#sqlcipher_export)
+and [SQLite exclusive locking mode](https://www.sqlite.org/pragma.html#pragma_locking_mode).
+Do not independently open/close raw descriptors on the source during the fence:
+[POSIX descriptor closure can release SQLite's process-wide locks](https://www.sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_).
+Tests cover the actual current database schema, encrypted readback, header values,
+source write exclusion in an independent process, failed transfer/retry, release,
+wrong keys, missing sources, obsolete schemas, and WAL rejection. Native packaged
+migration and Windows execution of this component remain CI/integration work.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,

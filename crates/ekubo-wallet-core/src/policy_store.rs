@@ -2692,3 +2692,6 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
 #[cfg(test)]
 #[path = "policy_store_test.rs"]
 mod tests;
+
+#[path = "migration_database.rs"]
+pub mod migration_database;
