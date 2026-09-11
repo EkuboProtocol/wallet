@@ -1,5 +1,6 @@
-//! Windows protected profile bootstrap and relative child reads. These checks
-//! do not activate custody; provisioning, writes, and migration remain separate.
+//! Windows protected profile bootstrap, relative reads, and immutable encrypted
+//! key creation. These checks do not activate custody; provisioning, deletion,
+//! transport integration, and migration remain separate.
 
 use crate::windows_security::AccessEntry;
 use anyhow::{Result, ensure};

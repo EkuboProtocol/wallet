@@ -603,6 +603,31 @@ arbitrary-signing oracle and does not satisfy this objective.
 
 ## At-rest wrapping implementation and remaining integration
 
+Windows `PrivateStorageRoot` now provides fixed database/account-key creation
+operations using the same `DataCipher` as Linux. The instance UUID selects an
+account filename and cryptographic binding; callers cannot supply an arbitrary
+write path. The root rechecks the native service process and private directory
+before creating any file. Account creation/import authorization still belongs
+to core's existing owner operation; these storage methods do not create account
+metadata, change policy, or authorize signing.
+
+The native writer applies an explicit protected DACL at creation, uses
+`FILE_CREATE` with no sharing and no reparse traversal, and writes only sealed
+82-byte ciphertext. It flushes the temporary file before a directory-relative
+`FileRenameInformation` operation with replacement disabled, then flushes again.
+Failure before publication deletes only the owned temporary handle. Failure
+after successful rename leaves the committed key for readback reconciliation.
+The Windows implementation follows Microsoft's documented
+[relative rename and no-replacement contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+
+Native tests cover private creation without inherited grants, conflicting and
+concurrent writers, failed-validation cleanup, preservation of existing keys and
+legacy plaintext, and a renamed parent path. One test retains the production
+directory sharing mode throughout publication. Tests use only synthetic keys in
+random temporary directories, with the test process's actual owner SID; they do
+not claim installed service-account or crash-recovery coverage. Native execution
+of this new write path remains required in addition to Windows-target Clippy.
+
 The at-rest design splits protection across the two OS identities. The shared
 `custody_envelope` primitive now implements symmetric key wrapping: only the
 service creates and unwraps data keys, so public-key distribution is unnecessary.

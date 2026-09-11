@@ -40,6 +40,9 @@ use windows::{
     core::PWSTR,
 };
 
+#[path = "windows_service_storage_write.rs"]
+mod write;
+
 struct Descriptor(PSECURITY_DESCRIPTOR);
 impl Drop for Descriptor {
     fn drop(&mut self) {
@@ -49,7 +52,8 @@ impl Drop for Descriptor {
 }
 
 /// An existing installer-provisioned profile and every pinned ancestor. This
-/// object enables validated reads only; it does not activate wallet custody.
+/// object enables validated reads and immutable encrypted-key creation; it does
+/// not activate wallet custody or grant owner-operation authorization.
 pub struct PrivateStorageRoot {
     directory: File,
     _ancestors: Vec<File>,
@@ -107,6 +111,49 @@ impl PrivateStorageRoot {
             component,
             &self.identity,
             StorageKind::File,
+        )
+    }
+
+    /// Service-internal database-key creation. Only ciphertext is written, and
+    /// an existing credential is never replaced, including corrupt plaintext.
+    pub fn create_database_key(
+        &self,
+        cipher: &crate::custody_envelope::DataCipher,
+        material: &[u8; 32],
+    ) -> Result<()> {
+        self.create_encrypted_key("key-database", &cipher.seal_database_key(material)?)
+    }
+
+    /// Account import/creation must already have passed core's owner checks.
+    /// This protected storage capability only creates an immutable instance key;
+    /// it does not add an account, change policy, or authorize signing.
+    pub fn create_account_key(
+        &self,
+        cipher: &crate::custody_envelope::DataCipher,
+        instance: uuid::Uuid,
+        material: &[u8; 32],
+    ) -> Result<()> {
+        let sealed = cipher.seal_account_key(instance, material)?;
+        self.create_encrypted_key(&format!("key-account-{instance}"), &sealed)
+    }
+
+    fn create_encrypted_key(
+        &self,
+        component: &str,
+        sealed: &[u8; crate::custody_envelope::SEALED_KEY_BYTES],
+    ) -> Result<()> {
+        crate::windows_service_identity::verify_service_process(self.identity.service_sid())?;
+        validate_private_handle(
+            self.directory.as_handle(),
+            &self.identity,
+            StorageKind::Directory,
+        )?;
+        write::publish(
+            &self.directory,
+            component,
+            self.identity.service_sid(),
+            sealed,
+            |file| validate_private_handle(file.as_handle(), &self.identity, StorageKind::File),
         )
     }
 }
