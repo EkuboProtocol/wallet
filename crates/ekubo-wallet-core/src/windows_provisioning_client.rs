@@ -7,7 +7,7 @@ use crate::{
     policy_store::migration_database::MigrationDatabaseSnapshot,
     provisioning_io, windows_provisioning_pipe, windows_service_config,
 };
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use std::io::Write as _;
 use zeroize::Zeroizing;
 
@@ -17,12 +17,47 @@ use zeroize::Zeroizing;
 pub struct StagedSource {
     _snapshot: MigrationDatabaseSnapshot,
     reply: StagingReply,
+    destination: Destination,
 }
 
 impl StagedSource {
     #[must_use]
     pub const fn reply(&self) -> &StagingReply {
         &self.reply
+    }
+
+    /// Explicitly reconnect and revalidate this same stage without releasing the
+    /// source fence. Keep the caller's lifecycle lock held too. Failure aborts
+    /// retention; it never activates custody or retries the original transfer.
+    pub async fn recover(mut self, owner_sid: &str, expected: Vec<WalletMetadata>) -> Result<Self> {
+        let identity = windows_service_config::pending_installer_identity(owner_sid)?;
+        ensure!(
+            destination(&identity) == self.destination,
+            "pending recovery profile changed"
+        );
+        let pipe = windows_provisioning_pipe::connect(&identity).await?;
+        let (mut stream, _cancel) =
+            provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
+        tokio::task::spawn_blocking(move || {
+            stream.write_all(windows_provisioning_pipe::PREFACE)?;
+            self.reply = migration_transfer::recover_exchange(
+                &mut stream,
+                self.destination.clone(),
+                &self.reply,
+                &mut self._snapshot,
+                &expected,
+            )?;
+            Ok(self)
+        })
+        .await?
+    }
+}
+
+fn destination(identity: &windows_service_config::PendingInstallerIdentity) -> Destination {
+    Destination {
+        owner: format!("windows:sid:{}", identity.owner_sid()),
+        service: format!("windows:sid:{}", identity.service_sid()),
+        profile: identity.profile_id(),
     }
 }
 
@@ -38,11 +73,7 @@ pub async fn transfer(
 ) -> Result<StagedSource> {
     let identity = windows_service_config::pending_installer_identity(owner_sid)?;
     let pipe = windows_provisioning_pipe::connect(&identity).await?;
-    let destination = Destination {
-        owner: format!("windows:sid:{}", identity.owner_sid()),
-        service: format!("windows:sid:{}", identity.service_sid()),
-        profile: identity.profile_id(),
-    };
+    let destination = destination(&identity);
     let (mut stream, _cancel) =
         provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
     // The worker owns the source fence. Dropping the awaiting future cancels
@@ -51,7 +82,7 @@ pub async fn transfer(
         stream.write_all(windows_provisioning_pipe::PREFACE)?;
         let session = migration_transfer::send(
             &mut stream,
-            destination,
+            destination.clone(),
             database_key,
             &expected,
             accounts,
@@ -62,6 +93,7 @@ pub async fn transfer(
         Ok(StagedSource {
             _snapshot: snapshot,
             reply,
+            destination,
         })
     })
     .await?

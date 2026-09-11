@@ -91,6 +91,39 @@ pub fn send_recovery(
     Ok(request.session)
 }
 
+/// Platform workers retain ownership of the snapshot through this entire call,
+/// including cancellation. The caller retains the original destination binding.
+pub(crate) fn exchange(
+    stream: &mut (impl Read + Write),
+    destination: Destination,
+    previous: &super::StagingReply,
+    snapshot: &mut super::MigrationDatabaseSnapshot,
+    expected: &[WalletMetadata],
+) -> Result<super::StagingReply> {
+    let request = RecoveryRequest {
+        destination,
+        session: previous.session(),
+        stage: previous.stage(),
+        source: snapshot.transfer()?,
+        relay: previous.relay().clone(),
+    };
+    let session = send_recovery(stream, &request, expected, super::INSTALLER_LIMITS)?;
+    let reply = super::read_reply(stream, session)?;
+    validate_reply(previous, &reply)?;
+    Ok(reply)
+}
+
+fn validate_reply(previous: &super::StagingReply, reply: &super::StagingReply) -> Result<()> {
+    ensure!(
+        reply.session() == previous.session()
+            && reply.stage() == previous.stage()
+            && reply.canonical() == previous.canonical()
+            && reply.relay().as_bytes() == previous.relay().as_bytes(),
+        "recovery reply changed the staged candidate"
+    );
+    Ok(())
+}
+
 pub(super) fn receive<'a, S: CredentialStagingStore + DatabaseStagingStore>(
     store: &'a S,
     input: &mut impl Read,

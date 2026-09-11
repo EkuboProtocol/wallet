@@ -24,6 +24,7 @@ const MAX_HEADER_BYTES: u32 = 4096;
 
 #[path = "migration_recovery_transfer.rs"]
 mod recovery_transfer;
+pub(crate) use recovery_transfer::exchange as recover_exchange;
 pub use recovery_transfer::{RecoveryRequest, send_recovery};
 
 /// Admission policy comes from the host, never from the incoming stream.

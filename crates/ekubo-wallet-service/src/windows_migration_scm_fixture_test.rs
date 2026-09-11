@@ -91,6 +91,7 @@ fn client(owner: &str) -> Result<()> {
             staged.reply().canonical().bytes > 0,
             "missing canonical database"
         );
+        let staged = runtime.block_on(staged.recover(owner, vec![wallet.clone()]))?;
         // Keep the source fence and lifecycle lock through reply validation.
         // No activation or deletion is performed by this fixture.
         drop(staged);
@@ -101,7 +102,7 @@ fn client(owner: &str) -> Result<()> {
         "source wallet metadata changed"
     );
     println!(
-        "Full encrypted Windows migration staged and rebuilt through the production host and client"
+        "Full encrypted Windows migration staged, rebuilt and recovered through the production host and client"
     );
     Ok(())
 }

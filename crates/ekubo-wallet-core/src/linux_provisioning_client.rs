@@ -22,12 +22,59 @@ pub struct StagedSource {
     _snapshot: MigrationDatabaseSnapshot,
     _bus: Connection,
     reply: StagingReply,
+    destination: Destination,
 }
 
 impl StagedSource {
     #[must_use]
     pub const fn reply(&self) -> &StagingReply {
         &self.reply
+    }
+
+    /// Explicitly reconnect to the same protected profile while retaining the
+    /// source fence. The caller retains its lifecycle lock. This does not replay
+    /// the transfer, activate custody or recover an installer-crash journal.
+    pub async fn recover(self, owner_uid: u32, expected: Vec<WalletMetadata>) -> Result<Self> {
+        let (identity, bus) = connect(owner_uid).await?;
+        let destination = destination(&identity);
+        if destination != self.destination {
+            let _ = bus.close().await;
+            anyhow::bail!("pending recovery profile changed");
+        }
+        let Self {
+            _snapshot: snapshot,
+            _bus: old_bus,
+            reply: previous,
+            ..
+        } = self;
+        let result = exchange(
+            &bus,
+            &identity,
+            snapshot,
+            move |stream, destination, snapshot| {
+                migration_transfer::recover_exchange(
+                    stream,
+                    destination,
+                    &previous,
+                    snapshot,
+                    &expected,
+                )
+            },
+        )
+        .await;
+        let _ = old_bus.close().await;
+        match result {
+            Ok((snapshot, reply)) => Ok(Self {
+                _snapshot: snapshot,
+                _bus: bus,
+                reply,
+                destination,
+            }),
+            Err(error) => {
+                let _ = bus.close().await;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -42,6 +89,41 @@ pub async fn transfer(
     accounts: Vec<MigrationAccount>,
     snapshot: MigrationDatabaseSnapshot,
 ) -> Result<StagedSource> {
+    let (identity, bus) = connect(owner_uid).await?;
+    let destination = destination(&identity);
+    let result = exchange(
+        &bus,
+        &identity,
+        snapshot,
+        move |stream, destination, snapshot| {
+            let session = migration_transfer::send(
+                stream,
+                destination,
+                database_key,
+                &expected,
+                accounts,
+                snapshot,
+                migration_transfer::INSTALLER_LIMITS,
+            )?;
+            migration_transfer::read_reply(stream, session)
+        },
+    )
+    .await;
+    match result {
+        Ok((snapshot, reply)) => Ok(StagedSource {
+            _snapshot: snapshot,
+            _bus: bus,
+            reply,
+            destination,
+        }),
+        Err(error) => {
+            let _ = bus.close().await;
+            Err(error)
+        }
+    }
+}
+
+async fn connect(owner_uid: u32) -> Result<(PendingInstallerIdentity, Connection)> {
     let identity = service_storage::pending_installer_identity(owner_uid)?;
     let bus = tokio::time::timeout(Duration::from_secs(10), async {
         zbus::connection::Builder::unix_stream(service_storage::system_bus_stream().await?)
@@ -51,17 +133,14 @@ pub async fn transfer(
     })
     .await
     .context("provisioning bus connection timed out")??;
-    let result = exchange(&bus, &identity, database_key, expected, accounts, snapshot).await;
-    match result {
-        Ok((snapshot, reply)) => Ok(StagedSource {
-            _snapshot: snapshot,
-            _bus: bus,
-            reply,
-        }),
-        Err(error) => {
-            let _ = bus.close().await;
-            Err(error)
-        }
+    Ok((identity, bus))
+}
+
+fn destination(identity: &PendingInstallerIdentity) -> Destination {
+    Destination {
+        owner: format!("linux:uid:{}", identity.owner_uid()),
+        service: format!("linux:uid:{}", identity.service_uid()),
+        profile: identity.profile_id(),
     }
 }
 
@@ -91,10 +170,14 @@ async fn authenticate(
 async fn exchange(
     bus: &Connection,
     identity: &PendingInstallerIdentity,
-    database_key: Zeroizing<[u8; 32]>,
-    expected: Vec<WalletMetadata>,
-    accounts: Vec<MigrationAccount>,
     mut snapshot: MigrationDatabaseSnapshot,
+    operation: impl FnOnce(
+        &mut InstallerStream,
+        Destination,
+        &mut MigrationDatabaseSnapshot,
+    ) -> Result<StagingReply>
+    + Send
+    + 'static,
 ) -> Result<(MigrationDatabaseSnapshot, StagingReply)> {
     let registry = DBusProxy::new(bus).await?;
     let name = format!("org.ekubo.Wallet.Provision.u{}", identity.owner_uid());
@@ -120,22 +203,9 @@ async fn exchange(
     let (mut stream, remote, _cancel) =
         InstallerStream::pair(migration_transfer::INSTALLER_TIMEOUT)?;
     let remote = zbus::zvariant::OwnedFd::from(remote);
-    let destination = Destination {
-        owner: format!("linux:uid:{}", identity.owner_uid()),
-        service: format!("linux:uid:{}", identity.service_uid()),
-        profile: identity.profile_id(),
-    };
+    let destination = destination(identity);
     let worker = tokio::task::spawn_blocking(move || {
-        let session = migration_transfer::send(
-            &mut stream,
-            destination,
-            database_key,
-            &expected,
-            accounts,
-            &mut snapshot,
-            migration_transfer::INSTALLER_LIMITS,
-        )?;
-        let reply = migration_transfer::read_reply(&mut stream, session)?;
+        let reply = operation(&mut stream, destination, &mut snapshot)?;
         Ok::<_, anyhow::Error>((snapshot, reply))
     });
     let call = async {

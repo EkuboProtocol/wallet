@@ -74,3 +74,34 @@ fn recovery_metadata_budget_is_checked_before_payload_or_storage_reads() {
     assert!(super::super::receive(&UnusedStore, &mut input, limits).is_err());
     assert_eq!(input.position(), boundary as u64);
 }
+
+#[test]
+fn recovery_reply_must_match_the_original_staged_result() {
+    let original = header();
+    let previous = super::super::StagingReply {
+        session: original.session,
+        stage: original.stage,
+        canonical: original.source.clone(),
+        relay: WrappedDataKey::from_bytes(&hex::decode(&original.relay).unwrap()).unwrap(),
+    };
+    assert!(validate_reply(&previous, &previous).is_ok());
+    for mutation in 0..5 {
+        let mut reply = super::super::StagingReply {
+            session: previous.session(),
+            stage: previous.stage(),
+            canonical: previous.canonical().clone(),
+            relay: previous.relay().clone(),
+        };
+        match mutation {
+            0 => reply.session = Uuid::new_v4(),
+            1 => reply.stage = Uuid::new_v4(),
+            2 => reply.canonical.bytes += 1,
+            3 => reply.canonical.sha256[0] ^= 1,
+            _ => {
+                reply.relay =
+                    WrappedDataKey::from_bytes(&hex::decode(header().relay).unwrap()).unwrap();
+            }
+        }
+        assert!(validate_reply(&previous, &reply).is_err());
+    }
+}

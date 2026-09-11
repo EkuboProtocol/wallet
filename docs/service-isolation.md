@@ -347,8 +347,16 @@ the receiver validates the destination, original session/stage, declared source
 size and account/metadata budgets before reading protected credentials. It then
 uses the recovery validator above and replies for the original session/stage.
 This read-only recovery does not create a replacement stage, replay a transfer,
-or grant activation authority. The platform installer clients still need recovery
-entry points and durable journal/source-fence coordination. Tests cover malformed
+or grant activation authority. Both platform installer clients now expose explicit `StagedSource::recover`,
+which consumes the previous staged source, checks the same protected destination,
+reauthenticates a new connection and retains the original frozen snapshot through
+recovery reply validation. A shared check rejects changes to the original
+session, stage, canonical database descriptor or relay. Linux transfer/recovery
+share exact unique-bus-owner authentication and disconnection cancellation;
+Windows retains the pipe-security check and cancellation bridge. Neither client
+automatically retries a failed operation. Callers must keep the lifecycle lock
+held; installer-crash journals, live-source revalidation after lost fences and
+activation still require integration. Tests cover malformed
 admission without storage access, metadata preflight and repeated recovery of a
 real encrypted Linux stage through the shared production receiver.
 
@@ -359,8 +367,9 @@ against a synthetic one-account SQLCipher database. Source configuration uses an
 explicit test key, never a keyring lookup; the lifecycle lock and frozen snapshot
 are retained through reply validation. The receiver performs normal credential
 staging, inventory checks and canonical database reconstruction. The fixture
-checks source metadata afterward and stops the pending host without activation
-or deletion. This full fixture's native result is still required separately from
+now also reconnects through the production recovery client while retaining the
+source fence, checks source metadata afterward and stops the host without activation
+or deletion. This recovery extension needs its native result separately from
 the lightweight storage/pipe harness. Its feature enables core `test-hooks`,
 which are forbidden in release builds.
 
