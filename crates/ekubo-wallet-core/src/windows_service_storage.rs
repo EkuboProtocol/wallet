@@ -1,6 +1,7 @@
 //! Windows protected profile bootstrap, relative reads, and immutable encrypted
-//! key creation. These checks do not activate custody; provisioning, deletion,
-//! transport integration, and migration remain separate.
+//! key creation after protected enrollment unlock. This object does not switch
+//! the application's credential backend; provisioning, deletion, transport
+//! integration, and migration remain separate.
 
 use crate::windows_security::AccessEntry;
 use anyhow::{Result, ensure};

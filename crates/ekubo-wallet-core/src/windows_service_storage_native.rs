@@ -52,13 +52,14 @@ impl Drop for Descriptor {
 }
 
 /// An existing installer-provisioned profile and every pinned ancestor. This
-/// object enables validated reads and immutable encrypted-key creation; it does
-/// not activate wallet custody or grant owner-operation authorization.
+/// object starts locked; encrypted credential access requires its protected
+/// enrollment to unlock. It grants no owner-operation authorization.
 pub struct PrivateStorageRoot {
     directory: File,
     _ancestors: Vec<File>,
     identity: InstalledServiceIdentity,
     _lock: ProfileLock,
+    custody: crate::service_custody::ServiceCustody,
 }
 
 impl PrivateStorageRoot {
@@ -102,6 +103,7 @@ impl PrivateStorageRoot {
             _ancestors: ancestors,
             identity,
             _lock: lock,
+            custody: crate::service_custody::ServiceCustody::default(),
         })
     }
 
@@ -114,26 +116,58 @@ impl PrivateStorageRoot {
         )
     }
 
+    /// The host authenticates the desktop peer before relaying its ciphertext.
+    /// Bindings, enrollment, and wrapping material come only from this verified
+    /// profile. Repeated unlock cannot replace an active cipher.
+    pub fn unlock(&self, wrapped: &crate::custody_envelope::WrappedDataKey) -> Result<()> {
+        self.custody.unlock(
+            self.open_file("custody.json")?,
+            self.open_file("wrapping.key")?,
+            &format!("windows:sid:{}", self.identity.owner_sid()),
+            &format!("windows:sid:{}", self.identity.service_sid()),
+            self.identity.profile_id(),
+            wrapped,
+        )
+    }
+
+    /// Service-internal database credential. Never return this material in IPC.
+    pub fn read_database_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        let cipher = self.custody.cipher()?;
+        let sealed = self.read_encrypted_key("key-database")?;
+        cipher.open_database_key(sealed.as_slice())
+    }
+
+    /// Service-internal account credential. Core's export and signing entry
+    /// points must still enforce their normal owner/policy checks.
+    pub fn read_account_key(&self, instance: uuid::Uuid) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        ensure!(!instance.is_nil(), "invalid wallet instance identifier");
+        let cipher = self.custody.cipher()?;
+        let sealed = self.read_encrypted_key(&format!("key-account-{instance}"))?;
+        cipher.open_account_key(instance, sealed.as_slice())
+    }
+
+    fn read_encrypted_key(
+        &self,
+        component: &str,
+    ) -> Result<zeroize::Zeroizing<[u8; crate::custody_envelope::SEALED_KEY_BYTES]>> {
+        crate::service_custody::read_fixed(self.open_file(component)?)
+    }
+
     /// Service-internal database-key creation. Only ciphertext is written, and
     /// an existing credential is never replaced, including corrupt plaintext.
-    pub fn create_database_key(
-        &self,
-        cipher: &crate::custody_envelope::DataCipher,
-        material: &[u8; 32],
-    ) -> Result<()> {
-        self.create_encrypted_key("key-database", &cipher.seal_database_key(material)?)
+    pub fn create_database_key(&self, material: &[u8; 32]) -> Result<()> {
+        let sealed = self.custody.cipher()?.seal_database_key(material)?;
+        self.create_encrypted_key("key-database", &sealed)
     }
 
     /// Account import/creation must already have passed core's owner checks.
     /// This protected storage capability only creates an immutable instance key;
     /// it does not add an account, change policy, or authorize signing.
-    pub fn create_account_key(
-        &self,
-        cipher: &crate::custody_envelope::DataCipher,
-        instance: uuid::Uuid,
-        material: &[u8; 32],
-    ) -> Result<()> {
-        let sealed = cipher.seal_account_key(instance, material)?;
+    pub fn create_account_key(&self, instance: uuid::Uuid, material: &[u8; 32]) -> Result<()> {
+        let sealed = self
+            .custody
+            .cipher()?
+            .seal_account_key(instance, material)?;
         self.create_encrypted_key(&format!("key-account-{instance}"), &sealed)
     }
 

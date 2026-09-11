@@ -30,13 +30,14 @@ pub(super) fn publish(
 ) -> Result<()> {
     validate_component(destination)?;
     let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
-    let mut file = create(parent.as_handle(), &temporary, owner_sid)?;
+    let mut file = create(parent.as_handle(), &temporary, owner_sid)
+        .context("cannot create encrypted credential temporary file")?;
     let mut published = false;
     let result = (|| {
         validate(&file)?;
         file.write_all(sealed)?;
         file.sync_all()?;
-        rename_new(&file, parent.as_handle(), destination)?;
+        rename_new(&file, destination).context("cannot publish encrypted credential name")?;
         published = true;
         // Flush again after publication. If this fails, report ambiguity: the
         // key may already be committed and must be read back, never overwritten.
@@ -128,7 +129,7 @@ fn create(parent: BorrowedHandle<'_>, component: &str, owner_sid: &str) -> Resul
     Ok(unsafe { File::from_raw_handle(handle.0) })
 }
 
-fn rename_new(file: &File, parent: BorrowedHandle<'_>, destination: &str) -> Result<()> {
+fn rename_new(file: &File, destination: &str) -> Result<()> {
     // repr(C) preserves the native header's alignment and flexible-name offset.
     // Our validated names fit this fixed allocation; no unaligned cast is used.
     #[repr(C)]
@@ -143,7 +144,11 @@ fn rename_new(file: &File, parent: BorrowedHandle<'_>, destination: &str) -> Res
             Anonymous: FILE_RENAME_INFORMATION_0 {
                 ReplaceIfExists: false,
             },
-            RootDirectory: HANDLE(parent.as_raw_handle()),
+            // A simple name with NULL RootDirectory renames inside the source
+            // file's existing directory. Supplying its parent handle instead
+            // makes Windows reopen a write handle to that directory, which
+            // conflicts with our deliberate no-write-sharing ancestor pins.
+            RootDirectory: HANDLE::default(),
             FileNameLength: u32::try_from(name.len() * 2)?,
             ..Default::default()
         },
@@ -159,8 +164,10 @@ fn rename_new(file: &File, parent: BorrowedHandle<'_>, destination: &str) -> Res
         std::ptr::copy_nonoverlapping(name.as_ptr(), output, name.len());
     }
     let mut status = IO_STATUS_BLOCK::default();
-    // SAFETY: the aligned structure and both handles remain live. A simple
-    // relative name resolves under the pinned parent; replacement is disabled.
+    // SAFETY: the aligned structure and source handle remain live. The name is
+    // a validated single component, so NULL RootDirectory uses the file's own
+    // directory, never cwd. The source denies delete sharing and its parent is
+    // pinned by publish; replacement and cross-directory moves are disabled.
     unsafe {
         NtSetInformationFile(
             HANDLE(file.as_raw_handle()),

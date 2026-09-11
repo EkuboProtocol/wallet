@@ -1,5 +1,5 @@
 use super::*;
-use crate::custody_envelope::CustodyBinding;
+use crate::custody_envelope::{CustodyBinding, CustodyEnrollment, WrappingKey};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ fn open_storage(path: &Path, owner_uid: u32, profile_id: Uuid) -> Storage {
         profile_id,
         service_uid,
         data_dir: path.to_owned(),
-        custody: OnceLock::new(),
+        custody: ServiceCustody::default(),
     }
 }
 
@@ -211,10 +211,10 @@ fn wrapping_and_enrollment_files_require_private_permissions_and_valid_binding()
         let path = fixture.directory.path().join(name);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         assert!(fixture.storage.unlock(&fixture.wrapped).is_err());
-        assert!(fixture.storage.custody.get().is_none());
+        assert!(fixture.storage.custody.cipher().is_err());
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     fixture.storage.profile_id = Uuid::new_v4();
     assert!(fixture.storage.unlock(&fixture.wrapped).is_err());
-    assert!(fixture.storage.custody.get().is_none());
+    assert!(fixture.storage.custody.cipher().is_err());
 }

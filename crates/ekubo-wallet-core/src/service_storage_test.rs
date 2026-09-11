@@ -1,4 +1,5 @@
 use super::*;
+use crate::custody_envelope::WrappingKey;
 
 #[test]
 fn installer_configuration_requires_distinct_nonroot_matching_identities() {

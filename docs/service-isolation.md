@@ -603,8 +603,11 @@ arbitrary-signing oracle and does not satisfy this objective.
 
 ## At-rest wrapping implementation and remaining integration
 
-Windows `PrivateStorageRoot` now provides fixed database/account-key creation
-operations using the same `DataCipher` as Linux. The instance UUID selects an
+Windows `PrivateStorageRoot` now provides fixed database/account-key reads and
+creation operations using the same `ServiceCustody` and `DataCipher` as Linux.
+The root starts locked and retains its cipher privately after validating the
+enrolled ciphertext. Callers no longer supply an arbitrary cipher to key writes.
+The instance UUID selects an
 account filename and cryptographic binding; callers cannot supply an arbitrary
 write path. The root rechecks the native service process and private directory
 before creating any file. Account creation/import authorization still belongs
@@ -613,7 +616,7 @@ metadata, change policy, or authorize signing.
 
 The native writer applies an explicit protected DACL at creation, uses
 `FILE_CREATE` with no sharing and no reparse traversal, and writes only sealed
-82-byte ciphertext. It flushes the temporary file before a directory-relative
+82-byte ciphertext. It flushes the temporary file before a same-directory
 `FileRenameInformation` operation with replacement disabled, then flushes again.
 Failure before publication deletes only the owned temporary handle. Failure
 after successful rename leaves the committed key for readback reconciliation.
@@ -626,7 +629,23 @@ legacy plaintext, and a renamed parent path. One test retains the production
 directory sharing mode throughout publication. Tests use only synthetic keys in
 random temporary directories, with the test process's actual owner SID; they do
 not claim installed service-account or crash-recovery coverage. Native execution
-of this new write path remains required in addition to Windows-target Clippy.
+of the corrected write path remains required in addition to Windows-target
+Clippy. The first native run passed 35 tests and exposed one sharing conflict
+with the production directory pin. Supplying a target root handle caused a
+conflicting directory reopen. The correction uses a simple name and NULL
+`RootDirectory`, which Microsoft defines as renaming inside the source file's
+existing directory. The source and ancestor handles remain pinned with their
+original sharing protections; no caller path or working directory is consulted.
+
+`ServiceCustody` now owns the common locked state, bounded enrollment/key reads,
+and active-enrollment digest pin. Linux supplies permission-checked file handles;
+Windows supplies its native ACL-checked handles. Windows unlock obtains only the
+fixed `custody.json` and `wrapping.key` files and binds them to protected owner
+SID, service SID, and profile UUID. Typed reads reject truncated, trailing,
+plaintext, cross-purpose, and cross-instance credential data. The shared tests
+exercise restart, locked failures, and refusal to replace an active cipher for
+both UID and SID bindings. This completes the Windows profile object's encrypted
+read/unlock path, not global backend activation or SCM/pipe integration.
 
 The at-rest design splits protection across the two OS identities. The shared
 `custody_envelope` primitive now implements symmetric key wrapping: only the

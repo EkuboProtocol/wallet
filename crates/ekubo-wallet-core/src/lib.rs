@@ -49,6 +49,8 @@ pub mod reconcile;
 pub mod rpc;
 pub mod sanitize;
 mod sealed;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod service_custody;
 #[cfg(target_os = "linux")]
 pub mod service_presence;
 #[cfg(target_os = "linux")]
