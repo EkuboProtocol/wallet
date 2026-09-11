@@ -1,4 +1,5 @@
 use super::*;
+const REVIEW_ID: Uuid = Uuid::from_u128(1);
 use ekubo_wallet_core::approval::{
     ApprovalDecision, ApprovalKind, ApprovalRequest, ReviewDocument,
 };
@@ -35,14 +36,17 @@ async fn decisions_require_the_exact_frame_and_refresh_retires_it() {
     let broker = TransactionReviews::default();
     let events = EventBus::default();
     let request_id = Uuid::new_v4();
-    let _reservation = broker.reserve(request_id, events.clone()).unwrap();
+    let _reservation = broker
+        .reserve(request_id, REVIEW_ID, events.clone())
+        .unwrap();
     let (first, response) = prompt();
     broker.insert(request_id, first).unwrap();
-    let frame = broker.frame(request_id).unwrap().unwrap();
+    let frame = broker.frame(request_id, REVIEW_ID).unwrap().unwrap();
     assert!(
         broker
             .decide(
                 request_id,
+                REVIEW_ID,
                 Uuid::new_v4(),
                 &frame.document.identity,
                 TransactionReviewChoice::Approve,
@@ -54,6 +58,7 @@ async fn decisions_require_the_exact_frame_and_refresh_retires_it() {
         broker
             .decide(
                 request_id,
+                REVIEW_ID,
                 frame.frame_id,
                 "forged",
                 TransactionReviewChoice::Approve,
@@ -62,12 +67,17 @@ async fn decisions_require_the_exact_frame_and_refresh_retires_it() {
             .is_err()
     );
     assert_eq!(
-        broker.frame(request_id).unwrap().unwrap().frame_id,
+        broker
+            .frame(request_id, REVIEW_ID)
+            .unwrap()
+            .unwrap()
+            .frame_id,
         frame.frame_id
     );
     broker
         .decide(
             request_id,
+            REVIEW_ID,
             frame.frame_id,
             &frame.document.identity,
             TransactionReviewChoice::Refresh,
@@ -75,16 +85,17 @@ async fn decisions_require_the_exact_frame_and_refresh_retires_it() {
         )
         .unwrap();
     assert_eq!(response.await.unwrap(), GuiReviewCommand::Refresh);
-    assert!(broker.frame(request_id).unwrap().is_none());
+    assert!(broker.frame(request_id, REVIEW_ID).unwrap().is_none());
     let (next, response) = prompt();
     broker.insert(request_id, next).unwrap();
-    let refreshed = broker.frame(request_id).unwrap().unwrap();
+    let refreshed = broker.frame(request_id, REVIEW_ID).unwrap().unwrap();
     // Even an unchanged document after refresh gets a new, single-use frame.
     assert_ne!(refreshed.frame_id, frame.frame_id);
     assert!(
         broker
             .decide(
                 request_id,
+                REVIEW_ID,
                 frame.frame_id,
                 &frame.document.identity,
                 TransactionReviewChoice::Approve,
@@ -95,6 +106,7 @@ async fn decisions_require_the_exact_frame_and_refresh_retires_it() {
     broker
         .decide(
             request_id,
+            REVIEW_ID,
             refreshed.frame_id,
             &refreshed.document.identity,
             TransactionReviewChoice::Reject,
@@ -102,7 +114,7 @@ async fn decisions_require_the_exact_frame_and_refresh_retires_it() {
         )
         .unwrap();
     assert_eq!(response.await.unwrap(), GuiReviewCommand::Reject);
-    assert!(broker.reserve(request_id, events).is_err());
+    assert!(broker.reserve(request_id, REVIEW_ID, events).is_err());
 }
 
 #[test]
@@ -110,11 +122,21 @@ fn reservations_are_bounded_and_shutdown_is_terminal() {
     let broker = TransactionReviews::default();
     let events = EventBus::default();
     let mut reservations: Vec<_> = (0..MAX_REVIEWS)
-        .map(|_| broker.reserve(Uuid::new_v4(), events.clone()).unwrap())
+        .map(|_| {
+            broker
+                .reserve(Uuid::new_v4(), REVIEW_ID, events.clone())
+                .unwrap()
+        })
         .collect();
-    assert!(broker.reserve(Uuid::new_v4(), events.clone()).is_err());
+    assert!(
+        broker
+            .reserve(Uuid::new_v4(), REVIEW_ID, events.clone())
+            .is_err()
+    );
     reservations.pop();
-    let last = broker.reserve(Uuid::new_v4(), events.clone()).unwrap();
+    let last = broker
+        .reserve(Uuid::new_v4(), REVIEW_ID, events.clone())
+        .unwrap();
     let (frame, mut receiver) = prompt();
     broker.insert(last.request_id, frame).unwrap();
     broker.shutdown().unwrap();
@@ -122,14 +144,14 @@ fn reservations_are_bounded_and_shutdown_is_terminal() {
         receiver.try_recv(),
         Err(oneshot::error::TryRecvError::Closed)
     ));
-    assert!(broker.reserve(Uuid::new_v4(), events).is_err());
-    assert!(broker.frame(last.request_id).unwrap().is_none());
+    assert!(broker.reserve(Uuid::new_v4(), REVIEW_ID, events).is_err());
+    assert!(broker.frame(last.request_id, REVIEW_ID).unwrap().is_none());
 }
 
 async fn wait_frame(broker: &TransactionReviews, request_id: Uuid) -> TransactionReviewFrame {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            if let Some(frame) = broker.frame(request_id).unwrap() {
+            if let Some(frame) = broker.frame(request_id, REVIEW_ID).unwrap() {
                 return frame;
             }
             tokio::task::yield_now().await;
@@ -158,12 +180,13 @@ async fn closing_a_review_is_an_abort_and_cancellation_releases_the_request() {
                 _ => panic!("unexpected choice"),
             }
         };
-        let drive = broker.run(request_id, receive, operation, events.clone());
+        let drive = broker.run(request_id, REVIEW_ID, receive, operation, events.clone());
         let choose = async {
             let frame = wait_frame(&broker, request_id).await;
             broker
                 .decide(
                     request_id,
+                    REVIEW_ID,
                     frame.frame_id,
                     &frame.document.identity,
                     choice,
@@ -179,8 +202,8 @@ async fn closing_a_review_is_an_abort_and_cancellation_releases_the_request() {
             }
             _ => unreachable!(),
         }
-        assert!(broker.frame(request_id).unwrap().is_none());
-        broker.reserve(request_id, events).unwrap();
+        assert!(broker.frame(request_id, REVIEW_ID).unwrap().is_none());
+        broker.reserve(request_id, REVIEW_ID, events).unwrap();
     }
 }
 
@@ -198,12 +221,13 @@ async fn approval_keeps_the_reservation_until_authentication_finishes_or_cancels
         auth_started.send(()).unwrap();
         std::future::pending::<Result<()>>().await
     };
-    let mut drive = Box::pin(broker.run(request_id, receive, operation, events.clone()));
+    let mut drive = Box::pin(broker.run(request_id, REVIEW_ID, receive, operation, events.clone()));
     let choose = async {
         let frame = wait_frame(&broker, request_id).await;
         broker
             .decide(
                 request_id,
+                REVIEW_ID,
                 frame.frame_id,
                 &frame.document.identity,
                 TransactionReviewChoice::Approve,
@@ -211,15 +235,19 @@ async fn approval_keeps_the_reservation_until_authentication_finishes_or_cancels
             )
             .unwrap();
         authenticating.await.unwrap();
-        assert!(broker.reserve(request_id, events.clone()).is_err());
-        assert!(broker.frame(request_id).unwrap().is_none());
+        assert!(
+            broker
+                .reserve(request_id, REVIEW_ID, events.clone())
+                .is_err()
+        );
+        assert!(broker.frame(request_id, REVIEW_ID).unwrap().is_none());
     };
     tokio::select! {
         result = &mut drive => panic!("review ended before authentication: {result:?}"),
         () = choose => {}
     }
     drop(drive);
-    broker.reserve(request_id, events).unwrap();
+    broker.reserve(request_id, REVIEW_ID, events).unwrap();
 }
 
 #[tokio::test]
@@ -237,7 +265,10 @@ async fn shutdown_cancels_preparation_before_any_frame_exists() {
         ready.await.unwrap();
         broker.shutdown().unwrap();
     };
-    let (result, ()) = tokio::join!(broker.run(request_id, receive, operation, events), stop);
+    let (result, ()) = tokio::join!(
+        broker.run(request_id, REVIEW_ID, receive, operation, events),
+        stop
+    );
     assert!(result.unwrap_err().to_string().contains("closed"));
     assert!(broker.state().unwrap().is_empty());
 }
@@ -261,7 +292,7 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
     let request_id = Uuid::new_v4();
     for _ in 0..2 {
         let request = serde_json::from_value(serde_json::json!({
-            "method": "review_transaction", "params": {"request_id": request_id}
+            "method": "review_transaction", "params": {"request_id": request_id, "review_id": REVIEW_ID}
         }))
         .unwrap();
         let error = dispatcher.dispatch(request).await.unwrap_err();
@@ -269,7 +300,10 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
     }
     assert!(
         dispatcher
-            .dispatch(Request::TransactionReviewFrame { request_id })
+            .dispatch(Request::TransactionReviewFrame {
+                request_id,
+                review_id: REVIEW_ID
+            })
             .await
             .unwrap()
             .is_null()
@@ -278,6 +312,7 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
         dispatcher
             .dispatch(Request::DecideTransactionReview {
                 request_id,
+                review_id: REVIEW_ID,
                 frame_id: Uuid::new_v4(),
                 reviewed_identity: "forged".into(),
                 choice: TransactionReviewChoice::Approve,
@@ -287,7 +322,7 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
     );
     for field in ["prepared_execution", "authorization", "owner_uid"] {
         let mut request = serde_json::json!({"method": "decide_transaction_review", "params": {
-            "request_id": request_id, "frame_id": Uuid::new_v4(),
+            "request_id": request_id, "review_id": REVIEW_ID, "frame_id": Uuid::new_v4(),
             "reviewed_identity": "forged", "choice": "approve"
         }});
         request["params"][field] = serde_json::json!(true);
@@ -296,7 +331,10 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
     dispatcher.shutdown().unwrap();
     dispatcher.shutdown().unwrap();
     let error = dispatcher
-        .dispatch(Request::ReviewTransaction { request_id })
+        .dispatch(Request::ReviewTransaction {
+            request_id,
+            review_id: REVIEW_ID,
+        })
         .await
         .unwrap_err();
     assert!(
@@ -304,4 +342,50 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
             .to_string()
             .contains("transaction review broker is closed")
     );
+}
+
+#[tokio::test]
+async fn a_reused_transaction_id_does_not_expose_or_accept_another_review_session() {
+    let broker = TransactionReviews::default();
+    let events = EventBus::default();
+    let request_id = Uuid::new_v4();
+    let old = broker
+        .reserve(request_id, REVIEW_ID, events.clone())
+        .unwrap();
+    drop(old);
+    let current_id = Uuid::new_v4();
+    let _current = broker
+        .reserve(request_id, current_id, events.clone())
+        .unwrap();
+    let (prompt, mut response) = prompt();
+    broker.insert(request_id, prompt).unwrap();
+    assert!(broker.frame(request_id, REVIEW_ID).unwrap().is_none());
+    let frame = broker.frame(request_id, current_id).unwrap().unwrap();
+    assert!(
+        broker
+            .decide(
+                request_id,
+                REVIEW_ID,
+                frame.frame_id,
+                &frame.document.identity,
+                TransactionReviewChoice::Approve,
+                &events
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    broker
+        .decide(
+            request_id,
+            current_id,
+            frame.frame_id,
+            &frame.document.identity,
+            TransactionReviewChoice::Reject,
+            &events,
+        )
+        .unwrap();
+    assert_eq!(response.await.unwrap(), GuiReviewCommand::Reject);
 }

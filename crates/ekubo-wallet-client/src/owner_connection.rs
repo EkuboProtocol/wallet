@@ -23,7 +23,7 @@ pub trait OwnerTransport: sealed::Sealed + Clone + Send + Sync + 'static {
 /// to adapters after platform-specific service authentication succeeds.
 #[derive(Clone)]
 pub struct OwnerConnection<T: OwnerTransport> {
-    transport: T,
+    pub(crate) transport: T,
 }
 
 impl<T: OwnerTransport> OwnerConnection<T> {

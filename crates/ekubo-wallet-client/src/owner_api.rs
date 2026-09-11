@@ -88,16 +88,25 @@ impl<T: OwnerTransport> OwnerConnection<T> {
     pub async fn review_transaction(
         &self,
         request_id: uuid::Uuid,
+        review_id: uuid::Uuid,
     ) -> Result<crate::transaction_review::ReviewedTransaction> {
-        self.call(&Request::ReviewTransaction { request_id }).await
+        self.call(&Request::ReviewTransaction {
+            request_id,
+            review_id,
+        })
+        .await
     }
 
     pub async fn transaction_review_frame(
         &self,
         request_id: uuid::Uuid,
+        review_id: uuid::Uuid,
     ) -> Result<Option<crate::transaction_review::TransactionReviewFrame>> {
-        self.call(&Request::TransactionReviewFrame { request_id })
-            .await
+        self.call(&Request::TransactionReviewFrame {
+            request_id,
+            review_id,
+        })
+        .await
     }
 
     pub async fn decide_transaction_review(
@@ -107,6 +116,7 @@ impl<T: OwnerTransport> OwnerConnection<T> {
     ) -> Result<()> {
         self.call(&Request::DecideTransactionReview {
             request_id: frame.request_id,
+            review_id: frame.review_id,
             frame_id: frame.frame_id,
             reviewed_identity: frame.document.identity.clone(),
             choice,

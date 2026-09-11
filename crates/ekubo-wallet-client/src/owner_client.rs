@@ -11,6 +11,7 @@ pub struct LinuxOwnerTransport {
     proxy: Proxy<'static>,
     service: OwnedUniqueName,
     process: u32,
+    uid: u32,
 }
 
 impl OwnerConnection<LinuxOwnerTransport> {
@@ -24,6 +25,36 @@ impl OwnerConnection<LinuxOwnerTransport> {
         })
         .await
         .context("wallet service connection timed out")?
+    }
+
+    /// A separately closable peer to this exact service, without activation or
+    /// another custody relay. Use for a long operation whose cancellation must
+    /// disconnect D-Bus without closing the desktop's main session.
+    pub async fn independent_connection(&self) -> Result<Self> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let bus = zbus::connection::Builder::unix_stream(
+                ekubo_wallet_core::service_storage::system_bus_stream().await?,
+            )
+            .build()
+            .await?;
+            self.independent_on_bus(bus).await
+        })
+        .await
+        .context("independent owner connection timed out")?
+    }
+
+    async fn independent_on_bus(&self, bus: Connection) -> Result<Self> {
+        let transport = LinuxOwnerTransport::authenticate(
+            bus,
+            self.transport.service.as_str(),
+            self.transport.uid,
+        )
+        .await?;
+        ensure!(
+            transport.process == self.transport.process,
+            "wallet service process changed"
+        );
+        Ok(Self::from_transport(transport))
     }
 
     #[cfg(test)]
@@ -68,6 +99,7 @@ impl LinuxOwnerTransport {
             proxy,
             service,
             process,
+            uid: actual_uid,
         })
     }
 

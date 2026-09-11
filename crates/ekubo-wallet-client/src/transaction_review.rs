@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub struct TransactionReviewFrame {
     pub request_id: Uuid,
+    pub review_id: Uuid,
     pub frame_id: Uuid,
     pub document: ReviewDocument,
     pub simulation: crate::simulation_display::SimulationDisplay,

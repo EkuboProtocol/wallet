@@ -8896,6 +8896,10 @@ impl WalletWindow {
         if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             return;
         }
+        self.queued_reviews.pending.retain(|review| match review {
+            QueuedReview::Transaction(prompt) => !prompt.response.is_closed(),
+            QueuedReview::WalletConnect(_) => true,
+        });
         let networks = self.cached_networks().unwrap_or_default().to_vec();
         let testnet_mode = self.testnet_mode;
         let next = self.queued_reviews.next_where(|review| match review {
@@ -11674,6 +11678,9 @@ impl WalletWindow {
     }
 
     fn receive_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        if prompt.response.is_closed() {
+            return;
+        }
         if let Some(active) = self.active_review.as_mut()
             && active.awaiting_refresh
             && active.completion.is_none()
@@ -11704,6 +11711,9 @@ impl WalletWindow {
     }
 
     fn activate_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        if prompt.response.is_closed() {
+            return;
+        }
         self.review_flow = ReviewFlowState::Busy;
         self.active_review = Some(ActiveReview::new(
             prompt.document,
@@ -11784,23 +11794,19 @@ impl WalletWindow {
             return;
         }
         self.clear_route_error(Route::Activity);
-        let owner = self.owner.clone();
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
         self.notification_record_loading = None;
         let presenter = self.review_presenter.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current()
-                    .block_on(owner.review_transaction(request_id, &presenter))
-            })
-            .await
-            .context("transaction review task failed")?
+            owner.review_transaction(request_id, &presenter).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ =
                 view.update(cx, |view, cx| {
                     if view.active_review.as_ref().is_some_and(|active| {
-                        active.awaiting_refresh && active.completion.is_none()
+                        (active.awaiting_refresh && active.completion.is_none())
+                            || matches!(&active.completion, Some(ActiveReviewCompletion::Transaction(response)) if response.is_closed())
                     }) {
                         view.active_review = None;
                     }
@@ -21389,6 +21395,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let review_window = window_slot.clone();
             cx.spawn(async move |cx| {
                 while let Some(prompt) = review_prompts.recv().await {
+                    if prompt.response.is_closed() {
+                        continue;
+                    }
                     review_view.update(cx, |view, cx| {
                         view.receive_transaction_prompt(prompt);
                         let route = view.active_review_route();

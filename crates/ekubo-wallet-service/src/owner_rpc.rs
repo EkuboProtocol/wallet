@@ -123,20 +123,26 @@ impl OwnerDispatcher {
                 reviewed,
                 reviewed_identity,
             } => serde_json::to_value(self.remove_account(&reviewed, &reviewed_identity).await?)?,
-            Request::ReviewTransaction { request_id } => {
-                serde_json::to_value(Box::pin(self.transactions.review(owner, request_id)).await?)?
-            }
-            Request::TransactionReviewFrame { request_id } => {
-                serde_json::to_value(self.transactions.frame(request_id)?)?
-            }
+            Request::ReviewTransaction {
+                request_id,
+                review_id,
+            } => serde_json::to_value(
+                Box::pin(self.transactions.review(owner, request_id, review_id)).await?,
+            )?,
+            Request::TransactionReviewFrame {
+                request_id,
+                review_id,
+            } => serde_json::to_value(self.transactions.frame(request_id, review_id)?)?,
             Request::DecideTransactionReview {
                 request_id,
+                review_id,
                 frame_id,
                 reviewed_identity,
                 choice,
             } => {
                 self.transactions.decide(
                     request_id,
+                    review_id,
                     frame_id,
                     &reviewed_identity,
                     choice,

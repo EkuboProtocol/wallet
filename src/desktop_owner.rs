@@ -96,6 +96,26 @@ impl DesktopOwner {
         }
     }
 
+    pub async fn review_transaction(
+        &self,
+        request_id: uuid::Uuid,
+        presenter: &crate::gui_review::GuiReviewPresenter,
+    ) -> Result<crate::authority::ReviewedTransaction> {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Self::Service(owner) => service_review::review(owner, request_id, presenter).await,
+            Self::Local(owner) => {
+                let owner = owner.clone();
+                let presenter = presenter.clone();
+                tokio::task::spawn_blocking(move || {
+                    tokio::runtime::Handle::current()
+                        .block_on(owner.review_transaction(request_id, &presenter))
+                })
+                .await?
+            }
+        }
+    }
+
     pub async fn account_removal_document(
         &self,
         wallet_id: &str,
@@ -1084,3 +1104,7 @@ impl SnapshotReader for DesktopOwner {
 #[cfg(test)]
 #[path = "desktop_owner_test.rs"]
 mod tests;
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[path = "service_review.rs"]
+mod service_review;

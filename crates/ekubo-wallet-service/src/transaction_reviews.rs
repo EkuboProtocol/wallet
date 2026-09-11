@@ -24,9 +24,14 @@ struct PendingFrame {
     prompt: GuiReviewPrompt,
 }
 
+struct ReviewSession {
+    review_id: Uuid,
+    pending: Option<PendingFrame>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct TransactionReviews {
-    state: Arc<Mutex<BTreeMap<Uuid, Option<PendingFrame>>>>,
+    state: Arc<Mutex<BTreeMap<Uuid, ReviewSession>>>,
     closed: CancellationToken,
 }
 
@@ -48,13 +53,13 @@ impl Drop for Reservation {
 }
 
 impl TransactionReviews {
-    fn state(&self) -> Result<MutexGuard<'_, BTreeMap<Uuid, Option<PendingFrame>>>> {
+    fn state(&self) -> Result<MutexGuard<'_, BTreeMap<Uuid, ReviewSession>>> {
         self.state
             .lock()
             .map_err(|_| anyhow::anyhow!("transaction review queue lock was poisoned"))
     }
 
-    fn reserve(&self, request_id: Uuid, events: EventBus) -> Result<Reservation> {
+    fn reserve(&self, request_id: Uuid, review_id: Uuid, events: EventBus) -> Result<Reservation> {
         let mut state = self.state()?;
         ensure!(
             !self.closed.is_cancelled(),
@@ -65,7 +70,13 @@ impl TransactionReviews {
             "transaction already has an active review"
         );
         ensure!(state.len() < MAX_REVIEWS, "too many transaction reviews");
-        state.insert(request_id, None);
+        state.insert(
+            request_id,
+            ReviewSession {
+                review_id,
+                pending: None,
+            },
+        );
         Ok(Reservation {
             broker: self.clone(),
             request_id,
@@ -84,10 +95,12 @@ impl TransactionReviews {
         &self,
         owner: &OwnerApi,
         request_id: Uuid,
+        review_id: Uuid,
     ) -> Result<ReviewedTransaction> {
         let (presenter, incoming) = GuiReviewPresenter::channel();
         self.run(
             request_id,
+            review_id,
             incoming,
             Box::pin(owner.review_transaction(request_id, &presenter)),
             owner.event_bus(),
@@ -98,13 +111,14 @@ impl TransactionReviews {
     async fn run<T>(
         &self,
         request_id: Uuid,
+        review_id: Uuid,
         incoming: mpsc::UnboundedReceiver<GuiReviewPrompt>,
         operation: impl Future<Output = Result<T>>,
         events: EventBus,
     ) -> Result<T> {
         // This reservation outlives presentation, including native auth and
         // exact-byte submission. Caller cancellation drops the whole scope.
-        let _reservation = self.reserve(request_id, events.clone())?;
+        let _reservation = self.reserve(request_id, review_id, events.clone())?;
         tokio::select! {
             biased;
             () = self.closed.cancelled() => bail!("transaction review broker is closed"),
@@ -141,28 +155,34 @@ impl TransactionReviews {
             .get_mut(&request_id)
             .context("transaction review is no longer active")?;
         ensure!(
-            slot.is_none(),
+            slot.pending.is_none(),
             "transaction review already has a pending frame"
         );
         ensure!(
             !prompt.response.is_closed(),
             "transaction review is no longer active"
         );
-        *slot = Some(PendingFrame {
+        slot.pending = Some(PendingFrame {
             frame_id: Uuid::new_v4(),
             prompt,
         });
         Ok(())
     }
 
-    pub(crate) fn frame(&self, request_id: Uuid) -> Result<Option<TransactionReviewFrame>> {
+    pub(crate) fn frame(
+        &self,
+        request_id: Uuid,
+        review_id: Uuid,
+    ) -> Result<Option<TransactionReviewFrame>> {
         let state = self.state()?;
         Ok(state
             .get(&request_id)
-            .and_then(Option::as_ref)
+            .filter(|session| session.review_id == review_id)
+            .and_then(|session| session.pending.as_ref())
             .filter(|pending| !pending.prompt.response.is_closed())
             .map(|pending| TransactionReviewFrame {
                 request_id,
+                review_id,
                 frame_id: pending.frame_id,
                 document: pending.prompt.document.clone(),
                 simulation: pending.prompt.simulation.clone(),
@@ -172,6 +192,7 @@ impl TransactionReviews {
     pub(crate) fn decide(
         &self,
         request_id: Uuid,
+        review_id: Uuid,
         frame_id: Uuid,
         reviewed_identity: &str,
         choice: TransactionReviewChoice,
@@ -185,7 +206,12 @@ impl TransactionReviews {
         let slot = state
             .get_mut(&request_id)
             .context("transaction review is no longer active")?;
+        ensure!(
+            slot.review_id == review_id,
+            "transaction review session changed; review it again"
+        );
         let pending = slot
+            .pending
             .as_ref()
             .context("transaction review has no pending frame")?;
         ensure!(
@@ -199,7 +225,8 @@ impl TransactionReviews {
             TransactionReviewChoice::Close => GuiReviewCommand::Close,
         };
         // Serialize delivery against shutdown and consume the exact frame once.
-        slot.take()
+        slot.pending
+            .take()
             .expect("checked under the same lock")
             .prompt
             .response

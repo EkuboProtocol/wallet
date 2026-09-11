@@ -15,9 +15,10 @@ and core paths. The local removal adapter checks the exact reviewed account and
 document before entering native authorization, matching service dispatch.
 
 This is a desktop integration step, not custody cutover. Startup still opens
-local `ApplicationAuthority` and supplies the adapter's local variant. Synchronous
-page initialization/settings, native review and WalletConnect orchestration,
-updates, and event/session lifecycle must move to the adapter/client before
+local `ApplicationAuthority` and supplies the adapter's local variant. Startup
+settings, legal acceptance, ordinary settings mutations, signature decisions,
+and account-removal reviews now use the async adapter. WalletConnect orchestration,
+updates, and event/session lifecycle still must move to the adapter/client before
 startup may select the service for an installed profile. Installed-profile
 startup must make that selection before opening any local authority.
 
@@ -295,8 +296,9 @@ Log: `~/Documents/wallet-service-assets-verify.log`.
   reservation lasts through preparation, refresh, native authentication, and
   sending; duplicate reviews cannot enter while a decision is authenticating.
   The broker reuses the existing GUI presenter, relays only display documents
-  and simulation facts, and requires the exact single-use frame ID and document
-  identity for each choice. Refresh retires the previous frame, even when its
+  and simulation facts. Start, frame lookup, and decisions share a fresh per-review
+  session ID; frame lookup cannot adopt a different review of the same transaction.
+  Every choice also requires the exact single-use frame ID and document identity. Refresh retires the previous frame, even when its
   document is unchanged. Close and cancellation abort without recording a
   rejection; only an explicit Reject choice follows core's rejection path.
   Cancellation drops the reservation, and broker shutdown cancels pending
@@ -305,10 +307,16 @@ Log: `~/Documents/wallet-service-assets-verify.log`.
   awaits so the service can poll the future without sharing SQLite connections.
   The Linux host explicitly closes reviews through the shared dispatcher before
   disconnecting its owner endpoint; Windows must invoke the same lifecycle hook.
-  Desktop adoption, large-frame handling, and native successful signing validation
-  are still required. Dropping a client
-  method future does not itself disconnect D-Bus: the desktop adapter must own
-  and close the review connection when cancelling its operation.
+  The desktop adapter now drives this protocol with the existing single-use GUI
+  prompts. It keeps the start RPC alive while fetching frames and forwarding intent,
+  waits for the actual service result after a decision, and never replays an ambiguous
+  failure. Linux reviews open an independently closable D-Bus peer to the already
+  pinned service, without activation or custody relay. A supervisor closes it on
+  completion or cancellation; dropping a method future alone would not cancel D-Bus.
+  Windows cancellation drops the initiating call's pipe. Closed GUI response channels
+  are discarded rather than reopening stale prompts. Production startup still chooses
+  the local backend; large-frame handling and native successful signing validation
+  are still required.
 
 Account creation and removal now have shared typed owner RPCs. Creation accepts
 only an account name and invokes existing custody with the desktop's policy that

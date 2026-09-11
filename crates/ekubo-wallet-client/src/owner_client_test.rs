@@ -303,3 +303,87 @@ async fn session_shutdown_closes_retained_owner_client_clones() {
     .unwrap();
     service.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn independent_owner_connections_close_without_closing_the_main_peer() {
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet.Owner.IndependentTest";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            Endpoint {
+                calls: calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let client = OwnerClient::on_bus(desktop, name, rustix::process::geteuid().as_raw())
+        .await
+        .unwrap();
+    let peer = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let unique = peer.unique_name().unwrap().to_owned();
+    let isolated = client.independent_on_bus(peer).await.unwrap();
+    isolated.accounts().await.unwrap();
+    isolated.close().await.unwrap();
+    let registry = DBusProxy::new(client.transport.proxy.connection())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while registry
+            .name_has_owner(unique.clone().into())
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    client.accounts().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let service_name = service.unique_name().unwrap().to_owned();
+    service.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while registry
+            .name_has_owner(service_name.clone().into())
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    // No activation or reconnect to a replacement well-known name.
+    let peer = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    assert!(client.independent_on_bus(peer).await.is_err());
+    client.close().await.unwrap();
+    replacement.close().await.unwrap();
+}
