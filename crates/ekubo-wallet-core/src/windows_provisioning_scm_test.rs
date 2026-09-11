@@ -1,10 +1,13 @@
 //! Standalone native fixture, built only by contrib/check-windows-service.py.
 //! Runs the production SCM and pipe code under distinct real Windows accounts.
-//! It exchanges synthetic bytes only; no wallet storage or credentials are used.
+//! It stages synthetic bytes in a fresh protected profile; no real credentials
+//! or existing wallet storage are used.
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_native_check::{
+    custody_staging::{CredentialStagingStore as _, ServiceCredentialRecord, StagedRecord},
     provisioning_io, windows_provisioning_pipe, windows_service_config, windows_service_identity,
     windows_service_manager,
+    windows_service_storage::PendingCredentialStorage,
 };
 use std::{
     io::{Read as _, Write as _},
@@ -43,6 +46,8 @@ fn host(
     mut stop: watch::Receiver<bool>,
 ) -> Result<()> {
     runtime()?.block_on(async move {
+        let pending = PendingCredentialStorage::open(owner).context("fixture pending storage bootstrap")?;
+        ensure!(PendingCredentialStorage::open(owner).is_err(), "pending profile allowed overlapping hosts");
         let listener = windows_provisioning_pipe::ProvisioningListener::bind(owner, true)?;
         running.ready()?;
         tokio::select! {
@@ -52,6 +57,13 @@ fn host(
                 tokio::task::spawn_blocking(move || {
                     let mut nonce = [0; 16];
                     stream.read_exact(&mut nonce)?;
+                    // Storage-only fixture: deliberately not a valid key
+                    // envelope, completion marker, or activation receipt.
+                    let stage = uuid::Uuid::from_bytes(nonce);
+                    let record = StagedRecord::Credential(ServiceCredentialRecord::DatabaseKey);
+                    pending.create_new(stage, record, &nonce)?;
+                    ensure!(pending.create_new(stage, record, b"replacement").is_err(), "stage was replaceable");
+                    ensure!(pending.read(stage, record)?.as_slice() == nonce, "staged readback changed");
                     for byte in &mut nonce { *byte ^= 0xff; }
                     stream.write_all(&nonce)?;
                     Ok::<_, anyhow::Error>(())
@@ -90,6 +102,8 @@ async fn client(owner: &str) -> Result<()> {
         Ok::<_, anyhow::Error>(())
     })
     .await??;
-    println!("SCM provisioning exchange passed with distinct installer and service SIDs");
+    println!(
+        "SCM provisioning exchange and protected storage staging passed with distinct installer and service SIDs"
+    );
     Ok(())
 }

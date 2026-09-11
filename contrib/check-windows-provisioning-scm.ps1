@@ -12,6 +12,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if (-not [Environment]::Is64BitProcess) { throw 'The fixture requires the 64-bit registry view.' }
 $registryPath = 'HKLM:\SOFTWARE\EkuboWallet'
 if (Test-Path $registryPath) { throw 'Refusing to touch an existing Ekubo installation.' }
+$storageRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'EkuboWallet'
+if (Test-Path $storageRoot) { throw 'Refusing to touch existing Ekubo storage.' }
 $profile = [Guid]::NewGuid()
 $serviceName = 'EkuboWallet-' + $profile.ToString('N')
 $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -21,6 +23,7 @@ $binary = Join-Path $directory 'ekubo-wallet-scm-fixture.exe'
 $serviceCreated = $false
 $registryCreated = $false
 $directoryCreated = $false
+$storageCreated = $false
 $serviceProcess = $null
 
 function Invoke-Sc([string[]]$Arguments) {
@@ -68,6 +71,22 @@ try {
     $metadata = @{ owner_sid = $owner; service_sid = $serviceSid; profile_id = $profile.ToString() } | ConvertTo-Json -Compress
     New-ItemProperty -LiteralPath $pendingPath -Name Profile -PropertyType Binary -Value ([Text.Encoding]::UTF8.GetBytes($metadata)) | Out-Null
 
+    New-Item -ItemType Directory -Path $storageRoot | Out-Null
+    $storageCreated = $true
+    Set-Acl -LiteralPath $storageRoot -AclObject $fileSecurity
+    $pendingStorage = Join-Path $storageRoot 'Pending'
+    New-Item -ItemType Directory -Path $pendingStorage | Out-Null
+    Set-Acl -LiteralPath $pendingStorage -AclObject $fileSecurity
+    $privateStorage = Join-Path $pendingStorage ($profile.ToString('N'))
+    New-Item -ItemType Directory -Path $privateStorage | Out-Null
+    $privateSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $privateSecurity.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;$serviceSid)(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")
+    Set-Acl -LiteralPath $privateStorage -AclObject $privateSecurity
+    New-Item -ItemType File -Path (Join-Path $privateStorage 'service.lock') | Out-Null
+    # Assign ownership only within the freshly created synthetic private tree.
+    & icacls.exe $privateStorage /setowner ("*" + $serviceSid) /T /Q
+    if ($LASTEXITCODE -ne 0) { throw 'Could not assign fixture storage to the virtual account.' }
+
     Invoke-Sc -Arguments @('start', $serviceName)
     $service = Get-Service -Name $serviceName
     $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
@@ -80,7 +99,7 @@ try {
     if ($status.ExitCode -ne 0 -or $status.ServiceSpecificExitCode -ne 0) {
         throw "Service reported failure: $($status.ExitCode)/$($status.ServiceSpecificExitCode)"
     }
-    Write-Output 'Production pending SCM bootstrap and cross-account provisioning authentication passed.'
+    Write-Output 'Production pending SCM bootstrap, protected storage and cross-account provisioning authentication passed.'
 } finally {
     if ($serviceCreated) {
         # Only this invocation's randomly named synthetic service is stopped.
@@ -100,5 +119,6 @@ try {
     }
     # Refusal above and creation flags confine cleanup to this fixture's objects.
     if ($registryCreated) { Remove-Item -LiteralPath $registryPath -Recurse }
+    if ($storageCreated) { Remove-Item -LiteralPath $storageRoot -Recurse }
     if ($directoryCreated) { Remove-Item -LiteralPath $directory -Recurse }
 }

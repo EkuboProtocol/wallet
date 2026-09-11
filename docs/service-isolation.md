@@ -305,9 +305,14 @@ now included in the native Windows CI job. It creates a temporary virtual-accoun
 service on a disposable elevated GitHub runner, reads protected pending metadata,
 and exchanges random bytes through the production pending SCM and pipe code. It
 refuses an existing Ekubo installation and cleans up only the objects it created.
-Its native result is still required: same-user pipe fixtures and cross-compilation
-do not prove cross-identity token access. This fixture does not exercise database
-migration, active custody, desktop owner presence or packaged installation.
+The cross-account exchange passed in native CI at `5eb5074`. The fixture now also
+opens a fresh service-owned pending profile under protected machine ancestors,
+rejects a second simultaneous host, and stages/readbacks synthetic bytes through
+the production native store while rejecting replacement. It refuses existing
+machine storage before creating the fixture. This extension still needs its native
+result. Same-user tests and cross-compilation do not prove cross-identity storage
+access. The fixture does not exercise SQLCipher migration, active custody, desktop
+owner presence or packaged installation.
 
 The SCM fixture exposed a `CREATOR OWNER` (`S-1-3-0`) ACE on the Windows runner's
 machine `SOFTWARE` key without the inherit-only flag. Registry validation now
