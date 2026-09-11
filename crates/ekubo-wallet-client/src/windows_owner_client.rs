@@ -27,8 +27,8 @@ impl OwnerTransport for WindowsOwnerTransport {
     async fn exchange(&self, request: &str) -> Result<zeroize::Zeroizing<String>> {
         self.0.exchange(request).await
     }
-    async fn hold(&self) -> Result<()> {
-        self.0.hold().await
+    async fn hold(&self, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
+        self.0.hold(ready).await
     }
     async fn close(&self) -> Result<()> {
         self.0.close().await

@@ -15,7 +15,10 @@ pub trait OwnerTransport: sealed::Sealed + Clone + Send + Sync + 'static {
         &self,
         request: &str,
     ) -> impl std::future::Future<Output = Result<Zeroizing<String>>> + Send;
-    fn hold(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn hold(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
     fn close(&self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
@@ -32,15 +35,19 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         Self { transport }
     }
 
-    /// Keep this lifetime in application state and await close on Quit.
+    /// Await `ready` before starting service-backed desktop work. Keep this
+    /// lifetime in application state and await close on Quit.
     #[must_use]
     pub fn start_desktop_session(&self) -> crate::desktop_session::DesktopSession {
         crate::desktop_session::DesktopSession::start(self.clone())
     }
 
     /// Cancelling this future alone does not close the authenticated connection.
-    pub async fn hold_desktop_session(&self) -> Result<()> {
-        self.transport.hold().await
+    pub async fn hold_desktop_session(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<()> {
+        self.transport.hold(ready).await
     }
 
     /// Close all connection clones and pending requests without reconnecting.

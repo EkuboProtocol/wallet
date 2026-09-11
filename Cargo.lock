@@ -4588,6 +4588,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "ekubo-wallet-core",
+ "futures",
  "rustix",
  "serde",
  "serde_json",

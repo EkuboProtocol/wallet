@@ -32,7 +32,7 @@ impl OwnerTransport for Transport {
             .ok_or_else(|| anyhow::anyhow!("connection lost"))?;
         Ok(Zeroizing::new(serde_json::to_string(&response)?))
     }
-    async fn hold(&self) -> Result<()> {
+    async fn hold(&self, _ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
         std::future::pending().await
     }
     fn close(&self) -> impl std::future::Future<Output = Result<()>> + Send {

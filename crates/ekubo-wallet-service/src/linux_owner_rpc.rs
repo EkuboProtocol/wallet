@@ -33,6 +33,7 @@ async fn hold_desktop(
     reservation: crate::runtime::ReservedDesktopSession,
     bus: &zbus::Connection,
     sender: &zbus::names::OwnedUniqueName,
+    nonce: &str,
 ) -> anyhow::Result<()> {
     let registry = zbus::fdo::DBusProxy::new(bus).await?;
     // Subscribe before checking liveness so a departure cannot be missed.
@@ -43,6 +44,14 @@ async fn hold_desktop(
         .get_connection_unix_user(sender.clone().into())
         .await?;
     let _session = reservation.activate();
+    bus.emit_signal(
+        Some(sender.as_str()),
+        ekubo_wallet_client::owner_protocol::OBJECT_PATH,
+        "org.ekubo.Wallet.Owner1",
+        "DesktopSessionReady",
+        &(nonce,),
+    )
+    .await?;
     while let Some(signal) = departed.next().await {
         let args = signal.args()?;
         if args.name().as_str() == sender.as_str() && args.new_owner().as_ref().is_none() {
@@ -56,9 +65,15 @@ async fn hold_desktop(
 impl LinuxOwnerInterface {
     async fn hold_desktop_session(
         &self,
+        nonce: &str,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> zbus::fdo::Result<()> {
+        if nonce.len() != 36 || nonce.parse::<uuid::Uuid>().is_err() {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "invalid desktop session nonce".into(),
+            ));
+        }
         let sender = header
             .sender()
             .ok_or_else(|| zbus::fdo::Error::AccessDenied("missing caller identity".into()))?
@@ -68,7 +83,7 @@ impl LinuxOwnerInterface {
             connection,
             &header,
             Box::pin(async {
-                hold_desktop(self.runtime.reserve_desktop()?, connection, &sender).await
+                hold_desktop(self.runtime.reserve_desktop()?, connection, &sender, nonce).await
             }),
         )
         .await

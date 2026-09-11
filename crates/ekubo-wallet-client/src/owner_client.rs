@@ -3,6 +3,7 @@
 use crate::owner_connection::{OwnerConnection, OwnerTransport};
 use crate::owner_protocol::OBJECT_PATH;
 use anyhow::{Context as _, Result, ensure};
+use futures::StreamExt as _;
 use std::time::Duration;
 use zbus::{Connection, Proxy, fdo::DBusProxy, names::OwnedUniqueName};
 
@@ -140,13 +141,31 @@ impl OwnerTransport for LinuxOwnerTransport {
     /// Keep automatic execution active for this desktop connection. Spawn this
     /// once for the application lifetime; closing the connection ends the lease.
     /// Cancelling just this method's future does not disconnect a D-Bus peer.
-    async fn hold(&self) -> Result<()> {
-        let response = self.proxy.call_method("HoldDesktopSession", &()).await?;
-        ensure!(
-            response.header().sender() == Some(self.service.inner()),
-            "desktop session response came from an unexpected service"
-        );
-        Ok(response.body().deserialize()?)
+    async fn hold(&self, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut started = self.proxy.receive_signal("DesktopSessionReady").await?;
+        let request = (nonce.as_str(),);
+        let call = self.proxy.call_method("HoldDesktopSession", &request);
+        tokio::pin!(call);
+        let mut ready = Some(ready);
+        loop {
+            tokio::select! {
+                biased;
+                response = &mut call => {
+                    let response = response?;
+                    ensure!(response.header().sender() == Some(self.service.inner()), "desktop session response came from an unexpected service");
+                    return Ok(response.body().deserialize()?);
+                }
+                signal = started.next(), if ready.is_some() => {
+                    let signal = signal.context("desktop readiness signal stream ended")?;
+                    ensure!(signal.header().sender() == Some(self.service.inner()), "desktop readiness came from an unexpected service");
+                    let (acknowledged,): (String,) = signal.body().deserialize()?;
+                    if acknowledged == nonce {
+                        let _ = ready.take().expect("readiness is pending").send(());
+                    }
+                }
+            }
+        }
     }
 
     /// Close this connection, including all clones and pending owner requests.

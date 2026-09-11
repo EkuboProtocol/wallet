@@ -155,7 +155,8 @@ async fn canceling_hold_does_not_close_the_lease_but_explicit_close_does() {
             .is_err()
     );
     let clone = fixture.client.clone();
-    let hold = tokio::spawn(async move { clone.hold().await });
+    let (ready, mut acknowledged) = tokio::sync::oneshot::channel();
+    let hold = tokio::spawn(async move { clone.hold(ready).await });
     assert_eq!(
         wire::read(&mut fixture.control)
             .await
@@ -164,9 +165,14 @@ async fn canceling_hold_does_not_close_the_lease_but_explicit_close_does() {
             .kind,
         Kind::Hold
     );
+    assert!(matches!(
+        acknowledged.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
     wire::write(&mut fixture.control, Kind::Ok, &[])
         .await
         .unwrap();
+    acknowledged.await.unwrap();
     hold.abort();
     assert!(hold.await.unwrap_err().is_cancelled());
     assert!(
@@ -194,7 +200,9 @@ async fn closing_the_client_cancels_pending_calls_and_refuses_new_connections() 
 async fn service_lifetime_disconnect_invalidates_calls_even_before_hold() {
     let fixture = Fixture::new().await;
     drop(fixture.control);
-    assert!(fixture.client.hold().await.is_err());
+    let (ready, acknowledged) = tokio::sync::oneshot::channel();
+    assert!(fixture.client.hold(ready).await.is_err());
+    assert!(acknowledged.await.is_err());
     assert!(fixture.client.exchange("{}").await.is_err());
     assert_eq!(fixture.client.connector.opened.load(Ordering::SeqCst), 1);
 }
@@ -218,4 +226,33 @@ async fn dropping_the_last_clone_closes_the_lifetime_driver() {
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn malformed_hold_acknowledgement_never_reports_readiness() {
+    let mut fixture = Fixture::new().await;
+    let clone = fixture.client.clone();
+    let (ready, acknowledged) = tokio::sync::oneshot::channel();
+    let hold = tokio::spawn(async move { clone.hold(ready).await });
+    assert_eq!(
+        wire::read(&mut fixture.control)
+            .await
+            .unwrap()
+            .unwrap()
+            .kind,
+        Kind::Hold
+    );
+    wire::write(&mut fixture.control, Kind::Ok, b"unexpected payload")
+        .await
+        .unwrap();
+    assert!(
+        hold.await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected owner acknowledgement payload")
+    );
+    assert!(acknowledged.await.is_err());
+    assert!(fixture.client.exchange("{}").await.is_err());
+    assert_eq!(fixture.client.connector.opened.load(Ordering::SeqCst), 1);
 }

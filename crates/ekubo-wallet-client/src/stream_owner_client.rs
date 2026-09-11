@@ -18,6 +18,7 @@ pub(crate) trait Connector: Clone + Send + Sync + 'static {
 struct State {
     stop: watch::Sender<bool>,
     hold: watch::Sender<bool>,
+    ready: watch::Receiver<bool>,
     closed: watch::Receiver<Option<String>>,
     calls: Semaphore,
 }
@@ -47,11 +48,12 @@ impl<C: Connector> StreamOwnerClient<C> {
         let (stop, mut stopping) = watch::channel(false);
         let (hold, mut holding) = watch::channel(false);
         let (closed, status) = watch::channel(None);
+        let (ready, readiness) = watch::channel(false);
         tokio::spawn(async move {
             let result = tokio::select! {
                 biased;
                 _ = stopping.wait_for(|stop| *stop) => Ok(()),
-                result = supervise(&mut stream, &mut holding) => result,
+                result = supervise(&mut stream, &mut holding, &ready) => result,
             };
             // A close acknowledgement means the actual lifetime pipe is gone.
             drop(stream);
@@ -66,6 +68,7 @@ impl<C: Connector> StreamOwnerClient<C> {
             state: Arc::new(State {
                 stop,
                 hold,
+                ready: readiness,
                 closed: status,
                 calls: Semaphore::new(32),
             }),
@@ -113,9 +116,22 @@ impl<C: Connector> StreamOwnerClient<C> {
         ))
     }
 
-    pub(crate) async fn hold(&self) -> Result<()> {
+    pub(crate) async fn hold(&self, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
         self.state.hold.send_replace(true);
         let mut closed = self.state.closed.clone();
+        let mut acknowledged = self.state.ready.clone();
+        tokio::select! {
+            biased;
+            reason = closed.wait_for(Option::is_some) => {
+                let reason = reason.context("owner lifetime task stopped")?;
+                anyhow::bail!("{}", reason.as_deref().unwrap_or("owner connection closed"));
+            },
+            result = acknowledged.wait_for(|ready| *ready) => {
+                result.context("desktop readiness monitor stopped")?;
+                let _ = ready.send(());
+            }
+        }
+
         let reason = closed
             .wait_for(Option::is_some)
             .await
@@ -174,6 +190,7 @@ where
 async fn supervise(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     holding: &mut watch::Receiver<bool>,
+    ready: &watch::Sender<bool>,
 ) -> Result<()> {
     let mut byte = [0];
     tokio::select! {
@@ -185,6 +202,7 @@ async fn supervise(
     }
     wire::write(stream, Kind::Hold, &[]).await?;
     unit_reply(stream).await?;
+    ready.send_replace(true);
     let count = stream.read(&mut byte).await?;
     ensure!(count == 0, "unexpected owner lifetime traffic");
     anyhow::bail!("owner service disconnected")

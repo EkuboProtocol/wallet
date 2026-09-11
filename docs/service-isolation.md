@@ -50,6 +50,17 @@ client before startup may select
 the service for an installed profile. Installed-profile
 startup must make that selection before opening any local authority.
 
+Desktop-session readiness now distinguishes authenticated transport startup from
+an accepted execution lease. Windows forwards the existing Hold acknowledgement
+only after validating it. Linux subscribes before calling Hold and accepts only
+a targeted `DesktopSessionReady` signal from the pinned unique service name with
+the nonce for this exact hold. The service emits it after lease activation.
+Missing acknowledgements fail startup after ten seconds and close the connection;
+readiness failures wait for closure to finish and never reconnect or fall back to
+local authority. This acknowledgement grants no owner authorization. The Linux
+Hold signature and its service/client implementations must be installed together.
+Startup selection and global event integration remain unfinished.
+
 ## Required outcome
 
 On Linux and Windows, the desktop and agent must not possess the account keys,
@@ -1027,9 +1038,10 @@ The client now has a transport-independent desktop-session supervisor and an
 OwnerClient entry point for it. The supervisor holds the long-running desktop
 lease, closes the underlying connection on explicit Quit, dropped lifetime, or
 unexpected lease completion, and reports closure failures. It never reconnects
-or replays requests. `Connected` describes supervision of the authenticated
-connection, not an acknowledgement of lease acceptance. The application must
-await close before stopping its runtime; Drop requests closure without waiting.
+or replays requests. The initial state is `Starting`; `Connected` now means the
+service has acknowledged this connection's active desktop lease. Callers await
+`DesktopSession::ready()` before allowing service-backed desktop work, and await
+close before stopping the runtime; Drop requests closure without waiting.
 Tests cover explicit close, Drop, unexpected successful/error lease completion,
 and closure errors. An explicitly executed private-bus test confirms that close
 invalidates retained OwnerClient clones and removes the desktop's unique bus

@@ -46,15 +46,39 @@ async fn desktop_disconnect_releases_its_execution_session() {
         .await
         .unwrap();
     let sender = desktop.unique_name().unwrap().clone();
+    let service_name = service.unique_name().unwrap().clone();
+    let proxy = zbus::Proxy::new(
+        &desktop,
+        service_name.as_str(),
+        ekubo_wallet_client::owner_protocol::OBJECT_PATH,
+        "org.ekubo.Wallet.Owner1",
+    )
+    .await
+    .unwrap();
+    let mut ready = proxy.receive_signal("DesktopSessionReady").await.unwrap();
     let sessions = crate::desktop_sessions::DesktopSessions::default();
-    let mut activity = sessions.activity();
+    let activity = sessions.activity();
     let reservation = sessions.reserve().unwrap();
-    let lease = tokio::spawn(async move { hold_desktop(reservation, &service, &sender).await });
-    tokio::time::timeout(Duration::from_secs(5), activity.changed())
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let expected_nonce = nonce.clone();
+    let lease =
+        tokio::spawn(async move { hold_desktop(reservation, &service, &sender, &nonce).await });
+    let signal = tokio::time::timeout(Duration::from_secs(5), ready.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(*activity.borrow_and_update(), 1);
+    assert_eq!(signal.header().sender(), Some(service_name.inner()));
+    assert_eq!(
+        signal.body().deserialize::<(String,)>().unwrap().0,
+        expected_nonce
+    );
+    assert_eq!(
+        *activity.borrow(),
+        1,
+        "readiness must follow lease activation"
+    );
+    drop(ready);
+    drop(proxy);
     desktop.close().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), lease)
         .await
