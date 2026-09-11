@@ -2894,6 +2894,8 @@ pub struct WalletWindow {
     export_clipboard: Arc<Mutex<Option<Zeroizing<String>>>>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
+    legal_load_generation: u64,
+    legal_accepting: bool,
     guided_setup: GuidedSetup,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
@@ -6742,9 +6744,70 @@ fn disable_signing_policy_document() -> Result<String> {
     Ok(serde_json::to_string_pretty(&WalletPolicy::deny_all())?)
 }
 
+struct InitialLegalReview {
+    document: LegalDocument,
+    text: String,
+    digest: String,
+    acceptance_required: bool,
+}
+
+async fn load_legal_review(
+    owner: &crate::desktop_owner::DesktopOwner,
+    requested: Option<LegalDocument>,
+) -> Result<Option<InitialLegalReview>> {
+    let status = owner.legal_status().await.ok();
+    let document = requested.or_else(|| {
+        status
+            .as_ref()
+            .map_or(Some(LegalDocument::TermsOfService), next_required_legal)
+    });
+    let Some(document) = document else {
+        return Ok(None);
+    };
+    let (text, digest) = owner.legal_document(document).await?;
+    Ok(Some(InitialLegalReview {
+        document,
+        text,
+        digest,
+        acceptance_required: legal_review_requires_acceptance(document, status.as_ref()),
+    }))
+}
+
+struct InitialDesktopState {
+    appearance: Result<AppearancePreference>,
+    testnet_mode: Result<bool>,
+    guided_setup: Result<ekubo_wallet_core::desktop_store::GuidedSetupState>,
+    companions: Result<CompanionSelection>,
+    legal: Option<InitialLegalReview>,
+    pending_reviews: usize,
+}
+
+impl InitialDesktopState {
+    async fn capture(owner: &crate::desktop_owner::DesktopOwner) -> Result<Self> {
+        let testnet_mode = owner.testnet_mode().await;
+        let networks = owner.networks().await.unwrap_or_default();
+        let pending_reviews = owner.reviews(None).await.map_or(0, |queues| {
+            review_queue_decision_count(
+                &queues,
+                &networks,
+                testnet_mode.as_ref().copied().unwrap_or(false),
+            )
+        });
+        Ok(Self {
+            appearance: owner.appearance_preference().await,
+            testnet_mode,
+            pending_reviews,
+            guided_setup: owner.guided_setup().await,
+            companions: owner.companion_servers().await,
+            legal: load_legal_review(owner, None).await?,
+        })
+    }
+}
+
 impl WalletWindow {
     fn new(
         owner: OwnerApi,
+        initial: InitialDesktopState,
         review_presenter: GuiReviewPresenter,
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
@@ -6753,15 +6816,15 @@ impl WalletWindow {
         data_dir: &Path,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance_preference = owner.appearance_preference().unwrap_or_default();
-        let testnet_mode = owner.testnet_mode().unwrap_or(false);
+        let appearance_preference = initial.appearance.unwrap_or_default();
+        let testnet_mode = initial.testnet_mode.unwrap_or(false);
         // A store that cannot be read yields nothing rather than a default,
         // and the card stays off screen until the read lands — `render`
         // retries it. Defaulting would show an empty checklist to somebody
         // who has finished it, and since dismissing now only lasts the run,
         // it would do that at every launch instead of once.
-        let guided_setup = owner
-            .guided_setup()
+        let guided_setup = initial
+            .guided_setup
             .map_or_else(|_| GuidedSetup::unloaded(), GuidedSetup::loaded);
         let route_scroll_handle = ScrollHandle::new();
         let route_overflow_indicator =
@@ -6786,7 +6849,7 @@ impl WalletWindow {
             render_embedded_png(include_bytes!("../assets/tray/dark_mode_tray_icon.png"))
                 .expect("embedded dark tray icon must be valid");
         // Read before `owner` moves into the struct.
-        let (companion_servers, companion_servers_error) = match owner.companion_servers() {
+        let (companion_servers, companion_servers_error) = match initial.companions {
             Ok(selection) => (selection, None),
             Err(error) => (
                 CompanionSelection::all(),
@@ -6878,8 +6941,18 @@ impl WalletWindow {
             account_action_errors: BTreeMap::new(),
             account_export: None,
             export_clipboard: Arc::new(Mutex::new(None)),
-            legal_review: None,
-            legal_gate: false,
+            legal_gate: initial.legal.is_some(),
+            legal_review: initial.legal.map(|review| {
+                Self::new_legal_review(
+                    review.document,
+                    &review.text,
+                    review.digest,
+                    review.acceptance_required,
+                    cx,
+                )
+            }),
+            legal_load_generation: 0,
+            legal_accepting: false,
             guided_setup,
             route_errors: BTreeMap::new(),
             appearance_preference,
@@ -6963,7 +7036,6 @@ impl WalletWindow {
             pending_update,
             update_data_dir: data_dir.to_path_buf(),
         };
-        window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
         window.reload_desktop_snapshot(cx);
         window
@@ -9770,17 +9842,47 @@ impl WalletWindow {
     }
 
     fn open_legal_review(&mut self, document: LegalDocument, cx: &mut Context<Self>) {
-        let (text, digest) = self.owner.legal_document(document);
-        let status = self.owner.legal_status().ok();
-        let acceptance_required = legal_review_requires_acceptance(document, status.as_ref());
-        self.legal_review = Some(Self::new_legal_review(
-            document,
-            &text,
-            digest,
-            acceptance_required,
-            cx,
-        ));
-        cx.notify();
+        if self.legal_accepting {
+            return;
+        }
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        let generation = self.legal_load_generation;
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            load_legal_review(&owner, Some(document)).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.legal_load_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(review) => {
+                        view.clear_route_error(Route::Settings);
+                        view.set_legal_review(review, cx);
+                    }
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not read document: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_legal_review(&mut self, review: Option<InitialLegalReview>, cx: &mut Context<Self>) {
+        self.legal_review = review.map(|review| {
+            Self::new_legal_review(
+                review.document,
+                &review.text,
+                review.digest,
+                review.acceptance_required,
+                cx,
+            )
+        });
     }
 
     fn new_legal_review(
@@ -9804,18 +9906,6 @@ impl WalletWindow {
         }
     }
 
-    fn open_next_required_legal(&mut self, cx: &mut Context<Self>) {
-        let document = match self.owner.legal_status() {
-            Ok(status) => next_required_legal(&status),
-            Err(_) => Some(LegalDocument::TermsOfService),
-        };
-        self.legal_gate = document.is_some();
-        self.legal_review = document.map(|document| {
-            let (text, digest) = self.owner.legal_document(document);
-            Self::new_legal_review(document, &text, digest, true, cx)
-        });
-    }
-
     fn update_legal_scroll_state(&mut self, digest: &str, cx: &mut Context<Self>) {
         let Some(review) = self.legal_review.as_mut() else {
             return;
@@ -9835,36 +9925,54 @@ impl WalletWindow {
         let Some(review) = self.legal_review.as_ref() else {
             return;
         };
-        if !review.acceptance_required
+        if self.legal_accepting
+            || !review.acceptance_required
             || (!review.viewed_to_end
                 && !legal_list_reached_end(&review.scroll_handle, &review.end_rendered))
         {
             return;
         }
         let document = review.document;
-        match self.owner.accept_legal(document, &review.digest) {
-            Ok(()) => {
-                self.open_next_required_legal(cx);
-                if !self.legal_gate {
-                    self.activate_next_waiting_surface(cx);
+        let digest = review.digest.clone();
+        self.legal_accepting = true;
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.accept_legal(document, &digest).await?;
+            load_legal_review(&owner, None).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.legal_accepting = false;
+                match result {
+                    Ok(next) => {
+                        view.legal_gate = next.is_some();
+                        view.set_legal_review(next, cx);
+                        if !view.legal_gate {
+                            view.activate_next_waiting_surface(cx);
+                        }
+                        // Legal acceptance emits no domain event.
+                        view.reload_desktop_snapshot(cx);
+                    }
+                    Err(error) => {
+                        if let Some(review) = view.legal_review.as_mut() {
+                            review.error =
+                                Some(format!("Could not accept document: {error:#}").into());
+                        }
+                    }
                 }
-                // Acceptance is written straight to the legal store, which
-                // raises no domain event, so nothing else was ever going to
-                // refresh the snapshot. Settings reads its acceptance dates
-                // from that snapshot and went on saying "Review required"
-                // about a document the reader had just accepted.
-                self.reload_desktop_snapshot(cx);
-            }
-            Err(error) => {
-                if let Some(review) = self.legal_review.as_mut() {
-                    review.error = Some(format!("Could not accept document: {error:#}").into());
-                }
-            }
-        }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        if !self.legal_gate {
+            self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        }
         if self.legal_review.is_some() && !self.legal_gate {
             self.legal_review = None;
             cx.notify();
@@ -11996,6 +12104,9 @@ impl WalletWindow {
             return;
         }
         if route != self.route {
+            if !self.legal_gate {
+                self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+            }
             // The record detail belongs to the inbox. Leaving that screen with
             // it still open would strand a modal about a row nobody can see
             // over whichever page was asked for.
@@ -12077,6 +12188,7 @@ impl WalletWindow {
         };
         // A read-only legal document is dismissible. Required legal review is
         // covered by `legal_gate` above and keeps the intent pending.
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
         self.legal_review = None;
         self.command_palette = false;
         self.set_route(Route::Activity);
@@ -18496,7 +18608,7 @@ impl WalletWindow {
                             app_button("accept-legal")
                                 .label("Accept")
                                 .primary()
-                                .disabled(!viewed_to_end)
+                                .disabled(!viewed_to_end || self.legal_accepting)
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.accept_legal(cx);
                                 })),
@@ -20850,6 +20962,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .enable_all()
         .build()
         .context("could not start the Tokio runtime")?;
+    let initial = tokio.block_on(InitialDesktopState::capture(
+        &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+    ))?;
     let tokio_handle = tokio.handle().clone();
     // In a slot because the quit handler and the tail of this function both
     // have to be able to claim it; see `join_tokio_runtime`.
@@ -20877,7 +20992,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             apply_appearance_preference(
-                owner.appearance_preference().unwrap_or_default(),
+                initial.appearance.as_ref().copied().unwrap_or_default(),
                 None,
                 cx,
             );
@@ -20887,11 +21002,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let tray = Rc::new(RefCell::new(
                 PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
             ));
-            let initial_networks = owner.networks().unwrap_or_default();
-            let initial_testnet_mode = owner.testnet_mode().unwrap_or(false);
-            let initial_pending_reviews = owner.reviews(None).map_or(0, |queues| {
-                review_queue_decision_count(&queues, &initial_networks, initial_testnet_mode)
-            });
+            let initial_pending_reviews = initial.pending_reviews;
             if let Some(tray) = tray.borrow_mut().as_mut() {
                 tray.update(&TraySnapshot {
                     pending_reviews: initial_pending_reviews,
@@ -21056,6 +21167,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let wallet_view = cx.new(|cx| {
                 WalletWindow::new(
                     owner.clone(),
+                    initial,
                     review_presenter.clone(),
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),

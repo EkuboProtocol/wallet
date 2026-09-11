@@ -86,12 +86,18 @@ fn wallet(
         apply_interface_palette(cx);
         OwnerApi::for_test(directory.path()).expect("throwaway owner")
     });
+    let initial = runtime
+        .block_on(InitialDesktopState::capture(
+            &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+        ))
+        .unwrap();
     let (review_presenter, _reviews) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, _proposals) = ProposalPresenter::channel();
     let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
     let window = cx.add_window(|_, cx| {
         WalletWindow::new(
             owner,
+            initial,
             review_presenter,
             walletconnect,
             walletconnect_presenter,
@@ -3477,6 +3483,12 @@ fn screenshots() {
         apply_interface_palette(cx);
         OwnerApi::for_test(temp.path()).expect("owner")
     });
+    let initial = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(InitialDesktopState::capture(
+            &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+        ))
+        .unwrap();
     let (review_presenter, _reviews) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, _proposals) = ProposalPresenter::channel();
     let window = cx
@@ -3484,6 +3496,7 @@ fn screenshots() {
             cx.new(|cx| {
                 WalletWindow::new(
                     owner,
+                    initial,
                     review_presenter,
                     Arc::new(Mutex::new(WalletConnectManager::default())),
                     walletconnect_presenter,
@@ -5008,6 +5021,80 @@ fn asynchronous_account_removal_retains_the_review_and_rechecks_before_authoriza
         assert!(wallet.active_review.is_none());
         assert!(wallet.account_action_errors["primary"].contains("Could not remove account"));
         assert!(wallet.owner.account("savings").is_ok());
+    });
+    release(cx, &view);
+}
+
+fn settle_legal_acceptance(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| !wallet.legal_accepting) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("legal acceptance did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_legal_acceptance_keeps_the_gate_until_both_documents_are_accepted(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
+        cx.update_entity(&view, |wallet, cx| {
+            assert!(wallet.legal_gate);
+            assert_eq!(wallet.legal_review.as_ref().unwrap().document, document);
+            wallet.accept_legal(cx);
+            assert!(
+                !wallet.legal_accepting,
+                "unread documents must not be accepted"
+            );
+            wallet.legal_review.as_mut().unwrap().viewed_to_end = true;
+            wallet.accept_legal(cx);
+            assert!(wallet.legal_accepting);
+            assert!(wallet.legal_gate, "a pending write is not acceptance");
+        });
+        settle_legal_acceptance(&view, cx);
+    }
+    cx.read_entity(&view, |wallet, _| {
+        assert!(!wallet.legal_gate);
+        assert!(wallet.legal_review.is_none());
+        let status = wallet.owner.legal_status().unwrap();
+        assert!(status.terms_of_service.accepted && status.privacy_policy.accepted);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_legal_acceptance_failure_keeps_the_review_open(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    cx.update_entity(&view, |wallet, cx| {
+        let review = wallet.legal_review.as_mut().unwrap();
+        review.digest = "stale document".into();
+        review.viewed_to_end = true;
+        wallet.accept_legal(cx);
+    });
+    settle_legal_acceptance(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(wallet.legal_gate);
+        let review = wallet.legal_review.as_ref().unwrap();
+        assert_eq!(review.document, LegalDocument::TermsOfService);
+        assert!(
+            review
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Could not accept document")
+        );
+        assert!(
+            !wallet
+                .owner
+                .legal_status()
+                .unwrap()
+                .terms_of_service
+                .accepted
+        );
     });
     release(cx, &view);
 }
