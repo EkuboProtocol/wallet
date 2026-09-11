@@ -219,16 +219,14 @@ fn source_owner(owner: u32) -> Result<()> {
     // Only synthetic credentials on this invocation's private session bus. Use
     // the same native backend as production, without adding core test overrides.
     let store = zbus_secret_service_keyring_store::Store::new()?;
-    store
-        .build("org.ekubo.wallet.db", "default", None)?
-        .set_secret(&[0x43; 32])?;
-    store
-        .build(
-            "org.ekubo.wallet.private-key.instance",
-            &wallet.instance_id.to_string(),
-            None,
-        )?
-        .set_secret(&[0x11; 32])?;
+    let database_key = store.build("org.ekubo.wallet.db", "default", None)?;
+    database_key.set_secret(&[0x43; 32])?;
+    let account_key = store.build(
+        "org.ekubo.wallet.private-key.instance",
+        &wallet.instance_id.to_string(),
+        None,
+    )?;
+    account_key.set_secret(&[0x11; 32])?;
     let runtime = runtime()?;
     let endpoint =
         runtime.block_on(ekubo_wallet_core::linux_source_handoff::OwnerSourceEndpoint::bind())?;
@@ -251,6 +249,17 @@ fn source_owner(owner: u32) -> Result<()> {
         ensure!(
             explicit.load()?.wallets == vec![wallet],
             "legacy inventory changed"
+        );
+        // Staging and abort preserve the keys needed to reopen legacy custody.
+        let database_secret = Zeroizing::new(database_key.get_secret()?);
+        let account_secret = Zeroizing::new(account_key.get_secret()?);
+        ensure!(
+            database_secret.as_slice() == [0x43; 32],
+            "legacy database key changed during staging"
+        );
+        ensure!(
+            account_secret.as_slice() == [0x11; 32],
+            "legacy account key changed during staging"
         );
         let profile = ekubo_wallet_core::service_storage::pending_owner_profile()?;
         ekubo_wallet_core::custody_relay::load(profile)?;

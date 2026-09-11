@@ -122,6 +122,15 @@ impl SyntheticCredential {
         self.created = false;
         Ok(())
     }
+
+    fn verify_preserved(&self) -> Result<()> {
+        let bytes = Zeroizing::new(self.entry.get_secret()?);
+        ensure!(
+            bytes.as_slice() == self.value.as_slice(),
+            "legacy credential changed during staging"
+        );
+        Ok(())
+    }
 }
 impl Drop for SyntheticCredential {
     fn drop(&mut self) {
@@ -183,6 +192,10 @@ pub(super) fn owner(owner: &str) -> Result<()> {
             config.load()?.wallets == vec![wallet],
             "source inventory changed"
         );
+        // Staging and abort must preserve both legacy keys. Teardown accepts
+        // already-missing entries, so it cannot establish this invariant.
+        account_key.verify_preserved()?;
+        database_key.verify_preserved()?;
         account_key.remove()?;
         database_key.remove()
     })
