@@ -3798,7 +3798,7 @@ enum ActiveReviewCompletion {
         response: oneshot::Sender<ProposalCommand>,
     },
     AccountRemoval {
-        wallet: WalletMetadata,
+        reviewed: Box<crate::authority::OwnerAccountRemovalReview>,
     },
 }
 
@@ -9725,7 +9725,7 @@ impl WalletWindow {
     }
 
     fn begin_account_removal(&mut self, wallet_id: String, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow.is_in_progress() {
+        if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.account_action_errors.insert(
                 wallet_id,
                 "Finish or close the current review first.".into(),
@@ -9733,24 +9733,39 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        match self.owner.account_removal_document(&wallet_id) {
-            Ok(review) => {
-                self.account_action_errors.remove(&wallet_id);
-                self.active_review = Some(ActiveReview::new(
-                    review.document,
-                    None,
-                    Some(ActiveReviewCompletion::AccountRemoval {
-                        wallet: review.wallet,
-                    }),
-                ));
-            }
-            Err(error) => {
-                self.account_action_errors.insert(
-                    wallet_id,
-                    format!("Could not prepare account removal: {error:#}").into(),
-                );
-            }
-        }
+        self.review_flow = ReviewFlowState::Busy;
+        let owner = crate::desktop_owner::DesktopOwner::from(self.owner.clone());
+        let task_wallet = wallet_id.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.account_removal_document(&task_wallet).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.review_flow = ReviewFlowState::Ready;
+                match result {
+                    Ok(reviewed) => {
+                        view.account_action_errors.remove(&wallet_id);
+                        view.active_review = Some(ActiveReview::new(
+                            reviewed.document.clone(),
+                            None,
+                            Some(ActiveReviewCompletion::AccountRemoval {
+                                reviewed: Box::new(reviewed),
+                            }),
+                        ));
+                    }
+                    Err(error) => {
+                        view.account_action_errors.insert(
+                            wallet_id,
+                            format!("Could not prepare account removal: {error:#}").into(),
+                        );
+                        view.activate_next_waiting_surface(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -11722,10 +11737,10 @@ impl WalletWindow {
             }
             (
                 GuiReviewCommand::Close | GuiReviewCommand::Reject,
-                Some(ActiveReviewCompletion::AccountRemoval { wallet }),
+                Some(ActiveReviewCompletion::AccountRemoval { reviewed }),
             ) => {
                 self.active_review = None;
-                self.account_action_errors.remove(&wallet.id);
+                self.account_action_errors.remove(&reviewed.wallet.id);
             }
             (
                 GuiReviewCommand::Reject,
@@ -11733,10 +11748,9 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 wait_for_flow = true;
+                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || owner.reject_message(request_id))
-                        .await
-                        .context("request rejection task failed")?
+                    owner.reject_message(request_id).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11760,10 +11774,9 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 wait_for_flow = true;
+                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || owner.reject_typed_data(request_id))
-                        .await
-                        .context("request rejection task failed")?
+                    owner.reject_typed_data(request_id).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11787,13 +11800,9 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
+                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(owner.sign_message(request_id, &digest))
-                    })
-                    .await
-                    .context("message signing task failed")?
+                    owner.sign_message(request_id, &digest).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11817,13 +11826,9 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
+                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(owner.sign_typed_data(request_id, &digest))
-                    })
-                    .await
-                    .context("typed-data signing task failed")?
+                    owner.sign_typed_data(request_id, &digest).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11843,13 +11848,14 @@ impl WalletWindow {
             }
             (
                 GuiReviewCommand::Approve,
-                Some(ActiveReviewCompletion::AccountRemoval { wallet }),
+                Some(ActiveReviewCompletion::AccountRemoval { reviewed }),
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let wallet_id = wallet.id.clone();
+                let wallet_id = reviewed.wallet.id.clone();
+                let owner = crate::desktop_owner::DesktopOwner::from(owner);
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.remove_account(&wallet).await
+                    owner.remove_account(&reviewed).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;

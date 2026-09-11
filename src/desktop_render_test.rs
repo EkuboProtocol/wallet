@@ -3296,14 +3296,17 @@ fn every_review_kind_lays_out_its_decision_row(cx: &mut gpui::TestAppContext) {
     // worth laying out rather than reasoning about.
     for completion in [
         ActiveReviewCompletion::AccountRemoval {
-            wallet: WalletMetadata {
-                instance_id: uuid::Uuid::nil(),
-                id: "primary".into(),
-                address: alloy::primitives::Address::ZERO,
-                created_at: chrono::Utc::now(),
-                source: ekubo_wallet_core::config::WalletSource::Created,
-                exported_at: None,
-            },
+            reviewed: Box::new(crate::authority::OwnerAccountRemovalReview {
+                wallet: WalletMetadata {
+                    instance_id: uuid::Uuid::nil(),
+                    id: "primary".into(),
+                    address: alloy::primitives::Address::ZERO,
+                    created_at: chrono::Utc::now(),
+                    source: ekubo_wallet_core::config::WalletSource::Created,
+                    exported_at: None,
+                },
+                document: review_document(),
+            }),
         },
         ActiveReviewCompletion::Message {
             request_id: uuid::Uuid::new_v4(),
@@ -4945,6 +4948,66 @@ fn asynchronous_policy_rejection_does_not_replace_a_newer_selection(cx: &mut gpu
             "the old rejection must not label the new editor"
         );
         assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "savings");
+    });
+    release(cx, &view);
+}
+
+fn settle_review_preparation(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| !wallet.review_flow.is_in_progress()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("review operation did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_account_removal_retains_the_review_and_rechecks_before_authorization(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            wallet.begin_account_removal("primary".into(), cx);
+            assert!(wallet.review_flow.is_in_progress());
+            wallet.begin_account_removal("savings".into(), cx);
+            assert!(wallet.account_action_errors.contains_key("savings"));
+        });
+    })
+    .unwrap();
+    settle_review_preparation(&view, cx);
+    cx.update_entity(&view, |wallet, cx| {
+        let active = wallet.active_review.as_mut().unwrap();
+        let Some(ActiveReviewCompletion::AccountRemoval { reviewed }) = &active.completion else {
+            panic!("account-removal review was not preserved");
+        };
+        assert_eq!(reviewed.wallet.id, "primary");
+        assert_eq!(active.state.document().identity, reviewed.document.identity);
+        // Only synthetic public metadata exists. Removing it makes the held
+        // review stale, so the approval path must fail before native custody.
+        wallet
+            .owner
+            .config()
+            .update_for_test(|config| {
+                config.wallets.retain(|account| account.id != "primary");
+                Ok(())
+            })
+            .unwrap();
+        let generation = active.state.generation();
+        active.state.mark_viewed_to_end(generation);
+        active.state.select(generation, ReviewDecision::Approve);
+        wallet.send_review_command(generation, GuiReviewCommand::Approve, cx);
+    });
+    settle_review_preparation(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(wallet.active_review.is_none());
+        assert!(wallet.account_action_errors["primary"].contains("Could not remove account"));
+        assert!(wallet.owner.account("savings").is_ok());
     });
     release(cx, &view);
 }
