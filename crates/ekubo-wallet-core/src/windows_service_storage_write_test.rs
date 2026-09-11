@@ -351,3 +351,34 @@ fn native_credential_removal_refuses_hard_linked_files() {
     assert!(fixture.path.join("key-database").exists());
     assert!(fixture.path.join("alias").exists());
 }
+
+#[test]
+fn variable_length_staging_records_publish_privately_without_replacement() {
+    use crate::custody_staging::{ServiceCredentialRecord, StagedRecord};
+    let fixture = Fixture::new();
+    let stage = Uuid::new_v4();
+    for (record, bytes) in [
+        (
+            StagedRecord::Credential(ServiceCredentialRecord::WrappingKey),
+            vec![0x77; 32],
+        ),
+        (
+            StagedRecord::Credential(ServiceCredentialRecord::Enrollment),
+            b"{\"version\":1}".to_vec(),
+        ),
+        (StagedRecord::Complete, b"{\"records\":3}".to_vec()),
+    ] {
+        let name = record.file_name(stage).unwrap();
+        publish(&fixture.parent, &name, &fixture.owner, &bytes, |file| {
+            fixture.validate(file)
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(fixture.path.join(&name)).unwrap(), bytes);
+        assert!(
+            publish(&fixture.parent, &name, &fixture.owner, &bytes, |file| {
+                fixture.validate(file)
+            })
+            .is_err()
+        );
+    }
+}

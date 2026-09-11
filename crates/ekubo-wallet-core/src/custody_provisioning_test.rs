@@ -224,3 +224,103 @@ fn missing_keys_and_changed_metadata_cannot_prepare_a_partial_inventory() {
         .is_err()
     );
 }
+
+struct StageStore {
+    profile: Uuid,
+    files: std::cell::RefCell<BTreeMap<String, Zeroizing<Vec<u8>>>>,
+    fail_at: Option<usize>,
+    corrupt_read: bool,
+}
+impl CredentialStagingStore for StageStore {
+    fn identity(&self) -> (String, String, Uuid) {
+        ("owner".into(), "service".into(), self.profile)
+    }
+    fn create_new(&self, stage: Uuid, record: StagedRecord, bytes: &[u8]) -> Result<()> {
+        let mut files = self.files.borrow_mut();
+        anyhow::ensure!(self.fail_at != Some(files.len()), "synthetic write failure");
+        let name = record.file_name(stage)?;
+        anyhow::ensure!(!files.contains_key(&name), "record already exists");
+        files.insert(name, Zeroizing::new(bytes.to_vec()));
+        Ok(())
+    }
+    fn read(&self, stage: Uuid, record: StagedRecord) -> Result<Zeroizing<Vec<u8>>> {
+        let mut bytes = self.files.borrow()[&record.file_name(stage)?].clone();
+        if self.corrupt_read {
+            bytes[0] ^= 1;
+        }
+        Ok(bytes)
+    }
+}
+fn stage_fixture(
+    fail_at: Option<usize>,
+    corrupt_read: bool,
+) -> (PreparedServiceCredentials, StageStore) {
+    let profile = Uuid::new_v4();
+    let prepared = prepare(
+        "owner",
+        "service",
+        profile,
+        Zeroizing::new([0x42; 32]),
+        vec![],
+    )
+    .unwrap();
+    (
+        prepared,
+        StageStore {
+            profile,
+            files: std::cell::RefCell::default(),
+            fail_at,
+            corrupt_read,
+        },
+    )
+}
+
+#[test]
+fn staging_publishes_a_completion_marker_last_without_using_active_names_or_relay_bytes() {
+    let (prepared, store) = stage_fixture(None, false);
+    let first = prepared.stage(&store).unwrap();
+    let files = store.files.borrow();
+    assert_eq!(files.len(), 4);
+    assert!(
+        files
+            .keys()
+            .all(|name| name.starts_with(&format!("custody-stage-{}-", first.id())))
+    );
+    assert!(
+        files
+            .values()
+            .all(|bytes| bytes.as_slice() != prepared.relay().as_bytes())
+    );
+    let marker = &files[&StagedRecord::Complete.file_name(first.id()).unwrap()];
+    assert_eq!(marker.as_slice(), serde_json::to_vec(&first).unwrap());
+    drop(files);
+    let second = prepared.stage(&store).unwrap();
+    assert_ne!(first.id(), second.id());
+    assert_eq!(store.files.borrow().len(), 8);
+}
+
+#[test]
+fn interrupted_or_corrupt_staging_never_publishes_completion() {
+    for fail_at in 0..4 {
+        let (prepared, store) = stage_fixture(Some(fail_at), false);
+        assert!(prepared.stage(&store).is_err());
+        assert!(
+            !store
+                .files
+                .borrow()
+                .keys()
+                .any(|name| name.ends_with("complete.json"))
+        );
+    }
+    let (prepared, store) = stage_fixture(None, true);
+    assert!(prepared.stage(&store).is_err());
+    assert_eq!(store.files.borrow().len(), 1);
+}
+
+#[test]
+fn staging_refuses_the_wrong_protected_profile_before_writing() {
+    let (prepared, mut store) = stage_fixture(None, false);
+    store.profile = Uuid::new_v4();
+    assert!(prepared.stage(&store).is_err());
+    assert!(store.files.borrow().is_empty());
+}

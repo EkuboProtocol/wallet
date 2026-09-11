@@ -7,6 +7,12 @@ desktop remote startup is implemented but has not been verified in a packaged in
 now requires encrypted credentials and starts locked. The host waits for the
 authenticated client's enrolled ciphertext before constructing authority.
 
+Credential preparation and protected staging now share a contract with Windows.
+Staging creates fresh immutable record names, verifies readback, and publishes a
+completion marker last. It does not activate custody, copy the database, or authorize
+legacy-key deletion. Partial or ambiguous stages require installer recovery; this
+primitive is not a completed migration or an installation procedure.
+
 The installer must install the service executable and all ancestor directories
 as root-owned and unwritable by the desktop user. Its fixed executable path is
 `/usr/lib/ekubo-wallet/ekubo-wallet-service`. Install the unit under

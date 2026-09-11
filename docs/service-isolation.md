@@ -108,8 +108,17 @@ key and enrollment, seals the existing database key and each account key under t
 proper identities, and exposes the desktop relay separately from service-only records.
 Tests unlock the output through the actual shared `ServiceCustody` loader. This step
 reads no live keyring, writes no files, authorizes no migration, and deletes nothing.
-Protected staging, database copy/verification, durable commit, recovery, activation,
-and exact legacy-credential deletion still require installer integration.
+The separate staging operation validates the destination identity, publishes new
+`custody-stage-<uuid>-<record>` files through Linux's pinned directory handle or
+Windows' protected storage handle, and reads each record back before publishing a
+completion marker last. It never replaces active credentials or stores the desktop
+relay beside the wrapping key. Failure-injection tests cover interrupted writes,
+corrupt readback, and destination profile mismatch. A completion marker proves only
+credential staging, not activation or permission to delete legacy keys. A failure
+after publication (including sync or marker readback) can leave an ambiguous stage;
+recovery must inspect it before proceeding. Database copy/verification, durable
+migration commit, recovery, activation, and exact legacy-credential deletion still
+require installer integration.
 
 ## Required outcome
 

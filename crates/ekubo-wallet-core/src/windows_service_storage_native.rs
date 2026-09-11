@@ -481,3 +481,46 @@ fn read_security(
 #[cfg(test)]
 #[path = "windows_service_storage_native_test.rs"]
 mod tests;
+
+impl crate::custody_staging::CredentialStagingStore for PrivateStorageRoot {
+    fn identity(&self) -> (String, String, uuid::Uuid) {
+        (
+            format!("windows:sid:{}", self.identity.owner_sid()),
+            format!("windows:sid:{}", self.identity.service_sid()),
+            self.identity.profile_id(),
+        )
+    }
+    fn create_new(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+        bytes: &[u8],
+    ) -> Result<()> {
+        crate::windows_service_identity::verify_service_process(self.identity.service_sid())?;
+        validate_private_handle(
+            self.directory.as_handle(),
+            &self.identity,
+            StorageKind::Directory,
+        )?;
+        write::publish(
+            &self.directory,
+            &record.file_name(stage)?,
+            self.identity.service_sid(),
+            bytes,
+            |file| validate_private_handle(file.as_handle(), &self.identity, StorageKind::File),
+        )
+    }
+    fn read(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        use std::io::Read as _;
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        self.open_file(&record.file_name(stage)?)?
+            .take(4097)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 4096, "custody staging record is oversized");
+        Ok(bytes)
+    }
+}

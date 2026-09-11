@@ -344,3 +344,35 @@ async fn mcp_connects_through_pinned_runtime_and_rejects_substituted_paths() {
             .is_err()
     );
 }
+
+#[test]
+fn custody_stage_records_use_private_immutable_names_and_leave_active_custody_untouched() {
+    use crate::custody_staging::{ServiceCredentialRecord, StagedRecord};
+    let (directory, entry) = fixture();
+    entry.set_secret(&[0x11; KEY_BYTES]).unwrap();
+    let name = StagedRecord::Credential(ServiceCredentialRecord::WrappingKey)
+        .file_name(uuid::Uuid::new_v4())
+        .unwrap();
+    publish_stage_record(&entry.directory, entry.service_uid, &name, &[0x77; 32]).unwrap();
+    assert_eq!(
+        read_stage_record(&entry.directory, entry.service_uid, &name)
+            .unwrap()
+            .as_slice(),
+        [0x77; 32]
+    );
+    assert!(publish_stage_record(&entry.directory, entry.service_uid, &name, &[0x88; 32]).is_err());
+    assert_eq!(entry.get_secret().unwrap(), [0x11; KEY_BYTES]);
+    assert_eq!(
+        std::fs::metadata(directory.path().join(&name))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o600
+    );
+    let linked = StagedRecord::Complete
+        .file_name(uuid::Uuid::new_v4())
+        .unwrap();
+    symlink(&name, directory.path().join(&linked)).unwrap();
+    assert!(publish_stage_record(&entry.directory, entry.service_uid, &linked, b"{}").is_err());
+    assert!(read_stage_record(&entry.directory, entry.service_uid, &linked).is_err());
+}

@@ -25,6 +25,7 @@ MODULES = (
     "windows_service_storage",
     "service_profile_lock",
     "custody_envelope",
+    "custody_staging",
     "service_custody",
     "windows_service_custody",
     "windows_owner_pipe",

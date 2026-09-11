@@ -25,9 +25,10 @@ pub(super) fn publish(
     parent: &File,
     destination: &str,
     owner_sid: &str,
-    sealed: &[u8; crate::custody_envelope::SEALED_KEY_BYTES],
+    sealed: &[u8],
     validate: impl FnOnce(&File) -> Result<()>,
 ) -> Result<()> {
+    ensure!(sealed.len() <= 4096, "private publication is oversized");
     validate_component(destination)?;
     let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
     let mut file = create(parent.as_handle(), &temporary, owner_sid)

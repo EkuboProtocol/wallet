@@ -377,6 +377,73 @@ pub fn unlock(wrapped: &WrappedDataKey) -> Result<()> {
         .unlock(wrapped)
 }
 
+pub struct CredentialStagingRoot(&'static Storage);
+
+pub fn credential_staging_root() -> Result<CredentialStagingRoot> {
+    Ok(CredentialStagingRoot(
+        STORAGE
+            .get()
+            .context("service storage is not initialized")?,
+    ))
+}
+
+impl crate::custody_staging::CredentialStagingStore for CredentialStagingRoot {
+    fn identity(&self) -> (String, String, uuid::Uuid) {
+        (
+            format!("linux:uid:{}", self.0.owner_uid),
+            format!("linux:uid:{}", self.0.service_uid),
+            self.0.profile_id,
+        )
+    }
+    fn create_new(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+        bytes: &[u8],
+    ) -> Result<()> {
+        ensure!(
+            rustix::process::geteuid().as_raw() == self.0.service_uid,
+            "service process identity changed"
+        );
+        publish_stage_record(
+            &self.0.directory,
+            self.0.service_uid,
+            &record.file_name(stage)?,
+            bytes,
+        )
+    }
+    fn read(
+        &self,
+        stage: uuid::Uuid,
+        record: crate::custody_staging::StagedRecord,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        ensure!(
+            rustix::process::geteuid().as_raw() == self.0.service_uid,
+            "service process identity changed"
+        );
+        read_stage_record(
+            &self.0.directory,
+            self.0.service_uid,
+            &record.file_name(stage)?,
+        )
+    }
+}
+
+fn publish_stage_record(parent: &File, uid: u32, name: &str, bytes: &[u8]) -> Result<()> {
+    ensure!(bytes.len() <= 4096, "custody staging record is oversized");
+    validate_directory(parent, uid, true)?;
+    publish_private_record(parent, name, bytes)
+}
+
+fn read_stage_record(parent: &File, uid: u32, name: &str) -> Result<Zeroizing<Vec<u8>>> {
+    validate_directory(parent, uid, true)?;
+    let file = open_regular(parent, name, uid, true)?;
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take(4097).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 4096, "custody staging record is oversized");
+    Ok(bytes)
+}
+
 impl Storage {
     fn unlock(&self, wrapped: &WrappedDataKey) -> Result<()> {
         self.custody.unlock(
@@ -444,30 +511,7 @@ impl Entry {
             Some(instance) => self.cipher.seal_account_key(instance, material)?,
             None => self.cipher.seal_database_key(material)?,
         };
-        let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
-        let mut file = File::from(openat(
-            &self.directory,
-            &temporary,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(PRIVATE_FILE_MODE),
-        )?);
-        let result = (|| {
-            file.write_all(&sealed)?;
-            file.sync_all()?;
-            rustix::fs::renameat_with(
-                &self.directory,
-                &temporary,
-                &self.directory,
-                &self.name,
-                RenameFlags::NOREPLACE,
-            )?;
-            self.directory.sync_all()?;
-            Ok(())
-        })();
-        // If publication succeeded, this name no longer exists. If it failed,
-        // remove only the exact temporary entry created by this operation.
-        let _ = rustix::fs::unlinkat(&self.directory, &temporary, AtFlags::empty());
-        result
+        publish_private_record(&self.directory, &self.name, &sealed)
     }
 
     pub(crate) fn delete_credential(&self) -> Result<()> {
@@ -546,3 +590,24 @@ mod tests;
 #[cfg(test)]
 #[path = "service_storage_unlock_test.rs"]
 mod unlock_tests;
+
+fn publish_private_record(parent: &File, name: &str, bytes: &[u8]) -> Result<()> {
+    let temporary = format!(".key-stage-{}", uuid::Uuid::new_v4());
+    let mut file = File::from(openat(
+        parent,
+        &temporary,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(PRIVATE_FILE_MODE),
+    )?);
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        rustix::fs::renameat_with(parent, &temporary, parent, name, RenameFlags::NOREPLACE)?;
+        parent.sync_all()?;
+        Ok(())
+    })();
+    // If publication succeeded, this name no longer exists. If it failed,
+    // remove only the exact temporary entry created by this operation.
+    let _ = rustix::fs::unlinkat(parent, &temporary, AtFlags::empty());
+    result
+}

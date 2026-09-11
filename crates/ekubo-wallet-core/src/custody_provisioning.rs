@@ -6,6 +6,7 @@
 //! and commit activation before removing any legacy credential. No deletion proof
 //! or authority to change an existing enrollment is produced here.
 
+use crate::custody_staging::{CredentialStage, CredentialStagingStore, StagedRecord};
 use crate::{
     config::{WalletMetadata, validate_wallet_id},
     custody_envelope::{
@@ -15,6 +16,7 @@ use crate::{
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context as _, Result, ensure};
 use rand::TryRng as _;
+use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -27,26 +29,7 @@ pub struct MigrationAccount {
     pub key: Zeroizing<[u8; 32]>,
 }
 
-/// Closed record names shared by Linux and Windows service custody.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ServiceCredentialRecord {
-    WrappingKey,
-    Enrollment,
-    DatabaseKey,
-    AccountKey(Uuid),
-}
-
-impl ServiceCredentialRecord {
-    #[must_use]
-    pub fn file_name(self) -> String {
-        match self {
-            Self::WrappingKey => "wrapping.key".into(),
-            Self::Enrollment => "custody.json".into(),
-            Self::DatabaseKey => "key-database".into(),
-            Self::AccountKey(instance) => format!("key-account-{instance}"),
-        }
-    }
-}
+pub use crate::custody_staging::ServiceCredentialRecord;
 
 /// Not serializable or Debug: the service wrapping key must never be included
 /// in a desktop relay, diagnostic dump, or ordinary migration manifest.
@@ -96,6 +79,26 @@ impl PreparedServiceCredentials {
             accounts: sealed,
             relay,
         })
+    }
+
+    /// Stage under a new identity without replacing active records. The native
+    /// store must provide durable create-new writes and validated handle reads.
+    /// This marker is not activation or legacy-credential deletion authority.
+    pub fn stage(
+        &self,
+        store: &impl crate::custody_staging::CredentialStagingStore,
+    ) -> Result<crate::custody_staging::CredentialStage> {
+        let (owner, service, profile) = store.identity();
+        CustodyEnrollment::from_bytes(&self.enrollment)?.unlock(
+            &WrappingKey::from_material(self.wrapping.clone()),
+            &owner,
+            &service,
+            profile,
+            &self.relay,
+        )?;
+        let mut stage = StageWriter::new(store);
+        self.visit_service_records(|record, bytes| stage.record(record, bytes))?;
+        stage.finish()
     }
 
     /// Ciphertext for the desktop login keyring only. Never store these bytes
@@ -169,3 +172,56 @@ fn validate_accounts(expected: &[WalletMetadata], accounts: &[MigrationAccount])
 #[cfg(test)]
 #[path = "custody_provisioning_test.rs"]
 mod tests;
+
+pub(crate) struct StageWriter<'a, S> {
+    store: &'a S,
+    id: Uuid,
+    count: u64,
+    digest: Sha256,
+}
+impl<'a, S: CredentialStagingStore> StageWriter<'a, S> {
+    pub(crate) fn new(store: &'a S) -> Self {
+        Self {
+            store,
+            id: Uuid::new_v4(),
+            count: 0,
+            digest: Sha256::new(),
+        }
+    }
+    pub(crate) fn record(&mut self, record: ServiceCredentialRecord, bytes: &[u8]) -> Result<()> {
+        let staged = StagedRecord::Credential(record);
+        self.store.create_new(self.id, staged, bytes)?;
+        let read = self.store.read(self.id, staged)?;
+        ensure!(
+            read.as_slice() == bytes,
+            "staged credential readback mismatch"
+        );
+        let name = record.file_name();
+        self.digest.update(u64::try_from(name.len())?.to_le_bytes());
+        self.digest.update(name.as_bytes());
+        self.digest
+            .update(u64::try_from(bytes.len())?.to_le_bytes());
+        self.digest.update(bytes);
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("too many staged records"))?;
+        Ok(())
+    }
+    pub(crate) fn finish(self) -> Result<CredentialStage> {
+        let stage = CredentialStage {
+            version: 1,
+            stage: self.id,
+            records: self.count,
+            digest: self.digest.finalize().into(),
+        };
+        let marker = serde_json::to_vec(&stage)?;
+        self.store
+            .create_new(self.id, StagedRecord::Complete, &marker)?;
+        ensure!(
+            self.store.read(self.id, StagedRecord::Complete)?.as_slice() == marker,
+            "staging completion readback mismatch"
+        );
+        Ok(stage)
+    }
+}
