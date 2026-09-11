@@ -25,6 +25,7 @@ MODULES = (
     "service_profile_lock",
     "custody_envelope",
     "service_custody",
+    "windows_service_custody",
 )
 DEPENDENCIES = ("anyhow", "chacha20poly1305", "fs2", "hex", "rand", "serde",
                 "serde_json", "sha2", "subtle", "uuid", "windows", "zeroize")
@@ -97,6 +98,10 @@ def prepare(output_root):
     source = ['#![cfg(target_os = "windows")]']
     for module in MODULES:
         path = (CORE / "src" / f"{module}.rs").resolve(strict=True)
+        # This adapter's crate-private callers live in the full core storage
+        # and presence modules, which this native-only harness excludes.
+        if module == "windows_service_custody":
+            source.append("#[allow(dead_code)]")
         source.extend([f"#[path = {json.dumps(path.as_posix(), ensure_ascii=False)}]", f"pub mod {module};"])
     (directory / "src" / "lib.rs").write_text("\n".join(source) + "\n", encoding="utf-8")
     # Cargo may prune unrelated workspace packages and add this harness entry.

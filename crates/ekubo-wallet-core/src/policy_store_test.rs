@@ -1652,3 +1652,33 @@ fn widening_the_signature_constraints_moves_no_rows_and_keeps_every_index() {
         )
         .expect("a withdrawn typed-data request has no decision timestamp");
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_pinned_database_can_retry_initialization_after_unseeded_reset() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wallet.db");
+    let pin = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .open(&path)
+        .unwrap();
+    let encryption_key = key(87);
+    let store = PolicyStore::open(&path, &encryption_key).unwrap();
+    store.assert_schema_current().unwrap();
+    assert!(pin.metadata().unwrap().len() > 0);
+    assert!(std::fs::remove_file(&path).is_err());
+    drop(store);
+    // The pin still blocks unlink after SQLite closes. First-use recovery must
+    // reset this exact file, then SQLCipher must reopen it with the same key.
+    assert!(std::fs::remove_file(&path).is_err());
+    reset_unseeded_database(&path, Some(&pin)).unwrap();
+    assert_eq!(pin.metadata().unwrap().len(), 0);
+    let reopened = PolicyStore::open(&path, &encryption_key).unwrap();
+    reopened.assert_schema_current().unwrap();
+    assert!(pin.metadata().unwrap().len() > 0);
+}

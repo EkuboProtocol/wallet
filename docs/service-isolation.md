@@ -1002,3 +1002,24 @@ The root also exposes its OS-resolved volume GUID path, obtained from the retain
 profile handle after ancestor validation. This gives the later SQLite adapter a
 Win32 path tied to the pinned profile rather than a new environment-based lookup.
 The root must outlive every connection using that path.
+
+Windows core now has explicit process-wide activation through
+`windows_service_custody::initialize(owner_sid)`. It verifies existing installed
+service identity and private storage, starts locked, and binds configuration,
+credential routing, and all fixed database/configuration/lifecycle lock files to
+that root. Once active, unsupported namespaces and paths fail without falling
+back to desktop credentials. A missing final credential name alone maps to
+`NoEntry`; missing profile paths, unsafe ACLs, and invalid ciphertext remain
+errors. Unlock continues to require authenticated transport relay.
+
+Each service-backed `PolicyStore` retains a no-delete database handle until its
+SQLite connection closes. Failed first-use token seeding resets that exact
+pinned database to empty so a retry can reuse its credential; it cannot unlink
+the file while other initialization handles hold it. Credential removal validates
+and decrypts the exact exclusively opened file before marking that handle for
+deletion. It never reopens a pathname to delete it.
+
+Windows service owner presence fails closed pending the authenticated desktop
+transport and operation-bound proof adapter. The desktop still uses its existing
+backend: this activation API is not yet called by an installed SCM host, and
+provisioning, migration, transport, and desktop cutover remain incomplete.

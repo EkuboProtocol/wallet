@@ -142,6 +142,8 @@ impl PrivateStorageRoot {
             match file {
                 DatabaseFile::Database => "wallet.db",
                 DatabaseFile::Lock => "wallet.lock",
+                DatabaseFile::ConfigurationLock => "config.lock",
+                DatabaseFile::LifecycleLock => "lifecycle.lock",
             },
             self.identity.service_sid(),
             |file| validate_private_handle(file.as_handle(), &self.identity, StorageKind::File),
@@ -201,6 +203,38 @@ impl PrivateStorageRoot {
             .cipher()?
             .seal_account_key(instance, material)?;
         self.create_encrypted_key(&format!("key-account-{instance}"), &sealed)
+    }
+
+    /// Service-internal removal after core has authorized account lifecycle
+    /// changes. Authenticate the exact encrypted object before deleting it.
+    pub(crate) fn delete_key(&self, instance: Option<uuid::Uuid>) -> Result<()> {
+        let cipher = self.custody.cipher()?;
+        crate::windows_service_identity::verify_service_process(self.identity.service_sid())?;
+        validate_private_handle(
+            self.directory.as_handle(),
+            &self.identity,
+            StorageKind::Directory,
+        )?;
+        let name = instance.map_or_else(
+            || "key-database".to_owned(),
+            |id| format!("key-account-{id}"),
+        );
+        write::remove_credential(
+            self.directory.as_handle(),
+            &name,
+            self.identity.service_sid(),
+            |file| {
+                validate_private_handle(file.as_handle(), &self.identity, StorageKind::File)?;
+                let sealed = crate::service_custody::read_fixed::<
+                    { crate::custody_envelope::SEALED_KEY_BYTES },
+                >(file)?;
+                let _material = match instance {
+                    Some(id) => cipher.open_account_key(id, sealed.as_slice())?,
+                    None => cipher.open_database_key(sealed.as_slice())?,
+                };
+                Ok(())
+            },
+        )
     }
 
     fn create_encrypted_key(

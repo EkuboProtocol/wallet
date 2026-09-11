@@ -23,6 +23,8 @@ pub enum StorageKind {
 pub enum DatabaseFile {
     Database,
     Lock,
+    ConfigurationLock,
+    LifecycleLock,
 }
 
 fn machine_path(path: &str) -> Result<(String, Vec<&str>)> {

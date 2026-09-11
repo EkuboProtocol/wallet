@@ -14,8 +14,8 @@ use windows::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         },
         Storage::FileSystem::{
-            DELETE, FILE_ACCESS_RIGHTS, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
-            FILE_SHARE_WRITE, FileDispositionInfo, SetFileInformationByHandle,
+            DELETE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE, FILE_SHARE_MODE, FILE_SHARE_WRITE,
+            FileDispositionInfo, SetFileInformationByHandle,
         },
     },
     core::PCWSTR,
@@ -84,6 +84,7 @@ fn descriptor(owner_sid: &str) -> Result<Descriptor> {
 #[derive(Clone, Copy)]
 enum OpenMode {
     NewCredential,
+    DeleteCredential,
     Database,
 }
 
@@ -98,7 +99,10 @@ pub(super) fn open_database_file(
     validate: impl FnOnce(&File) -> Result<()>,
 ) -> Result<File> {
     ensure!(
-        matches!(component, "wallet.db" | "wallet.lock"),
+        matches!(
+            component,
+            "wallet.db" | "wallet.lock" | "config.lock" | "lifecycle.lock"
+        ),
         "invalid database file name"
     );
     let file = open_handle(parent, component, owner_sid, OpenMode::Database)?;
@@ -106,6 +110,17 @@ pub(super) fn open_database_file(
     // actual handle before exposing write access to the rest of core.
     validate(&file)?;
     Ok(file)
+}
+
+pub(super) fn remove_credential(
+    parent: BorrowedHandle<'_>,
+    component: &str,
+    owner_sid: &str,
+    validate: impl FnOnce(&File) -> Result<()>,
+) -> Result<()> {
+    let file = open_handle(parent, component, owner_sid, OpenMode::DeleteCredential)?;
+    validate(&file)?;
+    discard(&file)
 }
 
 fn open_handle(
@@ -134,28 +149,28 @@ fn open_handle(
     let mut handle = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
     // SAFETY: all input allocations and the borrowed parent outlive the call.
-    // Neither mode truncates an existing file. A protected DACL is applied on
+    // No mode truncates an existing file. A protected DACL is applied on
     // creation, before bytes exist. Database mode validates existing objects
-    // before returning; credential mode creates a new, exclusively held file.
+    // before returning; deletion also validates its exclusive handle before use.
     unsafe {
         NtCreateFile(
             &raw mut handle,
-            FILE_GENERIC_READ
-                | FILE_GENERIC_WRITE
-                | match mode {
-                    OpenMode::NewCredential => DELETE,
-                    OpenMode::Database => FILE_ACCESS_RIGHTS::default(),
-                },
+            match mode {
+                OpenMode::NewCredential => FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+                OpenMode::DeleteCredential => FILE_GENERIC_READ | DELETE,
+                OpenMode::Database => FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            },
             &raw const attributes,
             &raw mut status,
             None,
             FILE_ATTRIBUTE_NORMAL,
             match mode {
-                OpenMode::NewCredential => FILE_SHARE_MODE(0),
+                OpenMode::NewCredential | OpenMode::DeleteCredential => FILE_SHARE_MODE(0),
                 OpenMode::Database => FILE_SHARE_READ | FILE_SHARE_WRITE,
             },
             match mode {
                 OpenMode::NewCredential => FILE_CREATE,
+                OpenMode::DeleteCredential => FILE_OPEN,
                 OpenMode::Database => FILE_OPEN_IF,
             },
             FILE_NON_DIRECTORY_FILE

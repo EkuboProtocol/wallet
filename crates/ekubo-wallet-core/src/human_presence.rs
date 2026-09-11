@@ -339,6 +339,15 @@ impl HumanPresence for PlatformHumanPresence {
             core::HSTRING,
         };
 
+        if crate::windows_service_custody::data_dir().is_some() {
+            // Session 0 must not ask Hello to authenticate the service identity
+            // or trust a desktop boolean. The owner transport must provide a
+            // separately verified, operation-bound proof before this is enabled.
+            return Err(HumanPresenceError::Unavailable(
+                "Windows service owner authentication is not connected".into(),
+            ));
+        }
+
         let availability = UserConsentVerifier::CheckAvailabilityAsync()
             .map_err(|error| HumanPresenceError::Backend(error.to_string()))?
             .await

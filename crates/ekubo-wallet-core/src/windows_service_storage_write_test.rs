@@ -189,7 +189,7 @@ fn native_database_handles_allow_writers_but_pin_private_files_against_replaceme
         StorageKind::Directory,
     )
     .unwrap();
-    for name in ["wallet.db", "wallet.lock"] {
+    for name in ["wallet.db", "wallet.lock", "config.lock", "lifecycle.lock"] {
         let mut first = open_database_file(pin.as_handle(), name, &fixture.owner, |file| {
             fixture.validate(file)
         })
@@ -270,4 +270,84 @@ fn native_database_opener_rejects_credential_and_arbitrary_names() {
         );
     }
     assert_eq!(std::fs::read_dir(&fixture.path).unwrap().count(), 0);
+}
+
+#[test]
+fn native_credential_removal_validates_and_deletes_the_same_exclusive_handle() {
+    let fixture = Fixture::new();
+    let sealed = fixture.cipher.seal_database_key(&[0x44; 32]).unwrap();
+    fixture.publish(&sealed).unwrap();
+    assert!(
+        remove_credential(
+            fixture.parent.as_handle(),
+            "key-database",
+            &fixture.owner,
+            |_| anyhow::bail!("refused credential")
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(fixture.path.join("key-database")).unwrap(),
+        sealed
+    );
+    remove_credential(
+        fixture.parent.as_handle(),
+        "key-database",
+        &fixture.owner,
+        |file| {
+            fixture.validate(file)?;
+            let bytes = crate::service_custody::read_fixed::<
+                { crate::custody_envelope::SEALED_KEY_BYTES },
+            >(file)?;
+            assert_eq!(
+                *fixture.cipher.open_database_key(bytes.as_slice())?,
+                [0x44; 32]
+            );
+            assert!(
+                std::fs::rename(
+                    fixture.path.join("key-database"),
+                    fixture.path.join("moved")
+                )
+                .is_err()
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(!fixture.path.join("key-database").exists());
+    let missing = remove_credential(
+        fixture.parent.as_handle(),
+        "key-database",
+        &fixture.owner,
+        |_| panic!("missing file reached validation"),
+    )
+    .unwrap_err();
+    assert!(crate::windows_service_custody::is_missing_credential(
+        &missing
+    ));
+    assert!(!fixture.path.join("key-database").exists());
+}
+
+#[test]
+fn native_credential_removal_refuses_hard_linked_files() {
+    let fixture = Fixture::new();
+    fixture
+        .publish(&fixture.cipher.seal_database_key(&[0x55; 32]).unwrap())
+        .unwrap();
+    std::fs::hard_link(
+        fixture.path.join("key-database"),
+        fixture.path.join("alias"),
+    )
+    .unwrap();
+    assert!(
+        remove_credential(
+            fixture.parent.as_handle(),
+            "key-database",
+            &fixture.owner,
+            |file| fixture.validate(file)
+        )
+        .is_err()
+    );
+    assert!(fixture.path.join("key-database").exists());
+    assert!(fixture.path.join("alias").exists());
 }

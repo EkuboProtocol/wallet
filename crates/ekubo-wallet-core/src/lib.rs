@@ -72,6 +72,8 @@ pub mod windows_service_identity;
 
 #[cfg(any(target_os = "windows", test))]
 mod windows_security;
+#[cfg(target_os = "windows")]
+pub mod windows_service_custody;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_service_storage;
 

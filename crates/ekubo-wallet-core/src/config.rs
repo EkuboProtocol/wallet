@@ -711,6 +711,10 @@ impl ConfigStore {
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    if let Some(service) = crate::windows_service_custody::data_dir() {
+        return Ok(service.to_owned());
+    }
     #[cfg(target_os = "linux")]
     if let Some(service) = crate::service_storage::data_dir() {
         // Activated authority is bound to installer-controlled state; inherited
@@ -1066,6 +1070,12 @@ pub fn replace_configured_network(
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    if crate::windows_service_custody::data_dir().is_some() {
+        // The installer owns provisioning. Never repair or create a caller path
+        // after service activation, even before a credential is requested.
+        return crate::windows_service_custody::require_data_dir(path);
+    }
     // Created private, rather than created and then narrowed. `create_dir_all`
     // followed by `set_permissions` leaves the directory readable for the
     // window between the two calls, which is when the wallet's own files are
@@ -1129,6 +1139,10 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
 /// link the mode is then applied to. Handing back the handle means the caller
 /// cannot reintroduce that gap: it already holds the only reference it needs.
 pub(crate) fn open_private_file(path: &Path) -> Result<File> {
+    #[cfg(target_os = "windows")]
+    if let Some(file) = crate::windows_service_custody::open_file(path) {
+        return file;
+    }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

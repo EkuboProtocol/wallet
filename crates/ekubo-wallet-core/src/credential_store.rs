@@ -10,13 +10,15 @@ pub(crate) enum Entry {
     Platform(keyring::Entry),
     #[cfg(target_os = "linux")]
     Service(crate::service_storage::Entry),
+    #[cfg(target_os = "windows")]
+    Service(crate::windows_service_custody::Entry),
 }
 
 impl Entry {
     pub(crate) fn get_secret(&self) -> keyring::Result<Vec<u8>> {
         match self {
             Self::Platform(entry) => entry.get_secret(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::Service(entry) => entry.get_secret().map_err(service_error),
         }
     }
@@ -24,7 +26,7 @@ impl Entry {
     pub(crate) fn set_secret(&self, bytes: &[u8]) -> keyring::Result<()> {
         match self {
             Self::Platform(entry) => entry.set_secret(bytes),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::Service(entry) => entry.set_secret(bytes).map_err(service_error),
         }
     }
@@ -32,7 +34,7 @@ impl Entry {
     pub(crate) fn delete_credential(&self) -> keyring::Result<()> {
         match self {
             Self::Platform(entry) => entry.delete_credential(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::Service(entry) => entry.delete_credential().map_err(service_error),
         }
     }
@@ -47,7 +49,20 @@ fn service_error(error: anyhow::Error) -> keyring::Error {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn service_error(error: anyhow::Error) -> keyring::Error {
+    if crate::windows_service_custody::is_missing_credential(&error) {
+        keyring::Error::NoEntry
+    } else {
+        keyring::Error::PlatformFailure(error.into_boxed_dyn_error())
+    }
+}
+
 pub(crate) fn entry(service: &str, user: &str) -> keyring::Result<Entry> {
+    #[cfg(target_os = "windows")]
+    if let Some(entry) = crate::windows_service_custody::entry(service, user) {
+        return entry.map(Entry::Service).map_err(service_error);
+    }
     #[cfg(target_os = "linux")]
     if let Some(entry) = crate::service_storage::entry(service, user) {
         // An active service never falls back to the desktop credential store,
