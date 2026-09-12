@@ -367,3 +367,101 @@ fn source_recovery_refuses_changed_source_missing_key_or_wrong_relay_before_outp
         assert!(output.into_inner().is_empty());
     }
 }
+
+#[test]
+fn committed_recovery_refreezes_without_account_keys_or_service_exchange() {
+    let (_dir, config, _) = fixture();
+    let destination = destination();
+    let (checkpoint, relay, _) = recovery_fixture(&config, &destination);
+    let expected = checkpoint.clone();
+    let path = config.data_dir().join(policy_store::DATABASE_FILE);
+    let before = std::fs::read(&path).unwrap();
+    let (mut owner, mut installer) = streams();
+    let worker = std::thread::spawn(move || {
+        config.with_lifecycle_lock(|| {
+            let mut command = [0; 1];
+            owner.read_exact(&mut command)?;
+            ensure!(command == [2], "expected committed recovery");
+            let request = RecoveryCheckpoint::read_source_request(&mut owner, &destination)?;
+            ensure!(
+                request.journal_bytes(&destination)? == expected.journal_bytes(&destination)?,
+                "checkpoint changed"
+            );
+            recover_cutover_source(
+                &mut owner,
+                config.data_dir(),
+                &request,
+                &relay,
+                |service, user| {
+                    ensure!(
+                        service == policy_store::KEYRING_SERVICE
+                            && user == policy_store::KEYRING_USER,
+                        "committed recovery requested an account key"
+                    );
+                    Ok(Zeroizing::new(KEY))
+                },
+                || Ok(()),
+            )
+        })
+    });
+    request_cutover(&mut installer, &checkpoint).unwrap();
+    assert!(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "policy_store::migration_database::tests::independent_process_observes_source_fence"
+            ])
+            .env("EKUBO_TEST_MIGRATION_FENCE_SOURCE", &path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    installer.write_all(&[0]).unwrap();
+    worker.join().unwrap().unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn committed_recovery_rejects_absent_decision_changed_source_missing_key_and_wrong_relay() {
+    for mutation in 0..4 {
+        let (_dir, config, _) = fixture();
+        let (mut checkpoint, relay, _) = recovery_fixture(&config, &destination());
+        if mutation == 1 {
+            config
+                .update_for_test(|state| {
+                    state.wallets[0].id = "changed".into();
+                    Ok(())
+                })
+                .unwrap();
+        }
+        if mutation == 3 {
+            checkpoint.relay_digest[0] ^= 1;
+        }
+        let mut output = Cursor::new(Vec::new());
+        let mut reads = 0;
+        let result = config.with_lifecycle_lock(|| {
+            recover_cutover_source(
+                &mut output,
+                config.data_dir(),
+                &checkpoint,
+                &relay,
+                |service, user| {
+                    assert_eq!(
+                        (service, user),
+                        (policy_store::KEYRING_SERVICE, policy_store::KEYRING_USER)
+                    );
+                    reads += 1;
+                    ensure!(mutation != 2, "missing key");
+                    Ok(Zeroizing::new(KEY))
+                },
+                || {
+                    ensure!(mutation != 0, "absent decision");
+                    Ok(())
+                },
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(reads, usize::from(mutation == 1 || mutation == 2));
+        assert!(output.into_inner().is_empty());
+    }
+}

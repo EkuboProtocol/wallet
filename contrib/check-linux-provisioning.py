@@ -216,6 +216,14 @@ def recover_source(executable, child, owner, unit):
     subprocess.run([str(executable), "source-recover", str(owner)],
                    env=dict(os.environ, EKUBO_FIXTURE_SOURCE_RECIPIENT=recipient),
                    check=True, timeout=420)
+    child.stdin.write(b"recover-cutover\n")
+    child.stdin.flush()
+    recipient = read_line(child, 30)
+    if re.fullmatch(r":[0-9]+\.[0-9]+", recipient) is None:
+        raise RuntimeError("owner cutover recovery returned an invalid unique name")
+    subprocess.run([str(executable), "source-recover-cutover", str(owner)],
+                   env=dict(os.environ, EKUBO_FIXTURE_SOURCE_RECIPIENT=recipient),
+                   check=True, timeout=420)
 
 
 def main():

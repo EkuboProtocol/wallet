@@ -11,8 +11,8 @@ use uuid::Uuid;
 mod native;
 #[cfg(target_os = "windows")]
 pub use native::{
-    find_installed_service_identity, installed_service_identity, pending_installer_identity,
-    service_identity,
+    committed_installer_identity, find_installed_service_identity, installed_service_identity,
+    pending_installer_identity, service_identity,
 };
 #[cfg(target_os = "windows")]
 pub(crate) use native::{

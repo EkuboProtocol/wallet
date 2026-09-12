@@ -85,6 +85,19 @@ pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     pending_configuration_under(HKEY_LOCAL_MACHINE, current.user_sid(), &machine_trustees()?)
 }
 
+/// Require an existing decision; recovery must not create one implicitly.
+pub fn committed_installer_identity(owner: &str) -> Result<super::PendingInstallerIdentity> {
+    let identity = pending_installer_identity(owner)?;
+    let committed =
+        read_configuration_at(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?, "Committed")?
+            .context("installer cutover has not been committed")?;
+    ensure!(
+        identity.0.0 == committed.0,
+        "installer committed identity changed"
+    );
+    Ok(identity)
+}
+
 pub(super) fn committed_owner_profile() -> Result<uuid::Uuid> {
     let pending = pending_owner_identity()?;
     let committed = read_configuration_at(

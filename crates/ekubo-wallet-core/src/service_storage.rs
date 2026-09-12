@@ -84,6 +84,17 @@ fn read_pending_installer_identity(
     })
 }
 
+/// Read an already recorded cutover for privileged recovery. Never records one.
+pub fn committed_installer_identity(owner_uid: u32) -> Result<PendingInstallerIdentity> {
+    let identity = pending_installer_identity(owner_uid)?;
+    ensure!(
+        find_configuration_at(&root_directory()?, owner_uid, 0, "committed")?
+            == Some(identity.configured.clone()),
+        "installer cutover has not been committed"
+    );
+    Ok(identity)
+}
+
 impl InstalledServiceIdentity {
     #[must_use]
     pub const fn profile_id(&self) -> uuid::Uuid {

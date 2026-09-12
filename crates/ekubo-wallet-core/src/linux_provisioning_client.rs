@@ -451,3 +451,7 @@ pub async fn resume(
 #[cfg(test)]
 #[path = "linux_provisioning_client_test.rs"]
 mod tests;
+
+#[path = "linux_cutover_client.rs"]
+mod cutover;
+pub use cutover::{RecoveredCutover, recover_cutover_from_owner};

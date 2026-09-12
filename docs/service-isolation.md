@@ -934,13 +934,30 @@ One confirmation is accepted per connection; abort, disconnect, or the existing
 deadline releases source retention. Cancellation stays with the awaiting task,
 while the blocking worker retains installer/service exclusion until native I/O exits.
 
-This confirms the source at the exchange, not indefinitely. Promotion, recovery
-after losing a committed source connection, production recovery coordination,
-and desktop/installer integration remain unfinished. No startup UX has been changed
+This confirms the source at the exchange, not indefinitely. Promotion, production
+recovery coordination, and desktop/installer integration remain unfinished. No startup UX has been changed
 to invoke this operation yet. The Linux and Windows source fixtures now stop their
 synthetic service and exercise this path; native execution at this revision is still
 required. The shared framing/confirmation logic is in `migration_source_control`,
 separate from credential collection and native transport.
+
+Before promotion, `recover_cutover_from_owner` can now reconnect after losing a
+committed source connection. Both native adapters require actual installer authority,
+the global installer lease, matching committed/pending metadata, and a protected
+checkpoint. They verify the stopped service's prepared files while holding its lock
+and contact only the owner source. No caller-supplied checkpoint, source path, key,
+or relay enters this API; the pending service is never restarted or contacted.
+
+Source request 2 verifies the committed destination, loads the existing owner relay
+and database key, and refreezes the source under lifecycle/SQLCipher exclusion.
+The relay digest and logical fingerprint must match the checkpoint before confirming.
+It neither collects account keys nor transmits keys, a database snapshot, or relay
+bytes. The original checkpoint remains unchanged despite the new temporary encrypted
+snapshot. Missing decisions, changed source data, missing keys, and wrong relays fail.
+The returned `RecoveredCutover` retains source and installer exclusion with the same
+deadline/cancellation limits as initial confirmation; it grants no cleanup authority.
+Native source fixtures retire the original endpoint and recover through a fresh one
+while the pending service remains stopped. Their execution still needs verification.
 
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData

@@ -89,6 +89,19 @@ pub(crate) fn serve(stream: &mut (impl Read + Write)) -> Result<()> {
                     existing_key,
                 )
             }
+            2 => {
+                let checkpoint = RecoveryCheckpoint::read_source_request(stream, &destination)?;
+                require_cutover(&checkpoint)?;
+                let relay = crate::custody_relay::load(destination.profile)?;
+                recover_cutover_source(
+                    stream,
+                    &directory,
+                    &checkpoint,
+                    &relay,
+                    existing_key,
+                    || require_cutover(&checkpoint),
+                )
+            }
             _ => anyhow::bail!("unsupported source request"),
         }
     })
@@ -185,24 +198,70 @@ fn retain_source(
     checkpoint: &RecoveryCheckpoint,
 ) -> Result<()> {
     control::retain(stream, checkpoint, || {
-        ensure!(
-            destination()? == checkpoint.destination,
-            "source destination changed"
-        );
-        #[cfg(target_os = "linux")]
-        let profile = crate::service_storage::committed_owner_profile()?;
-        #[cfg(target_os = "windows")]
-        let profile = crate::windows_service_config::committed_owner_profile()?;
-        ensure!(
-            profile == checkpoint.destination.profile,
-            "source committed profile changed"
-        );
+        require_cutover(checkpoint)?;
         ensure!(
             snapshot.source_fingerprint()? == checkpoint.source_fingerprint,
             "committed source fingerprint changed"
         );
         Ok(())
     })
+}
+
+fn require_cutover(checkpoint: &RecoveryCheckpoint) -> Result<()> {
+    ensure!(
+        destination()? == checkpoint.destination,
+        "source destination changed"
+    );
+    #[cfg(target_os = "linux")]
+    let profile = crate::service_storage::committed_owner_profile()?;
+    #[cfg(target_os = "windows")]
+    let profile = crate::windows_service_config::committed_owner_profile()?;
+    ensure!(
+        profile == checkpoint.destination.profile,
+        "source committed profile changed"
+    );
+    Ok(())
+}
+
+fn recover_cutover_source(
+    stream: &mut (impl Read + Write),
+    data_dir: &Path,
+    checkpoint: &RecoveryCheckpoint,
+    relay: &crate::custody_envelope::WrappedDataKey,
+    mut read: impl FnMut(&str, &str) -> Result<Zeroizing<[u8; 32]>>,
+    mut committed: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    checkpoint.journal_bytes(&checkpoint.destination)?;
+    committed()?;
+    ensure!(
+        relay.digest() == checkpoint.relay_digest,
+        "committed source relay changed"
+    );
+    let key = read(policy_store::KEYRING_SERVICE, policy_store::KEYRING_USER)?;
+    let snapshot =
+        MigrationDatabaseSnapshot::freeze(&data_dir.join(policy_store::DATABASE_FILE), key)?;
+    ensure!(
+        snapshot.source_fingerprint()? == checkpoint.source_fingerprint,
+        "committed source fingerprint changed"
+    );
+    control::retain(stream, checkpoint, || {
+        committed()?;
+        ensure!(
+            snapshot.source_fingerprint()? == checkpoint.source_fingerprint,
+            "committed source fingerprint changed"
+        );
+        Ok(())
+    })
+}
+
+pub(crate) fn request_cutover(
+    stream: &mut (impl Read + Write),
+    checkpoint: &RecoveryCheckpoint,
+) -> Result<()> {
+    checkpoint.journal_bytes(&checkpoint.destination)?;
+    stream.write_all(&[2])?;
+    checkpoint.write_source_request(stream)?;
+    control::confirm(stream, checkpoint)
 }
 
 #[cfg(test)]

@@ -75,6 +75,20 @@ pub(super) async fn client(owner: &str) -> Result<()> {
         drop(confirmed.verify_prepared()?);
         drop(confirmed);
         stdin.write_all(b"finish\n").await?;
+        let endpoint = read_endpoint(&mut stdout).await?;
+        let recovered =
+            windows_provisioning_client::recover_cutover_from_owner(owner, endpoint).await?;
+        ensure!(
+            serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&checkpoint)?,
+            "committed recovery changed checkpoint"
+        );
+        drop(recovered.verify_prepared()?);
+        ensure!(
+            windows_service_storage::installer_journal::acquire_installer().is_err(),
+            "committed recovery released installer exclusion"
+        );
+        drop(recovered);
+        stdin.write_all(b"finish\n").await?;
         drop(stdin);
         let status = tokio::time::timeout(Duration::from_secs(15), child.wait()).await??;
         ensure!(status.success(), "source owner failed");
@@ -213,6 +227,8 @@ pub(super) fn owner(owner: &str) -> Result<()> {
     runtime()?.block_on(serve())?;
     // Complete cancellation before publishing a fresh recovery endpoint; no
     // timing-based retry can race the previous collector's admission permit.
+    config.with_lifecycle_lock(|| Ok(()))?;
+    runtime()?.block_on(serve())?;
     config.with_lifecycle_lock(|| Ok(()))?;
     runtime()?.block_on(serve())?;
     // Wait for the blocking collector to release both locks before reopening

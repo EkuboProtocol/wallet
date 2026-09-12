@@ -315,3 +315,7 @@ async fn exchange<S: Send + 'static>(
     })
     .await?
 }
+
+#[path = "windows_cutover_client.rs"]
+mod cutover;
+pub use cutover::{RecoveredCutover, recover_cutover_from_owner};

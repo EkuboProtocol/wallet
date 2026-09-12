@@ -25,6 +25,7 @@ pub fn run() -> Result<()> {
         "source-owner" => source_owner(owner),
         "source-client" => source_client(owner),
         "source-recover" => source_recover(owner),
+        "source-recover-cutover" => source_recover_cutover(owner),
         "verify-prepared" => verify_prepared(owner),
         _ => anyhow::bail!("unknown fixture mode"),
     }
@@ -248,7 +249,7 @@ fn source_owner(owner: u32) -> Result<()> {
     )?;
     account_key.set_secret(&[0x11; 32])?;
     let runtime = runtime()?;
-    for expected in ["recover\n", "finish\n"] {
+    for expected in ["recover\n", "recover-cutover\n", "finish\n"] {
         let endpoint = runtime
             .block_on(ekubo_wallet_core::linux_source_handoff::OwnerSourceEndpoint::bind())?;
         println!("{}", endpoint.unique_name()?);
@@ -358,5 +359,27 @@ async fn reject_ordinary_relay_caller(recipient: zbus::names::OwnedUniqueName) -
         matches!(result, Err(zbus::Error::MethodError(ref name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"),
         "ordinary owner reached relay persistence"
     );
+    Ok(())
+}
+
+fn source_recover_cutover(owner: u32) -> Result<()> {
+    let previous = ekubo_wallet_core::service_storage::installer_journal::load_checkpoint(owner)?
+        .context("missing cutover checkpoint")?;
+    let recipient = std::env::var("EKUBO_FIXTURE_SOURCE_RECIPIENT")?.try_into()?;
+    let runtime = runtime()?;
+    let recovered = runtime.block_on(linux_provisioning_client::recover_cutover_from_owner(
+        owner, recipient,
+    ))?;
+    ensure!(
+        serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&previous)?,
+        "committed recovery changed checkpoint"
+    );
+    drop(recovered.verify_prepared()?);
+    ensure!(
+        ekubo_wallet_core::service_storage::installer_journal::acquire_installer().is_err(),
+        "committed recovery released installer exclusion"
+    );
+    drop(recovered);
+    println!("Committed source recovered without starting the pending service");
     Ok(())
 }
