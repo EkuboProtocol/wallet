@@ -23,9 +23,19 @@ pub struct ForwardedSource {
     _service: Connection,
     reply: StagingReply,
     checkpoint: migration_transfer::RecoveryCheckpoint,
-    _installer: service_storage::installer_journal::InstallerLease,
+    installer: service_storage::installer_journal::InstallerLease,
+    owner_uid: u32,
 }
 impl ForwardedSource {
+    /// Stop the pending service before calling. Source retention and installer
+    /// exclusion remain owned by this handoff while the verification guard lives.
+    pub fn verify_prepared(
+        &self,
+    ) -> Result<service_storage::installer_journal::QuiescentProfile<'_>> {
+        let prepared = self.installer.verify_prepared(self.owner_uid)?;
+        prepared.require_checkpoint(&self.checkpoint)?;
+        Ok(prepared)
+    }
     #[must_use]
     pub const fn reply(&self) -> &StagingReply {
         &self.reply
@@ -46,6 +56,7 @@ pub async fn forward_from_owner(
     recipient: OwnedUniqueName,
 ) -> Result<ForwardedSource> {
     let installer = service_storage::installer_journal::acquire_installer()?;
+    crate::service_storage::installer_journal::require_uncommitted(owner_uid)?;
     handoff_from_owner(owner_uid, recipient, None, installer).await
 }
 
@@ -57,6 +68,7 @@ pub async fn recover_from_owner(
     recipient: OwnedUniqueName,
 ) -> Result<ForwardedSource> {
     let installer = service_storage::installer_journal::acquire_installer()?;
+    crate::service_storage::installer_journal::require_uncommitted(owner_uid)?;
     let checkpoint = service_storage::installer_journal::load_checkpoint(owner_uid)?
         .context("source recovery requires a completed installer checkpoint")?;
     handoff_from_owner(owner_uid, recipient, Some(checkpoint), installer).await
@@ -116,7 +128,8 @@ async fn handoff_from_owner(
             _service: bus,
             reply,
             checkpoint: checkpoint.context("source checkpoint is missing")?,
-            _installer: installer,
+            installer,
+            owner_uid,
         }),
         Err(error) => {
             let _ = bus.close().await;

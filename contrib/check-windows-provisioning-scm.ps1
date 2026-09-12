@@ -1,5 +1,5 @@
 # Synthetic cross-account fixture for disposable GitHub Windows runners only.
-param([Parameter(Mandatory = $true)][string]$FixtureBinary, [switch]$StopAfterClient, [switch]$SourceFromOwner)
+param([Parameter(Mandatory = $true)][string]$FixtureBinary, [switch]$StopAfterClient, [switch]$SourceFromOwner, [switch]$VerifyPrepared)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') {
@@ -108,8 +108,10 @@ try {
         throw "Service reported failure: $($status.ExitCode)/$($status.ServiceSpecificExitCode)"
     }
     if (-not $serviceProcess.WaitForExit(30000)) { throw 'Pending service process has not exited.' }
-    & $binary verify-prepared $owner
-    if ($LASTEXITCODE -ne 0) { throw 'Quiescent prepared-file verification failed.' }
+    if ($VerifyPrepared) {
+        & $binary verify-prepared $owner
+        if ($LASTEXITCODE -ne 0) { throw 'Quiescent prepared-file verification failed.' }
+    }
     Write-Output 'Production pending SCM bootstrap, protected storage and cross-account provisioning authentication passed.'
 } finally {
     if ($serviceCreated) {

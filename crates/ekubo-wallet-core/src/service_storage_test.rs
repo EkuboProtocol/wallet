@@ -432,6 +432,15 @@ fn pending_storage_stages_without_becoming_an_active_profile() {
     assert!(!private.join("wrapping.key").exists());
     drop(staging);
     drop(open_pending_storage(&handle, owner, uid).unwrap());
+    let committed = root.path().join("etc/ekubo-wallet/committed");
+    std::fs::create_dir(&committed).unwrap();
+    std::fs::write(committed.join(format!("{owner}.json")), &bytes).unwrap();
+    assert!(
+        open_pending_storage(&handle, owner, uid).is_err(),
+        "a stopped pending profile must not restart after committed cutover"
+    );
+    assert!(find_installation_configuration(&handle, owner, uid).is_err());
+    assert!(read_pending_installer_identity(&handle, owner, uid).is_ok());
     let active = root.path().join("etc/ekubo-wallet/owners");
     std::fs::create_dir_all(&active).unwrap();
     let active = active.join(format!("{owner}.json"));

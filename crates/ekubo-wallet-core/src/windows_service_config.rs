@@ -15,7 +15,10 @@ pub use native::{
     service_identity,
 };
 #[cfg(target_os = "windows")]
-pub(crate) use native::{machine_trustees, pending_owner_identity, pending_service_identity};
+pub(crate) use native::{
+    machine_trustees, pending_owner_identity, pending_service_identity, record_cutover,
+    require_uncommitted,
+};
 
 /// Read protected pending metadata for the actual primary-token owner. The
 /// identity reader rejects thread impersonation; service SIDs are not owners.
@@ -26,7 +29,7 @@ pub fn pending_owner_profile() -> Result<Uuid> {
 
 const MAX_CONFIG_BYTES: usize = 4096;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configuration {
     owner_sid: String,

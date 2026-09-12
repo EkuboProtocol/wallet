@@ -175,9 +175,17 @@ fn verify_prepared(owner: &str) -> Result<()> {
         installer.verify_prepared(owner).is_err(),
         "prepared verifier released the service lock"
     );
+    prepared.begin_cutover()?;
+    prepared.begin_cutover()?;
+    ensure!(
+        ekubo_wallet_core::windows_service_config::find_installed_service_identity().is_err(),
+        "committed cutover allowed legacy startup"
+    );
     drop(prepared);
     drop(installer.verify_prepared(owner)?);
-    println!("Quiescent Windows runtime files match the protected checkpoint");
+    println!(
+        "Quiescent Windows runtime files match the protected checkpoint; durable cutover blocks legacy startup"
+    );
     Ok(())
 }
 

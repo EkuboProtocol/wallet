@@ -14,12 +14,40 @@ pub struct InstallerLease {
 }
 
 /// Verified files and retained service exclusion. All handles must be retired in
-/// a coordinated promotion phase; this guard itself permits no rename or cutover.
+/// a coordinated promotion phase; this guard itself permits no rename or cleanup.
 pub struct QuiescentProfile<'a> {
     _installer: &'a InstallerLease,
     _lock: ProfileLock,
     _directory: File,
     _ancestors: Vec<File>,
+    owner_sid: String,
+    checkpoint: RecoveryCheckpoint,
+}
+
+impl QuiescentProfile<'_> {
+    /// Persist the decision with installer and service exclusion retained. The
+    /// coordinator must separately retain/revalidate the live source. This does
+    /// not promote files, prove active service readiness, or permit deletion.
+    pub fn begin_cutover(&self) -> Result<()> {
+        crate::windows_service_identity::verify_installer_process()?;
+        self.require_checkpoint(
+            &load_checkpoint(&self.owner_sid)?.context("cutover checkpoint is missing")?,
+        )?;
+        crate::windows_service_config::record_cutover(
+            &self.owner_sid,
+            self.checkpoint.destination.profile,
+        )
+    }
+
+    pub(crate) fn require_checkpoint(&self, checkpoint: &RecoveryCheckpoint) -> Result<()> {
+        ensure!(
+            self.checkpoint
+                .journal_bytes(&self.checkpoint.destination)?
+                == checkpoint.journal_bytes(&self.checkpoint.destination)?,
+            "quiescent profile checkpoint changed"
+        );
+        Ok(())
+    }
 }
 
 impl InstallerLease {
@@ -63,6 +91,8 @@ impl InstallerLease {
             _lock: lock,
             _directory: directory,
             _ancestors: ancestors,
+            owner_sid: owner_sid.to_owned(),
+            checkpoint,
         })
     }
 }

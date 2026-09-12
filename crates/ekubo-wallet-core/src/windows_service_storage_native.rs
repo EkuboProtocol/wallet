@@ -96,6 +96,15 @@ impl PrivateStorageRoot {
             StorageKind::File,
         )?;
         let lock = ProfileLock::acquire(lock_file)?;
+        if collection == "Pending" {
+            let checked =
+                crate::windows_service_config::pending_service_identity(identity.owner_sid())?;
+            ensure!(
+                checked.profile_id() == identity.profile_id()
+                    && checked.service_sid() == identity.service_sid(),
+                "pending configuration changed during bootstrap"
+            );
+        }
         // Only now is every ancestor guaranteed to have a retained child.
         // Those child handles deny deletion, preventing the empty-directory
         // prerequisite for setting a reparse point via FILE_WRITE_ATTRIBUTES.

@@ -2,6 +2,97 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 #[test]
+fn cutover_identity_blocks_fallback_and_pending_bootstrap_until_matching_activation() {
+    let root = tempfile::tempdir().unwrap();
+    let wallet = root.path().join("etc/ekubo-wallet");
+    let pending = wallet.join("pending");
+    std::fs::create_dir_all(&pending).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let configured = OwnerConfiguration {
+        owner_uid: 1000,
+        service_uid: 2000,
+        profile_id: uuid::Uuid::new_v4(),
+    };
+    let bytes = serde_json::to_vec(&configured).unwrap();
+    std::fs::write(pending.join("1000.json"), &bytes).unwrap();
+    let handle = File::open(root.path()).unwrap();
+    assert!(
+        find_installation_configuration(&handle, 1000, uid)
+            .unwrap()
+            .is_none()
+    );
+    record_cutover_under(&handle, &configured, uid).unwrap();
+    record_cutover_under(&handle, &configured, uid).unwrap();
+    let marker = wallet.join("committed/1000.json");
+    assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    assert!(find_installation_configuration(&handle, 1000, uid).is_err());
+    assert!(super::super::require_uncommitted(&handle, 1000, uid).is_err());
+    assert!(open_pending_storage(&handle, 1000, uid).is_err());
+    assert!(pending_configuration(&handle, 1000, uid).unwrap() == configured);
+    let changed = OwnerConfiguration {
+        profile_id: uuid::Uuid::new_v4(),
+        ..configured.clone()
+    };
+    std::fs::write(
+        pending.join("1000.json"),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    assert!(record_cutover_under(&handle, &changed, uid).is_err());
+    assert!(pending_configuration(&handle, 1000, uid).is_err());
+    assert_eq!(std::fs::read(&marker).unwrap(), bytes);
+    std::fs::create_dir(wallet.join("owners")).unwrap();
+    std::fs::write(
+        wallet.join("owners/1000.json"),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    assert!(find_installation_configuration(&handle, 1000, uid).is_err());
+    std::fs::write(wallet.join("owners/1000.json"), &bytes).unwrap();
+    assert!(find_installation_configuration(&handle, 1000, uid).unwrap() == Some(configured));
+    std::fs::write(&marker, b"invalid").unwrap();
+    assert!(find_installation_configuration(&handle, 1000, uid).is_err());
+}
+
+#[test]
+fn cutover_publication_rejects_links_and_unsafe_directories_without_repair() {
+    let root = tempfile::tempdir().unwrap();
+    let wallet = root.path().join("etc/ekubo-wallet");
+    std::fs::create_dir_all(wallet.join("pending")).unwrap();
+    std::fs::create_dir(wallet.join("committed")).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let configured = OwnerConfiguration {
+        owner_uid: 1000,
+        service_uid: 2000,
+        profile_id: uuid::Uuid::new_v4(),
+    };
+    let bytes = serde_json::to_vec(&configured).unwrap();
+    std::fs::write(wallet.join("pending/1000.json"), &bytes).unwrap();
+    let handle = File::open(root.path()).unwrap();
+    let outside = root.path().join("outside");
+    std::fs::write(&outside, &bytes).unwrap();
+    let marker = wallet.join("committed/1000.json");
+    symlink(&outside, &marker).unwrap();
+    assert!(record_cutover_under(&handle, &configured, uid).is_err());
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::hard_link(&outside, &marker).unwrap();
+    assert!(record_cutover_under(&handle, &configured, uid).is_err());
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::set_permissions(
+        wallet.join("committed"),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    assert!(record_cutover_under(&handle, &configured, uid).is_err());
+    assert!(!marker.exists());
+    assert_eq!(std::fs::read(&outside).unwrap(), bytes);
+}
+
+#[test]
 fn checkpoint_publication_is_durable_immutable_and_bound_to_pending_identity() {
     let root = tempfile::tempdir().unwrap();
     let pending = root.path().join("etc/ekubo-wallet/pending");

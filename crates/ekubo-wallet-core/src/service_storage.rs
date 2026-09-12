@@ -27,7 +27,7 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 const MAX_CONFIG_BYTES: u64 = 4096;
 const KEY_BYTES: usize = 32;
 
-#[derive(Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OwnerConfiguration {
     owner_uid: u32,
@@ -110,7 +110,8 @@ pub fn installed_service_identity() -> Result<InstalledServiceIdentity> {
 /// malformed configuration never count as an absent installation.
 pub fn find_installed_service_identity() -> Result<Option<InstalledServiceIdentity>> {
     let owner_uid = client_uid()?;
-    let Some(configured) = find_owner_configuration(&root_directory()?, owner_uid, 0)? else {
+    let Some(configured) = find_installation_configuration(&root_directory()?, owner_uid, 0)?
+    else {
         return Ok(None);
     };
     Ok(Some(InstalledServiceIdentity {
@@ -157,7 +158,30 @@ fn root_directory() -> Result<File> {
 }
 
 fn owner_configuration(root: &File, owner_uid: u32) -> Result<OwnerConfiguration> {
-    find_owner_configuration(root, owner_uid, 0)?.context("wallet service is not installed")
+    find_installation_configuration(root, owner_uid, 0)?.context("wallet service is not installed")
+}
+
+fn find_installation_configuration(
+    root: &File,
+    owner: u32,
+    system_uid: u32,
+) -> Result<Option<OwnerConfiguration>> {
+    let active = find_owner_configuration(root, owner, system_uid)?;
+    if let Some(committed) = find_configuration_at(root, owner, system_uid, "committed")? {
+        ensure!(
+            active.as_ref() == Some(&committed),
+            "wallet service cutover requires installer recovery"
+        );
+    }
+    Ok(active)
+}
+
+fn require_uncommitted(root: &File, owner: u32, system_uid: u32) -> Result<()> {
+    ensure!(
+        find_configuration_at(root, owner, system_uid, "committed")?.is_none(),
+        "wallet service cutover has already been recorded"
+    );
+    Ok(())
 }
 
 fn find_owner_configuration(
@@ -486,6 +510,7 @@ fn open_pending_storage(
 ) -> Result<PendingCredentialStorage> {
     let service_uid = rustix::process::geteuid().as_raw();
     let configured = pending_configuration(root, owner_uid, system_uid)?;
+    require_uncommitted(root, owner_uid, system_uid)?;
     ensure!(
         configured.service_uid == service_uid,
         "pending service identity mismatch"
@@ -501,6 +526,11 @@ fn open_pending_storage(
         true,
     )?);
     let lock = lock_profile(&directory, service_uid)?;
+    require_uncommitted(root, owner_uid, system_uid)?;
+    ensure!(
+        pending_configuration(root, owner_uid, system_uid)? == configured,
+        "pending configuration changed during bootstrap"
+    );
     Ok(PendingCredentialStorage(CredentialStagingRoot {
         directory,
         owner_uid,
@@ -519,8 +549,15 @@ fn pending_configuration(
         find_owner_configuration(root, owner_uid, system_uid)?.is_none(),
         "pending bootstrap cannot replace an active service profile"
     );
-    find_configuration_at(root, owner_uid, system_uid, "pending")?
-        .context("pending service profile is missing")
+    let pending = find_configuration_at(root, owner_uid, system_uid, "pending")?
+        .context("pending service profile is missing")?;
+    if let Some(committed) = find_configuration_at(root, owner_uid, system_uid, "committed")? {
+        ensure!(
+            pending == committed,
+            "pending profile differs from committed cutover"
+        );
+    }
+    Ok(pending)
 }
 
 impl crate::custody_staging::CredentialStagingStore for CredentialStagingRoot {

@@ -212,11 +212,11 @@ jobs:
         run: |
           cargo build --locked -p ekubo-wallet-service --features migration-fixture --example windows-migration-scm --jobs ${{ matrix.test_jobs }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -StopAfterClient
+          pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -VerifyPrepared -StopAfterClient
 
       - name: Test Windows migration from the owner keyring
         if: runner.os == 'Windows'
-        run: pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -StopAfterClient -SourceFromOwner
+        run: pwsh -NoProfile -File contrib/check-windows-provisioning-scm.ps1 -FixtureBinary target/debug/examples/windows-migration-scm.exe -VerifyPrepared -StopAfterClient -SourceFromOwner
 
       - name: Test encrypted migration across Linux service identities
         if: runner.os == 'Linux'

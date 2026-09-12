@@ -14,7 +14,8 @@ use windows::{
         },
         System::Registry::{
             HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, REG_BINARY, REG_OPTION_OPEN_LINK,
-            REG_VALUE_TYPE, RegCloseKey, RegGetKeySecurity, RegOpenKeyExW, RegQueryValueExW,
+            REG_SAM_FLAGS, REG_VALUE_TYPE, RegCloseKey, RegGetKeySecurity, RegOpenKeyExW,
+            RegQueryValueExW,
         },
     },
     core::{PCWSTR, PWSTR},
@@ -29,6 +30,10 @@ use crate::windows_service_identity::{
 };
 
 struct Key(HKEY);
+
+#[path = "windows_cutover_config_native.rs"]
+mod cutover;
+pub(crate) use cutover::record_cutover;
 impl Drop for Key {
     fn drop(&mut self) {
         // This wrapper owns a successful RegOpenKeyExW result.
@@ -59,6 +64,7 @@ pub fn service_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
 // Pending identities are confined to the storage bootstrap, never returned to
 // desktop discovery or exposed as a public installed-identity constructor.
 pub(crate) fn pending_service_identity(owner: &str) -> Result<InstalledServiceIdentity> {
+    require_uncommitted(owner)?;
     let identity = pending_configuration_under(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?)?;
     verify_service_process(identity.service_sid())?;
     Ok(identity)
@@ -85,11 +91,27 @@ fn pending_configuration_under(
     trusted: &[String],
 ) -> Result<InstalledServiceIdentity> {
     ensure!(
-        read_configuration_under(root, owner, trusted)?.is_none(),
+        read_configuration_at(root, owner, trusted, "Owners")?.is_none(),
         "pending bootstrap cannot replace an active service profile"
     );
-    read_configuration_at(root, owner, trusted, "Pending")?
-        .context("pending service profile is missing")
+    let pending = read_configuration_at(root, owner, trusted, "Pending")?
+        .context("pending service profile is missing")?;
+    if let Some(committed) = read_configuration_at(root, owner, trusted, "Committed")? {
+        ensure!(
+            pending.0 == committed.0,
+            "pending profile differs from committed cutover"
+        );
+    }
+    Ok(pending)
+}
+
+pub(crate) fn require_uncommitted(owner: &str) -> Result<()> {
+    ensure!(
+        read_configuration_at(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?, "Committed")?
+            .is_none(),
+        "wallet service cutover has already been recorded"
+    );
+    Ok(())
 }
 
 fn account_sid(account: &str) -> Result<String> {
@@ -135,6 +157,15 @@ fn account_sid(account: &str) -> Result<String> {
 }
 
 fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<Option<Key>> {
+    open_component_access(parent, component, trusted, KEY_READ)
+}
+
+fn open_component_access(
+    parent: HKEY,
+    component: &str,
+    trusted: &[String],
+    access: REG_SAM_FLAGS,
+) -> Result<Option<Key>> {
     let name = wide(component);
     let mut handle = HKEY::default();
     let status = unsafe {
@@ -142,7 +173,7 @@ fn open_component(parent: HKEY, component: &str, trusted: &[String]) -> Result<O
             parent,
             PCWSTR(name.as_ptr()),
             Some(REG_OPTION_OPEN_LINK.0),
-            KEY_READ | KEY_WOW64_64KEY,
+            access | KEY_WOW64_64KEY,
             &raw mut handle,
         )
     };
@@ -190,7 +221,16 @@ fn read_configuration_under(
     owner: &str,
     trusted: &[String],
 ) -> Result<Option<InstalledServiceIdentity>> {
-    read_configuration_at(root, owner, trusted, "Owners")
+    let active = read_configuration_at(root, owner, trusted, "Owners")?;
+    if let Some(committed) = read_configuration_at(root, owner, trusted, "Committed")? {
+        ensure!(
+            active
+                .as_ref()
+                .is_some_and(|active| active.0 == committed.0),
+            "wallet service cutover requires installer recovery"
+        );
+    }
+    Ok(active)
 }
 
 fn read_configuration_at(
@@ -215,6 +255,18 @@ fn read_configuration_at(
         parent = key.0;
         keys.push(key);
     }
+    let bytes = read_profile_value(parent)?;
+    let identity = decode(&bytes, owner)?;
+    ensure!(
+        account_sid(&format!("NT SERVICE\\{}", identity.service_name()))? == identity.service_sid(),
+        "configured service SID does not match its installed name"
+    );
+    // Keep every validated ancestor open until all metadata has been checked.
+    drop(keys);
+    Ok(Some(identity))
+}
+
+fn read_profile_value(parent: HKEY) -> Result<Vec<u8>> {
     let name = wide("Profile");
     let mut kind = REG_VALUE_TYPE::default();
     let mut length = 0;
@@ -250,14 +302,7 @@ fn read_configuration_at(
         "registry profile changed while reading"
     );
     bytes.truncate(length as usize);
-    let identity = decode(&bytes, owner)?;
-    ensure!(
-        account_sid(&format!("NT SERVICE\\{}", identity.service_name()))? == identity.service_sid(),
-        "configured service SID does not match its installed name"
-    );
-    // Keep every validated ancestor open until all metadata has been checked.
-    drop(keys);
-    Ok(Some(identity))
+    Ok(bytes)
 }
 
 fn validate_key(key: &Key, trusted: &[String]) -> Result<()> {

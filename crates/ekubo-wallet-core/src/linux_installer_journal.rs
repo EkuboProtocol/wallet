@@ -17,6 +17,37 @@ pub struct QuiescentProfile<'a> {
     _lock: ProfileLock,
     _directory: File,
     _parent: File,
+    configured: OwnerConfiguration,
+    checkpoint: RecoveryCheckpoint,
+}
+
+impl QuiescentProfile<'_> {
+    /// Record the durable decision while retaining installer and service locks.
+    /// The coordinator must separately retain/revalidate the live source. This
+    /// blocks legacy fallback; it neither promotes files nor permits deletion.
+    pub fn begin_cutover(&self) -> Result<()> {
+        require_installer()?;
+        self.require_checkpoint(
+            &load_checkpoint(self.configured.owner_uid)?
+                .context("cutover checkpoint is missing")?,
+        )?;
+        record_cutover_under(&root_directory()?, &self.configured, 0)
+    }
+
+    pub(crate) fn require_checkpoint(&self, checkpoint: &RecoveryCheckpoint) -> Result<()> {
+        ensure!(
+            self.checkpoint
+                .journal_bytes(&self.checkpoint.destination)?
+                == checkpoint.journal_bytes(&self.checkpoint.destination)?,
+            "quiescent profile checkpoint changed"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn require_uncommitted(owner_uid: u32) -> Result<()> {
+    require_installer()?;
+    super::require_uncommitted(&root_directory()?, owner_uid, 0)
 }
 
 impl InstallerLease {
@@ -56,8 +87,61 @@ impl InstallerLease {
             _lock: lock,
             _directory: directory,
             _parent: parent,
+            configured,
+            checkpoint,
         })
     }
+}
+
+fn record_cutover_under(
+    root: &File,
+    configured: &OwnerConfiguration,
+    system_uid: u32,
+) -> Result<()> {
+    ensure!(
+        pending_configuration(root, configured.owner_uid, system_uid)? == *configured,
+        "cutover pending identity changed"
+    );
+    let etc = directory(root, "etc", system_uid, false)?;
+    let wallet = directory(&etc, "ekubo-wallet", system_uid, false)?;
+    match rustix::fs::mkdirat(&wallet, "committed", Mode::from_raw_mode(0o755)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = directory(&wallet, "committed", system_uid, false)?;
+    let name = format!("{}.json", configured.owner_uid);
+    let bytes = serde_json::to_vec(configured)?;
+    let existing = open_optional(
+        &parent,
+        &name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+    )?;
+    if let Some(file) = existing {
+        validate_file(&file, system_uid, false)?;
+        let mut stored = Vec::new();
+        (&file)
+            .take(MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut stored)?;
+        ensure!(
+            stored == bytes,
+            "cutover decision conflicts with existing evidence"
+        );
+        file.sync_all()?;
+        parent.sync_all()?;
+    } else {
+        publish_private_with(&parent, &name, |file| {
+            rustix::fs::fchmod(&*file, Mode::from_raw_mode(0o644))?;
+            std::io::Write::write_all(file, &bytes)?;
+            Ok(())
+        })?;
+    }
+    wallet.sync_all()?;
+    ensure!(
+        find_configuration_at(root, configured.owner_uid, system_uid, "committed")?
+            == Some(configured.clone()),
+        "cutover decision readback mismatch"
+    );
+    Ok(())
 }
 
 pub fn acquire_installer() -> Result<InstallerLease> {

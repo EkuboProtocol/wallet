@@ -14,6 +14,7 @@ pub async fn connect(
     identity: &crate::windows_service_config::PendingInstallerIdentity,
 ) -> Result<NamedPipeClient> {
     crate::windows_service_identity::verify_installer_process()?;
+    crate::windows_service_config::require_uncommitted(identity.owner_sid())?;
     windows_owner_pipe::open_private_pipe(
         &name(identity.profile_id())?,
         identity.service_sid(),

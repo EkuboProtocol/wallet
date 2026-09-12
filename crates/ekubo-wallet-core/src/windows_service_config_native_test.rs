@@ -117,14 +117,14 @@ use windows::Win32::System::Registry::{
     RegDeleteTreeW, RegSetValueExW,
 };
 
-struct RegistryFixture {
+pub(super) struct RegistryFixture {
     name: Vec<u16>,
-    root: Key,
-    trusted: Vec<String>,
+    pub(super) root: Key,
+    pub(super) trusted: Vec<String>,
 }
 
 impl RegistryFixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let name = wide(&format!(
             r"Software\EkuboWallet.NativeConfigTest-{}",
             uuid::Uuid::new_v4()
@@ -138,7 +138,7 @@ impl RegistryFixture {
         }
     }
 
-    fn create(&self, name: &str) -> Key {
+    pub(super) fn create(&self, name: &str) -> Key {
         create_key(self.root.0, &wide(name))
     }
 
@@ -219,6 +219,28 @@ fn native_untrusted_ancestor_is_rejected_before_considering_missing_children() {
     drop(registry.create("SOFTWARE"));
     assert!(read_configuration_under(registry.root.0, "S-1-5-21-1-2-3-1001", &[]).is_err());
     assert!(registry.read().unwrap().is_none());
+}
+
+#[test]
+fn native_incomplete_committed_identity_blocks_legacy_fallback() {
+    let registry = RegistryFixture::new();
+    drop(registry.create("SOFTWARE"));
+    assert!(registry.read().unwrap().is_none());
+    let key = registry.create(r"SOFTWARE\EkuboWallet\Committed\S-1-5-21-1-2-3-1001");
+    assert!(registry.read().is_err());
+    let name = wide("Profile");
+    unsafe {
+        RegSetValueExW(
+            key.0,
+            PCWSTR(name.as_ptr()),
+            None,
+            REG_BINARY,
+            Some(b"invalid"),
+        )
+    }
+    .ok()
+    .unwrap();
+    assert!(registry.read().is_err());
 }
 
 #[test]

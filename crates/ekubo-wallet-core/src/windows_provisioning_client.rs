@@ -22,9 +22,19 @@ pub struct ForwardedSource {
     _cancel: provisioning_io::CancelTransfer,
     reply: StagingReply,
     checkpoint: migration_transfer::RecoveryCheckpoint,
-    _installer: crate::windows_service_storage::installer_journal::InstallerLease,
+    installer: crate::windows_service_storage::installer_journal::InstallerLease,
+    owner_sid: String,
 }
 impl ForwardedSource {
+    /// Verify prepared files without releasing the retained source and installer
+    /// exclusion. The caller must stop the pending service before this operation.
+    pub fn verify_prepared(
+        &self,
+    ) -> Result<crate::windows_service_storage::installer_journal::QuiescentProfile<'_>> {
+        let profile = self.installer.verify_prepared(&self.owner_sid)?;
+        profile.require_checkpoint(&self.checkpoint)?;
+        Ok(profile)
+    }
     #[must_use]
     pub const fn reply(&self) -> &StagingReply {
         &self.reply
@@ -42,6 +52,7 @@ impl ForwardedSource {
 /// before success. Incomplete intent does not authorize replay or activation.
 pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
     let installer = crate::windows_service_storage::installer_journal::acquire_installer()?;
+    windows_service_config::require_uncommitted(owner_sid)?;
     handoff_from_owner(owner_sid, endpoint, None, installer).await
 }
 
@@ -49,6 +60,7 @@ pub async fn forward_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result
 /// source and stored relay. Incomplete intent cannot be recovered through this API.
 pub async fn recover_from_owner(owner_sid: &str, endpoint: uuid::Uuid) -> Result<ForwardedSource> {
     let installer = crate::windows_service_storage::installer_journal::acquire_installer()?;
+    windows_service_config::require_uncommitted(owner_sid)?;
     let checkpoint = crate::windows_service_storage::installer_journal::load_checkpoint(owner_sid)?
         .ok_or_else(|| {
             anyhow::anyhow!("source recovery requires a completed installer checkpoint")
@@ -119,7 +131,8 @@ async fn handoff_from_owner(
         _cancel: cancel,
         reply,
         checkpoint: checkpoint.ok_or_else(|| anyhow::anyhow!("source checkpoint is missing"))?,
-        _installer: installer,
+        installer,
+        owner_sid: owner_sid.to_owned(),
     })
 }
 

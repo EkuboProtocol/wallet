@@ -902,6 +902,32 @@ model or SQL dependency. It rejects changed inventories and runtime SQLite sidec
 including case aliases. The returned guard retains service exclusion but grants no
 activation authority and does not establish that the live legacy source is unchanged.
 
+`ForwardedSource::verify_prepared` uses the retained installer lease and matches
+the verifier's checkpoint to the source handoff. This lets a coordinator inspect
+the stopped service without releasing the source connection to reacquire its lease.
+Connection retention alone is not proof that the source fence is still live.
+
+The verified guard's `begin_cutover` records an immutable public identity at
+`/etc/ekubo-wallet/committed/<owner-uid>.json` on Linux or in the 64-bit
+`HKLM\SOFTWARE\EkuboWallet\Committed\<owner-sid>` registry key on Windows.
+Only root or elevated administrators may publish it; it contains no credentials,
+relay, or checkpoint payload. The protected pending checkpoint remains immutable
+and is rechecked before recording the decision. Publication flushes a temporary
+record before a rename that refuses replacement, then flushes the parent and
+validates readback. Exact identity retries succeed; conflicts fail.
+Windows uses [RegRenameKey](https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regrenamekey),
+whose destination name must not already exist; the native test exercises that refusal.
+
+Active discovery requires the active identity to match any committed record.
+Missing, malformed, or conflicting active metadata therefore requires installer
+recovery instead of legacy fallback. Pending service bootstrap refuses committed
+profiles and repeats that check after acquiring the service lock. An installer may
+still inspect the matching pending identity/checkpoint for recovery. This decision
+does not promote files, establish active-service readiness, or authorize cleanup.
+Post-decision live-source validation, promotion, production recovery coordination,
+and desktop/installer integration remain unfinished. No startup UX has been changed
+to invoke this operation yet.
+
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData
 ancestry. The Windows GNU harness compiles all native tests, but their latest
