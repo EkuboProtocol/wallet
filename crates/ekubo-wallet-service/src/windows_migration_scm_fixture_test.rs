@@ -22,6 +22,17 @@ pub fn run() -> Result<()> {
         "source-client" => runtime()?.block_on(source::client(&args[1])),
         "source-owner" => source::owner(&args[1]),
         "verify-prepared" => verify_prepared(&args[1]),
+        "verify-promoted" => verify_promoted(&args[1]),
+        "verify-promoted-conflict" => {
+            fixture_owner(&args[1])?;
+            ensure!(
+                ekubo_wallet_core::windows_service_storage::installer_journal::acquire_installer()?
+                    .verify_promoted(&args[1])
+                    .is_err(),
+                "duplicate locations were accepted"
+            );
+            Ok(())
+        }
         _ => anyhow::bail!("unknown fixture mode"),
     };
     if args[0] == "service" {
@@ -278,4 +289,27 @@ async fn relay_owner(owner: &str) -> Result<()> {
     let _ = stop.send(true);
     serving.await??;
     result.context("relay owner shutdown request timed out")?
+}
+
+fn verify_promoted(owner: &str) -> Result<()> {
+    fixture_owner(owner)?;
+    let installer =
+        ekubo_wallet_core::windows_service_storage::installer_journal::acquire_installer()?;
+    let promoted = installer.verify_promoted(owner)?;
+    ensure!(
+        installer.verify_prepared(owner).is_err(),
+        "promoted files remained pending"
+    );
+    ensure!(
+        installer.verify_promoted(owner).is_err(),
+        "promoted verification released service exclusion"
+    );
+    ensure!(
+        promoted.begin_cutover().is_err(),
+        "promoted guard allowed a new decision"
+    );
+    drop(promoted);
+    drop(installer.verify_promoted(owner)?);
+    println!("Moved Windows files verified against committed identity and checkpoint");
+    Ok(())
 }

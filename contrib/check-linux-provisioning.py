@@ -198,11 +198,28 @@ def exercise(binary, owner, source=False):
             check_raw_denial(private, owner)
             stop_fixture(unit)
             subprocess.run([str(executable), "verify-prepared", str(owner)], check=True, timeout=60)
+            verify_moved(executable, private, owner)
         finally:
             stop_fixture(unit)
             run(["journalctl", "--unit", unit, "--no-pager", "--output", "cat"])
         label = "owner-keyring source forwarding" if source else "migration/recovery"
         print(f"Production Linux systemd {label} and ordinary-owner raw file denial passed.")
+
+
+def verify_moved(executable, private, owner):
+    # These paths are inside the two fresh roots owned by this disposable fixture.
+    # This tests verification after a move, not production promotion/publication.
+    destination = private.parent.parent / str(owner)
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError("Refusing an existing synthetic destination")
+    private.rename(destination)
+    subprocess.run([str(executable), "verify-promoted", str(owner)], check=True, timeout=60)
+    private.mkdir(mode=0o700)
+    try:
+        subprocess.run([str(executable), "verify-promoted-conflict", str(owner)], check=True, timeout=60)
+    finally:
+        private.rmdir()
+    subprocess.run([str(executable), "verify-promoted", str(owner)], check=True, timeout=60)
 
 
 def recover_source(executable, child, owner, unit):

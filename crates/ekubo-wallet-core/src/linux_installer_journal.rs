@@ -1,5 +1,6 @@
 //! Root-owned pending checkpoint, separate from custody and login relay storage.
 use super::*;
+use crate::migration_ready::Location;
 use crate::migration_transfer::{Destination, RecoveryCheckpoint, TransferIntent};
 
 /// Serializes privileged installer operations across profiles. The file is a
@@ -19,6 +20,7 @@ pub struct QuiescentProfile<'a> {
     _parent: File,
     configured: OwnerConfiguration,
     checkpoint: RecoveryCheckpoint,
+    location: Location,
 }
 
 impl QuiescentProfile<'_> {
@@ -26,6 +28,10 @@ impl QuiescentProfile<'_> {
     /// The coordinator must separately retain/revalidate the live source. This
     /// blocks legacy fallback; it neither promotes files nor permits deletion.
     pub fn begin_cutover(&self) -> Result<()> {
+        ensure!(
+            self.location == Location::Pending,
+            "cutover decision requires pending files"
+        );
         require_installer()?;
         self.require_checkpoint(
             &load_checkpoint(self.configured.owner_uid)?
@@ -52,6 +58,17 @@ pub(crate) fn require_uncommitted(owner_uid: u32) -> Result<()> {
 
 impl InstallerLease {
     pub fn verify_prepared(&self, owner_uid: u32) -> Result<QuiescentProfile<'_>> {
+        self.verify_at(owner_uid, Location::Pending)
+    }
+
+    /// Verify moved files before active metadata publication. Requires an existing
+    /// committed decision and absence of the original pending directory.
+    pub fn verify_promoted(&self, owner_uid: u32) -> Result<QuiescentProfile<'_>> {
+        committed_installer_identity(owner_uid)?;
+        self.verify_at(owner_uid, Location::Promoted)
+    }
+
+    fn verify_at(&self, owner_uid: u32, location: Location) -> Result<QuiescentProfile<'_>> {
         use std::os::fd::AsRawFd as _;
         require_installer()?;
         let root = root_directory()?;
@@ -59,15 +76,21 @@ impl InstallerLease {
         let checkpoint =
             load_checkpoint(owner_uid)?.context("prepared verification requires a checkpoint")?;
         let mut parent = directory(&root, "var", 0, false)?;
-        for component in ["lib", "ekubo-wallet", "pending"] {
+        for component in ["lib", "ekubo-wallet"] {
             parent = directory(&parent, component, 0, false)?;
         }
-        let directory = directory(
-            &parent,
-            &configured.profile_id.to_string(),
-            configured.service_uid,
-            true,
-        )?;
+        let pending = directory(&parent, "pending", 0, false)?;
+        let (parent, name) = match location {
+            Location::Pending => {
+                require_absent(&parent, &owner_uid.to_string())?;
+                (pending, configured.profile_id.to_string())
+            }
+            Location::Promoted => {
+                require_absent(&pending, &configured.profile_id.to_string())?;
+                (parent, owner_uid.to_string())
+            }
+        };
+        let directory = directory(&parent, &name, configured.service_uid, true)?;
         // Never create a missing service lock: this must be an existing prepared
         // profile. A running/cooperating service prevents verification here.
         let lock = ProfileLock::acquire(open_regular(
@@ -89,6 +112,7 @@ impl InstallerLease {
             _parent: parent,
             configured,
             checkpoint,
+            location,
         })
     }
 }
@@ -324,3 +348,11 @@ fn save_record(parent: &File, name: &str, system_uid: u32, bytes: &[u8]) -> Resu
 #[cfg(test)]
 #[path = "linux_installer_journal_test.rs"]
 mod tests;
+
+fn require_absent(parent: &File, name: &str) -> Result<()> {
+    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => anyhow::bail!("both pending and promoted profile locations are present"),
+    }
+}

@@ -2,6 +2,23 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 #[test]
+fn an_opposite_location_must_be_absent_not_a_file_directory_or_dangling_link() {
+    let root = tempfile::tempdir().unwrap();
+    let handle = File::open(root.path()).unwrap();
+    let path = root.path().join("profile");
+    assert!(require_absent(&handle, "profile").is_ok());
+    std::fs::write(&path, b"unrelated").unwrap();
+    assert!(require_absent(&handle, "profile").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"unrelated");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(require_absent(&handle, "profile").is_err());
+    std::fs::remove_dir(&path).unwrap();
+    symlink(root.path().join("missing"), &path).unwrap();
+    assert!(require_absent(&handle, "profile").is_err());
+}
+
+#[test]
 fn cutover_identity_blocks_fallback_and_pending_bootstrap_until_matching_activation() {
     let root = tempfile::tempdir().unwrap();
     let wallet = root.path().join("etc/ekubo-wallet");

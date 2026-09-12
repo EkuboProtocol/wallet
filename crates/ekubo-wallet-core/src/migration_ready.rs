@@ -16,6 +16,12 @@ use std::{collections::BTreeSet, fs::File, io::Read as _};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Location {
+    Pending,
+    Promoted,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Ready {

@@ -1,5 +1,36 @@
 use super::*;
 
+#[test]
+fn opposite_profile_presence_and_untrusted_ancestors_cannot_be_ignored() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    let directory = tempfile::tempdir().unwrap();
+    let parent = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(directory.path())
+        .unwrap();
+    let trusted = vec![
+        crate::windows_service_identity::current_process_identity()
+            .unwrap()
+            .user_sid()
+            .to_owned(),
+        "S-1-5-32-544".into(),
+        "S-1-5-18".into(),
+    ];
+    assert!(require_other_absent(&parent, "Owners", "profile", &trusted).is_ok());
+    std::fs::create_dir(directory.path().join("Owners")).unwrap();
+    assert!(require_other_absent(&parent, "Owners", "profile", &trusted).is_ok());
+    assert!(require_other_absent(&parent, "Owners", "profile", &[]).is_err());
+    let profile = directory.path().join("Owners/profile");
+    std::fs::create_dir(&profile).unwrap();
+    assert!(require_other_absent(&parent, "Owners", "profile", &trusted).is_err());
+    std::fs::remove_dir(&profile).unwrap();
+    std::fs::write(&profile, b"unrelated").unwrap();
+    assert!(require_other_absent(&parent, "Owners", "profile", &trusted).is_err());
+    assert_eq!(std::fs::read(&profile).unwrap(), b"unrelated");
+}
+
 fn grant(sid: &str) -> AccessEntry {
     AccessEntry::Allow {
         sid: sid.into(),

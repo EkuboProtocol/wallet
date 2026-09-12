@@ -959,6 +959,22 @@ deadline/cancellation limits as initial confirmation; it grants no cleanup autho
 Native source fixtures retire the original endpoint and recover through a fresh one
 while the pending service remains stopped. Their execution still needs verification.
 
+`InstallerLease::verify_promoted` verifies a moved directory before active metadata
+is published. It requires matching committed/pending identity and the protected
+checkpoint, applies the same file checks as pending verification, and retains the
+service lock. Linux selects `/var/lib/ekubo-wallet/<owner-uid>`; Windows selects
+`ProgramData/EkuboWallet/Owners/<profile-uuid-without-hyphens>`. Neither location
+comes from an installer argument or environment variable. Both verifiers reject
+an entry at the opposite location, including invalid objects, rather than choosing
+one copy. A promoted guard cannot record a new cutover decision.
+
+This is verification for the interrupted-move state, not the production move or
+active-metadata publisher. Disposable native fixtures now move their own fresh
+directory, verify it, introduce an empty duplicate to test refusal, remove that
+duplicate, and verify again. Active metadata stays absent. Production promotion
+must retire Windows file handles before the move: Windows documents restrictions
+on [renaming directories with open child handles](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData
 ancestry. The Windows GNU harness compiles all native tests, but their latest

@@ -1,6 +1,7 @@
 //! Administrative checkpoint publication; no service-custody authorization.
 use super::*;
 use crate::installer_checkpoint::{Destination, RecoveryCheckpoint, TransferIntent};
+use crate::migration_ready::Location;
 use crate::windows_security::AccessEntry;
 use std::io::Read as _;
 
@@ -22,6 +23,7 @@ pub struct QuiescentProfile<'a> {
     _ancestors: Vec<File>,
     owner_sid: String,
     checkpoint: RecoveryCheckpoint,
+    location: Location,
 }
 
 impl QuiescentProfile<'_> {
@@ -29,6 +31,10 @@ impl QuiescentProfile<'_> {
     /// coordinator must separately retain/revalidate the live source. This does
     /// not promote files, prove active service readiness, or permit deletion.
     pub fn begin_cutover(&self) -> Result<()> {
+        ensure!(
+            self.location == Location::Pending,
+            "cutover decision requires pending files"
+        );
         crate::windows_service_identity::verify_installer_process()?;
         self.require_checkpoint(
             &load_checkpoint(&self.owner_sid)?.context("cutover checkpoint is missing")?,
@@ -52,12 +58,35 @@ impl QuiescentProfile<'_> {
 
 impl InstallerLease {
     pub fn verify_prepared(&self, owner_sid: &str) -> Result<QuiescentProfile<'_>> {
+        self.verify_at(owner_sid, Location::Pending)
+    }
+
+    /// Verify moved files before active metadata publication. Requires an existing
+    /// committed decision and absence of the original pending directory.
+    pub fn verify_promoted(&self, owner_sid: &str) -> Result<QuiescentProfile<'_>> {
+        crate::windows_service_config::committed_installer_identity(owner_sid)?;
+        self.verify_at(owner_sid, Location::Promoted)
+    }
+
+    fn verify_at(&self, owner_sid: &str, location: Location) -> Result<QuiescentProfile<'_>> {
         let identity = crate::windows_service_config::pending_installer_identity(owner_sid)?;
         let checkpoint =
             load_checkpoint(owner_sid)?.context("prepared verification requires a checkpoint")?;
         let trusted = crate::windows_service_config::machine_trustees()?;
         let mut ancestors = program_data_ancestors(&trusted)?;
-        for component in ["EkuboWallet", "Pending"] {
+        let (collection, other) = match location {
+            Location::Pending => ("Pending", "Owners"),
+            Location::Promoted => ("Owners", "Pending"),
+        };
+        for component in ["EkuboWallet", collection] {
+            if component == collection {
+                require_other_absent(
+                    ancestors.last().context("machine parent is missing")?,
+                    other,
+                    &identity.profile_id().simple().to_string(),
+                    &trusted,
+                )?;
+            }
             let parent = ancestors.last().context("machine parent is missing")?;
             let child = open_relative(parent.as_handle(), component, StorageKind::Directory)?;
             validate_machine_handle(child.as_handle(), &trusted, false)?;
@@ -93,6 +122,7 @@ impl InstallerLease {
             _ancestors: ancestors,
             owner_sid: owner_sid.to_owned(),
             checkpoint,
+            location,
         })
     }
 }
@@ -293,3 +323,29 @@ fn read_record(parent: &File, name: &str) -> Result<Option<Vec<u8>>> {
 #[cfg(test)]
 #[path = "windows_installer_journal_test.rs"]
 mod tests;
+
+fn require_other_absent(
+    wallet: &File,
+    collection: &str,
+    name: &str,
+    trusted: &[String],
+) -> Result<()> {
+    let parent = match open_relative(wallet.as_handle(), collection, StorageKind::Directory) {
+        Err(error) if missing(&error) => return Ok(()),
+        result => result?,
+    };
+    validate_machine_handle(parent.as_handle(), trusted, false)?;
+    match open_relative(parent.as_handle(), name, StorageKind::Directory) {
+        Err(error) if missing(&error) => Ok(()),
+        Err(error) => Err(error),
+        Ok(_) => anyhow::bail!("both pending and promoted profile locations are present"),
+    }
+}
+
+fn missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<windows::core::Error>()
+        .is_some_and(|error| {
+            error.code() == windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.to_hresult()
+        })
+}

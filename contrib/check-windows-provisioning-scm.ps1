@@ -112,6 +112,22 @@ try {
     if ($VerifyPrepared) {
         & $binary verify-prepared $owner
         if ($LASTEXITCODE -ne 0) { throw 'Quiescent prepared-file verification failed.' }
+        # Fixture-only move within its fresh storage root. Active metadata is
+        # deliberately absent, exercising recovery before publication.
+        $ownersStorage = Join-Path $storageRoot 'Owners'
+        New-Item -ItemType Directory -Path $ownersStorage | Out-Null
+        Set-Acl -LiteralPath $ownersStorage -AclObject $fileSecurity
+        $promotedStorage = Join-Path $ownersStorage ($profile.ToString('N'))
+        [IO.Directory]::Move($privateStorage, $promotedStorage)
+        & $binary verify-promoted $owner
+        if ($LASTEXITCODE -ne 0) { throw 'Promoted-file verification failed.' }
+        New-Item -ItemType Directory -Path $privateStorage | Out-Null
+        try {
+            & $binary verify-promoted-conflict $owner
+            if ($LASTEXITCODE -ne 0) { throw 'Duplicate-location refusal failed.' }
+        } finally { [IO.Directory]::Delete($privateStorage) }
+        & $binary verify-promoted $owner
+        if ($LASTEXITCODE -ne 0) { throw 'Promoted-file reverification failed.' }
     }
     Write-Output 'Production pending SCM bootstrap, protected storage and cross-account provisioning authentication passed.'
 } finally {

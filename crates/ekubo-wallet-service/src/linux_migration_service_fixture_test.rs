@@ -27,6 +27,16 @@ pub fn run() -> Result<()> {
         "source-recover" => source_recover(owner),
         "source-recover-cutover" => source_recover_cutover(owner),
         "verify-prepared" => verify_prepared(owner),
+        "verify-promoted" => verify_promoted(owner),
+        "verify-promoted-conflict" => {
+            ensure!(
+                ekubo_wallet_core::service_storage::installer_journal::acquire_installer()?
+                    .verify_promoted(owner)
+                    .is_err(),
+                "duplicate locations were accepted"
+            );
+            Ok(())
+        }
         _ => anyhow::bail!("unknown fixture mode"),
     }
 }
@@ -44,6 +54,7 @@ fn verify_prepared(owner: u32) -> Result<()> {
         installer.verify_prepared(owner).is_err(),
         "prepared verifier released the service lock"
     );
+    prepared.begin_cutover()?;
     drop(prepared);
     drop(installer.verify_prepared(owner)?);
     println!("Quiescent Linux runtime files match the protected checkpoint");
@@ -381,5 +392,26 @@ fn source_recover_cutover(owner: u32) -> Result<()> {
     );
     drop(recovered);
     println!("Committed source recovered without starting the pending service");
+    Ok(())
+}
+
+fn verify_promoted(owner: u32) -> Result<()> {
+    let installer = ekubo_wallet_core::service_storage::installer_journal::acquire_installer()?;
+    let promoted = installer.verify_promoted(owner)?;
+    ensure!(
+        installer.verify_prepared(owner).is_err(),
+        "promoted files remained pending"
+    );
+    ensure!(
+        installer.verify_promoted(owner).is_err(),
+        "promoted verification released service exclusion"
+    );
+    ensure!(
+        promoted.begin_cutover().is_err(),
+        "promoted guard allowed a new decision"
+    );
+    drop(promoted);
+    drop(installer.verify_promoted(owner)?);
+    println!("Moved Linux files verified against committed identity and checkpoint");
     Ok(())
 }
