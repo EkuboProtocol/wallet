@@ -139,6 +139,10 @@ fn client(owner: &str) -> Result<()> {
 }
 
 fn restart_fixture_service(owner: &str) -> Result<()> {
+    control_fixture_service(owner, false)
+}
+
+fn control_fixture_service(owner: &str, stop_only: bool) -> Result<()> {
     let identity = ekubo_wallet_core::windows_service_config::pending_installer_identity(owner)?;
     let executable = std::env::current_exe()?;
     let helper = executable
@@ -148,7 +152,8 @@ fn restart_fixture_service(owner: &str) -> Result<()> {
     let system = std::env::var_os("SystemRoot").context("missing fixture SystemRoot")?;
     let powershell =
         std::path::PathBuf::from(system).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let status = std::process::Command::new(powershell)
+    let mut command = std::process::Command::new(powershell);
+    command
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -160,9 +165,14 @@ fn restart_fixture_service(owner: &str) -> Result<()> {
         .arg("-ServiceName")
         .arg(format!("EkuboWallet-{}", identity.profile_id().simple()))
         .arg("-OwnerSid")
-        .arg(owner)
-        .status()?;
-    ensure!(status.success(), "synthetic service restart failed");
+        .arg(owner);
+    if stop_only {
+        command.arg("-StopOnly");
+    }
+    ensure!(
+        command.status()?.success(),
+        "synthetic service control failed"
+    );
     Ok(())
 }
 

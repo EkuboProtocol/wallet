@@ -97,7 +97,8 @@ try {
     $clientMode = if ($SourceFromOwner) { 'source-client' } else { 'client' }
     & $binary $clientMode $owner
     if ($LASTEXITCODE -ne 0) { throw "Native cross-account exchange failed ($LASTEXITCODE)." }
-    if ($StopAfterClient) {
+    $service.Refresh()
+    if ($StopAfterClient -and $service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
         $processId = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
         $serviceProcess = Get-Process -Id $processId
         Stop-Service -Name $serviceName

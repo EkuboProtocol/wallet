@@ -127,6 +127,19 @@ pub fn pending_owner_profile() -> Result<uuid::Uuid> {
     Ok(pending_owner_identity()?.profile_id())
 }
 
+/// Public identity only; requires matching protected pending and committed records.
+pub fn committed_owner_profile() -> Result<uuid::Uuid> {
+    let owner = client_uid()?;
+    ensure!(owner != 0, "cutover source requires the ordinary owner");
+    let root = root_directory()?;
+    let pending = pending_configuration(&root, owner, 0)?;
+    ensure!(
+        find_configuration_at(&root, owner, 0, "committed")? == Some(pending.clone()),
+        "source cutover has not been committed"
+    );
+    Ok(pending.profile_id)
+}
+
 pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     let owner = client_uid()?;
     ensure!(owner != 0, "root cannot persist a desktop custody relay");

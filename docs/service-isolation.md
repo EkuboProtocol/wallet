@@ -924,9 +924,23 @@ recovery instead of legacy fallback. Pending service bootstrap refuses committed
 profiles and repeats that check after acquiring the service lock. An installer may
 still inspect the matching pending identity/checkpoint for recovery. This decision
 does not promote files, establish active-service readiness, or authorize cleanup.
-Post-decision live-source validation, promotion, production recovery coordination,
+`ForwardedSource::begin_cutover` now verifies the prepared profile, records that
+decision, then challenges the retained owner source while still holding the
+installer and service locks. The source rechecks its protected pending/committed
+destination and logical database fingerprint under its existing lifecycle and
+SQLCipher locks. The bounded reply binds a fresh nonce to the checkpoint digest.
+It carries no keys, relay, signing capability, or durable activation receipt.
+One confirmation is accepted per connection; abort, disconnect, or the existing
+deadline releases source retention. Cancellation stays with the awaiting task,
+while the blocking worker retains installer/service exclusion until native I/O exits.
+
+This confirms the source at the exchange, not indefinitely. Promotion, recovery
+after losing a committed source connection, production recovery coordination,
 and desktop/installer integration remain unfinished. No startup UX has been changed
-to invoke this operation yet.
+to invoke this operation yet. The Linux and Windows source fixtures now stop their
+synthetic service and exercise this path; native execution at this revision is still
+required. The shared framing/confirmation logic is in `migration_source_control`,
+separate from credential collection and native transport.
 
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData

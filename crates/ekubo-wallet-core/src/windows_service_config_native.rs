@@ -85,6 +85,22 @@ pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     pending_configuration_under(HKEY_LOCAL_MACHINE, current.user_sid(), &machine_trustees()?)
 }
 
+pub(super) fn committed_owner_profile() -> Result<uuid::Uuid> {
+    let pending = pending_owner_identity()?;
+    let committed = read_configuration_at(
+        HKEY_LOCAL_MACHINE,
+        pending.owner_sid(),
+        &machine_trustees()?,
+        "Committed",
+    )?
+    .context("source cutover has not been committed")?;
+    ensure!(
+        committed.0 == pending.0,
+        "source committed identity changed"
+    );
+    Ok(committed.profile_id())
+}
+
 fn pending_configuration_under(
     root: HKEY,
     owner: &str,

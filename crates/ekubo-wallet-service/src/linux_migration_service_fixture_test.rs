@@ -308,7 +308,26 @@ fn source_recover(owner: u32) -> Result<()> {
         ekubo_wallet_core::service_storage::installer_journal::acquire_installer().is_err(),
         "recovered source released installer exclusion"
     );
-    drop(recovered);
+    let identity = ekubo_wallet_core::service_storage::pending_installer_identity(owner)?;
+    let unit = format!(
+        "ekubo-wallet-provision-fixture-{}@{owner}.service",
+        identity.profile_id().simple()
+    );
+    ensure!(
+        std::process::Command::new("systemctl")
+            .args(["stop", &unit])
+            .status()?
+            .success(),
+        "fixture service stop failed"
+    );
+    let confirmed = runtime.block_on(recovered.begin_cutover())?;
+    ensure!(
+        ekubo_wallet_core::service_storage::installer_journal::acquire_installer().is_err(),
+        "confirmed source released installer exclusion"
+    );
+    drop(confirmed.verify_prepared()?);
+    drop(confirmed);
+    println!("Native owner source confirmed its frozen checkpoint after durable cutover");
     Ok(())
 }
 

@@ -27,6 +27,12 @@ pub fn pending_owner_profile() -> Result<Uuid> {
     Ok(pending_owner_identity()?.profile_id())
 }
 
+/// Public identity only; requires matching protected pending and committed records.
+#[cfg(target_os = "windows")]
+pub fn committed_owner_profile() -> Result<Uuid> {
+    native::committed_owner_profile()
+}
+
 const MAX_CONFIG_BYTES: usize = 4096;
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize, Deserialize)]

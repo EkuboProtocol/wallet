@@ -14,6 +14,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[path = "migration_source_control.rs"]
+pub(crate) mod control;
+
 fn destination() -> Result<Destination> {
     #[cfg(target_os = "linux")]
     {
@@ -126,7 +129,7 @@ fn recover_source(
     // before sending any relay, preserving the original ciphertext descriptor.
     checkpoint.exchange(stream, destination, &snapshot, relay, &expected)?;
     checkpoint.write_source_request(stream)?;
-    retain_until_abort(stream)
+    retain_source(stream, &snapshot, checkpoint)
 }
 
 // Dependency injection stays private to core. Tests use synthetic keys and an
@@ -171,18 +174,35 @@ fn collect_and_transfer(
     )?;
     let reply = migration_transfer::read_reply(stream, session)?;
     persist(destination.profile, reply.relay())?;
-    reply.write_source_checkpoint(stream, destination, &mut snapshot)?;
-    // Staging is not cutover. Retain both locks until explicit abort, stream
-    // failure or the native deadline. No commit command exists yet, and the
-    // installer must not promote a profile using this temporary retention.
-    retain_until_abort(stream)
+    let checkpoint = RecoveryCheckpoint::capture(destination, &reply, &mut snapshot)?;
+    checkpoint.write_source_request(stream)?;
+    retain_source(stream, &snapshot, &checkpoint)
 }
 
-fn retain_until_abort(stream: &mut impl Read) -> Result<()> {
-    let mut command = [0; 1];
-    stream.read_exact(&mut command)?;
-    ensure!(command == [0], "unsupported source control command");
-    Ok(())
+fn retain_source(
+    stream: &mut (impl Read + Write),
+    snapshot: &MigrationDatabaseSnapshot,
+    checkpoint: &RecoveryCheckpoint,
+) -> Result<()> {
+    control::retain(stream, checkpoint, || {
+        ensure!(
+            destination()? == checkpoint.destination,
+            "source destination changed"
+        );
+        #[cfg(target_os = "linux")]
+        let profile = crate::service_storage::committed_owner_profile()?;
+        #[cfg(target_os = "windows")]
+        let profile = crate::windows_service_config::committed_owner_profile()?;
+        ensure!(
+            profile == checkpoint.destination.profile,
+            "source committed profile changed"
+        );
+        ensure!(
+            snapshot.source_fingerprint()? == checkpoint.source_fingerprint,
+            "committed source fingerprint changed"
+        );
+        Ok(())
+    })
 }
 
 #[cfg(test)]

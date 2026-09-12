@@ -66,7 +66,14 @@ pub(super) async fn client(owner: &str) -> Result<()> {
             serde_json::to_vec(recovered.checkpoint())? == serde_json::to_vec(&checkpoint)?,
             "native recovery changed the checkpoint"
         );
-        drop(recovered);
+        super::control_fixture_service(owner, true)?;
+        let confirmed = recovered.begin_cutover().await?;
+        ensure!(
+            windows_service_storage::installer_journal::acquire_installer().is_err(),
+            "confirmed source released installer exclusion"
+        );
+        drop(confirmed.verify_prepared()?);
+        drop(confirmed);
         stdin.write_all(b"finish\n").await?;
         drop(stdin);
         let status = tokio::time::timeout(Duration::from_secs(15), child.wait()).await??;

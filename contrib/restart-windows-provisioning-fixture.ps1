@@ -1,7 +1,8 @@
 # Copied beside the synthetic fixture executable on disposable Windows runners.
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^EkuboWallet-[0-9a-f]{32}$')][string]$ServiceName,
-    [Parameter(Mandatory = $true)][ValidatePattern('^S-[0-9]+(?:-[0-9]+)+$')][string]$OwnerSid
+    [Parameter(Mandatory = $true)][ValidatePattern('^S-[0-9]+(?:-[0-9]+)+$')][string]$OwnerSid,
+    [switch]$StopOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -26,6 +27,10 @@ Stop-Service -Name $ServiceName
 $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
 if (-not $original.WaitForExit(30000)) {
     throw 'Original service process did not exit; refusing to start a replacement.'
+}
+if ($StopOnly) {
+    Write-Output 'Original synthetic service process exited for cutover.'
+    exit 0
 }
 Start-Service -Name $ServiceName
 $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))

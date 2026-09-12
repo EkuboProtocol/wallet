@@ -18,14 +18,37 @@ type SourceStream = tokio_util::io::SyncIoBridge<
 /// Retains the owner channel after staging, but does not authorize activation.
 /// Disconnect or deadline can release the source fence; no commit API exists.
 pub struct ForwardedSource {
-    _source: SourceStream,
-    _cancel: provisioning_io::CancelTransfer,
+    source: SourceStream,
+    cancel: Option<provisioning_io::CancelTransfer>,
     reply: StagingReply,
     checkpoint: migration_transfer::RecoveryCheckpoint,
     installer: crate::windows_service_storage::installer_journal::InstallerLease,
     owner_sid: String,
 }
 impl ForwardedSource {
+    /// Verify prepared files, record cutover, and confirm the retained source
+    /// after that decision. Stop the pending service first. Failure after recording
+    /// requires installer recovery; success does not activate or authorize cleanup.
+    pub async fn begin_cutover(mut self) -> Result<Self> {
+        let cancel = self
+            .cancel
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("source cancellation guard is missing"))?;
+        // Cancellation remains in this awaiting task. The actual blocking worker
+        // retains installer/service exclusion until its native I/O exits.
+        let mut source = tokio::task::spawn_blocking(move || {
+            let prepared = self.installer.verify_prepared(&self.owner_sid)?;
+            prepared.require_checkpoint(&self.checkpoint)?;
+            prepared.begin_cutover()?;
+            crate::migration_source::control::confirm(&mut self.source, &self.checkpoint)?;
+            drop(prepared);
+            Ok::<_, anyhow::Error>(self)
+        })
+        .await??;
+        source.cancel = Some(cancel);
+        Ok(source)
+    }
+
     /// Verify prepared files without releasing the retained source and installer
     /// exclusion. The caller must stop the pending service before this operation.
     pub fn verify_prepared(
@@ -87,7 +110,7 @@ async fn handoff_from_owner(
             source
                 .0
                 .write_all(crate::windows_relay_pipe::SOURCE_PREFACE)?;
-            crate::migration_source::request(&mut source.0, previous.as_ref())?;
+            crate::migrationsource::request(&mut source.0, previous.as_ref())?;
             let request = if let Some(checkpoint) = &previous {
                 migration_transfer::relay_recovery_request(
                     &mut source.0,
@@ -127,8 +150,8 @@ async fn handoff_from_owner(
     )
     .await?;
     Ok(ForwardedSource {
-        _source: source,
-        _cancel: cancel,
+        source,
+        cancel: Some(cancel),
         reply,
         checkpoint: checkpoint.ok_or_else(|| anyhow::anyhow!("source checkpoint is missing"))?,
         installer,

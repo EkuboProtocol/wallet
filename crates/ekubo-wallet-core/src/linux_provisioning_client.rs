@@ -18,8 +18,8 @@ use zeroize::Zeroizing;
 /// source fence is temporary and may be lost on disconnect/deadline: this type
 /// deliberately has no activation method. Drop aborts retention, not staging.
 pub struct ForwardedSource {
-    _owner: crate::linux_source_handoff::OwnerChannel,
-    _cancel: crate::linux_provisioning_io::CancelStream,
+    owner: crate::linux_source_handoff::OwnerChannel,
+    cancel: Option<crate::linux_provisioning_io::CancelStream>,
     _service: Connection,
     reply: StagingReply,
     checkpoint: migration_transfer::RecoveryCheckpoint,
@@ -27,6 +27,29 @@ pub struct ForwardedSource {
     owner_uid: u32,
 }
 impl ForwardedSource {
+    /// Verify prepared files, record cutover, and confirm the retained source
+    /// after that decision. Stop the pending service first. Failure after recording
+    /// requires installer recovery; success does not activate or authorize cleanup.
+    pub async fn begin_cutover(mut self) -> Result<Self> {
+        let cancel = self
+            .cancel
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("source cancellation guard is missing"))?;
+        // Cancellation remains in this awaiting task. The actual blocking worker
+        // retains installer/service exclusion until its native I/O exits.
+        let mut source = tokio::task::spawn_blocking(move || {
+            let prepared = self.installer.verify_prepared(self.owner_uid)?;
+            prepared.require_checkpoint(&self.checkpoint)?;
+            prepared.begin_cutover()?;
+            crate::migration_source::control::confirm(&mut self.owner.stream, &self.checkpoint)?;
+            drop(prepared);
+            Ok::<_, anyhow::Error>(self)
+        })
+        .await??;
+        source.cancel = Some(cancel);
+        Ok(source)
+    }
+
     /// Stop the pending service before calling. Source retention and installer
     /// exclusion remain owned by this handoff while the verification guard lives.
     pub fn verify_prepared(
@@ -123,8 +146,8 @@ async fn handoff_from_owner(
     .await;
     match result {
         Ok(((owner, checkpoint, installer), reply)) => Ok(ForwardedSource {
-            _owner: owner,
-            _cancel: cancel,
+            owner,
+            cancel: Some(cancel),
             _service: bus,
             reply,
             checkpoint: checkpoint.context("source checkpoint is missing")?,
