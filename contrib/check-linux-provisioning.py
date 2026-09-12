@@ -208,12 +208,11 @@ def exercise(binary, owner, source=False):
 
 def verify_moved(executable, private, owner):
     # These paths are inside the two fresh roots owned by this disposable fixture.
-    # This tests verification after a move, not production promotion/publication.
+    # Exercise production promotion; active metadata remains unpublished.
     destination = private.parent.parent / str(owner)
     if destination.exists() or destination.is_symlink():
         raise RuntimeError("Refusing an existing synthetic destination")
-    private.rename(destination)
-    subprocess.run([str(executable), "verify-promoted", str(owner)], check=True, timeout=60)
+    subprocess.run([str(executable), "promote", str(owner)], check=True, timeout=60)
     private.mkdir(mode=0o700)
     try:
         subprocess.run([str(executable), "verify-promoted-conflict", str(owner)], check=True, timeout=60)

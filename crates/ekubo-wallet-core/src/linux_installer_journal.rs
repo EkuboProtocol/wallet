@@ -23,7 +23,7 @@ pub struct QuiescentProfile<'a> {
     location: Location,
 }
 
-impl QuiescentProfile<'_> {
+impl<'a> QuiescentProfile<'a> {
     /// Record the durable decision while retaining installer and service locks.
     /// The coordinator must separately retain/revalidate the live source. This
     /// blocks legacy fallback; it neither promotes files nor permits deletion.
@@ -38,6 +38,60 @@ impl QuiescentProfile<'_> {
                 .context("cutover checkpoint is missing")?,
         )?;
         record_cutover_under(&root_directory()?, &self.configured, 0)
+    }
+
+    /// Move a committed, quiescent profile without replacing an existing path.
+    /// The coordinator retains/revalidates the source separately. This publishes
+    /// no active metadata and grants no legacy cleanup authority.
+    pub fn promote(self) -> Result<QuiescentProfile<'a>> {
+        let identity = committed_installer_identity(self.configured.owner_uid)?;
+        ensure!(
+            self.location == Location::Pending && identity.configured == self.configured,
+            "promotion requires the committed pending profile"
+        );
+        self.require_checkpoint(
+            &load_checkpoint(self.configured.owner_uid)?
+                .context("promotion checkpoint is missing")?,
+        )?;
+        let root = root_directory()?;
+        let mut destination = directory(&root, "var", 0, false)?;
+        for component in ["lib", "ekubo-wallet"] {
+            destination = directory(&destination, component, 0, false)?;
+        }
+        let Self {
+            _installer: installer,
+            _lock: lock,
+            _directory: directory,
+            _parent: parent,
+            configured,
+            checkpoint: _,
+            location: _,
+        } = self;
+        let original = rustix::fs::fstat(&directory)?;
+        move_new(
+            &parent,
+            &configured.profile_id.to_string(),
+            &destination,
+            &configured.owner_uid.to_string(),
+        )?;
+        drop(directory);
+        drop(lock);
+        let promoted = installer.verify_promoted(configured.owner_uid)?;
+        let found = promoted.directory_identity()?;
+        ensure!(
+            (original.st_dev, original.st_ino) == found,
+            "promoted directory identity changed"
+        );
+        Ok(promoted)
+    }
+
+    fn directory_identity(&self) -> Result<(u64, u64)> {
+        let Self {
+            _directory: directory,
+            ..
+        } = self;
+        let stat = rustix::fs::fstat(directory)?;
+        Ok((stat.st_dev, stat.st_ino))
     }
 
     pub(crate) fn require_checkpoint(&self, checkpoint: &RecoveryCheckpoint) -> Result<()> {
@@ -355,4 +409,11 @@ fn require_absent(parent: &File, name: &str) -> Result<()> {
         Err(error) => Err(error.into()),
         Ok(_) => anyhow::bail!("both pending and promoted profile locations are present"),
     }
+}
+
+fn move_new(source: &File, name: &str, target: &File, target_name: &str) -> Result<()> {
+    rustix::fs::renameat_with(source, name, target, target_name, RenameFlags::NOREPLACE)?;
+    source.sync_all()?;
+    target.sync_all()?;
+    Ok(())
 }

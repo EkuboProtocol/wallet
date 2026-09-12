@@ -28,6 +28,14 @@ pub fn run() -> Result<()> {
         "source-recover-cutover" => source_recover_cutover(owner),
         "verify-prepared" => verify_prepared(owner),
         "verify-promoted" => verify_promoted(owner),
+        "promote" => {
+            let installer =
+                ekubo_wallet_core::service_storage::installer_journal::acquire_installer()?;
+            let promoted = installer.verify_prepared(owner)?.promote()?;
+            drop(promoted);
+            drop(installer);
+            verify_promoted(owner)
+        }
         "verify-promoted-conflict" => {
             ensure!(
                 ekubo_wallet_core::service_storage::installer_journal::acquire_installer()?

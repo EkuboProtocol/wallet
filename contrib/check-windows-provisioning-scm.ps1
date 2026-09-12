@@ -112,14 +112,12 @@ try {
     if ($VerifyPrepared) {
         & $binary verify-prepared $owner
         if ($LASTEXITCODE -ne 0) { throw 'Quiescent prepared-file verification failed.' }
-        # Fixture-only move within its fresh storage root. Active metadata is
-        # deliberately absent, exercising recovery before publication.
+        # Provision the protected target parent, then exercise production
+        # promotion. Active metadata remains absent during verification.
         $ownersStorage = Join-Path $storageRoot 'Owners'
         New-Item -ItemType Directory -Path $ownersStorage | Out-Null
         Set-Acl -LiteralPath $ownersStorage -AclObject $fileSecurity
-        $promotedStorage = Join-Path $ownersStorage ($profile.ToString('N'))
-        [IO.Directory]::Move($privateStorage, $promotedStorage)
-        & $binary verify-promoted $owner
+        & $binary promote $owner
         if ($LASTEXITCODE -ne 0) { throw 'Promoted-file verification failed.' }
         New-Item -ItemType Directory -Path $privateStorage | Out-Null
         try {

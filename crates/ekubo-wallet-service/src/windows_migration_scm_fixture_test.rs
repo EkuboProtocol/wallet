@@ -23,6 +23,15 @@ pub fn run() -> Result<()> {
         "source-owner" => source::owner(&args[1]),
         "verify-prepared" => verify_prepared(&args[1]),
         "verify-promoted" => verify_promoted(&args[1]),
+        "promote" => {
+            fixture_owner(&args[1])?;
+            let installer =
+                ekubo_wallet_core::windows_service_storage::installer_journal::acquire_installer()?;
+            let promoted = installer.verify_prepared(&args[1])?.promote()?;
+            drop(promoted);
+            drop(installer);
+            verify_promoted(&args[1])
+        }
         "verify-promoted-conflict" => {
             fixture_owner(&args[1])?;
             ensure!(

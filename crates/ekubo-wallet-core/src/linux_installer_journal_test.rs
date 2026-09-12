@@ -2,6 +2,35 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 #[test]
+fn profile_move_never_replaces_even_an_empty_directory_or_dangling_link() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let target = root.path().join("target");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    let source_parent = File::open(&source).unwrap();
+    let target_parent = File::open(&target).unwrap();
+    std::fs::create_dir(source.join("profile")).unwrap();
+    std::fs::write(source.join("profile/data"), b"original").unwrap();
+    std::fs::create_dir(target.join("profile")).unwrap();
+    assert!(move_new(&source_parent, "profile", &target_parent, "profile").is_err());
+    std::fs::remove_dir(target.join("profile")).unwrap();
+    symlink(root.path().join("missing"), target.join("profile")).unwrap();
+    assert!(move_new(&source_parent, "profile", &target_parent, "profile").is_err());
+    std::fs::remove_file(target.join("profile")).unwrap();
+    std::fs::write(target.join("profile"), b"retained").unwrap();
+    assert!(move_new(&source_parent, "profile", &target_parent, "profile").is_err());
+    assert_eq!(std::fs::read(target.join("profile")).unwrap(), b"retained");
+    std::fs::remove_file(target.join("profile")).unwrap();
+    move_new(&source_parent, "profile", &target_parent, "profile").unwrap();
+    assert!(!source.join("profile").exists());
+    assert_eq!(
+        std::fs::read(target.join("profile/data")).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
 fn an_opposite_location_must_be_absent_not_a_file_directory_or_dangling_link() {
     let root = tempfile::tempdir().unwrap();
     let handle = File::open(root.path()).unwrap();

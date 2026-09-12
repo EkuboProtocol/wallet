@@ -26,7 +26,7 @@ pub struct QuiescentProfile<'a> {
     location: Location,
 }
 
-impl QuiescentProfile<'_> {
+impl<'a> QuiescentProfile<'a> {
     /// Persist the decision with installer and service exclusion retained. The
     /// coordinator must separately retain/revalidate the live source. This does
     /// not promote files, prove active service readiness, or permit deletion.
@@ -43,6 +43,13 @@ impl QuiescentProfile<'_> {
             &self.owner_sid,
             self.checkpoint.destination.profile,
         )
+    }
+
+    /// Move a committed, quiescent profile to the preprovisioned Owners directory.
+    /// Source confirmation remains the coordinator's responsibility. No active
+    /// metadata or cleanup authority is published by this operation.
+    pub fn promote(self) -> Result<QuiescentProfile<'a>> {
+        promotion::promote(self)
     }
 
     pub(crate) fn require_checkpoint(&self, checkpoint: &RecoveryCheckpoint) -> Result<()> {
@@ -349,3 +356,6 @@ fn missing(error: &anyhow::Error) -> bool {
             error.code() == windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.to_hresult()
         })
 }
+
+#[path = "windows_profile_promotion.rs"]
+mod promotion;

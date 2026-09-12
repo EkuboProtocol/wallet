@@ -934,8 +934,8 @@ One confirmation is accepted per connection; abort, disconnect, or the existing
 deadline releases source retention. Cancellation stays with the awaiting task,
 while the blocking worker retains installer/service exclusion until native I/O exits.
 
-This confirms the source at the exchange, not indefinitely. Promotion, production
-recovery coordination, and desktop/installer integration remain unfinished. No startup UX has been changed
+This confirms the source at the exchange, not indefinitely. Active publication,
+production recovery coordination, and desktop/installer integration remain unfinished. No startup UX has been changed
 to invoke this operation yet. The Linux and Windows source fixtures now stop their
 synthetic service and exercise this path; native execution at this revision is still
 required. The shared framing/confirmation logic is in `migration_source_control`,
@@ -968,12 +968,32 @@ comes from an installer argument or environment variable. Both verifiers reject
 an entry at the opposite location, including invalid objects, rather than choosing
 one copy. A promoted guard cannot record a new cutover decision.
 
-This is verification for the interrupted-move state, not the production move or
-active-metadata publisher. Disposable native fixtures now move their own fresh
-directory, verify it, introduce an empty duplicate to test refusal, remove that
-duplicate, and verify again. Active metadata stays absent. Production promotion
-must retire Windows file handles before the move: Windows documents restrictions
+This verifies the interrupted-move state before active metadata publication.
+Disposable native fixtures now promote their own fresh directory through core,
+verify it, introduce an empty duplicate to test refusal, remove that duplicate,
+and verify again. Active metadata stays absent. Promotion retires Windows file
+handles before the move: Windows documents restrictions
 on [renaming directories with open child handles](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+
+`QuiescentProfile::promote` consumes the pending verifier guard, requires the existing
+committed identity, and rechecks its protected checkpoint. Linux uses a relative
+`renameat2` with `NOREPLACE` and flushes both parent directories. Windows requires
+the installer-provisioned protected `Owners` directory and uses
+[MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)
+with `MOVEFILE_WRITE_THROUGH` only. Source/destination paths are kernel-resolved
+volume GUID paths under retained protected parents. No drive-letter/environment
+selection, replacement, cross-volume copy/delete, or reboot scheduling is allowed.
+Only the wallet-owned target parent allows write sharing for the move's target
+open; its checked ACL excludes untrusted mutation and deletion sharing stays off.
+The broader OS ancestor pins retain their existing sharing policy.
+
+The installer lease survives the move. The service lock is reacquired and all
+prepared files are verified at the destination; directory identity must also match
+the original device/inode on Linux or volume/file ID on Windows. Errors never
+overwrite, delete, or silently retry an ambiguous result. The coordinator must
+retain/revalidate its source separately, and active metadata publication, active
+service verification, and legacy cleanup remain separate unfinished operations.
+Native promotion execution at this revision still needs verification.
 
 Portable tests cover machine-path ambiguity and ancestor access policy. Native
 tests now include read-only validation of the runner's actual ProgramData

@@ -372,6 +372,16 @@ fn open_native_access(
     kind: StorageKind,
     flush_access: bool,
 ) -> Result<File> {
+    open_native_shared(parent, name, kind, flush_access, FILE_SHARE_READ)
+}
+
+fn open_native_shared(
+    parent: Option<BorrowedHandle<'_>>,
+    name: &str,
+    kind: StorageKind,
+    flush_access: bool,
+    sharing: windows::Win32::Storage::FileSystem::FILE_SHARE_MODE,
+) -> Result<File> {
     let mut wide_name: Vec<u16> = name.encode_utf16().collect();
     let length = u16::try_from(wide_name.len() * size_of::<u16>())?;
     let name = UNICODE_STRING {
@@ -421,7 +431,7 @@ fn open_native_access(
             &raw mut status,
             None,
             FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_READ,
+            sharing,
             FILE_OPEN,
             file_type | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
             None,
