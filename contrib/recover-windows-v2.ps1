@@ -36,7 +36,12 @@ try {
     if ((Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash -cne '__HASH__') { throw 'Installed recovery changed after operator approval.' }
     & $script -OwnerSid '__OWNER__' -DiscardUnused
     exit 0
-} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    # Task Scheduler cannot return stderr. Preserve the failing source line in
+    # its exit status without publishing protected state or creating log files.
+    exit (10000 + $_.InvocationInfo.ScriptLineNumber)
+}
 '@
     $bootstrap = $bootstrap.Replace('__HASH__', $approvedHash).Replace('__OWNER__', $OwnerSid)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
@@ -75,7 +80,7 @@ try {
         }
     } until ($finished)
     Unregister-ScheduledTask -TaskPath '\' -TaskName $taskName -Confirm:$false
-    if ($info.LastTaskResult -ne 0) { throw "SYSTEM discard failed ($($info.LastTaskResult)); inspect pending state and Task Scheduler history before retrying. A Group Policy enforcing AllSigned can require SYSTEM publisher trust; recovery neither installs trust nor overrides Group Policy." }
+    if ($info.LastTaskResult -ne 0) { throw "SYSTEM discard failed ($($info.LastTaskResult)); codes above 10000 identify the failing recovery source line after subtracting 10000. Inspect pending state before retrying. A Group Policy enforcing AllSigned can require SYSTEM publisher trust; recovery neither installs trust nor overrides Group Policy." }
     Write-Output 'SYSTEM discarded the unused pending setup; fresh setup can retry.'
     return
 }
