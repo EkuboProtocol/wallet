@@ -492,7 +492,8 @@ impl Frozen {
     fn open(root: PathBuf, key: &DatabaseKey) -> Result<Self> {
         let mut locks = Vec::new();
         for name in ["application.lock", "lifecycle.lock"] {
-            let file = open_legacy_file(&root.join(name), true)?;
+            let file = open_legacy_file(&root.join(name), true)
+                .with_context(|| format!("cannot open legacy profile lock {name}"))?;
             fs2::FileExt::try_lock_exclusive(&file)
                 .context("close the 1.x application before moving its profile")?;
             locks.push(file);

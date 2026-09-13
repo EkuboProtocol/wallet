@@ -146,7 +146,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v2-installed-acceptance
-          cache-on-failure: false
+          # Preserve compiled dependencies when an installed acceptance assertion
+          # fails; Cargo still recompiles changed workspace code on the next run.
+          cache-on-failure: true
       - run: |
           cargo build --locked -p ekubo-wallet-core --example linux-move-fixture --features test-hooks --jobs 2
           cargo build --locked -p ekubo-wallet-core --example linux-move-client --no-default-features --jobs 2

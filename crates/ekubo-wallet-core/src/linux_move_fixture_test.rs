@@ -10,7 +10,11 @@ use ekubo_wallet_core::{
 };
 use keyring_core::api::CredentialStoreApi as _;
 use sha2::{Digest as _, Sha256};
-use std::{io::Write as _, os::unix::fs::DirBuilderExt as _, path::PathBuf};
+use std::{
+    io::Write as _,
+    os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _},
+    path::PathBuf,
+};
 
 const DATABASE_KEY: [u8; 32] = [0x63; 32];
 const ACCOUNT_KEY: [u8; 32] = [0x64; 32];
@@ -94,6 +98,18 @@ pub fn run() -> Result<()> {
             store.assert_schema_current()?;
             drop(store);
             drop(config);
+            // A released desktop creates these persistent lock files. The
+            // fixture constructs its database directly rather than opening a UI.
+            for name in ["application.lock", "lifecycle.lock"] {
+                let lock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(source.join(name))?;
+                fs2::FileExt::try_lock_exclusive(&lock)?;
+            }
             database_entry.set_secret(&DATABASE_KEY)?;
             account_entry.set_secret(&ACCOUNT_KEY)?;
             let file_hash = hex::encode(Sha256::digest(std::fs::read(source.join("wallet.db"))?));
