@@ -170,6 +170,61 @@ function Invoke-SetupScript($path, [string[]]$arguments) {
     & $powershell -NoProfile -NonInteractive -ExecutionPolicy AllSigned -File $path @arguments
     if ($LASTEXITCODE -ne 0) { throw "Signed setup script failed: $path" }
 }
+function Invoke-RecoveryFixture([switch]$RunOnce) {
+    # Fixture-only equivalent of an operator approving this one signed script.
+    # The normal baseline still invokes -File with AllSigned. Diagnostics run in
+    # Windows PowerShell 5.1, not the coordinating pwsh 7 process.
+    $path = Join-Path $install 'recover-windows-v2.ps1'
+    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    $thumbprint = $certificate.Thumbprint
+    if ($hash -notmatch '^[0-9A-Fa-f]{64}$' -or $thumbprint -notmatch '^[0-9A-Fa-f]{40}$' -or $ownerSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'Invalid fixture bootstrap identity.' }
+    $bootstrap = @'
+$ErrorActionPreference = 'Stop'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+try {
+    if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { throw 'Expected Windows PowerShell 5.1.' }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    Write-Output "RECOVERY PREFLIGHT: PS=$($PSVersionTable.PSVersion); SID=$($identity.User.Value); profile=$env:USERPROFILE; RunOnce=__RUN_ONCE__"
+    Get-ExecutionPolicy -List | Format-Table -AutoSize | Out-Host
+    foreach ($store in @('CurrentUser', 'LocalMachine')) {
+        foreach ($kind in @('Root', 'TrustedPublisher', 'Disallowed')) {
+            Write-Output ("Fixture certificate {0}/{1}: {2}" -f $store, $kind, (Test-Path -LiteralPath "Cert:\$store\$kind\__THUMB__"))
+        }
+    }
+    $path = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\recover-windows-v2.ps1'
+    $signature = Get-AuthenticodeSignature -LiteralPath $path
+    Write-Output "Recovery signature: status=$($signature.Status); message=$($signature.StatusMessage)"
+    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    Write-Output "Recovery SHA256=$hash"
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $text = [Text.Encoding]::UTF8.GetString($bytes)
+    Write-Output ("Recovery encoding: prefix={0}; CRLF={1}; bareLF={2}" -f ([BitConverter]::ToString($bytes, 0, [Math]::Min(3, $bytes.Length))), ([regex]::Matches($text, "`r`n").Count), ([regex]::Matches($text, "(?<!`r)`n").Count))
+    $tokens = $null; $parseErrors = $null
+    $null = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+    foreach ($parseError in $parseErrors) { [Console]::Error.WriteLine("PS5.1 parse: $($parseError.ErrorId) line=$($parseError.Extent.StartLineNumber): $($parseError.Message)") }
+    if (@($parseErrors).Count) { throw 'Recovery script has Windows PowerShell 5.1 parse errors.' }
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -cne '__THUMB__' -or $hash -cne '__HASH__') { throw 'Recovery is not the exact signed fixture-approved file.' }
+    Write-Output 'RECOVERY PREFLIGHT PASS: valid fixture signature, exact approved hash, PS5.1 parse clean.'
+    if (__RUN_ONCE__) {
+        if (Test-Path -LiteralPath 'Cert:\LocalMachine\TrustedPublisher\__THUMB__') { throw 'No-machine-publisher case still has machine publisher trust.' }
+        Write-Output 'RECOVERY INVOKE: fixture-validated Run once; production script and SYSTEM bootstrap follow.'
+        & $path -OwnerSid '__OWNER__' -DiscardUnused
+    }
+    exit 0
+} catch {
+    [Console]::Error.WriteLine($_.ToString())
+    [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage)
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
+    exit 1
+}
+'@
+    $run = if ($RunOnce) { '$true' } else { '$false' }
+    $bootstrap = $bootstrap.Replace('__HASH__', $hash).Replace('__THUMB__', $thumbprint).Replace('__OWNER__', $ownerSid).Replace('__RUN_ONCE__', $run)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+    & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded
+    if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell 5.1 recovery preflight/validated invocation failed; see diagnostics above.' }
+    if (-not $RunOnce) { Invoke-SetupScript $path @('-OwnerSid', $ownerSid, '-DiscardUnused') }
+}
 function Wait-ServiceState($name, $state) {
     $controller = Get-Service $name
     try { $controller.WaitForStatus($state, [TimeSpan]::FromSeconds(30)) } finally { $controller.Dispose() }
@@ -345,11 +400,9 @@ try {
         $identity = Await-Report $exchange 'identity.json' $worker 30
         $nativeProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$ownerSid'"
         if ($identity.owner_sid -ne $ownerSid -or $nativeProfile.LocalPath -ne $identity.profile -or $identity.session -ne $installerSession) { throw 'Owner token/profile/session mapping is not the fixture logon.' }
-        Publish $exchange 'begin.json' @{}
         if ($phase -eq 'enroll') {
-            $stage = 'enroll / production installer'
-            $relay = Await-Report $exchange 'relay.json' $worker
-            if ($relay.owner_sid -ne $ownerSid -or $relay.owner_sid -eq $administrator.User.Value) { throw 'Relay is not owned by the standard fixture user.' }
+            # Hold the real owner at begin.json until both interruption cases
+            # finish, so they do not consume its 90-second connection deadline.
             $stdout = Join-Path $work 'installer.stdout.log'; $stderr = Join-Path $work 'installer.stderr.log'
             $startedInstall = $true
             $stage = 'interrupted enrollment / production provisioning with absent relay'
@@ -360,49 +413,55 @@ try {
             $credentialTarget = "EkuboWalletV2-Acceptance-$nonce"
             [WalletAcceptanceCredential]::Create($credentialTarget)
             try {
-                # This really asks the production authority to create its empty
-                # SQLCipher/key files, then loses the owner handoff. No fixture
-                # switch or fabricated pending metadata enters production.
-                $missingRelay = [Guid]::NewGuid().ToString()
-                $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $missingRelay) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-                if (-not $installer.WaitForExit(120000)) { throw 'Interrupted enrollment did not fail within 120 seconds.' }
-                if ($installer.ExitCode -eq 0) { throw 'Absent owner relay unexpectedly completed enrollment.' }
-                $pendingRecord = Get-ItemProperty -LiteralPath (Join-Path $registry "Pending/$ownerSid")
-                if ($pendingRecord.PSObject.Properties['RelayConfirmed']) { throw 'Interrupted enrollment published relay confirmation.' }
-                $pendingIdentity = [Text.Encoding]::UTF8.GetString([byte[]]$pendingRecord.Profile) | ConvertFrom-Json
-                $pendingPath = Join-Path $storage ('Pending/' + ([Guid]$pendingIdentity.profile_id).ToString('N'))
-                foreach ($name in @('wallet.db', 'key-database', 'wrapping.key', 'fresh-profile-ready')) {
-                    if (-not (Test-Path -LiteralPath (Join-Path $pendingPath $name))) { throw "Interruption did not reach actual service-created $name" }
+                foreach ($trustMode in @('machine-publisher-baseline', 'validated-run-once')) {
+                    $stage = "interrupted enrollment / $trustMode / absent relay"
+                    Write-Output "STEP $stage"
+                    # Real empty SQLCipher/key creation precedes failed handoff.
+                    $missingRelay = [Guid]::NewGuid().ToString()
+                    $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $missingRelay) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+                    if (-not $installer.WaitForExit(120000)) { throw 'Interrupted enrollment did not fail within 120 seconds.' }
+                    Get-Content -LiteralPath $stdout, $stderr | Write-Output
+                    if ($installer.ExitCode -eq 0) { throw 'Absent owner relay unexpectedly completed enrollment.' }
+                    $pendingRecord = Get-ItemProperty -LiteralPath (Join-Path $registry "Pending/$ownerSid")
+                    if ($pendingRecord.PSObject.Properties['RelayConfirmed']) { throw 'Interrupted enrollment published relay confirmation.' }
+                    $pendingIdentity = [Text.Encoding]::UTF8.GetString([byte[]]$pendingRecord.Profile) | ConvertFrom-Json
+                    $pendingPath = Join-Path $storage ('Pending/' + ([Guid]$pendingIdentity.profile_id).ToString('N'))
+                    foreach ($name in @('wallet.db', 'key-database', 'wrapping.key', 'fresh-profile-ready')) {
+                        if (-not (Test-Path -LiteralPath (Join-Path $pendingPath $name))) { throw "Interruption did not reach actual service-created $name" }
+                    }
+                    $stage = "interrupted enrollment / $trustMode / production SYSTEM discard"
+                    Write-Output "STEP $stage"
+                    if ($trustMode -eq 'machine-publisher-baseline') {
+                        Invoke-RecoveryFixture
+                    } else {
+                        # No publisher approval is silently installed in either
+                        # user store. Model Run once only for the verified bytes.
+                        Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)"
+                        try { Invoke-RecoveryFixture -RunOnce } finally {
+                            Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+                        }
+                    }
+                    if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage) -or
+                        @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue).Count) { throw 'Production discard left setup-blocking state.' }
+                    if ((Get-FileHash -LiteralPath $unrelated).Hash -ne $unrelatedHash) { throw 'Discard changed unrelated files.' }
+                    foreach ($before in $profilesBefore) {
+                        $after = Get-CimInstance Win32_UserProfile -Filter "SID='$($before.SID)'"
+                        if (-not $after -or $after.LocalPath -ne $before.LocalPath) { throw 'Discard changed an unrelated Windows profile.' }
+                    }
+                    [WalletAcceptanceCredential]::Verify($credentialTarget)
+                    Remove-FixtureProfile $pendingIdentity.service_sid -AllowCachedVirtualProfile
+                    Write-Output "$trustMode PASS: real unpublished custody discarded; unrelated profiles, file and synthetic credential unchanged."
                 }
-                $stage = 'interrupted enrollment / signed production SYSTEM discard'
-                # Parent AllSigned approval is user-scoped; SYSTEM has no publisher
-                # approval. Exercise explicit signature/hash verification rather
-                # than hiding an extra production prerequisite behind fixture trust.
-                Import-Certificate -FilePath $public -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
-                Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)"
-                try {
-                    Invoke-SetupScript (Join-Path $install 'recover-windows-v2.ps1') @('-OwnerSid', $ownerSid, '-DiscardUnused')
-                } finally {
-                    Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
-                    Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPublisher\$($certificate.Thumbprint)"
-                }
-                if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage) -or
-                    @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue).Count) { throw 'Production discard left setup-blocking state.' }
-                if ((Get-FileHash -LiteralPath $unrelated).Hash -ne $unrelatedHash) { throw 'Discard changed unrelated files.' }
-                foreach ($before in $profilesBefore) {
-                    $after = Get-CimInstance Win32_UserProfile -Filter "SID='$($before.SID)'"
-                    if (-not $after -or $after.LocalPath -ne $before.LocalPath) { throw 'Discard changed an unrelated Windows profile.' }
-                }
-                [WalletAcceptanceCredential]::Verify($credentialTarget)
-                Remove-FixtureProfile $pendingIdentity.service_sid -AllowCachedVirtualProfile
-                Write-Output 'interruption PASS: real unpublished custody discarded via signed SYSTEM recovery; unrelated profile mappings, file and synthetic credential unchanged.'
             } finally { [WalletAcceptanceCredential]::Delete($credentialTarget) }
+            Publish $exchange 'begin.json' @{}
+            $relay = Await-Report $exchange 'relay.json' $worker
+            if ($relay.owner_sid -ne $ownerSid -or $relay.owner_sid -eq $administrator.User.Value) { throw 'Relay is not owned by the standard fixture user.' }
             $stage = 'enroll / retry production installer after discard'
             $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $relay.endpoint) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             if (-not $installer.WaitForExit(120000)) { throw 'Production enrollment exceeded 120 seconds.' }
             Get-Content $stdout, $stderr | Write-Output
             if ($installer.ExitCode -ne 0) { throw "Production enrollment failed: $($installer.ExitCode)" }
-        }
+        } else { Publish $exchange 'begin.json' @{} }
         $stage = "$phase / authenticated readiness and persistence"
         $ready = Await-Report $exchange 'ready.json' $worker
         $nativeProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$ownerSid'"
@@ -532,10 +591,6 @@ try {
     } catch { $cleanupErrors.Add((Write-FixtureFailure "CLEANUP [owner profile: $ownerSid]" $_)) }
     try { if ($ownerSid) { Remove-LocalUser -SID $ownerSid } } catch { $cleanupErrors.Add((Write-FixtureFailure "CLEANUP [owner account: $ownerSid]" $_)) }
     if ($certificate) {
-        try {
-            $path = "Cert:\CurrentUser\TrustedPublisher\$($certificate.Thumbprint)"
-            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
-        } catch { $cleanupErrors.Add((Write-FixtureFailure "CLEANUP [user publisher: $path]" $_)) }
         foreach ($store in @('Root', 'TrustedPublisher', 'My')) {
             try {
                 $path = "Cert:\LocalMachine\$store\$($certificate.Thumbprint)"

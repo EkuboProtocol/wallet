@@ -27,6 +27,8 @@ ROOTS = [LIB, Path('/etc/ekubo-wallet-v2'), Path('/var/lib/ekubo-wallet-v2'),
          Path('/run/ekubo-wallet-v2')]
 SERVICE = 'ekubo-wallet-v2'
 ACCEPTANCE_PACKAGE = 'ekubo-wallet-v2-activation-acceptance'
+RUNNER_SHARE_PATHS = tuple(map(Path, ['/usr/share', '/usr/share/dbus-1',
+                                    '/usr/share/dbus-1/system-services']))
 UNITS = ['ekubo-wallet-v2@.service', 'ekubo-wallet-v2-provision@.service']
 FAULT_DIR = Path('/run/ekubo-wallet-v2/acceptance-fault')
 ASSETS = {
@@ -86,6 +88,72 @@ def absent_activation_fixture():
         raise RuntimeError('REFUSED: existing acceptance package')
 
 
+def directory_identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)
+
+
+def runner_directory_mode(path, info):
+    """Only the image's documented root:root 0777 share tree is repairable."""
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0:
+        raise RuntimeError(f'REFUSED: unexpected runner directory identity: {path}')
+    mode = stat.S_IMODE(info.st_mode)
+    if path in RUNNER_SHARE_PATHS and mode == 0o777:
+        return 0o755
+    if mode & 0o022:
+        raise RuntimeError(f'REFUSED: unexpected runner directory mode: {path}')
+    return mode
+
+
+def inspect_runner_activation_ancestors():
+    # actions/runner-images images/ubuntu/scripts/build/configure-system.sh
+    # chmods /usr/share recursively to 777. Never copy that trust exception into
+    # the shipped installer, or recursively change any runner directory here.
+    snapshots = []
+    for path in [Path('/'), Path('/usr'), *RUNNER_SHARE_PATHS]:
+        info = path.lstat()
+        print(f'Activation ancestor {path}: uid={info.st_uid} gid={info.st_gid} '
+              f'mode={stat.S_IMODE(info.st_mode):04o} dev={info.st_dev} ino={info.st_ino}', flush=True)
+        mode = runner_directory_mode(path, info)
+        snapshots.append((path, info, mode))
+    return snapshots
+
+
+@contextmanager
+def hardened_runner_activation_ancestors(snapshots):
+    require_runner(os.environ, os.geteuid(), sys.platform, True)
+    changed = []
+    try:
+        for path, expected, mode in snapshots:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                if directory_identity(os.fstat(fd)) != directory_identity(expected):
+                    raise RuntimeError(f'REFUSED: runner ancestor changed after preflight: {path}')
+                if mode != stat.S_IMODE(expected.st_mode):
+                    changed.append((os.dup(fd), path, expected))
+                    os.fchmod(fd, mode)
+                    print(f'Temporarily hardened exact runner directory {path} to {mode:04o}', flush=True)
+            finally:
+                os.close(fd)
+        yield
+    finally:
+        failures = []
+        for fd, path, original in reversed(changed):
+            try:
+                os.fchmod(fd, stat.S_IMODE(original.st_mode))
+                if directory_identity(os.fstat(fd)) != directory_identity(original):
+                    raise RuntimeError(f'Runner ancestor restoration mismatch: {path}')
+                print(f'Restored {path}: uid={original.st_uid} gid={original.st_gid} '
+                      f'mode={stat.S_IMODE(original.st_mode):04o}', flush=True)
+            except OSError as error:
+                failures.append(error)
+            except RuntimeError as error:
+                failures.append(error)
+            finally:
+                os.close(fd)
+        if failures:
+            raise RuntimeError('Could not restore all runner activation ancestors') from failures[0]
+
+
 def preflight(binary_dir, owner, home, rule, migration):
     require_runner(os.environ, os.geteuid(), sys.platform, True)
     if Path('/proc/1/comm').read_text().strip() != 'systemd':
@@ -106,7 +174,7 @@ def preflight(binary_dir, owner, home, rule, migration):
             if not os.access(binary_dir / 'examples' / name, os.X_OK):
                 raise RuntimeError(f'Missing acceptance example: {name}')
     run('systemctl', 'is-active', 'dbus.service')
-    run('systemctl', 'start', 'polkit.service')
+    return inspect_runner_activation_ancestors()
 
 
 def policy(owner, uid, migration=False):
@@ -562,11 +630,17 @@ def acceptance(binary_dir, migration=False):
     owner = f'ewv2-ci-{uuid.uuid4().hex[:12]}'
     home = Path('/home') / owner
     rule = Path('/etc/polkit-1/rules.d') / f'00-{owner}.rules'
-    preflight(binary_dir, owner, home, rule, migration)
+    snapshots = preflight(binary_dir, owner, home, rule, migration)
+    with hardened_runner_activation_ancestors(snapshots):
+        acceptance_fixture(binary_dir, owner, home, rule, migration)
+
+
+def acceptance_fixture(binary_dir, owner, home, rule, migration):
     created = []
     account_created = service_created = False
     uid = None
     try:
+        run('systemctl', 'start', 'polkit.service')
         run('useradd', '--create-home', '--home-dir', str(home), '--shell', '/bin/bash', owner)
         account_created = True
         uid = pwd.getpwnam(owner).pw_uid
@@ -616,7 +690,30 @@ def acceptance(binary_dir, migration=False):
         subprocess.run(['dpkg', '--remove', ACCEPTANCE_PACKAGE], check=False, timeout=120)
 
 
+def check_runner_directory_guards():
+    def info(mode, uid=0, gid=0):
+        return os.stat_result((mode, 1, 1, 1, uid, gid, 0, 0, 0, 0))
+
+    for path in RUNNER_SHARE_PATHS:
+        assert runner_directory_mode(path, info(stat.S_IFDIR | 0o777)) == 0o755
+        assert runner_directory_mode(path, info(stat.S_IFDIR | 0o755)) == 0o755
+    invalid = [(Path('/usr'), info(stat.S_IFDIR | 0o777)),
+               (Path('/usr/share/other'), info(stat.S_IFDIR | 0o777)),
+               (Path('/usr/share'), info(stat.S_IFDIR | 0o775)),
+               (Path('/usr/share'), info(stat.S_IFDIR | 0o1777)),
+               (Path('/usr/share'), info(stat.S_IFDIR | 0o777, uid=1001)),
+               (Path('/usr/share'), info(stat.S_IFDIR | 0o777, gid=1001)),
+               (Path('/usr/share'), info(stat.S_IFLNK | 0o777))]
+    for path, metadata in invalid:
+        try:
+            runner_directory_mode(path, metadata)
+        except RuntimeError:
+            continue
+        raise AssertionError('Unexpected runner directory accepted for normalization')
+
+
 def check_guards():
+    check_runner_directory_guards()
     good = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='Linux')
     require_runner(good, 0, 'linux', True)
     cases = [({}, 0, 'linux', True), (good, 1000, 'linux', True),

@@ -89,6 +89,19 @@ and removes only fixture-created files, roots and accounts. Diagnostics include
 the synthetic session log and exact units' journal on failure. Never run the
 installation portion on the main host, even with sudo access.
 
+GitHub's Ubuntu image build script
+[`configure-system.sh`](https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-system.sh)
+applies `chmod -R 777 /usr/share`. After all read-only preflight checks, the
+disposable fixture temporarily hardens only `/usr/share`, `/usr/share/dbus-1`
+and `/usr/share/dbus-1/system-services` when they are real root:root directories
+with exactly mode `0777`. Already protected ancestors are left alone; other
+unsafe ownership, modes or symlinks are refused. Preflight reports each exact
+ancestor's UID, GID, mode, device and inode and checks `/` and `/usr` too.
+Pinned directory descriptors are revalidated before mutation, and original modes
+are restored in `finally` after cleanup, with unchanged ownership and identity
+verified. Nothing is recursively normalized. Production installer ancestry
+validation remains strict and has no runner exception.
+
 ## Installed first-run migration and interrupted-retirement resume
 
 The second Linux acceptance step uses `--run-migration-disposable`. It creates
