@@ -766,9 +766,13 @@ pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
             auth.require(OwnerAuthorizationScope::LegacyMove)?;
             let config = crate::config::ConfigStore::production()?;
             config.with_lifecycle_lock(|| {
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
                 let digest =
                     database::import_bound(&root, &transfer.snapshot, &binding, |wallets| {
-                        prepare_keys(wallets, &transfer.keys)
+                        auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                        prepare_keys(wallets, &transfer.keys)?;
+                        auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                        Ok(())
                     })?;
                 verified_receipt(&root, digest, Uuid::nil())
             })
@@ -783,14 +787,16 @@ pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
             // Windows authorization must execute inside the service's sealed
             // authenticated owner-call task-local, never in the desktop process.
             #[cfg(target_os = "windows")]
-            {
-                let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
-                auth.require(OwnerAuthorizationScope::LegacyMove)?;
-            }
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
             let config = crate::config::ConfigStore::production()?;
             config.with_lifecycle_lock(|| {
+                #[cfg(target_os = "windows")]
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
                 database::verify_binding(&root, &binding)?;
-                verified_receipt(&root, *digest, *nonce)
+                let receipt = verified_receipt(&root, *digest, *nonce)?;
+                #[cfg(target_os = "windows")]
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                Ok(receipt)
             })
         }
         ServiceCommand::Complete {
@@ -804,8 +810,10 @@ pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
             auth.require(OwnerAuthorizationScope::LegacyMove)?;
             let config = crate::config::ConfigStore::production()?;
             config.with_lifecycle_lock(|| {
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
                 database::verify_binding(&root, &binding)?;
                 let receipt = verified_receipt(&root, *digest, *nonce)?;
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
                 database::finish_cleanup(&root, *digest, &binding)?;
                 Ok(receipt)
             })

@@ -16,7 +16,7 @@ fn malformed_delivery_never_reaches_credential_storage() {
 
 struct PolicyEndpoint(&'static str);
 
-#[zbus::interface(name = "org.ekubo.Wallet.InstallerRelay1")]
+#[zbus::interface(name = "org.ekubo.Wallet2.InstallerRelay1")]
 impl PolicyEndpoint {
     fn persist(&self) -> &'static str {
         self.0
@@ -110,21 +110,14 @@ async fn installer_policy_admits_only_the_exact_relay_method() {
         reply.body().deserialize::<String>().unwrap(),
         "policy admitted the call"
     );
-    let reply = client
-        .call_method(
-            Some(destination),
-            "/org/ekubo/Wallet/InstallerSource",
-            Some("org.ekubo.Wallet.InstallerSource1"),
-            "Start",
-            &(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        reply.body().deserialize::<String>().unwrap(),
-        "source admitted"
-    );
     for (path, interface, member) in [
+        // Automatic source handoff was removed; its old privileged route must
+        // remain denied even when a peer still exports that interface.
+        (
+            "/org/ekubo/Wallet/InstallerSource",
+            "org.ekubo.Wallet.InstallerSource1",
+            "Start",
+        ),
         ("/org/ekubo/Wallet/Other", INTERFACE, "Persist"),
         (PATH, INTERFACE, "Other"),
         (PATH, "org.ekubo.Wallet.Other", "Persist"),

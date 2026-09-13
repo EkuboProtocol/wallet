@@ -19,6 +19,30 @@ VIAddVersionKey "LegalCopyright" "Ekubo, Inc."
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+; ExecToLog writes only to NSIS's details list, which does not exist under /S.
+; Retain the bounded child output and also forward it to the caller's inherited
+; stdout handle. The smoke runner owns that pipe/file: no elevated arbitrary
+; logfile path or environment-controlled destination is introduced here.
+!macro Lifecycle MODE SCRIPT
+  nsExec::ExecToStack '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${SCRIPT}" -Mode ${MODE}'
+  Pop $0
+  Pop $1
+  DetailPrint "V2 lifecycle ${MODE}: exit=$0; $1"
+  System::Call 'kernel32::GetStdHandle(i -11) p.r2'
+  ; Match PowerShell 7's redirected stdout reader with explicit UTF-8 bytes.
+  StrCpy $1 "V2 lifecycle ${MODE}: exit=$0; $1$\r$\nPS=$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe; script=${SCRIPT}$\r$\n"
+  System::Call 'kernel32::WideCharToMultiByte(i 65001, i 0, w r1, i -1, p 0, i 0, p 0, p 0) i.r3'
+  System::Alloc $3
+  Pop $4
+  System::Call 'kernel32::WideCharToMultiByte(i 65001, i 0, w r1, i -1, p r4, i r3, p 0, p 0)'
+  IntOp $3 $3 - 1
+  System::Call 'kernel32::WriteFile(p r2, p r4, i r3, *i.r5, p 0)'
+  System::Free $4
+  StrCmp $0 0 +3
+    SetErrorLevel 1
+    Abort "V2 lifecycle ${MODE} failed (exit $0). See installer diagnostic output."
+!macroend
+
 Function .onInit
   ${IfNot} ${RunningX64}
     Abort "Ekubo Wallet 2 requires 64-bit Windows."
@@ -41,11 +65,7 @@ Section "Install"
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
   File "package-windows-v2.ps1"
-  nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\package-windows-v2.ps1" -Mode Before'
-  Pop $0
-  StrCmp $0 0 +3
-    SetErrorLevel 1
-    Abort "Could not stop v2 services safely."
+  !insertmacro Lifecycle Before "$PLUGINSDIR\package-windows-v2.ps1"
   SetOutPath "$INSTDIR"
   File "..\target\release\ekubo-wallet-v2.exe"
   File "..\target\release\ekubo-wallet-v2-mcp-bridge.exe"
@@ -65,22 +85,14 @@ Section "Install"
   CreateShortcut "$SMPROGRAMS\Ekubo Wallet 2.lnk" "$INSTDIR\ekubo-wallet-v2.exe"
   ; Toast identity is installer-owned; desktop startup does not write registry state.
   WriteRegStr HKLM "Software\Classes\AppUserModelId\org.ekubo.wallet.v2" "DisplayName" "Ekubo Wallet 2"
-  nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\package-windows-v2.ps1" -Mode After'
-  Pop $0
-  StrCmp $0 0 +3
-    SetErrorLevel 1
-    Abort "V2 payload installed; service restart failed. Inspect Services before opening v2."
+  !insertmacro Lifecycle After "$INSTDIR\package-windows-v2.ps1"
 SectionEnd
 
 Section "Uninstall"
   SetRegView 64
   SetShellVarContext all
   StrCpy $INSTDIR "$PROGRAMFILES64\Ekubo Wallet 2"
-  nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\package-windows-v2.ps1" -Mode Remove'
-  Pop $0
-  StrCmp $0 0 +3
-    SetErrorLevel 1
-    Abort "Could not stop v2 services safely."
+  !insertmacro Lifecycle Remove "$INSTDIR\package-windows-v2.ps1"
   Delete "$SMPROGRAMS\Ekubo Wallet 2.lnk"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\org.ekubo.wallet.v2"
   DeleteRegKey HKLM "Software\Classes\AppUserModelId\org.ekubo.wallet.v2"

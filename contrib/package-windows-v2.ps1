@@ -1,6 +1,14 @@
 # Package lifecycle only. Fresh enrollment needs the actual owner's live relay,
 # and must be invoked explicitly with install-windows-v2.ps1, never guessed here.
 param([Parameter(Mandatory=$true)][ValidateSet('Before', 'After', 'Remove')][string]$Mode)
+trap {
+    # Put the cause first: nsExec's stack output is bounded by NSIS_MAX_STRLEN.
+    # Avoid PowerShell's verbose error rendering burying it below context.
+    [Console]::Error.WriteLine(('V2 {0}: {1}: {2}' -f $Mode, $_.Exception.GetType().FullName, $_.Exception.Message))
+    [Console]::Error.WriteLine(('ErrorId={0}; line={1}; PS={2}; 64bit={3}' -f $_.FullyQualifiedErrorId, $_.InvocationInfo.ScriptLineNumber, $PSVersionTable.PSVersion, [Environment]::Is64BitProcess))
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
+    exit 1
+}
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2'
