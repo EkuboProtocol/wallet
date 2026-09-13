@@ -65,9 +65,14 @@ if ($Mode -eq 'After') {
         }
     }
 }
-$services = @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue)
+if ($Mode -eq 'After' -and (Test-Path -LiteralPath 'HKLM:\SOFTWARE\EkuboWalletV2\Owners')) {
+    foreach ($owner in Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\EkuboWalletV2\Owners') {
+        & (Join-Path $install 'register-windows-v2-auth.ps1') -OwnerSid $owner.PSChildName
+    }
+}
+$services = @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue | Sort-Object Name)
 foreach ($service in $services) {
-    if ($service.Name -notmatch '^EkuboWalletV2-[0-9a-f]{32}$') { throw 'Unexpected v2 service identity.' }
+    if ($service.Name -notmatch '^EkuboWalletV2-[0-9a-f]{32}(-Auth)?$') { throw 'Unexpected v2 service identity.' }
     $config = Get-CimInstance Win32_Service -Filter "Name='$($service.Name)'"
     if ($Mode -eq 'Before' -and $config.PathName -match '--provision-owner-sid' -and $service.Status -ne 'Stopped') {
         throw 'Complete or recover the in-progress v2 enrollment before replacing installed code.'

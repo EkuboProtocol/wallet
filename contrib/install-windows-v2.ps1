@@ -16,7 +16,7 @@ if ($OwnerSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$' -or $RelayEndpoint -eq [Gui
 $install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2'
 $binary = Join-Path $install 'ekubo-wallet-service.exe'
 $enroll = Join-Path $install 'ekubo-wallet-v2-enroll.exe'
-foreach ($file in @($binary, $enroll)) {
+foreach ($file in @($binary, $enroll, (Join-Path $install 'ekubo-wallet-v2-owner-auth.exe'))) {
     if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'Valid') {
         throw "The installed v2 binary must have a valid Authenticode signature: $file"
     }
@@ -78,6 +78,7 @@ try {
     New-Item -Path $activeKey -Force | Out-Null
     New-ItemProperty -LiteralPath $activeKey -Name Profile -PropertyType Binary -Value $bytes | Out-Null
     (Get-Item -LiteralPath $activeKey).Flush()
+    & (Join-Path $install 'register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
     Start-Service $service
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not (Test-Path -LiteralPath (Join-Path $active 'setup-complete'))) {

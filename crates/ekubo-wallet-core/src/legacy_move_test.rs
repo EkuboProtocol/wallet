@@ -1,6 +1,17 @@
 use super::*;
 use std::{cell::RefCell, collections::BTreeMap};
 
+#[test]
+fn move_owner_request_uses_the_shared_protocol_envelope() {
+    let nonce = Uuid::new_v4();
+    let request =
+        serde_json::to_value(OwnerRequest::LegacyMove(&ServiceCommand::Inspect { nonce })).unwrap();
+    assert_eq!(
+        request,
+        serde_json::json!({ "method": "legacy_move", "params": { "operation": "inspect", "nonce": nonce } })
+    );
+}
+
 #[tokio::test]
 async fn unknown_profile_inventory_cannot_start_a_retirement() {
     assert!(
@@ -70,6 +81,7 @@ fn cleanup_resumes_after_partial_failure_and_retains_shared_credentials() {
         source: summary.source.clone(),
         preserved_profiles: summary.preserved_profiles.clone(),
         retained_shared_accounts: summary.retained_shared_accounts.clone(),
+        retirement: None,
     })
     .unwrap();
     let digest =

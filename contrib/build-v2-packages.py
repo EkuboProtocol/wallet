@@ -79,7 +79,8 @@ def main():
         raise ValueError("native installer requires a stable v2 workspace version")
     output = ROOT / "target/release"
     suffix = ".exe" if args.format == "nsis" else ""
-    for binary in BINARIES:
+    binaries = BINARIES + (("ekubo-wallet-v2-owner-auth",) if args.format == "nsis" else ())
+    for binary in binaries:
         if not (output / (binary + suffix)).is_file():
             raise FileNotFoundError(binary + suffix)
     if args.format == "deb":

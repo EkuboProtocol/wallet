@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn missing_proof_never_falls_back_to_service_or_desktop_consent() {
+#[tokio::test]
+async fn missing_proof_never_falls_back_to_service_or_desktop_consent() {
     // Calls the actual production adapter, not authorize_owner's test hook.
     for request in [
         PresenceRequest::ChangeProtectedSettings {
@@ -18,7 +18,7 @@ fn missing_proof_never_falls_back_to_service_or_desktop_consent() {
         },
     ] {
         assert!(matches!(
-            confirm(&request),
+            confirm(&request).await,
             Err(HumanPresenceError::Unavailable(_))
         ));
     }

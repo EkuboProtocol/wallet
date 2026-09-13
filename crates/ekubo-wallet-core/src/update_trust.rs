@@ -704,7 +704,7 @@ fn embedded_package_version(
     let mut versions = BTreeSet::new();
     for language in information.translation() {
         ensure!(
-            information.value(*language, "ProductName") == Some("Ekubo Wallet 2"),
+            information.value(*language, "ProductName").as_deref() == Some("Ekubo Wallet 2"),
             "the NSIS package belongs to another product"
         );
         if let Some(value) = information.value(*language, "ProductVersion") {

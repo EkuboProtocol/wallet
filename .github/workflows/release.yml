@@ -222,16 +222,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not extract verified payload.' }
           7z x $files[0].FullName -overified-installer
           if ($LASTEXITCODE -ne 0) { throw 'Could not inspect verified installer.' }
-          $expected = @('ekubo-wallet-v2.exe', 'ekubo-wallet-v2-mcp-bridge.exe', 'ekubo-wallet-service.exe', 'ekubo-wallet-v2-enroll.exe')
+          $expected = @('ekubo-wallet-v2.exe', 'ekubo-wallet-v2-mcp-bridge.exe', 'ekubo-wallet-service.exe', 'ekubo-wallet-v2-enroll.exe', 'ekubo-wallet-v2-owner-auth.exe')
           $payload = @(Get-ChildItem target/release -File)
-          if ($payload.Count -ne 4) { throw 'Unexpected payload file count.' }
+          if ($payload.Count -ne $expected.Count) { throw 'Unexpected payload file count.' }
           foreach ($name in $expected) {
             $candidate = @(Get-ChildItem verified-installer -Recurse -Filter $name)
             if ($candidate.Count -ne 1 -or (Get-FileHash $candidate[0].FullName).Hash -ne (Get-FileHash "target/release/$name").Hash) {
               throw "Payload differs from verified installer: $name"
             }
           }
-          foreach ($name in @('install-windows-v2.ps1', 'recover-windows-v2.ps1', 'package-windows-v2.ps1')) {
+          foreach ($name in @('install-windows-v2.ps1', 'recover-windows-v2.ps1', 'package-windows-v2.ps1', 'register-windows-v2-auth.ps1')) {
             $candidate = @(Get-ChildItem verified-installer -Recurse -Filter $name)
             if ($candidate.Count -eq 0) { throw "Missing candidate script: $name" }
             foreach ($file in $candidate) {
@@ -271,6 +271,7 @@ jobs:
             ${{ github.workspace }}/contrib/install-windows-v2.ps1
             ${{ github.workspace }}/contrib/recover-windows-v2.ps1
             ${{ github.workspace }}/contrib/package-windows-v2.ps1
+            ${{ github.workspace }}/contrib/register-windows-v2-auth.ps1
           cache-dependencies: false
           exclude-environment-credential: true
           exclude-workload-identity-credential: true

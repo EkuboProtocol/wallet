@@ -100,8 +100,7 @@ async fn main() -> anyhow::Result<()> {
                 if matches!(
                     ekubo_wallet_core::windows_service_config::find_installed_service_identity(),
                     Ok(Some(_))
-                ) && let Ok(client) =
-                    ekubo_wallet_client::windows_owner_client::OwnerClient::connect().await
+                ) && let Ok(client) = ekubo_wallet_client::OwnerClient::connect().await
                 {
                     drop(client);
                     return Ok::<_, anyhow::Error>(());

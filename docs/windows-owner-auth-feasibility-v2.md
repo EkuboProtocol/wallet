@@ -1,4 +1,52 @@
-# Windows v2 interactive-owner authentication: blocked
+# Windows v2 native owner authentication
+
+## Implemented workflow (2026-09-13)
+
+`windows_service_presence` now scopes core authentication to the last-read owner
+pipe token, its session/logon LUID, the exact request digest and a retained live
+connection. `--authenticate-owner-sid` runs a separate, per-profile SYSTEM SCM
+broker. Its private pipe admits only the installed wallet service SID and SYSTEM;
+each request must additionally authenticate as that wallet service SID.
+
+The broker launches the fixed installed `ekubo-wallet-v2-owner-auth.exe` with
+`WTSQueryUserToken` / `CreateProcessAsUserW`. It checks the actual owner SID and
+logon generation before creation and after completion. Process and primary-thread
+objects are SYSTEM-owned; the cloned token's default ACL protects subsequent
+threads and suppresses implicit owner `WRITE_DAC`. The helper runs at high
+integrity with startup image/extension-point/dynamic-code mitigations, a clean
+system-derived environment, and no inherited handles. Only the fixed System32
+consent DLL supplies `IUserConsentVerifierInterop` for the helper's own HWND.
+
+The retained process object supplies a one-use, nonzero success exit code. There
+is no desktop approval enum, caller-selected executable, enrolled software key,
+or process-ID-only result lookup. Timeout, cancellation, disconnect and invalid
+bindings fail closed; dropping the process lease terminates an outstanding
+helper. Core rechecks the owner connection before granting authorization and
+before consuming protected-setting authorization, which also retains the exact
+initiating-call binding. A private kill-on-close job ends the collector if its
+broker crashes.
+
+Installer, recovery, upgrade, NSIS, and trusted-signing inputs include the helper
+and broker registration. Native negative fixtures cover process/thread access,
+wrong owner/logon generation, default ACL owner rights, expiry, cancellation,
+pipe closure and malformed/replayed receipts. The SYSTEM fixture is explicitly
+limited to disposable Windows CI and never resumes its child or invokes Hello.
+
+Validation in this worker: the helper crate passes Windows GNU-target Clippy for
+all targets with warnings denied. A read-only probe on the Windows build host
+successfully loaded the fixed System32 DLL and queried its HWND interop interface.
+That probe invoked no consent method. Full service integration, the SYSTEM CI
+fixture and installed human-interaction acceptance are separate gates; no actual
+PIN/biometric success or signed package installation is claimed here.
+
+Native contracts checked against Microsoft documentation:
+[CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw),
+[CreateThread](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createthread),
+[GetCurrentProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess),
+and [RequestVerificationForWindowAsync](https://learn.microsoft.com/en-us/windows/win32/api/userconsentverifierinterop/nf-userconsentverifierinterop-iuserconsentverifierinterop-requestverificationforwindowasync)
+(Windows build 22000 or later).
+
+## Historical pre-implementation investigation (superseded)
 
 2026-09-12 implementation result: **no safe end-to-end Windows owner proof has
 been established in this architecture**. `human_presence::windows_owner_auth`

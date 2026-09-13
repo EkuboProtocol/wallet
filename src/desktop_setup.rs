@@ -117,10 +117,10 @@ impl Render for SetupWindow {
                 .bg(cx.theme().background).text_color(cx.theme().foreground)
                 .child(div().text_lg().font_semibold().child(if self.move_status.pending() { "Resume move cleanup" } else { "Start with Ekubo Wallet 2" }))
                 .when(!self.move_status.pending(), |panel| panel.child(selectable_label("Your protected v2 wallet has no accounts. Continue to create or import an account, or choose an explicit move from 1.x. A move requires v2 to remain unchanged from fresh setup; core refuses to overwrite a configured profile. Nothing from 1.x has been read.")))
-                .when(self.move_status.pending(), |panel| panel.child(selectable_label("The destination import is committed, but old-credential cleanup is not confirmed complete. Execution remains paused. Review the same source and preserved profiles to resume; no deletion is retried automatically.")))
+                .when(self.move_status.pending(), |panel| panel.child(selectable_label("Your accounts are stored in v2, but source retirement is incomplete. Review the bound source to resume after owner authorization, including if its old database key is already gone. Execution stays paused until cleanup finishes.")))
                 .child(app_button("first-run-continue").self_start().label("Continue without moving").disabled(self.move_status.pending())
                     .on_click(cx.listener(|view, _, _, cx| { if !view.move_status.pending() { view.restart.set(true); cx.quit(); } })))
-                .child(app_button("first-run-move").self_start().label(if self.move_status.pending() { "Review pending cleanup…" } else { "Move from 1.x…" }).disabled(cfg!(target_os = "windows"))
+                .child(app_button("first-run-move").self_start().label(if self.move_status.pending() { "Review pending cleanup…" } else { "Move from 1.x…" })
                     .on_click(cx.listener(|view, _, window, cx| {
                         let Some(owner) = view.owner.clone() else { return; };
                         let pending = match &view.move_status { MoveStatus::PendingCleanup { binding, .. } => Some(binding.clone()), _ => None };
@@ -130,16 +130,13 @@ impl Render for SetupWindow {
                         }
                         cx.notify();
                     })))
-                .when(cfg!(target_os = "windows"), |panel| panel.child(selectable_label("Protected owner authorization is unavailable in this Windows build. Moving from 1.x and other protected owner operations remain blocked.")))
+                .when(cfg!(target_os = "windows"), |panel| panel.child(selectable_label("Moving requires the installed service and Windows owner authorization. If either is unavailable, the move stops before reading old credentials.")))
                 .when_some(self.message.clone(), |panel, message| panel.child(selectable_label(message)));
         }
         div().size_full().p_6().flex().flex_col().gap_4()
             .bg(cx.theme().background).text_color(cx.theme().foreground)
             .child(div().text_lg().font_semibold().child("Set up Ekubo Wallet 2"))
             .child(selectable_label("The protected service must be ready before the wallet can open. Set up wallet runs the installed coordinator and asks the operating system for approval. Existing 1.x data is not read or moved during setup."))
-            .when(cfg!(target_os = "windows"), |panel| panel.child(selectable_label(
-                "Protected owner authorization is unavailable in this Windows build. Setup does not enable approvals, key export, legal acceptance, or moving from 1.x; those operations remain blocked."
-            )))
             .when_some(self.message.clone(), |panel, message| panel.child(div().id("setup-status").overflow_y_scroll().flex_1().min_h_0().child(selectable_label(message))))
             .when(self.can_enroll, |panel| panel
                 .child(app_button("enroll-wallet").label("Set up wallet").self_start().primary().disabled(self.busy)

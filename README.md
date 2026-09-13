@@ -5,13 +5,15 @@ local AI agents, and WalletConnect dapps. Linux and Windows v2 separate the
 desktop from protected service custody. The `ekubo-wallet-v2-mcp-bridge`
 speaks stdio for local agents. macOS retains its platform custody backend.
 
-**This is the v2 implementation branch, not a release-ready product.** Windows
-native owner authorization remains fail-closed, and installed-product acceptance
-is outstanding. See the current [service-isolation status](docs/service-isolation.md).
+Windows owner authorization uses an isolated native Hello collector controlled
+by a protected broker; no desktop-provided approval boolean is accepted. Windows
+requires the HWND consent API available on Windows 11 (build 22000 or later) and
+configured Windows Hello. See the current [service-isolation status](docs/service-isolation.md)
+for native acceptance and release validation.
 
 V2 uses separate application, data, helper and update-channel identities so
-released 1.x remains independently runnable. Linux offers an explicit first-run
-move with verified account-key cleanup; retained shared credentials and recovery
+released 1.x remains independently runnable. An explicit first-run move retires
+the selected old profile after verified credential cleanup; shared credentials and recovery
 limits are documented in the service-isolation status. Fresh setup never moves
 1.x state automatically. Released 1.x retains the
 [credential-store limitation](docs/threat-model.md#critical-windows-and-linux-credential-store-limitation).

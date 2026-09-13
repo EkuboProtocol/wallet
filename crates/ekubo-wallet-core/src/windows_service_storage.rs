@@ -10,6 +10,8 @@ use anyhow::{Result, ensure};
 #[path = "windows_service_storage_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
+pub(crate) use native::pin_machine_image;
+#[cfg(target_os = "windows")]
 pub use native::{
     PendingCredentialStorage, PrivateStorageRoot, open_private_child, validate_private_handle,
 };

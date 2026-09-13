@@ -59,6 +59,7 @@ try {
             $activeBytes = [byte[]]$activeRecord.Profile
             if ([Convert]::ToBase64String($activeBytes) -ne [Convert]::ToBase64String($bytes)) { throw 'Installed identity differs; refusing recovery.' }
             (Get-Item -LiteralPath $activeKey).Flush()
+            & (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
             Start-Service $service
             Write-Output 'Existing installed v2 service started; unlock from the owner desktop.'
             return
@@ -77,6 +78,7 @@ try {
     New-Item -Path $activeKey -Force | Out-Null
     New-ItemProperty -LiteralPath $activeKey -Name Profile -PropertyType Binary -Value $bytes | Out-Null
     (Get-Item -LiteralPath $activeKey).Flush()
+    & (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
     Start-Service $service
     Write-Output 'Relay-confirmed v2 profile published. Unlock from the owner desktop to finish readiness.'
 } finally {

@@ -44,6 +44,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: pipx run ruff==0.16.4 check --output-format concise .
       - run: python3 contrib/check-v2-packaging.py
+      - run: python3 contrib/accept-installed-linux.py --check-guards
       - run: for file in contrib/deb-v2-* contrib/smoke-v2-*.sh; do bash -n "$file"; done
 
   windows-service:
@@ -90,7 +91,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup update stable --no-self-update
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus dbus-tests gnome-keyring
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus dbus-tests gnome-keyring libsecret-tools policykit-1 libglib2.0-bin python3-dbus python3-gi
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: v2-rust
@@ -99,12 +100,36 @@ jobs:
         run: cargo check --locked --workspace --bins --lib --jobs 1
       - name: Workspace tests
         run: cargo test --locked --workspace --all-features --jobs 1
+      - name: Native Windows protected collector boundary (no biometric interaction)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: contrib/test-windows-auth-boundary.ps1
       - name: Native Linux owner transport and keyring recovery
         if: runner.os == 'Linux'
         run: |
           cargo test --locked -p ekubo-wallet-core --all-features --lib credential_store::tests::recovers_after_secret_service_startup_and_restart -- --ignored
           cargo test --locked --workspace --all-features --lib owner_client::tests -- --ignored
           cargo test --locked --workspace --all-features --lib linux_relay_handoff::tests::installer_policy -- --ignored
+      - name: Installed Linux fresh enrollment, restart and owner denial (disposable runner)
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: |
+          # Build production artifacts explicitly after the all-features tests;
+          # dev-dependency test-hooks must not enter the installed service.
+          cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 1
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" \
+            python3 contrib/accept-installed-linux.py --run-disposable "$PWD/target/debug"
+      - name: Installed Linux first-run move and interrupted retirement resume
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: |
+          # Hooks construct ONLY the synthetic released-schema source. The move
+          # client refuses to run with hooks, and the service stays production.
+          cargo build --locked -p ekubo-wallet-core --example linux-move-fixture --features test-hooks --jobs 1
+          cargo build --locked -p ekubo-wallet-core --example linux-move-client --no-default-features --jobs 1
+          cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 1
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" \
+            python3 contrib/accept-installed-linux.py --run-migration-disposable "$PWD/target/debug"
 
   lint:
     if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only

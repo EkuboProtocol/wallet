@@ -24,6 +24,13 @@ Function .onInit
     Abort "Ekubo Wallet 2 requires 64-bit Windows."
   ${EndIf}
   SetRegView 64
+  ClearErrors
+  ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
+  IfErrors unsupported_windows
+  IntCmpU $0 22000 supported_windows unsupported_windows supported_windows
+unsupported_windows:
+  Abort "Ekubo Wallet 2 requires Windows 11 (build 22000 or later) and Windows Hello. Existing 1.x installations are unchanged."
+supported_windows:
   ; /D cannot redirect protected service code into an owner-writable directory.
   StrCpy $INSTDIR "$PROGRAMFILES64\Ekubo Wallet 2"
 FunctionEnd
@@ -43,9 +50,11 @@ Section "Install"
   File "..\target\release\ekubo-wallet-v2.exe"
   File "..\target\release\ekubo-wallet-v2-mcp-bridge.exe"
   File "..\target\release\ekubo-wallet-service.exe"
+  File "..\target\release\ekubo-wallet-v2-owner-auth.exe"
   File "..\target\release\ekubo-wallet-v2-enroll.exe"
   File "install-windows-v2.ps1"
   File "recover-windows-v2.ps1"
+  File "register-windows-v2-auth.ps1"
   File "package-windows-v2.ps1"
   SetOutPath "$INSTDIR\schemas"
   File /r "..\schemas\*"
@@ -78,9 +87,11 @@ Section "Uninstall"
   Delete "$INSTDIR\ekubo-wallet-v2.exe"
   Delete "$INSTDIR\ekubo-wallet-v2-mcp-bridge.exe"
   Delete "$INSTDIR\ekubo-wallet-service.exe"
+  Delete "$INSTDIR\ekubo-wallet-v2-owner-auth.exe"
   Delete "$INSTDIR\ekubo-wallet-v2-enroll.exe"
   Delete "$INSTDIR\install-windows-v2.ps1"
   Delete "$INSTDIR\recover-windows-v2.ps1"
+  Delete "$INSTDIR\register-windows-v2-auth.ps1"
   Delete "$INSTDIR\package-windows-v2.ps1"
   RMDir /r "$INSTDIR\schemas"
   Delete "$INSTDIR\uninstall.exe"

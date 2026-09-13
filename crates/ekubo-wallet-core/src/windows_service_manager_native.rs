@@ -32,6 +32,7 @@ use windows::{
 enum StoragePhase {
     Active,
     Pending,
+    Authentication,
 }
 
 type Host = fn(&str, Running, watch::Receiver<bool>) -> Result<()>;
@@ -81,6 +82,10 @@ pub fn run(owner_sid: &str, host: Host) -> Result<()> {
 /// only protected pending metadata. No active discovery or fallback is allowed.
 pub fn run_pending(owner_sid: &str, host: Host) -> Result<()> {
     run_with_phase(owner_sid, host, StoragePhase::Pending)
+}
+
+pub fn run_authentication(owner_sid: &str, host: Host) -> Result<()> {
+    run_with_phase(owner_sid, host, StoragePhase::Authentication)
 }
 
 fn run_with_phase(owner_sid: &str, host: Host, storage_phase: StoragePhase) -> Result<()> {
@@ -199,12 +204,16 @@ fn run_registered(handle: SERVICE_STATUS_HANDLE, name: PWSTR) -> Result<()> {
         StoragePhase::Pending => {
             crate::windows_service_config::pending_service_identity(&context.owner_sid)?
         }
+        StoragePhase::Authentication => {
+            crate::windows_service_config::auth_broker_identity(&context.owner_sid)?
+        }
     };
-    let expected: Vec<u16> = identity
-        .service_name()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let service_name = if matches!(context.storage_phase, StoragePhase::Authentication) {
+        format!("{}-Auth", identity.service_name())
+    } else {
+        identity.service_name()
+    };
+    let expected: Vec<u16> = service_name.encode_utf16().chain(Some(0)).collect();
     // SAFETY: SCM supplies a valid NUL-terminated name. Read no farther than
     // its terminator, and bound comparison by the fixed expected service name.
     ensure!(

@@ -119,10 +119,24 @@ pub async fn authorize_dapp_access(
 pub struct OwnerAuthorization {
     scope: OwnerAuthorizationScope,
     granted_at: Instant,
+    #[cfg(target_os = "windows")]
+    call: Option<crate::windows_service_presence::OwnerCallContext>,
 }
 
 impl OwnerAuthorization {
     pub(crate) fn require(&self, scope: OwnerAuthorizationScope) -> Result<(), HumanPresenceError> {
+        #[cfg(target_os = "windows")]
+        match &self.call {
+            Some(call) => call
+                .verify_current()
+                .map_err(|error| HumanPresenceError::Denied(error.to_string()))?,
+            None if cfg!(any(test, feature = "test-hooks")) => {}
+            None => {
+                return Err(HumanPresenceError::Denied(
+                    "owner authorization has no initiating call".into(),
+                ));
+            }
+        }
         if self.scope != scope {
             return Err(HumanPresenceError::Denied(
                 "owner authorization was granted for a different setting".into(),
@@ -142,6 +156,8 @@ impl OwnerAuthorization {
         Self {
             scope,
             granted_at: Instant::now(),
+            #[cfg(target_os = "windows")]
+            call: None,
         }
     }
 
@@ -153,6 +169,8 @@ impl OwnerAuthorization {
             granted_at: Instant::now()
                 .checked_sub(OWNER_AUTHORIZATION_LIFETIME + Duration::from_secs(1))
                 .expect("the monotonic clock has enough test history"),
+            #[cfg(target_os = "windows")]
+            call: None,
         }
     }
 }
@@ -168,6 +186,11 @@ pub async fn authorize_owner(
     Ok(OwnerAuthorization {
         scope,
         granted_at: Instant::now(),
+        #[cfg(target_os = "windows")]
+        call: Some(
+            crate::windows_service_presence::current_binding()
+                .map_err(|error| HumanPresenceError::Denied(error.to_string()))?,
+        ),
     })
 }
 
@@ -412,7 +435,7 @@ mod windows_owner_auth;
 #[async_trait]
 impl HumanPresence for PlatformHumanPresence {
     async fn confirm(&self, request: &PresenceRequest) -> Result<(), HumanPresenceError> {
-        windows_owner_auth::confirm(request)
+        windows_owner_auth::confirm(request).await
     }
 }
 

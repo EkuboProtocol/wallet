@@ -10,12 +10,14 @@ use uuid::Uuid;
 #[path = "windows_service_config_native.rs"]
 mod native;
 #[cfg(target_os = "windows")]
+pub(crate) use native::{
+    auth_broker_identity, machine_trustees, pending_owner_identity, pending_service_identity,
+};
+#[cfg(target_os = "windows")]
 pub use native::{
     find_installed_service_identity, installed_service_identity, pending_installer_identity,
     service_identity,
 };
-#[cfg(target_os = "windows")]
-pub(crate) use native::{machine_trustees, pending_owner_identity, pending_service_identity};
 
 /// Read protected pending metadata for the actual primary-token owner. The
 /// identity reader rejects thread impersonation; service SIDs are not owners.

@@ -21,9 +21,8 @@ def check_initialize(initialized: dict, expected_version: str) -> None:
 
     if initialized.get("id") != "package-initialize":
         fail("initialize response did not preserve its request ID")
-    # The wire-protocol server name remains stable; the installed executable,
-    # helper root and managed harness entry carry the v2 product identity.
-    if server.get("name") != "ekubo-wallet-mcp-bridge":
+    # Both offline protocol versions identify the separately installed v2 bridge.
+    if server.get("name") != "ekubo-wallet-v2-mcp-bridge":
         fail("initialize response has the wrong server name")
     if server.get("version") != expected_version:
         fail(

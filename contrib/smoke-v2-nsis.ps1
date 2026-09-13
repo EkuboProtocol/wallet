@@ -19,7 +19,7 @@ $before = LegacySnapshot
 foreach ($attempt in 1..2) {
     $process = Start-Process -FilePath $Installer -ArgumentList '/S' -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "NSIS install failed: $($process.ExitCode)" }
-    foreach ($file in @('ekubo-wallet-v2.exe', 'ekubo-wallet-v2-mcp-bridge.exe', 'ekubo-wallet-service.exe', 'ekubo-wallet-v2-enroll.exe', 'install-windows-v2.ps1', 'recover-windows-v2.ps1')) {
+    foreach ($file in @('ekubo-wallet-v2.exe', 'ekubo-wallet-v2-mcp-bridge.exe', 'ekubo-wallet-service.exe', 'ekubo-wallet-v2-enroll.exe', 'ekubo-wallet-v2-owner-auth.exe', 'install-windows-v2.ps1', 'recover-windows-v2.ps1', 'register-windows-v2-auth.ps1')) {
         if (-not (Test-Path -LiteralPath (Join-Path $install $file))) { throw "Missing installed payload: $file" }
         if ($RequireSignature -and ($file.EndsWith('.exe') -or $file.EndsWith('.ps1')) -and (Get-AuthenticodeSignature -LiteralPath (Join-Path $install $file)).Status -ne 'Valid') {
             throw "The installed executable is not Authenticode-valid: $file"

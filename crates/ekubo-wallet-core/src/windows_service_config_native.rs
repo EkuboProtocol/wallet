@@ -58,6 +58,14 @@ pub fn service_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
     Ok(identity)
 }
 
+pub(crate) fn auth_broker_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
+    ensure!(
+        current_process_identity()?.user_sid() == "S-1-5-18",
+        "native authentication broker requires SYSTEM"
+    );
+    read_configuration(owner_sid)?.context("wallet service is not installed")
+}
+
 // Pending identities are confined to the storage bootstrap, never returned to
 // desktop discovery or exposed as a public installed-identity constructor.
 pub(crate) fn pending_service_identity(owner: &str) -> Result<InstalledServiceIdentity> {

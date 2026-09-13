@@ -4616,6 +4616,7 @@ dependencies = [
  "clear-signing",
  "cron",
  "directories",
+ "ekubo-wallet-windows-owner-auth",
  "ekubo_sdk",
  "erc8410",
  "flate2",
@@ -4712,6 +4713,17 @@ dependencies = [
  "walletconnect-session",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "ekubo-wallet-windows-owner-auth"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "windows 0.62.2",
+ "windows-future 0.3.2",
 ]
 
 [[package]]

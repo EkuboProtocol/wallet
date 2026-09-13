@@ -10,7 +10,20 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def check_windows_auth_payload():
+    with (ROOT / "crates/windows-owner-auth/Cargo.toml").open("rb") as source:
+        helper = tomllib.load(source)["bin"][0]["name"] + ".exe"
+    assert helper == "ekubo-wallet-v2-owner-auth.exe"
+    for relative in ("contrib/windows-v2.nsi", ".github/workflows/build-release-artifacts.yml",
+                     ".github/workflows/release.yml", "contrib/smoke-v2-nsis.ps1"):
+        assert helper in (ROOT / relative).read_text(encoding="utf-8"), relative
+    for relative in ("contrib/windows-v2.nsi", ".github/workflows/release.yml",
+                     "contrib/install-windows-v2.ps1", "contrib/recover-windows-v2.ps1"):
+        assert "register-windows-v2-auth.ps1" in (ROOT / relative).read_text(encoding="utf-8"), relative
+
+
 def main():
+    check_windows_auth_payload()
     with (ROOT / "Cargo.toml").open("rb") as source:
         manifest = tomllib.load(source)
     assert manifest["workspace"]["package"]["version"].split(".")[0] == "2"

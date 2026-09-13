@@ -1,6 +1,6 @@
 # Service-isolated Wallet 2
 
-Status: implementation branch, **not release-ready**. Windows native owner authentication and packaged end-to-end acceptance remain blockers. See [Windows authorization feasibility](windows-owner-auth-feasibility-v2.md). The released 1.x application retains its documented credential-store limitation.
+Status: native authorization, explicit credential retirement, and installed acceptance harnesses are implemented. Platform execution and actual PIN/biometric release acceptance must be distinguished from source checks. See [Windows native authorization](windows-owner-auth-feasibility-v2.md) and [Linux installed acceptance](native-linux-acceptance.md). The released 1.x application retains its documented credential-store limitation.
 
 ## Product boundary
 
@@ -34,16 +34,26 @@ Initial Linux packaging is DEB; Windows packaging is machine-wide NSIS. Service 
 
 ## Optional first-run move from 1.x
 
-This is an explicit Linux owner flow after fresh v2 enrollment, not automatic installer migration. Windows move is disabled until its native authorization and transport are validated.
+This is an explicit owner flow after fresh v2 enrollment, not automatic installer migration. The Windows transport uses the shared owner stream protocol and service-side native authorization for source reading, destination verification, and completion.
 
 1. Before starting an execution lease or changing v2 onboarding state, offer the move for a fresh destination or an existing pending cleanup.
 2. The owner selects the source and explicitly identifies all other custom 1.x profiles to preserve. Unknown inventories are refused.
 3. Core authorizes the read, takes the old application/lifecycle locks and opens the source read-only. 1.x must be closed, transactions quiescent and automations disabled. Unsupported schemas and oversized state are refused rather than partially copied.
 4. The UI presents exact paths, addresses, instance IDs, table inventory and credentials that must remain shared. A separate explicit confirmation precedes the move.
 5. Core imports supported schema data and account material through the authenticated service, preserving identities, policies, revisions, stored history, pending records and settings. It rejects a configured destination. The service reopens/verifies durable state and all keys before source cleanup is possible.
-6. After renewed owner authorization, delete only exact verified unshared account-credential entries and confirm their absence. A durable source-bound pending/complete state controls explicit recovery; a pending cleanup prevents execution leases. It cannot silently adopt a different source or overwrite changed destination state.
+6. After renewed owner authorization and fresh destination verification, publish an encrypted `wallet.db.retired-v2-backup`, then atomically replace the selected source's `wallet.db` with an intentionally invalid database retirement file. Both old locks stay held. Released 1.x fails to open this nonempty database; it need not understand any new marker format. Do not remove/reset the retirement file. Other profiles are not modified.
+7. Delete exact verified unshared account-credential entries and confirm their absence. If no preserved profiles need `org.ekubo.wallet.db/default`, delete that exact database credential and confirm absence too. Otherwise retain it. A changed database credential is a hard stop, never permission to delete a newly created authority.
+8. The protected pending receipt binds the source ciphertext hash, old database-key hash, destination profile and preserved inventory. An authenticated `Inspect` request freshly verifies destination state and signing keys and returns only nonsecret account identities. Recovery uses that receipt and the exact retirement file/backup even after the source database key has been deleted. It never regenerates an old key or requires decrypting the retired backup. Completion remains pending until cleanup succeeds; execution stays blocked throughout.
 
-**Cleanup limitations:** the shared 1.x database credential and old database are retained. Account credentials needed by preserved profiles are retained as disclosed. Therefore this flow does not provide confidentiality for the retained old database or isolate a key whose legacy copy remains. Keyring APIs do not provide atomic compare-and-delete against noncooperating same-user software. No move can revoke a key copied before the transition. Do not describe this as complete removal of all legacy credentials or as securing previously compromised accounts.
+**Shared-key cases:** preserved profiles require the global 1.x database key, so the encrypted source backup remains readable while that key is retained. Account credentials shared with those profiles remain accessible to 1.x and must not be described as fully isolated. No silent rekeying of preserved profiles occurs. With no preserved profiles, all reviewed source account entries and the global database entry are retired. Histories are not deleted. Keyring APIs have no atomic compare-and-delete against noncooperating same-user software, and no move revokes a previously copied key.
+
+**Windows integration:** `Request::LegacyMove(ServiceCommand)` dispatches to core inside the authenticated owner-call context. The move peer authenticates the installed pipe, unlocks with the opaque owner relay, pins the service instance, and uses shared stream framing. `AuthorizeSource` binds a fresh nonce and exact source selection to native authorization before credential access; phase-specific receipts prevent interchange with import/verify/complete responses. Receipts are bounded to 1 MiB. No presentation-supplied successful receipt is accepted. Retirement file publication uses Windows write-through rename; Linux fsyncs the containing directory. Older receipts missing retirement identity metadata are refused for keyless resume rather than guessed.
+
+## Windows native owner authorization
+
+The per-profile SYSTEM broker accepts only the installed custody service SID. The custody service scopes authorization to kernel-authenticated owner session/logon identity, the exact request digest, and a retained live connection. The broker launches only the installed collector, under the actual interactive owner's token with SYSTEM-owned process/thread security, a restricted token default ACL, high integrity, startup mitigations, a clean environment, and a kill-on-close job. The complete machine image path is pinned and validated through native handles before launch.
+
+Only this protected collector calls `IUserConsentVerifierInterop` from the fixed System32 implementation. The broker consumes its retained process object's result once; arbitrary desktop processes, supplied PIDs, software keys, or approval booleans have no authority. Expiry, disconnect, changed logon identity and cancellation refuse authorization. This requires Windows 11's HWND interop API and Windows Hello configuration. CI's SYSTEM fixture exercises isolation without inventing or automatically approving a biometric gesture.
 
 The old cross-identity migration transfer, snapshot staging, installer commit/cutover and recovery framework has been removed. The smaller optional move is in `legacy_move*` and is separate from fresh installation.
 

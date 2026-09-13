@@ -299,10 +299,19 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
         let (first, _) = listener.accept().unwrap();
         let (mut reader, writer) = initialize(first, Duration::ZERO, false);
         assert_eq!(read(&mut reader)["method"], "notifications/initialized");
-        // Keep the write half open so EOF cannot win the race: the bridge
-        // must handle its own failed write instead of exiting through `?`.
-        reader.get_ref().shutdown(Shutdown::Read).unwrap();
         ready_tx.send(()).unwrap();
+        // Darwin does not promise EPIPE at the peer after shutdown(Read): a
+        // small write may succeed and leave both peers waiting forever. Wait
+        // until the oversized request is actually being written, then close
+        // the transport. Its unread remainder exceeds the socket buffer, so
+        // write_all cannot have completed. The bridge is inside client_frame
+        // and must handle the write failure before it can poll upstream EOF.
+        let mut prefix = [0; 1024];
+        reader.read_exact(&mut prefix).unwrap();
+        assert!(std::str::from_utf8(&prefix).unwrap().contains("arguments"));
+        writer.shutdown(Shutdown::Both).unwrap();
+        drop(reader);
+        drop(writer);
         let (second, _) = listener.accept().unwrap();
         let (mut reader, mut writer2) = initialize(second, Duration::ZERO, true);
         // Finishing our handshake writes does not mean the bridge has polled
@@ -326,13 +335,12 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
         );
         let mut eof = String::new();
         assert_eq!(reader.read_line(&mut eof).unwrap(), 0);
-        drop(writer);
     });
     let mut harness = Harness::start(home.path());
     harness.receive();
     harness.initialized();
     ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    harness.send(&json!({"jsonrpc":"2.0","id":"interrupted","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}));
+    harness.send(&json!({"jsonrpc":"2.0","id":"interrupted","method":"tools/call","params":{"name":"wallet_test","arguments":{"padding":"x".repeat(8 * 1024 * 1024)}}}));
     let failure = harness.receive();
     assert_eq!(failure["id"], "interrupted");
     assert!(

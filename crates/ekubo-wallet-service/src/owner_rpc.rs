@@ -212,6 +212,8 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Request::LegacyMove(command) => legacy_move_reply(command).await?,
             Request::LegacyMoveStatus => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
@@ -386,25 +388,12 @@ impl OwnerDispatcher {
             Request::WaitForEvents { after } => {
                 serde_json::to_value(owner.event_bus().wait_since(after).await?)?
             }
-            Request::Automations => serde_json::to_value(owner.automations()?)?,
-            Request::AutomationRuns {
-                automation_id,
-                limit,
-            } => serde_json::to_value(owner.automation_runs(automation_id, limit)?)?,
-            Request::DisableAutomation { automation_id } => {
-                serde_json::to_value(owner.disable_automation(automation_id)?)?
-            }
-            Request::RelinkAutomation { automation_id } => {
-                serde_json::to_value(owner.relink_automation(automation_id)?)?
-            }
-            Request::DeleteAutomation { automation_id } => {
-                owner.delete_automation(automation_id).await?;
-                Value::Null
-            }
-            Request::DryRunAutomation { automation_id } => {
-                // The simulation future is large; keep it off every owner call frame.
-                serde_json::to_value(Box::pin(owner.dry_run_automation(automation_id)).await?)?
-            }
+            request @ (Request::Automations
+            | Request::AutomationRuns { .. }
+            | Request::DisableAutomation { .. }
+            | Request::RelinkAutomation { .. }
+            | Request::DeleteAutomation { .. }
+            | Request::DryRunAutomation { .. }) => self.dispatch_automation(request).await?,
             Request::Tokens {
                 chain_id,
                 limit,
@@ -540,6 +529,31 @@ impl OwnerDispatcher {
             }
         })
     }
+    async fn dispatch_automation(&self, request: Request) -> anyhow::Result<Value> {
+        let owner = &self.owner;
+        Ok(match request {
+            Request::Automations => serde_json::to_value(owner.automations()?)?,
+            Request::AutomationRuns {
+                automation_id,
+                limit,
+            } => serde_json::to_value(owner.automation_runs(automation_id, limit)?)?,
+            Request::DisableAutomation { automation_id } => {
+                serde_json::to_value(owner.disable_automation(automation_id)?)?
+            }
+            Request::RelinkAutomation { automation_id } => {
+                serde_json::to_value(owner.relink_automation(automation_id)?)?
+            }
+            Request::DeleteAutomation { automation_id } => {
+                owner.delete_automation(automation_id).await?;
+                Value::Null
+            }
+            Request::DryRunAutomation { automation_id } => {
+                serde_json::to_value(Box::pin(owner.dry_run_automation(automation_id)).await?)?
+            }
+            _ => anyhow::bail!("not an automation operation"),
+        })
+    }
+
     /// Network operations retain the initiating owner's authentication context
     /// and delegate every mutation to the existing core-enforced `OwnerApi`.
     async fn dispatch_network(&self, request: Request) -> anyhow::Result<Value> {
@@ -577,6 +591,19 @@ impl OwnerDispatcher {
             _ => anyhow::bail!("not a network operation"),
         })
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+async fn legacy_move_reply(
+    command: ekubo_wallet_core::legacy_move::ServiceCommand,
+) -> anyhow::Result<Value> {
+    let receipt = ekubo_wallet_core::legacy_move::service_command(command).await?;
+    let encoded = serde_json::to_vec(&receipt)?;
+    anyhow::ensure!(
+        encoded.len() <= 1024 * 1024,
+        "legacy move receipt is oversized"
+    );
+    Ok(serde_json::from_slice(&encoded)?)
 }
 
 #[cfg(test)]

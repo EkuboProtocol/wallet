@@ -11,8 +11,9 @@ mod native;
 pub use native::{ConnectedOwnerPipe, OwnerPipeListener, connect};
 #[cfg(target_os = "windows")]
 pub(crate) use native::{
-    authenticate_installer_client, create as create_private_pipe,
-    open_available as open_private_pipe,
+    authenticate_auth_service, authenticate_installer_client, create as create_auth_server,
+    create as create_private_pipe, open_available as open_auth_client,
+    open_available as open_private_pipe, verify_auth_connection,
 };
 
 // FILE_GENERIC_READ plus FILE_WRITE_DATA: include the standard read-side pipe

@@ -248,6 +248,35 @@ pub struct ConnectedOwnerPipe {
 }
 
 impl ConnectedOwnerPipe {
+    pub fn owner_call_context(
+        &self,
+        request: &[u8],
+    ) -> Result<crate::windows_service_presence::OwnerCallContext> {
+        self.authenticate_request()?;
+        let (session, logon) = with_client(HANDLE(self.pipe.as_raw_handle()), || {
+            use windows::Win32::{
+                Security::TOKEN_QUERY,
+                System::Threading::{GetCurrentThread, OpenThreadToken},
+            };
+            let mut handle = HANDLE::default();
+            // SAFETY: read the impersonated, last-read client token on this
+            // thread only. The local handle closes before impersonation ends.
+            unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &raw mut handle) }?;
+            let token = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+            ekubo_wallet_windows_owner_auth::logon_identity(HANDLE(token.as_raw_handle()))
+        })?;
+        let retained = retain_auth_connection(&self.pipe)?;
+        Ok(
+            crate::windows_service_presence::OwnerCallContext::from_authenticated_token(
+                self.identity.clone(),
+                session,
+                logon,
+                request,
+                retained,
+            ),
+        )
+    }
+
     pub fn stream(&mut self) -> &mut NamedPipeServer {
         &mut self.pipe
     }
@@ -297,6 +326,63 @@ fn client_sid(pipe: HANDLE) -> Result<String> {
         pipe,
         crate::windows_service_identity::current_thread_user_sid,
     )
+}
+
+pub(crate) fn authenticate_auth_service(pipe: &NamedPipeServer, expected: &str) -> Result<()> {
+    ensure!(
+        client_sid(HANDLE(pipe.as_raw_handle()))? == expected,
+        "native authentication caller is not the installed wallet service"
+    );
+    verify_pipe_connection(HANDLE(pipe.as_raw_handle()))
+}
+
+pub(crate) fn verify_auth_connection(connection: &OwnedHandle) -> Result<()> {
+    verify_pipe_connection(HANDLE(connection.as_raw_handle()))
+}
+
+fn verify_pipe_connection(connection: HANDLE) -> Result<()> {
+    let mut available = 0;
+    // SAFETY: retained overlapped server handle; this consumes no data and does
+    // not change the last-read impersonation context. Broken pipes fail.
+    unsafe {
+        windows::Win32::System::Pipes::PeekNamedPipe(
+            connection,
+            None,
+            0,
+            None,
+            Some(&raw mut available),
+            None,
+        )
+    }?;
+    ensure!(
+        available == 0,
+        "unexpected traffic on native authorization owner connection"
+    );
+    Ok(())
+}
+
+fn retain_auth_connection(pipe: &NamedPipeServer) -> Result<OwnedHandle> {
+    use windows::Win32::{
+        Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle},
+        System::Threading::GetCurrentProcess,
+    };
+    let mut retained = HANDLE::default();
+    // SAFETY: retain the verified overlapped server endpoint in this process
+    // without inheritance. Holding a server handle does not keep its peer alive.
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            HANDLE(pipe.as_raw_handle()),
+            GetCurrentProcess(),
+            &raw mut retained,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }?;
+    let retained = unsafe { OwnedHandle::from_raw_handle(retained.0) };
+    verify_auth_connection(&retained)?;
+    Ok(retained)
 }
 
 fn with_client<T>(pipe: HANDLE, inspect: impl FnOnce() -> Result<T>) -> Result<T> {

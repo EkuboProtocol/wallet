@@ -17,6 +17,13 @@ pub(crate) trait Peer: Send {
     type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
     fn stream(&mut self) -> &mut Self::Stream;
     fn authenticate(&self) -> Result<()>;
+    #[cfg(windows)]
+    fn owner_call_context(
+        &self,
+        _request: &[u8],
+    ) -> Result<Option<ekubo_wallet_core::windows_service_presence::OwnerCallContext>> {
+        Ok(None)
+    }
     fn into_stream(self) -> Self::Stream;
 }
 
@@ -149,9 +156,16 @@ impl OwnerStreamService {
         let runtime = self.runtime()?;
         let request: Request = serde_json::from_slice(frame.body())
             .map_err(|_| anyhow::anyhow!("invalid owner operation"))?;
+        let operation = runtime.owner.encode(request);
+        #[cfg(windows)]
+        let operation = ekubo_wallet_core::windows_service_presence::scope(
+            peer.owner_call_context(frame.body())?,
+            operation,
+        );
         let response = tokio::select! {
-            response = runtime.owner.encode(request) => response?,
+            biased;
             departed = wait_for_departure(peer.stream()) => return Err(departed),
+            response = operation => response?,
         };
         wire::write(peer.stream(), Kind::Ok, response.as_bytes()).await
     }

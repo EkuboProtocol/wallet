@@ -17,6 +17,7 @@ members = [
     "crates/ekubo-wallet-core",
     "crates/ekubo-wallet-client",
     "crates/ekubo-wallet-service",
+    "crates/windows-owner-auth",
     "crates/ekubo-wallet-preview",
     "crates/ekubo-wallet-preview-wasm",
     "crates/mcp-bridge",

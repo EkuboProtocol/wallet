@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn offline_protocol_identities_are_v2() {
+    assert_eq!(
+        offline_initialize_result(&json!("2025-11-25"))["serverInfo"]["name"],
+        "ekubo-wallet-v2-mcp-bridge"
+    );
+    assert_eq!(
+        modern::offline_discovery()["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "ekubo-wallet-v2-mcp-bridge"
+    );
+}
+
+#[test]
 fn missing_service_is_an_actionable_setup_failure() {
     let error = require_service::<()>(None).unwrap_err().to_string();
     assert!(error.contains("Ekubo Wallet 2"));

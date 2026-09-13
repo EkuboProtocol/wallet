@@ -57,8 +57,12 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
         SetupAction::Resume => String::new(),
         SetupAction::DiscardUnused => " -DiscardUnused".into(),
     };
+    // AllSigned can prompt for a valid but not-yet-trusted publisher. The
+    // elevated console must allow the operator to choose Run once; do not
+    // import a publisher certificate or answer Always run on their behalf.
+    // The outer command-only launcher remains noninteractive below.
     let arguments = format!(
-        "-NoProfile -NonInteractive -ExecutionPolicy AllSigned -File \"{}\" -OwnerSid {owner_sid}{option}",
+        "-NoProfile -ExecutionPolicy AllSigned -File \"{}\" -OwnerSid {owner_sid}{option}",
         script.display()
     );
     let expression = format!(

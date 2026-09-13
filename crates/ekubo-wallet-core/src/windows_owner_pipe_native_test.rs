@@ -2,6 +2,30 @@ use super::*;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[tokio::test]
+async fn native_authorization_lease_rejects_extra_traffic_and_disconnect() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let mut server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let mut client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    let retained = retain_auth_connection(&server).unwrap();
+    verify_auth_connection(&retained).unwrap();
+    client.write_all(b"x").await.unwrap();
+    assert!(verify_auth_connection(&retained).is_err());
+    let mut byte = [0];
+    server.read_exact(&mut byte).await.unwrap();
+    authenticate_auth_service(&server, &sid).unwrap();
+    assert!(authenticate_auth_service(&server, "S-1-5-80-1-2-3-4-5").is_err());
+    verify_auth_connection(&retained).unwrap();
+    drop(client);
+    assert_eq!(server.read(&mut byte).await.unwrap(), 0);
+    assert!(verify_auth_connection(&retained).is_err());
+}
+
+#[tokio::test]
 async fn native_pipe_authenticates_its_object_and_client_without_retaining_impersonation() {
     let sid = crate::windows_service_identity::current_process_identity()
         .unwrap()

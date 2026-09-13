@@ -290,6 +290,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `capabilities_cover_every_wallet_capability` in the wallet's MCP tests,
 /// so a capability added there cannot silently go unannounced here.
 const OFFLINE_CAPABILITIES: &str = include_str!("offline_capabilities.json");
+const BRIDGE_SERVER_NAME: &str = "ekubo-wallet-v2-mcp-bridge";
 
 /// One live wallet connection, and everything the harness learns from it.
 struct WalletSession<S> {
@@ -420,7 +421,7 @@ fn offline_initialize_result(protocol: &Value) -> Value {
         "protocolVersion": protocol,
         "capabilities": serde_json::from_str::<Value>(OFFLINE_CAPABILITIES)
             .expect("offline capabilities are valid JSON"),
-        "serverInfo":{"name":"ekubo-wallet-mcp-bridge","version":BUILD_VERSION},
+        "serverInfo":{"name":BRIDGE_SERVER_NAME,"version":BUILD_VERSION},
         "instructions":"Ekubo Wallet is temporarily unavailable. The bridge reconnects automatically and announces catalog changes. Retry discovery after starting or unlocking the wallet; if your client does not refresh tools, refresh its MCP connection."
     })
 }

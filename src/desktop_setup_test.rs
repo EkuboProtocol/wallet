@@ -7,6 +7,7 @@ fn pending_cleanup_overrides_populated_accounts_and_continue_marker_but_complete
         source: std::env::temp_dir().join("source"),
         preserved_profiles: vec![],
         retained_shared_accounts: vec![uuid::Uuid::new_v4()],
+        retirement: None,
     };
     let pending = MoveStatus::PendingCleanup {
         digest: [1; 32],

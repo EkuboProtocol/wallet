@@ -8,6 +8,150 @@ use windows::{
 
 const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 
+fn image_fixture_trust() -> Vec<String> {
+    let mut trusted = crate::windows_service_config::machine_trustees().unwrap();
+    // Only these synthetic fixtures trust their creating user. Production
+    // pin_machine_image obtains its fixed machine trustees internally.
+    trusted.push(
+        crate::windows_service_identity::current_process_identity()
+            .unwrap()
+            .user_sid()
+            .to_owned(),
+    );
+    trusted
+}
+
+fn image_fixture_root(dir: &Directory) -> File {
+    open_native(
+        None,
+        &format!(r"\??\{}", dir.0.display()),
+        StorageKind::Directory,
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_image_chain_pins_every_directory_and_rejects_redirection() {
+    let dir = Directory::new();
+    let middle = dir.0.join("Program Files");
+    let install = middle.join("Ekubo Wallet 2");
+    std::fs::create_dir_all(&install).unwrap();
+    let image = install.join("collector.exe");
+    std::fs::write(&image, b"synthetic image, never executed").unwrap();
+    let pins = pin_image_descendants(
+        vec![image_fixture_root(&dir)],
+        &["Program Files", "Ekubo Wallet 2", "collector.exe"],
+        &image_fixture_trust(),
+    )
+    .unwrap();
+    assert_eq!(pins.len(), 4);
+    assert!(std::fs::rename(&middle, dir.0.join("moved")).is_err());
+    assert!(std::fs::rename(&install, middle.join("moved")).is_err());
+    assert!(std::fs::remove_file(&image).is_err());
+    assert!(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .is_err()
+    );
+    let writer = attribute_writer(&middle);
+    assert!(set_junction(&writer, &dir.0).is_err());
+    drop(writer);
+    drop(pins);
+    std::fs::rename(&middle, dir.0.join("moved")).unwrap();
+    std::fs::create_dir(&middle).unwrap();
+    let writer = attribute_writer(&middle);
+    // Positive control: the same now-empty ancestor can be redirected. The
+    // production traversal must reject it rather than pinning a redirected leaf.
+    set_junction(&writer, &dir.0.join("moved")).unwrap();
+    assert!(
+        pin_image_descendants(
+            vec![image_fixture_root(&dir)],
+            &["Program Files", "Ekubo Wallet 2", "collector.exe"],
+            &image_fixture_trust()
+        )
+        .is_err()
+    );
+    drop(writer);
+    std::fs::remove_dir(middle).unwrap();
+}
+
+#[test]
+fn native_image_chain_rejects_owner_modifiable_image() {
+    use windows::Win32::Security::{
+        Authorization::SetNamedSecurityInfoW, GetSecurityDescriptorDacl,
+    };
+    let dir = Directory::new();
+    let install = dir.0.join("install");
+    std::fs::create_dir(&install).unwrap();
+    let image = install.join("collector.exe");
+    std::fs::write(&image, b"synthetic image, never executed").unwrap();
+    let trusted = image_fixture_trust();
+    // Baseline uses the same opened-handle checks and succeeds.
+    drop(
+        pin_image_descendants(
+            vec![image_fixture_root(&dir)],
+            &["install", "collector.exe"],
+            &trusted,
+        )
+        .unwrap(),
+    );
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let sddl: Vec<u16> = format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})(A;;FW;;;BU)")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &raw mut sd,
+            None,
+        )
+    }
+    .unwrap();
+    let sd = Descriptor(sd);
+    let mut present = false.into();
+    let mut defaulted = false.into();
+    let mut acl = std::ptr::null_mut();
+    unsafe { GetSecurityDescriptorDacl(sd.0, &raw mut present, &raw mut acl, &raw mut defaulted) }
+        .unwrap();
+    let path: Vec<u16> = image
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(path.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION
+                | windows::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl),
+            None,
+        )
+    }
+    .ok()
+    .unwrap();
+    let error = pin_image_descendants(
+        vec![image_fixture_root(&dir)],
+        &["install", "collector.exe"],
+        &trusted,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("untrusted mutation rights"),
+        "{error:#}"
+    );
+}
+
 #[test]
 fn native_profile_lock_excludes_competitors_and_prevents_lock_file_replacement() {
     let dir = Directory::new();

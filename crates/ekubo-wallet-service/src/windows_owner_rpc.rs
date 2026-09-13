@@ -98,6 +98,12 @@ impl WindowsOwnerEndpoint {
 }
 
 impl Peer for ConnectedOwnerPipe {
+    fn owner_call_context(
+        &self,
+        request: &[u8],
+    ) -> Result<Option<ekubo_wallet_core::windows_service_presence::OwnerCallContext>> {
+        self.owner_call_context(request).map(Some)
+    }
     type Stream = NamedPipeServer;
     fn stream(&mut self) -> &mut Self::Stream {
         self.stream()

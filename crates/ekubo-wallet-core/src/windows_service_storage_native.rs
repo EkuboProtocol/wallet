@@ -373,6 +373,72 @@ fn validate_machine_handle(
     validate_machine_security(&owner, &entries, trusted, shared_os_ancestor)
 }
 
+/// Pin an installed image from its fixed local drive root. Shared OS ancestors
+/// may permit child creation/attribute writes, but never replacement. Once the
+/// complete chain is retained, no ancestor can be emptied and converted into a
+/// junction. Every lookup below the root is handle-relative and no-reparse.
+pub(crate) fn pin_machine_image(path: &Path) -> Result<Vec<File>> {
+    use windows::{
+        Win32::{Storage::FileSystem::GetDriveTypeW, System::WindowsProgramming::DRIVE_FIXED},
+        core::PCWSTR,
+    };
+    let path = path.to_str().context("invalid installed image path")?;
+    let (drive, components) = machine_path(path)?;
+    ensure!(
+        components.len() >= 2,
+        "installed image needs a protected directory"
+    );
+    let wide: Vec<u16> = drive.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: this is the validated, NUL-terminated local drive root.
+    ensure!(
+        unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) } == DRIVE_FIXED,
+        "installed image is not on a fixed local drive"
+    );
+    let trusted = crate::windows_service_config::machine_trustees()?;
+    let root = open_native(None, &format!("\\??\\{drive}"), StorageKind::Directory)?;
+    validate_machine_handle(root.as_handle(), &trusted, true)?;
+    pin_image_descendants(vec![root], &components, &trusted)
+}
+
+fn pin_image_descendants(
+    mut handles: Vec<File>,
+    components: &[&str],
+    trusted: &[String],
+) -> Result<Vec<File>> {
+    ensure!(
+        !handles.is_empty() && components.len() >= 2,
+        "invalid image traversal"
+    );
+    let image_index = components.len() - 1;
+    for (index, component) in components.iter().enumerate() {
+        let kind = if index == image_index {
+            StorageKind::File
+        } else {
+            StorageKind::Directory
+        };
+        let parent = handles.last().context("missing pinned image parent")?;
+        // Components originate in machine_path, which also permits legitimate
+        // spaces/Unicode in Program Files and machine installation directories.
+        let child = open_native(Some(parent.as_handle()), component, kind)?;
+        let (owner, entries) = read_security(child.as_handle(), kind)?;
+        validate_machine_security(&owner, &entries, trusted, index + 1 < image_index)?;
+        handles.push(child);
+    }
+    // Close the attribute-only writer race from *before* each child was pinned.
+    // Inspect held objects again, not names that could refer to different objects.
+    let image_index = handles.len() - 1;
+    for (index, handle) in handles.iter().enumerate() {
+        let kind = if index == image_index {
+            StorageKind::File
+        } else {
+            StorageKind::Directory
+        };
+        let (owner, entries) = read_security(handle.as_handle(), kind)?;
+        validate_machine_security(&owner, &entries, trusted, index + 1 < image_index)?;
+    }
+    Ok(handles)
+}
+
 /// Validate one object held open by the service. The caller must first traverse
 /// protected ancestors without following reparse points and retain the handle
 /// for subsequent I/O. This does not prove path provenance or authorize a read.

@@ -175,7 +175,7 @@ jobs:
               installers=(target/release/*setup.exe)
               test "${#installers[@]}" -eq 1
               cp "${installers[0]}" dist/
-              7z a dist/windows-payload.zip ./target/release/ekubo-wallet-v2.exe ./target/release/ekubo-wallet-v2-mcp-bridge.exe ./target/release/ekubo-wallet-service.exe ./target/release/ekubo-wallet-v2-enroll.exe
+              7z a dist/windows-payload.zip ./target/release/ekubo-wallet-v2.exe ./target/release/ekubo-wallet-v2-mcp-bridge.exe ./target/release/ekubo-wallet-service.exe ./target/release/ekubo-wallet-v2-enroll.exe ./target/release/ekubo-wallet-v2-owner-auth.exe
               ;;
             Linux)
               debs=(target/release/*.deb)

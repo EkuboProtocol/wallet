@@ -51,6 +51,8 @@ pub mod mcp_companions;
 pub mod message;
 pub mod networks;
 pub mod orchestrator;
+pub mod owner_framing;
+pub mod owner_stream_protocol;
 pub mod pending;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod pending_profile;
@@ -87,12 +89,16 @@ pub mod windows_service_identity;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_service_manager;
 
+#[cfg(target_os = "windows")]
+mod windows_auth_image;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_owner_pipe;
 #[cfg(any(target_os = "windows", test))]
 mod windows_security;
 #[cfg(target_os = "windows")]
 pub mod windows_service_custody;
+#[cfg(target_os = "windows")]
+pub mod windows_service_presence;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows_service_storage;
 

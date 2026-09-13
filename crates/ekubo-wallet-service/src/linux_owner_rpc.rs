@@ -88,7 +88,9 @@ impl LinuxOwnerInterface {
             zbus::fdo::Error::AccessDenied("legacy move owner authentication failed".into())
         })?
         .map_err(|_| {
-            zbus::fdo::Error::Failed("legacy move failed; source credentials retained".into())
+            zbus::fdo::Error::Failed(
+                "legacy move failed; inspect pending cleanup before retrying".into(),
+            )
         })
     }
 

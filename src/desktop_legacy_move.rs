@@ -24,7 +24,7 @@ fn selected_profiles(
 ) -> Result<(PathBuf, ProfileInventory)> {
     anyhow::ensure!(
         complete,
-        "Identify every other 1.x profile before reviewing the move. If the inventory is unknown, keep using 1.x until it can be established."
+        "Confirm whether you use any custom 1.x profiles. Add their paths above before continuing."
     );
     let source = PathBuf::from(source.trim());
     let profiles = preserved
@@ -78,8 +78,14 @@ fn inventory_text(summary: &MoveSummary) -> String {
         let _ = writeln!(text, "{}", path.display());
     }
     if summary.preserved_profiles.is_empty() {
-        text.push_str("None declared\n");
+        text.push_str("None declared. The old global database credential will be deleted after verification.\n");
+    } else {
+        text.push_str("The old global database credential stays available to these profiles.\n");
     }
+    if !summary.retained_shared_accounts.is_empty() {
+        text.push_str("\nShared signing keys remain accessible to 1.x. These accounts do not have full key isolation.\n");
+    }
+    text.push_str("\nThe moved profile will be retired. Its encrypted database is kept as wallet.db.retired-v2-backup; its original database path will block 1.x startup. Do not remove or reset that retirement file.\n");
     text.push_str("\nStored data included:\n");
     for (table, rows) in &summary.tables {
         let _ = writeln!(text, "{table}: {rows} rows");
@@ -180,7 +186,7 @@ impl MoveWindow {
                 view.busy = false;
                 view.message = Some(match result {
                     Ok(report) => format!(
-                        "Destination verified. Deleted {} old account credential(s); {} already absent; {} shared account credential(s) retained.\nThe shared 1.x database credential is retained: {}. The old database and preserved profiles remain. Close and reopen v2 to reload the moved state.",
+                        "Destination verified and source profile retired. Deleted {} old account credential(s); {} already absent; {} shared account credential(s) retained.\nThe shared 1.x database credential is retained: {}. Encrypted history is preserved in wallet.db.retired-v2-backup. Any retained shared signing key still remains accessible to 1.x. Close and reopen v2 to reload the moved state.",
                         report.deleted_account_credentials.len(), report.already_absent.len(), report.retained_shared_accounts.len(), report.shared_database_credential_retained
                     ),
                     Err(error) => format!("Move or cleanup did not complete: {error:#}\nThe destination may already contain the moved state and cleanup may be partial. Keep both profiles. Close and reopen v2 to inspect the result before taking another action; this window will not replay the move."),
@@ -197,11 +203,11 @@ impl Render for MoveWindow {
         div().size_full().flex().flex_col().p_6().gap_4().bg(cx.theme().background).text_color(cx.theme().foreground)
             .child(div().text_lg().font_semibold().child("Move from Ekubo Wallet 1.x"))
             .child(div().id("legacy-move-content").overflow_y_scroll().flex_1().min_h_0().flex().flex_col().gap_3()
-                .child(selectable_label("Close 1.x first. A new move requires an empty v2 wallet; pending cleanup resumes against its exact committed destination receipt. Eligible old credentials are deleted only after core verifies the destination. Already-absent old keys can be verified against v2 during resume. The old database, its shared credential, and credentials shared with preserved profiles are retained. Retained copies and prior key exposure are not repaired by this move."))
+                .child(selectable_label("Close 1.x, then review the suggested default profile or enter a custom path. After verifying v2, this move retires the selected profile and deletes its unshared credentials. Other profiles keep their required keys. Interrupted cleanup resumes from the protected destination, even after the old database key is gone. Encrypted history is preserved; previous key exposure cannot be undone."))
                 .when(self.summary.is_none() && !self.finished(), |panel| panel
                     .child(selectable_label("1.x source profile (absolute path)"))
                     .child(Input::new(&self.source_input).disabled(self.busy))
-                    .child(selectable_label("Every other 1.x profile to preserve (one absolute path per line; leave blank only if none exist)"))
+                    .child(selectable_label("Other custom 1.x profiles you use (optional; one absolute path per line)"))
                     .child(Input::new(&self.preserved_input).disabled(self.busy))
                     .child(Checkbox::new("complete-legacy-inventory").checked(self.inventory_complete).disabled(self.busy)
                         .label("This is the complete list of my other 1.x profiles, including custom profiles. If blank, I confirm there are none.")
@@ -210,7 +216,7 @@ impl Render for MoveWindow {
                     .child(selectable_label(inventory_text(summary)))
                     .when(!self.finished(), |panel| panel.child(Checkbox::new("confirm-legacy-deletion")
                         .checked(self.deletion_confirmed).disabled(self.busy)
-                        .label("I reviewed this exact source and account inventory. I authorize moving it and deleting the eligible old account credentials only after the destination is verified, with the shared credentials shown above retained.")
+                        .label("Retire this profile after verifying v2. Delete its unshared account credentials and, if no other profiles need it, the old database key. Keep the shared keys shown above.")
                         .on_click(cx.listener(|view, checked, _, cx| { view.deletion_confirmed = *checked; cx.notify(); })))))
                 .when_some(self.message.clone(), |panel, message| panel.child(div().id("legacy-move-status").role(Role::Status).child(selectable_label(message)))))
             .when(self.summary.is_none() && !self.finished(), |panel| panel.child(app_button("review-legacy-source").self_start().label("Review selected source…")
@@ -235,10 +241,6 @@ pub(super) fn create(
     restart: Rc<Cell<bool>>,
     pending: Option<ekubo_wallet_core::legacy_move::MoveBinding>,
 ) -> Result<Entity<MoveWindow>> {
-    anyhow::ensure!(
-        !cfg!(target_os = "windows"),
-        "Protected owner authorization is unavailable in this Windows build."
-    );
     let suggested = match &pending {
         Some(binding) => binding.source.clone(),
         None => ekubo_wallet_core::legacy_move::suggested_legacy_root()?,
