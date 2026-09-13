@@ -26,7 +26,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: wallet-ci-${{ github.head_ref || github.ref_name }}
+  # Cheap PR checks must not cancel a manually dispatched native milestone.
+  # Repeated runs of the same class still supersede one another on this branch.
+  group: wallet-ci-${{ github.event_name == 'pull_request' && 'source' || 'native' }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
