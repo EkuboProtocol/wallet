@@ -11,8 +11,8 @@ use anyhow::{Result, ensure};
 mod native;
 #[cfg(target_os = "windows")]
 pub use native::{
-    current_process_identity, verify_installer_process, verify_installer_thread,
-    verify_service_process,
+    current_process_authentication_id, current_process_identity, verify_installer_process,
+    verify_installer_thread, verify_service_process,
 };
 #[cfg(target_os = "windows")]
 pub(crate) use native::{current_thread_user_sid, sid_string};

@@ -106,12 +106,8 @@ mod fixture {
             std::env::var_os("EKUBO_WALLET_V2_HOME").is_none(),
             "fixture must use production paths"
         );
-        let logon = std::process::Command::new("whoami.exe")
-            .arg("/logonid")
-            .output()?;
-        ensure!(logon.status.success(), "cannot read actual token logon SID");
-        let logon = String::from_utf8(logon.stdout)?.trim().to_owned();
-        ensure!(logon.starts_with("S-1-5-5-"), "unexpected logon SID output");
+        let authentication = windows_service_identity::current_process_authentication_id()?;
+        let logon = format!("{:08x}:{:08x}", authentication[1], authentication[0]);
         // Let the administrator compare the real token report with Windows'
         // SID->profile mapping before touching even the synthetic 1.x sentinel.
         publish(

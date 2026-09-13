@@ -280,7 +280,14 @@ try {
         if ($nativeProfile.LocalPath -ne $ready.profile) { throw 'Owner environment did not load its real Windows profile.' }
         if ($ready.session -ne $installerSession) { throw 'Fixture did not use the installer session with a distinct owner logon.' }
         if ($phase -eq 'enroll') { $baseline = $ready } else {
-            if ($ready.logon -eq $baseline.logon -or $ready.profile_id -ne $baseline.profile_id -or $ready.service_sid -ne $baseline.service_sid -or ($ready.account | ConvertTo-Json -Compress) -ne ($baseline.account | ConvertTo-Json -Compress)) { throw 'New logon/restart did not retain the exact service and account identities.' }
+            if ($ready.logon -eq $baseline.logon) { throw "The new process reused authentication LUID $($ready.logon)." }
+            if ($ready.profile_id -ne $baseline.profile_id) { throw 'Protected profile identity changed across restart.' }
+            if ($ready.service_sid -ne $baseline.service_sid) { throw 'Service account identity changed across restart.' }
+            if (($ready.account | ConvertTo-Json -Compress) -ne ($baseline.account | ConvertTo-Json -Compress)) {
+                Write-Output ('Before: ' + ($baseline.account | ConvertTo-Json -Compress))
+                Write-Output ('After: ' + ($ready.account | ConvertTo-Json -Compress))
+                throw 'Stored account metadata changed across restart.'
+            }
         }
         if ($ready.owner_sid -ne $ownerSid -or $ready.service_sid -eq $ownerSid) { throw 'Published service/owner identity is not isolated.' }
         $service = Get-CimInstance Win32_Service -Filter "Name='$($ready.service_name)'"
@@ -351,16 +358,22 @@ try {
                 $cleanupStep = "stop and await exit: $($service.Name)"
                 Stop-FixtureService $service.Name
             }
+            $virtualProfiles = [Collections.Generic.List[string]]::new()
             foreach ($service in $services) {
                 if ($service.StartName -like 'NT SERVICE\*') {
                     $virtualSid = [Security.Principal.NTAccount]::new($service.StartName).Translate([Security.Principal.SecurityIdentifier]).Value
                     if ($virtualSid -notlike 'S-1-5-80-*') { throw 'Unexpected fixture virtual account SID.' }
-                    $cleanupStep = "remove virtual profile: $virtualSid"
-                    Remove-FixtureProfile $virtualSid
+                    $virtualProfiles.Add($virtualSid)
                 }
                 $cleanupStep = "delete SCM registration: $($service.Name)"
                 & sc.exe delete $service.Name | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw 'Could not remove fixture SCM registration.' }
+            }
+            # SCM can retain the virtual account's profile while its registration
+            # exists, even after the service process has exited.
+            foreach ($virtualSid in $virtualProfiles) {
+                $cleanupStep = "remove virtual profile after SCM deletion: $virtualSid"
+                Remove-FixtureProfile $virtualSid
             }
             $cleanupStep = "remove registry: $registry"
             if (Test-Path $registry) { Remove-Item -LiteralPath $registry -Recurse -Force }

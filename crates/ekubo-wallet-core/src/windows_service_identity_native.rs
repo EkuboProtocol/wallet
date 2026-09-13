@@ -18,8 +18,8 @@ use windows::{
         },
         Security::Authorization::ConvertSidToStringSidW,
         Security::{
-            GetTokenInformation, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, TokenSessionId,
-            TokenUser,
+            GetTokenInformation, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_STATISTICS,
+            TOKEN_USER, TokenSessionId, TokenStatistics, TokenUser,
         },
         System::Threading::{
             GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
@@ -172,4 +172,21 @@ pub fn verify_service_process(expected_service_sid: &str) -> Result<ProcessIdent
     let identity = current_process_identity()?;
     identity.verify_service(expected_service_sid)?;
     Ok(identity)
+}
+
+/// Read the primary token's logon generation, not its window-station logon SID
+/// group (which secondary-logon processes may share with the caller).
+pub fn current_process_authentication_id() -> Result<[u32; 2]> {
+    ensure_not_impersonating()?;
+    let mut handle = HANDLE::default();
+    // SAFETY: the current-process pseudo-handle and output pointer are valid.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut handle) }?;
+    let token = Token(handle);
+    let data = token_data(&token, TokenStatistics, size_of::<TOKEN_STATISTICS>())?;
+    // SAFETY: token_data checked alignment and the full record's size.
+    let statistics = unsafe { &*data.words.as_ptr().cast::<TOKEN_STATISTICS>() };
+    Ok([
+        statistics.AuthenticationId.LowPart,
+        statistics.AuthenticationId.HighPart.cast_unsigned(),
+    ])
 }
