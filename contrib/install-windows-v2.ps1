@@ -35,8 +35,10 @@ try {
     if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage)) { throw 'Concurrent v2 setup detected.' }
     $profile = [Guid]::NewGuid()
     $service = 'EkuboWalletV2-' + $profile.ToString('N')
-    & sc.exe create $service binPath= ('"' + $binary + '" --provision-owner-sid ' + $OwnerSid) start= demand obj= ('NT SERVICE\' + $service)
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create the protected service.' }
+    # Pass the command directly through SCM rather than PowerShell 5's legacy
+    # native-argument quoting (which strips embedded Program Files quotes).
+    $credential = [Management.Automation.PSCredential]::new(('NT SERVICE\' + $service), [Security.SecureString]::new())
+    New-Service -Name $service -BinaryPathName ('"' + $binary + '" --provision-owner-sid ' + $OwnerSid) -StartupType Manual -Credential $credential | Out-Null
     $sid = [Security.Principal.NTAccount]::new('NT SERVICE', $service).Translate([Security.Principal.SecurityIdentifier]).Value
     $machineAcl = [Security.AccessControl.DirectorySecurity]::new()
     $machineAcl.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)(A;OICI;FRFX;;;$sid)")
@@ -73,8 +75,12 @@ try {
     if ([IO.File]::ReadAllText((Join-Path $pending 'fresh-profile-ready')) -ne $profile.ToString()) { throw 'Fresh profile did not become ready.' }
     $active = Join-Path (Join-Path $storage 'Owners') $profile.ToString('N')
     [IO.Directory]::Move($pending, $active)
-    & sc.exe config $service binPath= ('"' + $binary + '" --owner-sid ' + $OwnerSid) start= auto
-    if ($LASTEXITCODE -ne 0) { throw 'Service activation configuration failed; profile retained.' }
+    $registration = Get-CimInstance Win32_Service -Filter "Name='$service'"
+    $changed = Invoke-CimMethod -InputObject $registration -MethodName Change -Arguments @{PathName=('"' + $binary + '" --owner-sid ' + $OwnerSid); StartMode='Automatic'}
+    if ($changed.ReturnValue -ne 0) { throw "Service activation configuration failed ($($changed.ReturnValue)); profile retained." }
+    $sc = Join-Path ([Environment]::GetFolderPath('System')) 'sc.exe'
+    & $sc sdset $service "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LCRP;;;$OwnerSid)"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not grant the owner service query/start access.' }
     $activeKey = Join-Path $registry ('Owners\' + $OwnerSid)
     New-Item -Path $activeKey -Force | Out-Null
     New-ItemProperty -LiteralPath $activeKey -Name Profile -PropertyType Binary -Value $bytes | Out-Null

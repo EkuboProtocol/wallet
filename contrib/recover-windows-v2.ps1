@@ -19,6 +19,7 @@ try {
     $profile = [Guid]$metadata.profile_id
     if ($profile -eq [Guid]::Empty -or $metadata.owner_sid -ne $OwnerSid) { throw 'Fresh setup identity mismatch.' }
     $service = 'EkuboWalletV2-' + $profile.ToString('N')
+    $sc = Join-Path ([Environment]::GetFolderPath('System')) 'sc.exe'
     $sid = [Security.Principal.NTAccount]::new('NT SERVICE', $service).Translate([Security.Principal.SecurityIdentifier]).Value
     if ($sid -ne $metadata.service_sid) { throw 'Service identity changed.' }
     $activeKey = Join-Path $registry ('Owners\' + $OwnerSid)
@@ -60,6 +61,8 @@ try {
             $activeBytes = [byte[]]$activeRecord.Profile
             if ([Convert]::ToBase64String($activeBytes) -ne [Convert]::ToBase64String($bytes)) { throw 'Installed identity differs; refusing recovery.' }
             (Get-Item -LiteralPath $activeKey).Flush()
+            & $sc sdset $service "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LCRP;;;$OwnerSid)"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not restore owner service query/start access.' }
             & (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
             Start-Service $service
             Write-Output 'Existing installed v2 service started; unlock from the owner desktop.'
@@ -74,8 +77,12 @@ try {
     if ($current -eq $pending) { [IO.Directory]::Move($pending, $active) }
     $binary = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\ekubo-wallet-service.exe'
     if ((Get-AuthenticodeSignature -LiteralPath $binary).Status -ne 'Valid') { throw 'Invalid signed service binary.' }
-    & sc.exe config $service binPath= ('"' + $binary + '" --owner-sid ' + $OwnerSid) start= auto
-    if ($LASTEXITCODE -ne 0) { throw 'Service activation configuration failed.' }
+    $registration = Get-CimInstance Win32_Service -Filter "Name='$service'"
+    if ($registration.StartName -ne ('NT SERVICE\' + $service)) { throw 'Unexpected authority service account.' }
+    $changed = Invoke-CimMethod -InputObject $registration -MethodName Change -Arguments @{PathName=('"' + $binary + '" --owner-sid ' + $OwnerSid); StartMode='Automatic'}
+    if ($changed.ReturnValue -ne 0) { throw "Service activation configuration failed: $($changed.ReturnValue)" }
+    & $sc sdset $service "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LCRP;;;$OwnerSid)"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not restore owner service query/start access.' }
     New-Item -Path $activeKey -Force | Out-Null
     New-ItemProperty -LiteralPath $activeKey -Name Profile -PropertyType Binary -Value $bytes | Out-Null
     (Get-Item -LiteralPath $activeKey).Flush()
