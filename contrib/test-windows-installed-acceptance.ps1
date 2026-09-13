@@ -176,7 +176,23 @@ function Wait-FixtureProfileUnloaded($sid) {
     if ($profile -and $profile.Loaded) { throw "Fixture profile still loaded after 30 seconds: SID=$sid; path=$($profile.LocalPath). Not deleting or forcing unload." }
     Write-Output "Fixture profile unloaded: SID=$sid"
 }
-function Remove-FixtureProfile($sid) {
+function Remove-FixtureProfile($sid, [switch]$AllowCachedVirtualProfile) {
+    if ($AllowCachedVirtualProfile) {
+        $cached = Get-CimInstance Win32_UserProfile -Filter "SID='$sid'"
+        if ($cached -and $cached.Loaded) {
+            $parent = Join-Path ([Environment]::GetFolderPath('Windows')) 'ServiceProfiles'
+            if ($sid -notlike 'S-1-5-80-*' -or
+                (Split-Path $cached.LocalPath) -ne $parent -or
+                (Split-Path $cached.LocalPath -Leaf) -notmatch '^EkuboWalletV2-[0-9a-f]{32}$') {
+                throw 'Refusing to defer an unrelated loaded profile.'
+            }
+            # SCM/LSASS may keep this OS-owned hive loaded until reboot after
+            # service deletion. Do not force-unload it. This disposable VM is
+            # destroyed after the job; application custody is removed below.
+            Write-Output "OS-cached fixture virtual profile deferred to runner teardown: $sid"
+            return
+        }
+    }
     Wait-FixtureProfileUnloaded $sid
     $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$sid'"
     if ($profile) {
@@ -373,7 +389,7 @@ try {
             # exists, even after the service process has exited.
             foreach ($virtualSid in $virtualProfiles) {
                 $cleanupStep = "remove virtual profile after SCM deletion: $virtualSid"
-                Remove-FixtureProfile $virtualSid
+                Remove-FixtureProfile $virtualSid -AllowCachedVirtualProfile
             }
             $cleanupStep = "remove registry: $registry"
             if (Test-Path $registry) { Remove-Item -LiteralPath $registry -Recurse -Force }
