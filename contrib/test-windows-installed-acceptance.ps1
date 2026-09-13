@@ -200,6 +200,38 @@ function Remove-FixtureProfile($sid, [switch]$AllowCachedVirtualProfile) {
         $profile | Remove-CimInstance
     }
 }
+
+function Remove-FixtureStorageAsSystem($path) {
+    $expected = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'EkuboWalletV2'
+    if ($path -ne $expected) { throw 'Invalid fixture storage cleanup path.' }
+    # Service-created files carry SYSTEM integrity as well as private DACLs.
+    # Use their existing SYSTEM grant after all service processes have exited;
+    # do not lower the labels or weaken the application storage implementation.
+    $name = 'EkuboWalletV2-Cleanup-' + [Guid]::NewGuid().ToString('N')
+    $literal = $path.Replace("'", "''")
+    $command = "`$ErrorActionPreference='Stop'; `$env:PSModulePath=[IO.Path]::Combine(`$PSHOME,'Modules'); if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') { exit 2 }; Remove-Item -LiteralPath '$literal' -Recurse -Force; if (Test-Path -LiteralPath '$literal') { exit 3 }; exit 0"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -EncodedCommand $encoded"
+    $principal = New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
+    try {
+        Register-ScheduledTask -TaskName $name -Action $action -Principal $principal | Out-Null
+        $started = [DateTime]::Now.AddSeconds(-2)
+        Start-ScheduledTask -TaskName $name
+        $deadline = [DateTime]::Now.AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 200
+            $info = Get-ScheduledTaskInfo -TaskName $name
+            $task = Get-ScheduledTask -TaskName $name
+            if ([DateTime]::Now -gt $deadline) { throw 'SYSTEM fixture storage cleanup timed out.' }
+        } until ($info.LastRunTime -gt $started -and $task.State -ne 'Running' -and $task.State -ne 'Queued')
+        if ($info.LastTaskResult -ne 0 -or (Test-Path -LiteralPath $path)) { throw "SYSTEM fixture cleanup failed: $($info.LastTaskResult)" }
+    } finally {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+        }
+    }
+}
 function Write-FixtureFailure($step, $record) {
     $details = "${step}: $($record.Exception.GetType().FullName): $($record.Exception.Message); HResult=$($record.Exception.HResult.ToString('X8')); ErrorId=$($record.FullyQualifiedErrorId); TargetObject=$($record.TargetObject)"
     [Console]::Error.WriteLine($details)
@@ -398,15 +430,7 @@ try {
                 if (@(Get-ChildItem -LiteralPath $storage -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) {
                     throw 'Refusing redirected fixture storage during administrative cleanup.'
                 }
-                # Native private files intentionally do not grant the installer
-                # ordinary access. Only after the denial assertions, process exit
-                # and fixture-provenance checks may this VM's admin take ownership
-                # to remove its own synthetic state. Never weaken production ACLs.
-                & "$env:WINDIR/System32/takeown.exe" /F $storage /A /R /D Y | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw 'Could not take ownership of fixture storage for deletion.' }
-                & "$env:WINDIR/System32/icacls.exe" $storage /grant '*S-1-5-32-544:(OI)(CI)F' /T /Q | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw 'Could not authorize fixture storage deletion.' }
-                Remove-Item -LiteralPath $storage -Recurse -Force
+                Remove-FixtureStorageAsSystem $storage
             }
         }
         $cleanupStep = "remove code: $install"
