@@ -1,19 +1,20 @@
-# Ekubo Wallet
+# Ekubo Wallet 2
 
 Ekubo Wallet is a native GPUI desktop wallet for EVM accounts used by people,
-local AI agents, and WalletConnect dapps. One tray-first process owns encrypted
-state and private keys. The separately bundled `ekubo-wallet-mcp-bridge` speaks
-stdio for local agent harnesses; the wallet application itself has no
-command-line, terminal, or webview mode.
+local AI agents, and WalletConnect dapps. Linux and Windows v2 separate the
+desktop from protected service custody. The `ekubo-wallet-v2-mcp-bridge`
+speaks stdio for local agents. macOS retains its platform custody backend.
 
-> [!WARNING]
-> **Windows and Linux key-storage limitation:** the current builds store raw
-> account keys and the SQLCipher database key in a per-user credential service
-> that does not isolate them to Ekubo Wallet. Same-user malware, including a
-> prompt-injected local agent that can execute programs as the user, can extract
-> those keys outside the wallet and bypass policy and native review. Read the
-> [platform threat-model section](docs/threat-model.md#critical-windows-and-linux-credential-store-limitation)
-> before using either build with valuable accounts.
+**This is the v2 implementation branch, not a release-ready product.** Windows
+native owner authorization remains fail-closed, and installed-product acceptance
+is outstanding. See the current [service-isolation status](docs/service-isolation.md).
+
+V2 uses separate application, data, helper and update-channel identities so
+released 1.x remains independently runnable. Linux offers an explicit first-run
+move with verified account-key cleanup; retained shared credentials and recovery
+limits are documented in the service-isolation status. Fresh setup never moves
+1.x state automatically. Released 1.x retains the
+[credential-store limitation](docs/threat-model.md#critical-windows-and-linux-credential-store-limitation).
 
 User-facing installation and usage documentation lives at
 [docs.ekubo.org/wallet](https://docs.ekubo.org/wallet). This repository retains

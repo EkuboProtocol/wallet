@@ -194,3 +194,55 @@ fn a_batch_reaches_the_ui_in_the_services_arrival_order() {
         identities
     );
 }
+
+#[tokio::test]
+async fn epoch_change_retires_even_identical_proposals_without_replaying_them() {
+    let (events, incoming) = mpsc::channel(4);
+    let source = Arc::new(Source {
+        events: tokio::sync::Mutex::new(incoming),
+        reviews: Mutex::new(vec![review()]),
+        reads: Mutex::new(Vec::new()),
+    });
+    let (updates, mut displayed) = mpsc::channel(4);
+    let reader = source.clone();
+    let task = tokio::spawn(async move { consume(reader.as_ref(), &updates).await });
+    events
+        .send(Ok(EventBatch {
+            cursor: EventCursor {
+                epoch: Uuid::new_v4(),
+                sequence: 1,
+            },
+            refresh_required: true,
+            mcp_online: None,
+            events: vec![],
+        }))
+        .await
+        .unwrap();
+    let DappProposalUpdate::Changed(mut prompts) = displayed.recv().await.unwrap() else {
+        panic!("expected initial proposal")
+    };
+    let prompt = prompts.pop().unwrap();
+    assert!(!prompt.response.is_closed());
+    events
+        .send(Ok(EventBatch {
+            cursor: EventCursor {
+                epoch: Uuid::new_v4(),
+                sequence: 1,
+            },
+            refresh_required: true,
+            mcp_online: None,
+            events: vec![],
+        }))
+        .await
+        .unwrap();
+    assert!(
+        task.await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("generation changed")
+    );
+    assert!(prompt.response.is_closed());
+    assert!(displayed.recv().await.is_none());
+    assert_eq!(source.reads.lock().unwrap().len(), 2);
+}

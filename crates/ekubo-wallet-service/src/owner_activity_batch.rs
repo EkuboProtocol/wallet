@@ -26,7 +26,9 @@ pub(crate) fn read(owner: &OwnerApi, references: &[OwnerActivityReference]) -> R
     }))
 }
 
-fn bounded_batch(records: impl Iterator<Item = Result<OwnerActivityRecord>>) -> Result<Value> {
+pub(crate) fn bounded_batch<T: serde::Serialize>(
+    records: impl Iterator<Item = Result<T>>,
+) -> Result<Value> {
     let mut batch = Vec::new();
     let mut bytes = 2; // Array delimiters; every additional element adds a comma.
     for record in records {
@@ -34,10 +36,8 @@ fn bounded_batch(records: impl Iterator<Item = Result<OwnerActivityRecord>>) -> 
         let length = serde_json::to_vec(&value)?.len();
         let next = bytes + usize::from(!batch.is_empty()) + length;
         if next > crate::framing::MAX_FRAME_BYTES {
-            ensure!(
-                !batch.is_empty(),
-                "individual activity record exceeds its size limit"
-            );
+            // An empty prefix asks the client to fetch this exact record via
+            // its bounded chunked read; accepted records are never truncated.
             break;
         }
         batch.push(value);

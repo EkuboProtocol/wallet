@@ -100,7 +100,15 @@ impl RemoteEvents {
         let task = runtime.spawn(async move {
             let mut cursor = None;
             loop {
-                let batch = source.wait(cursor).await;
+                let batch = source.wait(cursor).await.and_then(|batch| {
+                    anyhow::ensure!(
+                        cursor.is_none_or(
+                            |previous: EventCursor| previous.epoch == batch.cursor.epoch
+                        ),
+                        "wallet service generation changed; close and reopen Ekubo Wallet 2"
+                    );
+                    Ok(batch)
+                });
                 let failed = batch.is_err();
                 if let Ok(batch) = &batch {
                     cursor = Some(batch.cursor);

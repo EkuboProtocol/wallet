@@ -5,7 +5,7 @@ use crate::custody_envelope::WrappedDataKey;
 use anyhow::{Result, ensure};
 use uuid::Uuid;
 
-pub(crate) const SERVICE: &str = "org.ekubo.wallet.custody-envelope";
+pub(crate) const SERVICE: &str = "org.ekubo.wallet.v2.custody-envelope";
 
 /// The caller obtains this profile from protected installer configuration after
 /// authenticating its service. There is no filesystem cache or fallback. This
@@ -86,6 +86,9 @@ pub struct RelayReceipt {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl RelayReceipt {
+    pub(crate) fn verify_relay(&self, profile: Uuid, relay: &WrappedDataKey) -> Result<()> {
+        self.verify(profile, self.nonce, relay)
+    }
     pub(crate) fn persisted(profile: Uuid, nonce: Uuid, relay: &WrappedDataKey) -> Result<Self> {
         ensure!(
             !nonce.is_nil() && !profile.is_nil(),

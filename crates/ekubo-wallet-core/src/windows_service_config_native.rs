@@ -31,9 +31,6 @@ use crate::windows_service_identity::{
 
 struct Key(HKEY);
 
-#[path = "windows_cutover_config_native.rs"]
-mod cutover;
-pub(crate) use cutover::record_cutover;
 impl Drop for Key {
     fn drop(&mut self) {
         // This wrapper owns a successful RegOpenKeyExW result.
@@ -64,7 +61,6 @@ pub fn service_identity(owner_sid: &str) -> Result<InstalledServiceIdentity> {
 // Pending identities are confined to the storage bootstrap, never returned to
 // desktop discovery or exposed as a public installed-identity constructor.
 pub(crate) fn pending_service_identity(owner: &str) -> Result<InstalledServiceIdentity> {
-    require_uncommitted(owner)?;
     let identity = pending_configuration_under(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?)?;
     verify_service_process(identity.service_sid())?;
     Ok(identity)
@@ -85,35 +81,6 @@ pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     pending_configuration_under(HKEY_LOCAL_MACHINE, current.user_sid(), &machine_trustees()?)
 }
 
-/// Require an existing decision; recovery must not create one implicitly.
-pub fn committed_installer_identity(owner: &str) -> Result<super::PendingInstallerIdentity> {
-    let identity = pending_installer_identity(owner)?;
-    let committed =
-        read_configuration_at(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?, "Committed")?
-            .context("installer cutover has not been committed")?;
-    ensure!(
-        identity.0.0 == committed.0,
-        "installer committed identity changed"
-    );
-    Ok(identity)
-}
-
-pub(super) fn committed_owner_profile() -> Result<uuid::Uuid> {
-    let pending = pending_owner_identity()?;
-    let committed = read_configuration_at(
-        HKEY_LOCAL_MACHINE,
-        pending.owner_sid(),
-        &machine_trustees()?,
-        "Committed",
-    )?
-    .context("source cutover has not been committed")?;
-    ensure!(
-        committed.0 == pending.0,
-        "source committed identity changed"
-    );
-    Ok(committed.profile_id())
-}
-
 fn pending_configuration_under(
     root: HKEY,
     owner: &str,
@@ -125,22 +92,7 @@ fn pending_configuration_under(
     );
     let pending = read_configuration_at(root, owner, trusted, "Pending")?
         .context("pending service profile is missing")?;
-    if let Some(committed) = read_configuration_at(root, owner, trusted, "Committed")? {
-        ensure!(
-            pending.0 == committed.0,
-            "pending profile differs from committed cutover"
-        );
-    }
     Ok(pending)
-}
-
-pub(crate) fn require_uncommitted(owner: &str) -> Result<()> {
-    ensure!(
-        read_configuration_at(HKEY_LOCAL_MACHINE, owner, &machine_trustees()?, "Committed")?
-            .is_none(),
-        "wallet service cutover has already been recorded"
-    );
-    Ok(())
 }
 
 fn account_sid(account: &str) -> Result<String> {
@@ -250,16 +202,7 @@ fn read_configuration_under(
     owner: &str,
     trusted: &[String],
 ) -> Result<Option<InstalledServiceIdentity>> {
-    let active = read_configuration_at(root, owner, trusted, "Owners")?;
-    if let Some(committed) = read_configuration_at(root, owner, trusted, "Committed")? {
-        ensure!(
-            active
-                .as_ref()
-                .is_some_and(|active| active.0 == committed.0),
-            "wallet service cutover requires installer recovery"
-        );
-    }
-    Ok(active)
+    read_configuration_at(root, owner, trusted, "Owners")
 }
 
 fn read_configuration_at(
@@ -271,7 +214,7 @@ fn read_configuration_at(
     validate_owner_component(owner)?;
     let mut keys = Vec::new();
     let mut parent = root;
-    for component in ["SOFTWARE", "EkuboWallet", collection, owner] {
+    for component in ["SOFTWARE", "EkuboWalletV2", collection, owner] {
         let Some(key) = open_component(parent, component, trusted)
             .with_context(|| format!("unsafe service registry component {component}"))?
         else {

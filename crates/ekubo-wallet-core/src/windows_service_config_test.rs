@@ -15,7 +15,7 @@ fn configuration_binds_owner_service_and_fixed_name() {
     assert!(!identity.profile_id().is_nil());
     assert_eq!(
         identity.service_name(),
-        "EkuboWallet-b74236a2bc214c358424c9846c069d51"
+        "EkuboWalletV2-b74236a2bc214c358424c9846c069d51"
     );
 }
 

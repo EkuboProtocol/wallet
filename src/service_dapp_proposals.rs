@@ -115,6 +115,10 @@ async fn consume(
         // Establish the cursor BEFORE reading state. An event racing the read
         // remains available to the next wait; initial/gap batches refresh too.
         let batch = source.events(cursor).await?;
+        ensure!(
+            cursor.is_none_or(|previous: EventCursor| previous.epoch == batch.cursor.epoch),
+            "wallet service generation changed; close and reopen Ekubo Wallet 2"
+        );
         cursor = Some(batch.cursor);
         if let Some(prompts) = feed.reconcile(source.reviews().await?)? {
             updates

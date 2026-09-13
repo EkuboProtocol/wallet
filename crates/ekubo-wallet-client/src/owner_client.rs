@@ -4,6 +4,7 @@ use crate::owner_connection::{OwnerConnection, OwnerTransport};
 use crate::owner_protocol::OBJECT_PATH;
 use anyhow::{Context as _, Result, ensure};
 use futures::StreamExt as _;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use zbus::{Connection, Proxy, fdo::DBusProxy, names::OwnedUniqueName};
 
@@ -13,6 +14,43 @@ pub struct LinuxOwnerTransport {
     service: OwnedUniqueName,
     process: u32,
     uid: u32,
+    lifetime: Arc<ConnectionLifetime>,
+}
+
+// The root owns child admission and shutdown. Children never own the root and
+// closing a child cannot cancel another review. Keep admission locked across
+// authentication so root shutdown also drains children being opened.
+struct ConnectionLifetime {
+    state: tokio::sync::Mutex<LifetimeState>,
+    bus: Connection,
+    runtime: tokio::runtime::Handle,
+}
+
+#[derive(Default)]
+struct LifetimeState {
+    closed: bool,
+    child: bool,
+    children: Vec<Weak<ConnectionLifetime>>,
+}
+
+impl Drop for ConnectionLifetime {
+    fn drop(&mut self) {
+        let state = self.state.get_mut();
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        let children = std::mem::take(&mut state.children);
+        let bus = self.bus.clone();
+        self.runtime.spawn(async move {
+            for child in children.into_iter().filter_map(|child| child.upgrade()) {
+                let mut state = child.state.lock().await;
+                state.closed = true;
+                let _ = child.bus.clone().close().await;
+            }
+            let _ = bus.close().await;
+        });
+    }
 }
 
 impl OwnerConnection<LinuxOwnerTransport> {
@@ -45,6 +83,11 @@ impl OwnerConnection<LinuxOwnerTransport> {
     }
 
     async fn independent_on_bus(&self, bus: Connection) -> Result<Self> {
+        let mut root = self.transport.lifetime.state.lock().await;
+        ensure!(
+            !root.closed && !root.child,
+            "desktop connection is closed or is not a root"
+        );
         let transport = LinuxOwnerTransport::authenticate(
             bus,
             self.transport.service.as_str(),
@@ -55,6 +98,9 @@ impl OwnerConnection<LinuxOwnerTransport> {
             transport.process == self.transport.process,
             "wallet service process changed"
         );
+        transport.lifetime.state.lock().await.child = true;
+        root.children.retain(|child| child.strong_count() > 0);
+        root.children.push(Arc::downgrade(&transport.lifetime));
         Ok(Self::from_transport(transport))
     }
 
@@ -94,13 +140,23 @@ impl LinuxOwnerTransport {
         let process = registry
             .get_connection_unix_process_id(service.clone().into())
             .await?;
-        let proxy =
-            Proxy::new_owned(bus, service.clone(), OBJECT_PATH, "org.ekubo.Wallet.Owner1").await?;
+        let proxy = Proxy::new_owned(
+            bus.clone(),
+            service.clone(),
+            OBJECT_PATH,
+            "org.ekubo.Wallet2.Owner1",
+        )
+        .await?;
         Ok(Self {
             proxy,
             service,
             process,
             uid: actual_uid,
+            lifetime: Arc::new(ConnectionLifetime {
+                state: tokio::sync::Mutex::new(LifetimeState::default()),
+                bus,
+                runtime: tokio::runtime::Handle::try_current()?,
+            }),
         })
     }
 
@@ -112,7 +168,7 @@ impl LinuxOwnerTransport {
             self.proxy.connection(),
             self.service.as_str(),
             crate::owner_protocol::CUSTODY_OBJECT_PATH,
-            "org.ekubo.Wallet.Custody1",
+            "org.ekubo.Wallet2.Custody1",
         )
         .await?;
         let reply = proxy.call_method("Unlock", &(wrapped.as_bytes(),)).await?;
@@ -128,6 +184,10 @@ impl crate::owner_connection::sealed::Sealed for LinuxOwnerTransport {}
 
 impl OwnerTransport for LinuxOwnerTransport {
     async fn exchange(&self, request: &str) -> Result<zeroize::Zeroizing<String>> {
+        ensure!(
+            !self.lifetime.state.lock().await.closed,
+            "desktop connection is closed; restart Ekubo Wallet 2"
+        );
         let message = self.proxy.call_method("Call", &(request,)).await?;
         ensure!(
             message.header().sender() == Some(self.service.inner()),
@@ -171,7 +231,41 @@ impl OwnerTransport for LinuxOwnerTransport {
     /// Close this connection, including all clones and pending owner requests.
     /// The application must do this on Quit to release its desktop session.
     async fn close(&self) -> Result<()> {
-        Ok(self.proxy.connection().clone().close().await?)
+        // Even when a caller cancels this wait, drain the actual peers. A second
+        // close waits on the same state lock until the first drain completes.
+        let transport = self.clone();
+        self.lifetime
+            .runtime
+            .spawn(async move { transport.close_connections().await })
+            .await
+            .context("owner connection shutdown task failed")?
+    }
+}
+
+impl LinuxOwnerTransport {
+    async fn close_connections(&self) -> Result<()> {
+        let mut state = self.lifetime.state.lock().await;
+        if state.closed {
+            return Ok(());
+        }
+        state.closed = true;
+        let children = std::mem::take(&mut state.children);
+        let mut failure = None;
+        for child in children.into_iter().filter_map(|child| child.upgrade()) {
+            let mut child_state = child.state.lock().await;
+            if !child_state.closed {
+                child_state.closed = true;
+                if let Err(error) = child.bus.clone().close().await {
+                    failure = Some(error);
+                }
+            }
+        }
+        let closed = self.lifetime.bus.clone().close().await;
+        closed?;
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        Ok(())
     }
 }
 
@@ -185,7 +279,7 @@ async fn connect_custody(
     .await?;
     let transport = LinuxOwnerTransport::activate(
         bus,
-        &format!("org.ekubo.Wallet.Owner.u{}", identity.owner_uid()),
+        &format!("org.ekubo.Wallet2.Owner.u{}", identity.owner_uid()),
         identity.service_uid(),
     )
     .await?;

@@ -92,10 +92,10 @@ async fn activity_batches_preserve_the_index_order_and_request_only_the_remainin
 }
 
 #[tokio::test]
-async fn empty_mismatched_and_excess_batches_fail_without_returning_partial_activity() {
+async fn mismatched_and_excess_batches_fail_without_returning_partial_activity() {
     let row = record(Uuid::new_v4());
     let wrong = record(Uuid::new_v4());
-    for batch in [json!([]), json!([wrong]), json!([row.clone(), row.clone()])] {
+    for batch in [json!([wrong]), json!([row.clone(), row.clone()])] {
         let (client, transport) = client(vec![Some(json!([row.reference()])), Some(batch)]);
         assert!(client.activity(None, 1).await.is_err());
         assert_eq!(transport.sent.lock().unwrap().len(), 2);
@@ -128,6 +128,111 @@ async fn a_disconnect_during_hydration_does_not_replay_or_return_a_partial_list(
 
 fn preview_page(id: Uuid, offset: usize, total: usize, text: &str) -> Value {
     json!({"transfer_id":id, "offset":offset, "total_bytes":total, "text":text})
+}
+
+fn record_pages(value: &impl serde::Serialize) -> Vec<Option<Value>> {
+    let text = serde_json::to_string(value).unwrap();
+    let id = Uuid::new_v4();
+    let mut pages = Vec::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let mut end = (offset + crate::preview_page::PAGE_BYTES).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        pages.push(Some(preview_page(
+            id,
+            offset,
+            text.len(),
+            &text[offset..end],
+        )));
+        offset = end;
+    }
+    pages
+}
+
+#[tokio::test]
+async fn reviews_hydrate_only_exact_ordered_index_entries() {
+    use crate::activity::OwnerReviewRecord;
+    let rows = (0..70)
+        .map(|_| OwnerReviewRecord::Activity(Box::new(record(Uuid::new_v4()))))
+        .collect::<Vec<_>>();
+    let index = rows
+        .iter()
+        .map(OwnerReviewRecord::reference)
+        .collect::<Vec<_>>();
+    let mut replies = record_pages(&index);
+    replies.extend([Some(json!(&rows[..64])), Some(json!(&rows[64..]))]);
+    let (client, transport) = client(replies);
+    let queues = client.reviews(None).await.unwrap();
+    assert_eq!(json!(queues.into_records()), json!(rows));
+    let sent = transport.sent.lock().unwrap();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[1]["params"]["references"], json!(&index[..64]));
+    assert_eq!(sent[2]["params"]["references"], json!(&index[64..]));
+}
+
+#[tokio::test]
+async fn oversized_activity_record_is_read_completely_after_an_empty_batch() {
+    let mut row = json!(record(Uuid::new_v4()));
+    row["Message"]["message_hex"] = json!("ab".repeat(crate::framing::MAX_FRAME_BYTES / 2));
+    let row: OwnerActivityRecord = serde_json::from_value(row).unwrap();
+    let mut replies = vec![Some(json!([row.reference()])), Some(json!([]))];
+    replies.extend(record_pages(&row));
+    let (client, transport) = client(replies);
+    assert_eq!(json!(client.activity(None, 1).await.unwrap()), json!([row]));
+    let sent = transport.sent.lock().unwrap();
+    assert_eq!(sent[2]["method"], "activity_record");
+    assert!(
+        sent[3..]
+            .iter()
+            .all(|request| request["method"] == "read_page")
+    );
+}
+
+#[tokio::test]
+async fn record_pages_reject_generation_offset_and_length_changes() {
+    let id = Uuid::new_v4();
+    for bad in [
+        preview_page(Uuid::new_v4(), 1, 2, "]"),
+        preview_page(id, 0, 2, "]"),
+        preview_page(id, 1, 3, "]"),
+        preview_page(id, 1, 2, ""),
+        preview_page(id, 1, 2, "]extra"),
+    ] {
+        let (client, transport) = client(vec![Some(preview_page(id, 0, 2, "[")), Some(bad)]);
+        assert!(client.reviews(None).await.is_err());
+        assert_eq!(transport.sent.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn large_completed_mutation_reply_is_fetched_without_replaying_the_write() {
+    let id = Uuid::new_v4();
+    let (client, transport) = client(vec![
+        Some(json!({"owner_record_transfer": preview_page(id, 0, 2, "4")})),
+        Some(preview_page(id, 1, 2, "2")),
+    ]);
+    assert_eq!(client.clear_activity_history().await.unwrap(), 42);
+    let sent = transport.sent.lock().unwrap();
+    assert_eq!(sent[0]["method"], "clear_activity_history");
+    assert_eq!(sent[1]["method"], "read_page");
+    assert_eq!(sent.len(), 2);
+}
+
+#[tokio::test]
+async fn reviews_reject_duplicate_and_substituted_records() {
+    use crate::activity::OwnerReviewRecord;
+    let row = OwnerReviewRecord::Activity(Box::new(record(Uuid::new_v4())));
+    let other = OwnerReviewRecord::Activity(Box::new(record(Uuid::new_v4())));
+    let (duplicate, transport) = client(record_pages(&vec![row.reference(), row.reference()]));
+    assert!(duplicate.reviews(None).await.is_err());
+    assert_eq!(transport.sent.lock().unwrap().len(), 1);
+    let mut replies = record_pages(&vec![row.reference()]);
+    replies.push(Some(json!([other])));
+    let (substitution, transport) = client(replies);
+    assert!(substitution.reviews(None).await.is_err());
+    assert_eq!(transport.sent.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

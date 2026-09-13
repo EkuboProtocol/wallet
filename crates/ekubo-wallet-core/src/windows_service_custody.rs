@@ -35,8 +35,19 @@ pub fn unlock(wrapped: &WrappedDataKey) -> Result<()> {
         .unlock(wrapped)
 }
 
+pub fn mark_setup_complete() -> Result<()> {
+    STORAGE
+        .get()
+        .context("service custody is not initialized")?
+        .mark_setup_complete()
+}
+
 pub(crate) fn data_dir() -> Option<&'static Path> {
     STORAGE.get().map(PrivateStorageRoot::data_dir)
+}
+
+pub(crate) fn profile_id() -> Option<uuid::Uuid> {
+    STORAGE.get().map(PrivateStorageRoot::profile_id)
 }
 
 pub(crate) fn require_data_dir(path: &Path) -> Result<()> {
@@ -94,8 +105,8 @@ enum Credential {
 impl Credential {
     fn parse(service: &str, user: &str) -> Result<Self> {
         match (service, user) {
-            ("org.ekubo.wallet.db", "default") => Ok(Self::Database),
-            ("org.ekubo.wallet.private-key.instance", id) => {
+            ("org.ekubo.wallet.v2.db", "default") => Ok(Self::Database),
+            ("org.ekubo.wallet.v2.private-key.instance", id) => {
                 let id = uuid::Uuid::parse_str(id).context("invalid wallet instance identifier")?;
                 ensure!(!id.is_nil(), "invalid wallet instance identifier");
                 Ok(Self::Account(id))

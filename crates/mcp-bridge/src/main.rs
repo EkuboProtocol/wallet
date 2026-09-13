@@ -1,10 +1,10 @@
 #![cfg_attr(windows, allow(unsafe_code))]
 
 use anyhow::{Context, Result, ensure};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use directories::BaseDirs;
 use serde_json::{Value, json};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::{collections::BTreeSet, env, fmt, time::Duration};
 
@@ -15,6 +15,10 @@ use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 mod legacy;
 mod modern;
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;
 
 #[cfg(unix)]
 type Stream = tokio::net::UnixStream;
@@ -145,23 +149,16 @@ fn arguments() -> Result<ClientKind> {
     ClientKind::parse(&args[1])
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn data_dir() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("EKUBO_WALLET_HOME") {
-        ensure!(!path.is_empty(), "EKUBO_WALLET_HOME cannot be empty");
+    if let Some(path) = env::var_os("EKUBO_WALLET_V2_HOME") {
+        ensure!(!path.is_empty(), "EKUBO_WALLET_V2_HOME cannot be empty");
         return Ok(path.into());
     }
     let base = BaseDirs::new().context("could not determine the user home directory")?;
-    #[cfg(target_os = "macos")]
-    return Ok(base
+    Ok(base
         .home_dir()
-        .join("Library/Application Support/org.ekubo.wallet"));
-    #[cfg(target_os = "windows")]
-    return Ok(base.data_local_dir().join("Ekubo/wallet"));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Ok(env::var_os("XDG_STATE_HOME")
-        .map_or_else(|| base.home_dir().join(".local/state"), PathBuf::from)
-        .join("ekubo-wallet"))
+        .join("Library/Application Support/org.ekubo.wallet.v2"))
 }
 
 /// Read one newline-terminated frame, accumulating into caller-owned `partial`.
@@ -248,13 +245,9 @@ async fn emit(stdout: &mut tokio::io::Stdout, bytes: &[u8]) -> Result<()> {
 #[cfg(unix)]
 async fn connect(client: ClientKind) -> Result<tokio::net::UnixStream> {
     #[cfg(target_os = "linux")]
-    let installed = ekubo_wallet_client::try_connect_agent_stream().await?;
-    #[cfg(not(target_os = "linux"))]
-    let installed = None;
-    let mut stream = match installed {
-        Some(stream) => stream,
-        None => tokio::net::UnixStream::connect(data_dir()?.join("mcp.sock")).await?,
-    };
+    let mut stream = require_service(ekubo_wallet_client::try_connect_agent_stream().await?)?;
+    #[cfg(target_os = "macos")]
+    let mut stream = tokio::net::UnixStream::connect(data_dir()?.join("mcp.sock")).await?;
     let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
     stream.write_all(&hello).await?;
     stream.write_all(b"\n").await?;
@@ -263,70 +256,16 @@ async fn connect(client: ClientKind) -> Result<tokio::net::UnixStream> {
 
 #[cfg(windows)]
 async fn connect(client: ClientKind) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    let mut stream = match ekubo_wallet_client::try_connect_agent_stream().await? {
-        Some(stream) => stream,
-        None => ClientOptions::new().open(windows_pipe_name()?)?,
-    };
+    let mut stream = require_service(ekubo_wallet_client::try_connect_agent_stream().await?)?;
     let hello = serde_json::to_vec(&json!({"client":client.wire_name()}))?;
     stream.write_all(&hello).await?;
     stream.write_all(b"\n").await?;
     Ok(stream)
 }
 
-#[cfg(windows)]
-fn windows_pipe_name() -> Result<String> {
-    Ok(format!(
-        r"\\.\pipe\ekubo-wallet-mcp-{}",
-        current_user_sid_string()?.replace('-', "_")
-    ))
-}
-
-#[cfg(windows)]
-fn current_user_sid_string() -> Result<String> {
-    use std::ptr;
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, LocalFree},
-        Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
-            TokenUser,
-        },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-
-    unsafe {
-        let mut token: HANDLE = ptr::null_mut();
-        ensure!(
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0,
-            "could not open current-user token"
-        );
-        let mut size = 0;
-        let _ = GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut size);
-        ensure!(size > 0, "could not size current-user token");
-        let mut buffer = vec![0u8; size as usize];
-        ensure!(
-            GetTokenInformation(
-                token,
-                TokenUser,
-                buffer.as_mut_ptr().cast(),
-                size,
-                &mut size
-            ) != 0,
-            "could not read current-user token"
-        );
-        let sid = (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid;
-        let mut text = ptr::null_mut();
-        ensure!(
-            ConvertSidToStringSidW(sid, &mut text) != 0,
-            "could not format current-user SID"
-        );
-        let length = (0..).take_while(|offset| *text.add(*offset) != 0).count();
-        let result = String::from_utf16(std::slice::from_raw_parts(text, length))?;
-        LocalFree(text.cast());
-        CloseHandle(token);
-        Ok(result)
-    }
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn require_service<T>(stream: Option<T>) -> Result<T> {
+    stream.context("Ekubo Wallet 2 requires its protected wallet service. Run the signed Ekubo Wallet 2 installer, then open the wallet and reconnect this agent session.")
 }
 
 /// The wallet's own answers to the two catalog requests the bridge makes on

@@ -7,7 +7,7 @@ fn provisioning_names_are_profile_bound_and_separate_from_owner_dispatch() {
     let second = uuid::Uuid::new_v4();
     assert_eq!(
         name(first).unwrap(),
-        format!(r"\\.\pipe\EkuboWallet.Provision.{}", first.simple())
+        format!(r"\\.\pipe\EkuboWalletV2.Provision.{}", first.simple())
     );
     assert_ne!(name(first).unwrap(), name(second).unwrap());
     assert!(!name(first).unwrap().contains(".Owner."));

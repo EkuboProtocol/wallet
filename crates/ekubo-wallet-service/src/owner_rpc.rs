@@ -2,6 +2,9 @@
 //! credential access, or client-supplied authorization proof in this protocol.
 
 use crate::{authority::OwnerApi, dapp_runtime::DappRuntime};
+use ekubo_wallet_client::activity::{
+    OwnerActivityRecord, OwnerActivityReference, OwnerReviewRecord, OwnerReviewReference,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -16,6 +19,7 @@ pub(crate) struct OwnerDispatcher {
     dapps: Arc<DappRuntime>,
     transactions: crate::transaction_reviews::TransactionReviews,
     previews: crate::transaction_previews::TransactionPreviews,
+    reads: crate::preview_transfer::PreviewTransfers,
 }
 
 impl Drop for OwnerDispatcher {
@@ -31,12 +35,25 @@ impl OwnerDispatcher {
         &self,
         request: Request,
     ) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        let private_key_export = matches!(&request, Request::BeginPrivateKeyExport { .. });
         let encoded = match request {
             Request::BeginPrivateKeyExport { wallet_id } => {
                 let lease = self.owner.begin_private_key_export(&wallet_id).await?;
                 serde_json::to_string(&lease)?
             }
             request => serde_json::to_string(&self.dispatch(request).await?)?,
+        };
+        // Record-bearing mutation replies can be large too. Capture the result
+        // once, then page that immutable result without replaying the mutation.
+        // Key exports are tiny and never enter the transfer store.
+        let encoded = if !private_key_export
+            && encoded.len() > ekubo_wallet_client::framing::MAX_FRAME_BYTES / 8
+        {
+            serde_json::to_string(&ekubo_wallet_client::preview_page::RecordTransferReply {
+                owner_record_transfer: self.reads.begin(encoded)?,
+            })?
+        } else {
+            encoded
         };
         Ok(zeroize::Zeroizing::new(encoded))
     }
@@ -45,6 +62,7 @@ impl OwnerDispatcher {
     /// transport. This also cancels preparation before any frame is published.
     pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
         self.previews.shutdown();
+        self.reads.clear();
         self.transactions.shutdown()
     }
 
@@ -57,7 +75,109 @@ impl OwnerDispatcher {
             dapps,
             transactions: crate::transaction_reviews::TransactionReviews::default(),
             previews: crate::transaction_previews::TransactionPreviews::default(),
+            reads: crate::preview_transfer::PreviewTransfers::default(),
         }
+    }
+
+    fn read_reply(&self, value: &impl serde::Serialize) -> anyhow::Result<Value> {
+        // Reuse the service's expiring UTF-8 preview transfer. Clients discard
+        // these read handles when their authenticated connection closes.
+        Ok(serde_json::to_value(
+            self.reads.begin(serde_json::to_string(value)?)?,
+        )?)
+    }
+
+    fn review_record(&self, reference: &OwnerReviewReference) -> anyhow::Result<OwnerReviewRecord> {
+        let row = match reference {
+            OwnerReviewReference::Activity(OwnerActivityReference::Transaction(id)) => {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::Transaction(Box::new(
+                    self.owner.transaction(*id)?,
+                ))))
+            }
+            OwnerReviewReference::Activity(OwnerActivityReference::Message(id)) => {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::Message(
+                    self.owner.message(*id)?,
+                )))
+            }
+            OwnerReviewReference::Activity(OwnerActivityReference::TypedData(id)) => {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::TypedData(
+                    self.owner.typed_data(*id)?,
+                )))
+            }
+            _ => self
+                .review_proposals(std::slice::from_ref(reference))?
+                .remove(reference)
+                .ok_or_else(|| anyhow::anyhow!("proposal changed; refresh reviews"))?,
+        };
+        anyhow::ensure!(
+            row.reference() == *reference,
+            "review record identity changed"
+        );
+        Ok(row)
+    }
+
+    fn review_batch(&self, references: &[OwnerReviewReference]) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            (1..=64).contains(&references.len()),
+            "review batches require between 1 and 64 selectors"
+        );
+        // Read each proposal store once per batch, not once per token. Activity
+        // rows remain lazy so one large plan stops the bounded prefix promptly.
+        let proposals = self.review_proposals(references)?;
+        crate::owner_activity_batch::bounded_batch(references.iter().map(|reference| {
+            if matches!(reference, OwnerReviewReference::Activity(_)) {
+                self.review_record(reference)
+            } else {
+                proposals
+                    .get(reference)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("proposal changed; refresh reviews"))
+            }
+        }))
+    }
+
+    fn review_proposals(
+        &self,
+        references: &[OwnerReviewReference],
+    ) -> anyhow::Result<std::collections::BTreeMap<OwnerReviewReference, OwnerReviewRecord>> {
+        let mut proposals = Vec::new();
+        if references
+            .iter()
+            .any(|reference| matches!(reference, OwnerReviewReference::Policy(_)))
+        {
+            proposals.extend(
+                self.owner
+                    .policy_proposals()?
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Policy(Box::new(row))),
+            );
+        }
+        if references
+            .iter()
+            .any(|reference| matches!(reference, OwnerReviewReference::Network(_)))
+        {
+            proposals.extend(
+                self.owner
+                    .network_proposals()?
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Network(Box::new(row))),
+            );
+        }
+        if references
+            .iter()
+            .any(|reference| matches!(reference, OwnerReviewReference::Token { .. }))
+        {
+            proposals.extend(
+                self.owner
+                    .token_proposals()?
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Token(Box::new(row))),
+            );
+        }
+        Ok(proposals
+            .into_iter()
+            .map(|record| (record.reference(), record))
+            .collect())
     }
 
     fn transaction_records(
@@ -92,6 +212,14 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
+            Request::LegacyMoveStatus => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    serde_json::to_value(ekubo_wallet_core::legacy_move::move_status()?)?
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                anyhow::bail!("legacy moves are unavailable on this platform")
+            }
             request @ (Request::Networks
             | Request::NetworkByChainId { .. }
             | Request::ResetNetworksToDefaults { .. }
@@ -132,7 +260,7 @@ impl OwnerDispatcher {
             Request::TransactionReviewFrame {
                 request_id,
                 review_id,
-            } => serde_json::to_value(self.transactions.frame(request_id, review_id)?)?,
+            } => self.read_reply(&self.transactions.frame(request_id, review_id)?)?,
             Request::DecideTransactionReview {
                 request_id,
                 review_id,
@@ -185,7 +313,9 @@ impl OwnerDispatcher {
             Request::Transactions { wallet_id, limit } => {
                 serde_json::to_value(owner.transactions(wallet_id.as_deref(), limit)?)?
             }
-            Request::ClearActivityHistory => serde_json::to_value(owner.clear_activity_history()?)?,
+            Request::ClearActivityHistory => {
+                serde_json::to_value(owner.clear_activity_history().await?)?
+            }
             Request::Activity { wallet_id, limit } => {
                 serde_json::to_value(owner.activity(wallet_id.as_deref(), limit)?)?
             }
@@ -200,24 +330,36 @@ impl OwnerDispatcher {
                 crate::owner_activity_batch::read(owner, &references)?
             }
             Request::ActivityRecord { request_id } => {
-                serde_json::to_value(owner.activity_record(request_id)?)?
+                self.read_reply(&owner.activity_record(request_id)?)?
             }
             Request::ActivitySources => serde_json::to_value(owner.activity_sources()?)?,
             Request::Transaction { request_id } => {
-                serde_json::to_value(owner.transaction(request_id)?)?
+                self.read_reply(&owner.transaction(request_id)?)?
             }
-            Request::Message { request_id } => serde_json::to_value(owner.message(request_id)?)?,
-            Request::TypedData { request_id } => {
-                serde_json::to_value(owner.typed_data(request_id)?)?
-            }
+            Request::Message { request_id } => self.read_reply(&owner.message(request_id)?)?,
+            Request::TypedData { request_id } => self.read_reply(&owner.typed_data(request_id)?)?,
             Request::Reviews { wallet_id } => {
-                serde_json::to_value(owner.reviews(wallet_id.as_deref())?)?
+                let index = owner
+                    .reviews(wallet_id.as_deref())?
+                    .into_records()
+                    .iter()
+                    .map(OwnerReviewRecord::reference)
+                    .collect::<Vec<_>>();
+                self.read_reply(&index)?
             }
+            Request::ReviewRecord { reference } => {
+                self.read_reply(&self.review_record(&reference)?)?
+            }
+            Request::ReviewRecords { references } => self.review_batch(&references)?,
+            Request::ReadPage {
+                transfer_id,
+                offset,
+            } => serde_json::to_value(self.reads.read(transfer_id, offset)?)?,
             Request::MessageReviewDocument { request_id } => {
-                serde_json::to_value(owner.message_review_document(request_id)?)?
+                self.read_reply(&owner.message_review_document(request_id)?)?
             }
             Request::TypedDataReviewDocument { request_id } => {
-                serde_json::to_value(owner.typed_data_review_document(request_id)?)?
+                self.read_reply(&owner.typed_data_review_document(request_id)?)?
             }
             Request::TransactionHeadlines { request_ids } => {
                 let records = self.transaction_records(&request_ids)?;
@@ -256,7 +398,7 @@ impl OwnerDispatcher {
                 serde_json::to_value(owner.relink_automation(automation_id)?)?
             }
             Request::DeleteAutomation { automation_id } => {
-                owner.delete_automation(automation_id)?;
+                owner.delete_automation(automation_id).await?;
                 Value::Null
             }
             Request::DryRunAutomation { automation_id } => {
@@ -393,7 +535,7 @@ impl OwnerDispatcher {
                 document,
                 reviewed_digest,
             } => {
-                owner.accept_legal(document, &reviewed_digest)?;
+                owner.accept_legal(document, &reviewed_digest).await?;
                 Value::Null
             }
         })

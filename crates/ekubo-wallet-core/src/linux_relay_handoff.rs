@@ -7,8 +7,8 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zbus::{Connection, fdo::DBusProxy, names::OwnedUniqueName};
 
-const PATH: &str = "/org/ekubo/Wallet/InstallerRelay";
-const INTERFACE: &str = "org.ekubo.Wallet.InstallerRelay1";
+const PATH: &str = "/org/ekubo/Wallet2/InstallerRelay";
+const INTERFACE: &str = "org.ekubo.Wallet2.InstallerRelay1";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Retain while the desktop can receive a pending installer's delivery. The
@@ -51,7 +51,7 @@ struct OwnerInterface {
     slots: Arc<Semaphore>,
 }
 
-#[zbus::interface(name = "org.ekubo.Wallet.InstallerRelay1")]
+#[zbus::interface(name = "org.ekubo.Wallet2.InstallerRelay1")]
 impl OwnerInterface {
     async fn persist(
         &self,
@@ -121,8 +121,8 @@ async fn ensure_uid(registry: &DBusProxy<'_>, name: &OwnedUniqueName, uid: u32) 
     Ok(())
 }
 
-/// Authenticate the actual owner before sending even relay ciphertext. Caller
-/// must retain the source fence and lifecycle lock; no reconnect/replay occurs.
+/// Authenticate the actual owner before sending even relay ciphertext. The
+/// privileged caller retains fresh-setup exclusion; no reconnect/replay occurs.
 pub async fn deliver(
     owner_uid: u32,
     recipient: OwnedUniqueName,

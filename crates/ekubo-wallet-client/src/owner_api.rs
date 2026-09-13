@@ -21,6 +21,10 @@ use ekubo_wallet_core::{
 mod activity_read_tests;
 
 impl<T: OwnerTransport> OwnerConnection<T> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn legacy_move_status(&self) -> Result<ekubo_wallet_core::legacy_move::MoveStatus> {
+        self.call(&Request::LegacyMoveStatus).await
+    }
     pub async fn portfolio(
         &self,
         wallet_id: Option<&str>,
@@ -102,7 +106,7 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         request_id: uuid::Uuid,
         review_id: uuid::Uuid,
     ) -> Result<Option<crate::transaction_review::TransactionReviewFrame>> {
-        self.call(&Request::TransactionReviewFrame {
+        self.read(&Request::TransactionReviewFrame {
             request_id,
             review_id,
         })
@@ -245,11 +249,19 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         let mut records = Vec::with_capacity(references.len());
         while records.len() < references.len() {
             let remaining = &references[records.len()..];
-            let batch: Vec<OwnerActivityRecord> = self
+            let mut batch: Vec<OwnerActivityRecord> = self
                 .call(&Request::ActivityRecords {
                     references: remaining.to_vec(),
                 })
                 .await?;
+            if batch.is_empty() {
+                let id = match remaining[0] {
+                    OwnerActivityReference::Transaction(id)
+                    | OwnerActivityReference::Message(id)
+                    | OwnerActivityReference::TypedData(id) => id,
+                };
+                batch.push(self.activity_record(id).await?);
+            }
             anyhow::ensure!(
                 !batch.is_empty()
                     && batch.len() <= remaining.len()
@@ -267,7 +279,7 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         &self,
         request_id: uuid::Uuid,
     ) -> Result<crate::activity::OwnerActivityRecord> {
-        self.call(&Request::ActivityRecord { request_id }).await
+        self.read(&Request::ActivityRecord { request_id }).await
     }
     pub async fn activity_sources(&self) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
         self.call(&Request::ActivitySources).await
@@ -276,41 +288,82 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         &self,
         request_id: uuid::Uuid,
     ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
-        self.call(&Request::Transaction { request_id }).await
+        self.read(&Request::Transaction { request_id }).await
     }
     pub async fn message(
         &self,
         request_id: uuid::Uuid,
     ) -> Result<ekubo_wallet_core::message::PendingMessage> {
-        self.call(&Request::Message { request_id }).await
+        self.read(&Request::Message { request_id }).await
     }
     pub async fn typed_data(
         &self,
         request_id: uuid::Uuid,
     ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
-        self.call(&Request::TypedData { request_id }).await
+        self.read(&Request::TypedData { request_id }).await
     }
     pub async fn reviews(
         &self,
         wallet_id: Option<&str>,
     ) -> Result<crate::activity::OwnerReviewQueues> {
-        self.call(&Request::Reviews {
-            wallet_id: wallet_id.map(str::to_owned),
-        })
-        .await
+        use crate::activity::{OwnerReviewQueues, OwnerReviewRecord, OwnerReviewReference};
+        let index: Vec<OwnerReviewReference> = self
+            .read(&Request::Reviews {
+                wallet_id: wallet_id.map(str::to_owned),
+            })
+            .await?;
+        anyhow::ensure!(
+            index
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == index.len(),
+            "duplicate review index entries"
+        );
+        let mut queues = OwnerReviewQueues::default();
+        let mut offset = 0;
+        while offset < index.len() {
+            let remaining = &index[offset..index.len().min(offset + 64)];
+            let mut records: Vec<OwnerReviewRecord> = self
+                .call(&Request::ReviewRecords {
+                    references: remaining.to_vec(),
+                })
+                .await?;
+            if records.is_empty() {
+                records.push(
+                    self.read(&Request::ReviewRecord {
+                        reference: remaining[0].clone(),
+                    })
+                    .await?,
+                );
+            }
+            anyhow::ensure!(
+                records.len() <= remaining.len()
+                    && records
+                        .iter()
+                        .zip(remaining)
+                        .all(|(record, reference)| record.reference() == *reference),
+                "review batch does not match its ordered index"
+            );
+            offset += records.len();
+            for record in records {
+                queues.push(record);
+            }
+        }
+        Ok(queues)
     }
     pub async fn message_review_document(
         &self,
         request_id: uuid::Uuid,
     ) -> Result<ekubo_wallet_core::approval::ReviewDocument> {
-        self.call(&Request::MessageReviewDocument { request_id })
+        self.read(&Request::MessageReviewDocument { request_id })
             .await
     }
     pub async fn typed_data_review_document(
         &self,
         request_id: uuid::Uuid,
     ) -> Result<ekubo_wallet_core::approval::ReviewDocument> {
-        self.call(&Request::TypedDataReviewDocument { request_id })
+        self.read(&Request::TypedDataReviewDocument { request_id })
             .await
     }
     pub async fn transaction_headlines(

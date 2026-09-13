@@ -153,7 +153,7 @@ const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
 const POLICY_EDITOR_DESCRIPTION: &str =
     "Requests are automatically signed, refused or require review according to the account policy";
-const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases";
 
 fn app_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
@@ -1431,6 +1431,14 @@ fn account_required_panel(
                 })),
         )
 }
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "desktop_setup.rs"]
+mod service_setup;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "desktop_legacy_move.rs"]
+mod legacy_move;
 
 /// One row of the About panel: a name, an optional status line beneath it, and
 /// a single action on the right. Each row used to assemble its own container,
@@ -2783,6 +2791,8 @@ fn reset_route_scroll_if_changed(current: Route, next: Route, scroll: &ScrollHan
 #[allow(clippy::struct_excessive_bools)]
 pub struct WalletWindow {
     owner: crate::desktop_owner::DesktopOwner,
+    service_disconnected: Option<SharedString>,
+    service_recovery_pending: bool,
     desktop_snapshot: Option<Arc<DesktopSnapshot>>,
     desktop_snapshot_generation: u64,
     /// How many snapshots have actually been published, as opposed to
@@ -6904,6 +6914,8 @@ impl WalletWindow {
             owner,
             desktop_snapshot: None,
             desktop_snapshot_generation: 0,
+            service_disconnected: None,
+            service_recovery_pending: false,
             desktop_snapshot_revision: 0,
             desktop_snapshot_loading: false,
             desktop_snapshot_invalidated: false,
@@ -7711,7 +7723,40 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn service_lost(&mut self, error: &str, cx: &mut Context<Self>) {
+        if !self.owner.uses_service() || self.service_disconnected.is_some() {
+            return;
+        }
+        self.service_disconnected = Some(error.to_owned().into());
+        self.service_recovery_pending = true;
+        self.desktop_snapshot_generation = self.desktop_snapshot_generation.wrapping_add(1);
+        self.notification_load_generation = self.notification_load_generation.wrapping_add(1);
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        self.walletconnect_sessions_generation =
+            self.walletconnect_sessions_generation.wrapping_add(1);
+        self.desktop_snapshot = None;
+        self.active_review = None;
+        self.queued_reviews = SerialQueue::default();
+        self.selected_record = None;
+        self.legal_review = None;
+        self.clear_export_clipboard(cx);
+        self.account_export = None;
+        self.command_palette = false;
+        self.activity_inspections.clear();
+        self.activity_refresh_task = None;
+        let owner = self.owner.clone();
+        gpui_tokio::Tokio::handle(cx).spawn(async move {
+            if let Err(error) = owner.disconnect_service().await {
+                tracing::warn!(%error, "could not finish disconnected desktop shutdown");
+            }
+        });
+        cx.notify();
+    }
+
     fn reload_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.service_disconnected.is_some() {
+            return;
+        }
         if self.desktop_snapshot_loading {
             self.desktop_snapshot_dirty = true;
             return;
@@ -8974,6 +9019,7 @@ impl WalletWindow {
                 prompts
             }
             DappProposalUpdate::Failed(error) => {
+                self.service_lost(&error, cx);
                 self.walletconnect_reviews_error = Some(error.into());
                 cx.notify();
                 return false;
@@ -8994,7 +9040,7 @@ impl WalletWindow {
     }
 
     fn receive_walletconnect_prompt(&mut self, prompt: DesktopDappPrompt) {
-        if prompt.response.is_closed() {
+        if self.service_disconnected.is_some() || prompt.response.is_closed() {
             return;
         }
         if !prompt
@@ -11722,6 +11768,11 @@ impl WalletWindow {
     }
 
     fn check_latest_release(&mut self, cx: &mut Context<Self>) {
+        // The privileged installer updates the complete service-backed product.
+        // Do not discover an in-process installable payload for this backend.
+        if self.owner.uses_service() {
+            return;
+        }
         if matches!(self.release_state, ReleaseDisplayState::Checking) {
             return;
         }
@@ -11757,6 +11808,9 @@ impl WalletWindow {
     }
 
     fn confirm_update_installation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.owner.uses_service() {
+            return;
+        }
         let ReleaseDisplayState::Ready {
             update: Some(update),
             ..
@@ -11785,6 +11839,9 @@ impl WalletWindow {
     }
 
     fn download_update(&mut self, cx: &mut Context<Self>) {
+        if self.owner.uses_service() {
+            return;
+        }
         let ReleaseDisplayState::Ready {
             update: Some(update),
             ..
@@ -11838,7 +11895,7 @@ impl WalletWindow {
     }
 
     fn receive_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
-        if prompt.response.is_closed() {
+        if self.service_disconnected.is_some() || prompt.response.is_closed() {
             return;
         }
         if let Some(active) = self.active_review.as_mut()
@@ -17866,6 +17923,18 @@ impl WalletWindow {
     }
 
     fn render_updates(&self, cx: &mut Context<Self>) -> gpui::Div {
+        if self.owner.uses_service() {
+            return settings_section(
+                "Updates",
+                GroupBox::new().id("software-updates").child(
+                    div().flex().flex_col().gap_3()
+                        .child(selectable_label("Update using the signed Ekubo Wallet 2 installer. Close the wallet, then run the installer to update the desktop, bridge, and protected service together. Your wallet data is preserved."))
+                        .child(gpui_component::link::Link::new("wallet-v2-installers")
+                            .href(LATEST_RELEASE_URL)
+                            .child("View releases and signed installers")),
+                ),
+            );
+        }
         let mut panel = div()
             .flex()
             .flex_col()
@@ -17934,7 +18003,7 @@ impl WalletWindow {
                     panel.child(
                         app_button("open-latest-release")
                             .self_start()
-                            .label("View latest release")
+                            .label("View releases")
                             .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
                     )
                 }),
@@ -20613,6 +20682,23 @@ impl WalletWindow {
 impl Render for WalletWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach_window(window, cx);
+        if self.service_recovery_pending {
+            self.service_recovery_pending = false;
+            cx.defer_in(window, |view, window, cx| {
+                window.close_all_dialogs(cx);
+                window.close_sheet(cx);
+                view.modal_focus.focus(window, cx);
+            });
+        }
+        if let Some(error) = &self.service_disconnected {
+            return div().track_focus(&self.modal_focus).size_full().flex().flex_col().gap_4().p_6()
+                .bg(cx.theme().background).text_color(cx.theme().foreground)
+                .child(div().text_lg().font_semibold().child("Wallet service disconnected"))
+                .child(selectable_label("Close and reopen Ekubo Wallet 2 to reconnect. If it still cannot connect, run the signed installer to repair the service. An interrupted action may have completed; check its current status after reopening before trying it again."))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(selectable_label(error.clone())))
+                .child(app_button("close-disconnected-wallet").self_start().label("Close wallet")
+                    .on_click(|_, _, cx| cx.quit()));
+        }
         if let Some(review) = self.active_review.as_mut() {
             let generation = review.state.generation();
             if review.scroll_layout_ready {
@@ -21052,6 +21138,7 @@ fn show_wallet_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(960.0), px(650.0)), cx)),
             window_min_size: Some(size(px(660.0), px(500.0))),
+            app_id: Some("ekubo-wallet-v2".into()),
             ..Default::default()
         },
         |window, cx| {
@@ -21265,6 +21352,20 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         InstanceOutcome::Primary(instance) => instance,
         InstanceOutcome::ActivatedExisting => return Ok(()),
     };
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    match crate::desktop_startup::installed() {
+        Ok(true) => {}
+        installation => {
+            let can_enroll = matches!(&installation, Ok(false));
+            let error = installation.err().map(|error| format!("{error:#}"));
+            let restart = service_setup::run(error, can_enroll)?;
+            drop(instance);
+            if restart {
+                service_setup::relaunch()?;
+            }
+            return Ok(());
+        }
+    }
     // Only after winning the instance lock, because the helper now lives at
     // one fixed path. A second launch of a *different* build would otherwise
     // overwrite the helper, hand the user off to the running primary, and
@@ -21293,14 +21394,84 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         owner,
         dapps: walletconnect,
         local,
-        session,
-    } = crate::desktop_startup::DesktopStartup::open(&tokio, walletconnect_presenter)?;
+    } = match crate::desktop_startup::DesktopStartup::open(&tokio, walletconnect_presenter) {
+        Ok(startup) => startup,
+        Err(error) => {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                return service_setup::recover_connection(&error, None, &tokio, &instance_slot);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            return Err(error);
+        }
+    };
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let (move_status, accounts_empty) = {
+        match tokio.block_on(async {
+            Ok::<_, anyhow::Error>((
+                owner.legacy_move_status().await?,
+                owner.accounts().await?.is_empty(),
+            ))
+        }) {
+            Ok(state) => state,
+            Err(error) => {
+                return service_setup::recover_connection(
+                    &error,
+                    Some(&owner),
+                    &tokio,
+                    &instance_slot,
+                );
+            }
+        }
+    };
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if service_setup::show_move(
+        &move_status,
+        accounts_empty,
+        std::env::var_os(service_setup::CONTINUE_EMPTY).as_deref()
+            == Some(std::ffi::OsStr::new("1")),
+    ) {
+        // Before normal desktop initialization can change the fresh baseline.
+        // Continuing is an optional UI choice; core still enforces every move.
+        let result = service_setup::first_run(owner.clone(), move_status);
+        if let Err(error) = tokio.block_on(owner.disconnect_service()) {
+            tracing::warn!(%error, "first-run owner connection shutdown failed");
+        }
+        drop(owner);
+        drop(walletconnect);
+        drop(tokio);
+        release_single_instance(&instance_slot)?;
+        if result? {
+            service_setup::continue_to_wallet()?;
+        }
+        return Ok(());
+    }
+    let session =
+        match crate::desktop_startup::DesktopStartup::start_service_session(&owner, &tokio) {
+            Ok(session) => session,
+            Err(error) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    return service_setup::recover_connection(
+                        &error,
+                        Some(&owner),
+                        &tokio,
+                        &instance_slot,
+                    );
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                return Err(error);
+            }
+        };
     let initial = match tokio.block_on(InitialDesktopState::capture(&owner)) {
         Ok(initial) => initial,
         Err(error) => {
             if let Some(session) = session {
                 let _ = close_service_session(tokio.handle(), Some(session));
             }
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            return service_setup::recover_connection(&error, Some(&owner), &tokio, &instance_slot);
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             return Err(error);
         }
     };
@@ -21491,7 +21662,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &message,
                             );
                             tracing::error!(%error, "authorized update installation failed");
-                            let _ = notify_rust::Notification::new()
+                            let _ = crate::notifications::platform_notification()
                                 .summary("Ekubo Wallet update failed")
                                 .body(&format!(
                                     "{message}. Details: {}",
@@ -21693,6 +21864,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         Err(error) => {
                             tracing::warn!(%error, "desktop event stream stopped");
                             event_view.update(cx, |view, cx| {
+                                view.service_lost(&format!("{error:#}"), cx);
                                 view.mcp_status =
                                     McpGatewayStatus::Offline(format!("{error:#}").into());
                                 cx.notify();

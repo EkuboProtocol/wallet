@@ -55,7 +55,10 @@ fn a_large_activity_inventory_is_split_without_omitting_or_reordering_records() 
 #[test]
 fn an_individually_oversized_record_or_read_failure_is_not_silently_skipped() {
     let oversized = record(Uuid::new_v4(), crate::framing::MAX_FRAME_BYTES);
-    assert!(bounded_batch(std::iter::once(Ok(oversized))).is_err());
+    assert_eq!(
+        bounded_batch(std::iter::once(Ok(oversized))).unwrap(),
+        serde_json::json!([])
+    );
     assert!(
         bounded_batch(
             [

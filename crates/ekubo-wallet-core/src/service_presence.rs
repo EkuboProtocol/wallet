@@ -1,8 +1,10 @@
-//! Bind Linux service owner authentication to a live desktop system-bus caller.
+//! Bind Linux service owner authentication to a live, untrusted same-user caller.
 //!
 //! The service dispatch layer must pass the header supplied by zbus, never a
 //! caller-supplied name or approval boolean. Context is task-local: concurrent
 //! requests cannot borrow each other's identity and spawned tasks inherit none.
+//! UID matching is admission, not UI identity or human consent. Only the native
+//! polkit decision may authorize a protected mutation.
 
 use crate::human_presence::HumanPresenceError;
 use futures::StreamExt as _;
@@ -166,6 +168,72 @@ pub(crate) async fn verify_after_authentication() -> Result<(), HumanPresenceErr
         current(owner_uid)?.verify().await?;
     }
     Ok(())
+}
+
+/// One native challenge, never a retained polkit authorization. A caller leaving
+/// drops this future; cancellation is sent on the same authority connection.
+/// A late reply has no receiver and cannot authorize another owner operation.
+pub(crate) async fn check_authorization(
+    authority: zbus_polkit::policykit1::AuthorityProxy<'static>,
+    subject: &Subject,
+    reason: &str,
+) -> Result<zbus_polkit::policykit1::AuthorizationResult, HumanPresenceError> {
+    use zbus_polkit::policykit1::CheckAuthorizationFlags;
+    let mut pending = PendingAuthentication {
+        authority,
+        cancellation_id: Some(uuid::Uuid::new_v4().to_string()),
+    };
+    // polkit permits dialog details only for root or the policy's declared
+    // action owner. The installed v2 service is that owner; a local development
+    // caller must use the shipped static message instead.
+    let details = if crate::service_storage::owner_uid().is_some() {
+        HashMap::from([("polkit.message", reason)])
+    } else {
+        HashMap::new()
+    };
+    let result = tokio::time::timeout(
+        Duration::from_mins(2),
+        pending.authority.check_authorization(
+            subject,
+            crate::polkit::ACTION_ID,
+            &details,
+            CheckAuthorizationFlags::AllowUserInteraction.into(),
+            pending
+                .cancellation_id
+                .as_deref()
+                .expect("live authentication"),
+        ),
+    )
+    .await
+    .map_err(|_| HumanPresenceError::Denied("owner authentication timed out".into()))?
+    .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
+    pending.cancellation_id = None;
+    Ok(result)
+}
+
+struct PendingAuthentication {
+    authority: zbus_polkit::policykit1::AuthorityProxy<'static>,
+    cancellation_id: Option<String>,
+}
+
+impl Drop for PendingAuthentication {
+    fn drop(&mut self) {
+        let Some(id) = self.cancellation_id.take() else {
+            return;
+        };
+        let authority = self.authority.clone();
+        // Best effort UI cleanup only. Revocation is dropping the awaiting
+        // operation itself, not the success of this cancellation RPC.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    authority.cancel_check_authorization(&id),
+                )
+                .await;
+            });
+        }
+    }
 }
 
 #[cfg(test)]

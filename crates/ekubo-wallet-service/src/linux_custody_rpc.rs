@@ -5,7 +5,7 @@ use crate::custody_bootstrap::CustodyBootstrap;
 
 pub(crate) struct LinuxCustodyInterface(pub(crate) CustodyBootstrap);
 
-#[zbus::interface(name = "org.ekubo.Wallet.Custody1")]
+#[zbus::interface(name = "org.ekubo.Wallet2.Custody1")]
 impl LinuxCustodyInterface {
     async fn unlock(
         &self,

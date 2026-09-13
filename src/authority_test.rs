@@ -5,6 +5,26 @@ use ekubo_wallet_core::{
     rpc::{ReceiptDetails, ReceiptLog},
 };
 
+#[tokio::test]
+async fn legal_acceptance_rejects_stale_and_informational_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    assert!(
+        owner
+            .accept_legal(LegalDocument::TermsOfService, "0xdeadbeef")
+            .await
+            .is_err()
+    );
+    let document = LegalDocument::ApplicationLicense;
+    assert!(
+        owner
+            .accept_legal(document, &document.digest())
+            .await
+            .is_err()
+    );
+    assert!(!owner.legal_status().unwrap().signing_allowed);
+}
+
 #[test]
 fn owner_management_can_find_disabled_configured_chains() {
     let directory = tempfile::tempdir().unwrap();

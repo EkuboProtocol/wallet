@@ -1110,9 +1110,8 @@ impl OwnerApi {
     /// unrecoverable rather than merely inconvenient. Its run history goes with
     /// it; the transactions those runs produced are activity records and stay
     /// where they are.
-    pub fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
-        let mut store = AutomationStore::production(self.config.data_dir())?;
-        let automation = store
+    pub async fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
+        let automation = AutomationStore::production(self.config.data_dir())?
             .get(automation_id)?
             .context("that automation is no longer installed")?;
         ensure!(
@@ -1120,7 +1119,11 @@ impl OwnerApi {
             "stop this automation before deleting it"
         );
         ensure!(
-            store.remove_stopped(automation_id)?,
+            ekubo_wallet_core::human_presence::delete_stopped_automation(
+                self.config.data_dir(),
+                automation_id
+            )
+            .await?,
             "that automation changed; stop it before deleting it"
         );
         self.events.publish(DomainEventKind::AutomationsChanged {
@@ -1593,12 +1596,8 @@ impl OwnerApi {
     /// than history, and one of them holds the only copy of an envelope the
     /// chain may still mine. Nothing on chain changes and no policy loosens;
     /// this forgets the local record and nothing else.
-    pub fn clear_activity_history(&self) -> Result<usize> {
-        let data_dir = self.config.data_dir();
-        let mut removed = PendingStore::production(data_dir)?.clear_terminal_history(None)?;
-        removed += MessageStore::production(data_dir)?.clear_history(None)?;
-        removed += TypedDataStore::production(data_dir)?.clear_history(None)?;
-        Ok(removed)
+    pub async fn clear_activity_history(&self) -> Result<usize> {
+        ekubo_wallet_core::human_presence::clear_activity_history(self.config.data_dir()).await
     }
 
     pub fn transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
@@ -2637,8 +2636,13 @@ impl OwnerApi {
         (document.text(), document.digest())
     }
 
-    pub fn accept_legal(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
-        LegalStore::production(self.config.data_dir())?.record_acceptance(document, reviewed_digest)
+    pub async fn accept_legal(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
+        ekubo_wallet_core::human_presence::accept_legal(
+            self.config.data_dir(),
+            document,
+            reviewed_digest,
+        )
+        .await
     }
 }
 

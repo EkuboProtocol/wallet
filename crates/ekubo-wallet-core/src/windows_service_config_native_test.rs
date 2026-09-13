@@ -184,9 +184,9 @@ fn native_absence_is_distinct_from_an_incomplete_owner_profile() {
     );
     drop(registry.create("SOFTWARE"));
     assert!(registry.read().unwrap().is_none());
-    drop(registry.create(r"SOFTWARE\EkuboWallet\Owners"));
+    drop(registry.create(r"SOFTWARE\EkuboWalletV2\Owners"));
     assert!(registry.read().unwrap().is_none());
-    drop(registry.create(r"SOFTWARE\EkuboWallet\Owners\S-1-5-21-1-2-3-1001"));
+    drop(registry.create(r"SOFTWARE\EkuboWalletV2\Owners\S-1-5-21-1-2-3-1001"));
     assert!(
         registry.read().is_err(),
         "a present owner key without Profile must not permit fallback"
@@ -196,7 +196,7 @@ fn native_absence_is_distinct_from_an_incomplete_owner_profile() {
 #[test]
 fn native_invalid_profile_values_never_become_absent_installations() {
     let registry = RegistryFixture::new();
-    let profile = registry.create(r"SOFTWARE\EkuboWallet\Owners\S-1-5-21-1-2-3-1001");
+    let profile = registry.create(r"SOFTWARE\EkuboWalletV2\Owners\S-1-5-21-1-2-3-1001");
     let name = wide("Profile");
     for (kind, bytes) in [
         (REG_BINARY, b"not json".to_vec()),
@@ -222,12 +222,12 @@ fn native_untrusted_ancestor_is_rejected_before_considering_missing_children() {
 }
 
 #[test]
-fn native_incomplete_committed_identity_blocks_legacy_fallback() {
+fn native_v1_metadata_is_never_consulted_by_v2() {
     let registry = RegistryFixture::new();
     drop(registry.create("SOFTWARE"));
     assert!(registry.read().unwrap().is_none());
     let key = registry.create(r"SOFTWARE\EkuboWallet\Committed\S-1-5-21-1-2-3-1001");
-    assert!(registry.read().is_err());
+    assert!(registry.read().unwrap().is_none());
     let name = wide("Profile");
     unsafe {
         RegSetValueExW(
@@ -240,14 +240,14 @@ fn native_incomplete_committed_identity_blocks_legacy_fallback() {
     }
     .ok()
     .unwrap();
-    assert!(registry.read().is_err());
+    assert!(registry.read().unwrap().is_none());
 }
 
 #[test]
 fn native_pending_metadata_is_separate_from_active_discovery() {
     let registry = RegistryFixture::new();
     let owner = "S-1-5-21-1-2-3-1001";
-    let profile = registry.create(r"SOFTWARE\EkuboWallet\Pending\S-1-5-21-1-2-3-1001");
+    let profile = registry.create(r"SOFTWARE\EkuboWalletV2\Pending\S-1-5-21-1-2-3-1001");
     assert!(registry.read().unwrap().is_none());
     // An incomplete pending profile must not be usable even though the desktop
     // correctly remains in its pre-installation state.
@@ -266,7 +266,7 @@ fn native_pending_metadata_is_separate_from_active_discovery() {
     .unwrap();
     assert!(pending_configuration_under(registry.root.0, owner, &registry.trusted).is_err());
     assert!(registry.read().unwrap().is_none());
-    drop(registry.create(r"SOFTWARE\EkuboWallet\Owners\S-1-5-21-1-2-3-1001"));
+    drop(registry.create(r"SOFTWARE\EkuboWalletV2\Owners\S-1-5-21-1-2-3-1001"));
     assert!(registry.read().is_err());
     assert!(pending_configuration_under(registry.root.0, owner, &registry.trusted).is_err());
 }

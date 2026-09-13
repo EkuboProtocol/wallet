@@ -298,15 +298,15 @@ async fn rpc_failures_release_review_state_and_reject_forged_authority() {
         let error = dispatcher.dispatch(request).await.unwrap_err();
         assert!(!error.to_string().contains("already has an active review"));
     }
-    assert!(
+    assert_eq!(
         dispatcher
             .dispatch(Request::TransactionReviewFrame {
                 request_id,
                 review_id: REVIEW_ID
             })
             .await
-            .unwrap()
-            .is_null()
+            .unwrap()["text"],
+        "null"
     );
     assert!(
         dispatcher

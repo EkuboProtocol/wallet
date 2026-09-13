@@ -24,7 +24,7 @@ pub async fn run(owner_uid: u32) -> Result<()> {
     let owner_bus = zbus::connection::Builder::unix_stream(
         ekubo_wallet_core::service_storage::system_bus_stream().await?,
     )
-    .name(format!("org.ekubo.Wallet.Owner.u{owner_uid}"))?
+    .name(format!("org.ekubo.Wallet2.Owner.u{owner_uid}"))?
     .serve_at(
         ekubo_wallet_client::owner_protocol::CUSTODY_OBJECT_PATH,
         crate::linux_custody_rpc::LinuxCustodyInterface(bootstrap),
@@ -55,6 +55,7 @@ pub async fn run(owner_uid: u32) -> Result<()> {
             crate::owner_rpc::LinuxOwnerInterface::new(service.clone()),
         )
         .await?;
+    ekubo_wallet_core::service_storage::mark_setup_complete()?;
     startup.ready();
     let events = service.events();
     let mut supervisor = Box::pin(service.supervise());

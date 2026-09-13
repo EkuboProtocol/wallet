@@ -76,7 +76,7 @@ fn custody_stays_locked_until_the_exact_enrolled_ciphertext_is_supplied() {
     assert!(
         fixture
             .storage
-            .entry("org.ekubo.wallet.db", "default")
+            .entry("org.ekubo.wallet.v2.db", "default")
             .is_err()
     );
     let (_, wrong) = enroll(&fixture.storage);
@@ -84,14 +84,14 @@ fn custody_stays_locked_until_the_exact_enrolled_ciphertext_is_supplied() {
     assert!(
         fixture
             .storage
-            .entry("org.ekubo.wallet.db", "default")
+            .entry("org.ekubo.wallet.v2.db", "default")
             .is_err()
     );
     assert!(!fixture.directory.path().join("key-database").exists());
     fixture.storage.unlock(&fixture.wrapped).unwrap();
     let database = fixture
         .storage
-        .entry("org.ekubo.wallet.db", "default")
+        .entry("org.ekubo.wallet.v2.db", "default")
         .unwrap();
     database.set_secret(&[0x11; 32]).unwrap();
     assert_eq!(database.get_secret().unwrap(), [0x11; 32]);
@@ -116,23 +116,23 @@ fn reopening_requires_unlock_and_preserves_encrypted_database_and_account_keys()
     storage.unlock(&wrapped).unwrap();
     let instance = Uuid::new_v4().to_string();
     storage
-        .entry("org.ekubo.wallet.db", "default")
+        .entry("org.ekubo.wallet.v2.db", "default")
         .unwrap()
         .set_secret(&[0x11; 32])
         .unwrap();
     storage
-        .entry("org.ekubo.wallet.private-key.instance", &instance)
+        .entry("org.ekubo.wallet.v2.private-key.instance", &instance)
         .unwrap()
         .set_secret(&[0x22; 32])
         .unwrap();
     let (owner, profile) = (storage.owner_uid, storage.profile_id);
     drop(storage);
     let reopened = open_storage(directory.path(), owner, profile);
-    assert!(reopened.entry("org.ekubo.wallet.db", "default").is_err());
+    assert!(reopened.entry("org.ekubo.wallet.v2.db", "default").is_err());
     reopened.unlock(&wrapped).unwrap();
     assert_eq!(
         reopened
-            .entry("org.ekubo.wallet.db", "default")
+            .entry("org.ekubo.wallet.v2.db", "default")
             .unwrap()
             .get_secret()
             .unwrap(),
@@ -140,7 +140,7 @@ fn reopening_requires_unlock_and_preserves_encrypted_database_and_account_keys()
     );
     assert_eq!(
         reopened
-            .entry("org.ekubo.wallet.private-key.instance", &instance)
+            .entry("org.ekubo.wallet.v2.private-key.instance", &instance)
             .unwrap()
             .get_secret()
             .unwrap(),
@@ -155,14 +155,14 @@ fn ciphertext_substitution_and_legacy_plaintext_do_not_become_missing_key_fallba
     let first = fixture
         .storage
         .entry(
-            "org.ekubo.wallet.private-key.instance",
+            "org.ekubo.wallet.v2.private-key.instance",
             &Uuid::new_v4().to_string(),
         )
         .unwrap();
     let second = fixture
         .storage
         .entry(
-            "org.ekubo.wallet.private-key.instance",
+            "org.ekubo.wallet.v2.private-key.instance",
             &Uuid::new_v4().to_string(),
         )
         .unwrap();
@@ -191,7 +191,7 @@ fn enrollment_changes_cannot_replace_an_active_cipher() {
     fixture.storage.unlock(&fixture.wrapped).unwrap();
     let entry = fixture
         .storage
-        .entry("org.ekubo.wallet.db", "default")
+        .entry("org.ekubo.wallet.v2.db", "default")
         .unwrap();
     entry.set_secret(&[0x11; 32]).unwrap();
     let (updated, wrapped) = enroll(&fixture.storage);

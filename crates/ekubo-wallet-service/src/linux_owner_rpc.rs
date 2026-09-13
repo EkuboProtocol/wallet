@@ -47,7 +47,7 @@ async fn hold_desktop(
     bus.emit_signal(
         Some(sender.as_str()),
         ekubo_wallet_client::owner_protocol::OBJECT_PATH,
-        "org.ekubo.Wallet.Owner1",
+        "org.ekubo.Wallet2.Owner1",
         "DesktopSessionReady",
         &(nonce,),
     )
@@ -61,8 +61,37 @@ async fn hold_desktop(
     anyhow::bail!("desktop session lost its system bus connection")
 }
 
-#[zbus::interface(name = "org.ekubo.Wallet.Owner1")]
+#[zbus::interface(name = "org.ekubo.Wallet2.Owner1")]
 impl LinuxOwnerInterface {
+    async fn legacy_move(
+        &self,
+        command: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<String> {
+        if command.len() > 12 * 1024 * 1024 {
+            return Err(zbus::fdo::Error::LimitsExceeded(
+                "legacy move is oversized".into(),
+            ));
+        }
+        ekubo_wallet_core::service_presence::with_owner_call(
+            connection,
+            &header,
+            Box::pin(async {
+                let command = serde_json::from_str(command)?;
+                let receipt = ekubo_wallet_core::legacy_move::service_command(command).await?;
+                Ok::<_, anyhow::Error>(serde_json::to_string(&receipt)?)
+            }),
+        )
+        .await
+        .map_err(|_| {
+            zbus::fdo::Error::AccessDenied("legacy move owner authentication failed".into())
+        })?
+        .map_err(|_| {
+            zbus::fdo::Error::Failed("legacy move failed; source credentials retained".into())
+        })
+    }
+
     async fn hold_desktop_session(
         &self,
         nonce: &str,

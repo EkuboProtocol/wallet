@@ -148,3 +148,36 @@ async fn reset_batches_cannot_inject_historical_notifications() {
     );
     assert!(events.recv().await.is_err());
 }
+
+#[tokio::test]
+async fn changed_service_generation_requires_relaunch_and_stops_the_old_feed() {
+    let cursors = Arc::new(Mutex::new(Vec::new()));
+    let mut changed = batch(1, true, vec![]);
+    changed.cursor.epoch = uuid::Uuid::new_v4();
+    let mut events = RemoteEvents::start(
+        Source {
+            replies: Mutex::new(VecDeque::from([
+                Ok(batch(1, true, vec![])),
+                Ok(changed),
+                Ok(batch(2, false, vec![event()])),
+            ])),
+            cursors: cursors.clone(),
+            dropped: None,
+        },
+        &tokio::runtime::Handle::current(),
+    );
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        DesktopEvent::Refresh { .. }
+    ));
+    assert!(
+        events
+            .recv()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("generation changed")
+    );
+    assert!(events.recv().await.is_err());
+    assert_eq!(cursors.lock().unwrap().len(), 2);
+}

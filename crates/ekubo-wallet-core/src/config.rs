@@ -7,6 +7,7 @@ use crate::{
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
+#[cfg(not(target_os = "windows"))]
 use directories::BaseDirs;
 use fs2::FileExt;
 use rusqlite::{OptionalExtension as _, params};
@@ -718,24 +719,28 @@ pub fn default_data_dir() -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     if let Some(service) = crate::service_storage::data_dir() {
         // Activated authority is bound to installer-controlled state; inherited
-        // user HOME/XDG/EKUBO_WALLET_HOME values cannot redirect it.
+        // user HOME/XDG/EKUBO_WALLET_V2_HOME values cannot redirect it.
         return Ok(service.to_path_buf());
     }
-    if let Some(explicit) = env::var_os("EKUBO_WALLET_HOME") {
-        ensure!(!explicit.is_empty(), "EKUBO_WALLET_HOME cannot be empty");
+    if let Some(explicit) = env::var_os("EKUBO_WALLET_V2_HOME") {
+        ensure!(!explicit.is_empty(), "EKUBO_WALLET_V2_HOME cannot be empty");
         return Ok(PathBuf::from(explicit));
     }
+    #[cfg(not(target_os = "windows"))]
     let base = BaseDirs::new().context("could not determine the user home directory")?;
     #[cfg(target_os = "macos")]
     return Ok(base
         .home_dir()
-        .join("Library/Application Support/org.ekubo.wallet"));
+        .join("Library/Application Support/org.ekubo.wallet.v2"));
     #[cfg(target_os = "windows")]
-    return Ok(base.data_local_dir().join("Ekubo/wallet"));
+    return Ok(directories::ProjectDirs::from("org", "Ekubo", "wallet-v2")
+        .context("could not determine v2 user data directory")?
+        .data_local_dir()
+        .to_owned());
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Ok(env::var_os("XDG_STATE_HOME")
         .map_or_else(|| base.home_dir().join(".local/state"), PathBuf::from)
-        .join("ekubo-wallet"))
+        .join("ekubo-wallet-v2"))
 }
 
 /// The networks a fresh configuration starts with.

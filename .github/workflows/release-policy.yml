@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-policy-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   immutable-actions:
     runs-on: ubuntu-24.04

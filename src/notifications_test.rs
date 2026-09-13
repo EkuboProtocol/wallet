@@ -4,8 +4,24 @@ use chrono::Utc;
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_notifications_name_the_packaged_wallet_instead_of_the_fallback_placeholder() {
-    assert_eq!(MACOS_BUNDLE_IDENTIFIER, "org.ekubo.wallet");
+    assert_eq!(MACOS_BUNDLE_IDENTIFIER, "org.ekubo.wallet.v2");
     assert_ne!(MACOS_BUNDLE_IDENTIFIER, "use_default");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_notifications_select_only_the_v2_desktop_entry() {
+    let notification = platform_notification();
+    assert!(
+        notification
+            .hints
+            .contains(&notify_rust::Hint::DesktopEntry("ekubo-wallet-v2".into()))
+    );
+    assert!(
+        !notification
+            .hints
+            .contains(&notify_rust::Hint::DesktopEntry("ekubo-wallet".into()))
+    );
 }
 
 fn context() -> NotificationContext {

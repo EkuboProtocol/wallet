@@ -44,7 +44,12 @@ pub(super) fn runtime(path: &std::path::Path) -> Arc<ServiceRuntime> {
         crate::legal::LegalDocument::PrivacyPolicy,
     ] {
         let (_, digest) = owner.legal_document(document);
-        owner.accept_legal(document, &digest).unwrap();
+        // Fixture initialization; this test exercises stream admission rather
+        // than the production-feature native-authentication boundary.
+        ekubo_wallet_core::legal::LegalStore::production(path)
+            .unwrap()
+            .record_acceptance(document, &digest)
+            .unwrap();
     }
     Arc::new(ServiceRuntime::new(
         ApplicationAuthority::open(owner.config().clone()).unwrap(),

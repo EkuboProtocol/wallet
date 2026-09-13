@@ -81,6 +81,25 @@ pub(crate) fn entry(service: &str, user: &str) -> keyring::Result<Entry> {
     keyring::Entry::new(service, user).map(Entry::Platform)
 }
 
+/// Deliberately separate opt-in source access. Fresh setup and ordinary v2
+/// credential routing never invoke this old namespace.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn legacy_entry(service: &str, user: &str) -> anyhow::Result<keyring::Entry> {
+    anyhow::ensure!(
+        matches!(
+            service,
+            "org.ekubo.wallet.db" | "org.ekubo.wallet.private-key.instance"
+        ),
+        "unsupported legacy credential namespace"
+    );
+    match entry(service, user)? {
+        Entry::Platform(entry) => Ok(entry),
+        Entry::Service(_) => {
+            anyhow::bail!("protected service cannot access login-owner legacy credentials")
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 #[path = "credential_store_test.rs"]
 mod tests;

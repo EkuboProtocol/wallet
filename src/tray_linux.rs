@@ -193,7 +193,7 @@ impl StatusNotifierItem {
 
     #[zbus(property)]
     fn id(&self) -> &str {
-        "ekubo-wallet"
+        "ekubo-wallet-v2"
     }
 
     #[zbus(property)]

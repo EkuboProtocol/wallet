@@ -1,7 +1,7 @@
 //! Async desktop operations over one authority backend. Service-backed values
 //! carry only the authenticated client: no local stores or authority fallback.
-//! The local backend preserves macOS and pre-migration behavior. Startup must
-//! select the service before opening local authority for an installed profile;
+//! The local backend preserves macOS behavior. Linux/Windows startup must
+//! select the service before opening any local authority;
 //! this adapter does not perform installation discovery itself.
 
 use crate::authority::OwnerApi;
@@ -37,8 +37,34 @@ impl From<OwnerApi> for DesktopOwner {
     )
 )]
 impl DesktopOwner {
-    /// The local installer consumes an in-process core authorization. A service
-    /// profile must eventually install through its protected service updater;
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn legacy_move_status(&self) -> Result<ekubo_wallet_core::legacy_move::MoveStatus> {
+        match self {
+            Self::Service(owner) => owner.legacy_move_status().await,
+            Self::Local(_) => Ok(ekubo_wallet_core::legacy_move::MoveStatus::Unavailable),
+        }
+    }
+    #[must_use]
+    pub const fn uses_service(&self) -> bool {
+        match self {
+            Self::Local(_) => false,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Self::Service(_) => true,
+        }
+    }
+
+    /// Invalidate the complete remote desktop period, including review children.
+    /// Relaunch is the only reconnect path and never retries an ambiguous write.
+    pub async fn disconnect_service(&self) -> Result<()> {
+        match self {
+            Self::Local(_) => Ok(()),
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Self::Service(owner) => owner.close().await,
+        }
+    }
+
+    /// The local installer consumes an in-process core authorization. Service
+    /// profiles use the signed privileged installer to update all components;
     /// never mint a desktop proof or serialize this capability across IPC.
     pub async fn authorize_update_install(
         &self,
@@ -47,7 +73,9 @@ impl DesktopOwner {
         match self {
             Self::Local(owner) => owner.authorize_update_install(review).await,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Self::Service(_) => anyhow::bail!("service update installation is not implemented"),
+            Self::Service(_) => anyhow::bail!(
+                "Use the signed Ekubo Wallet 2 installer to update the wallet and its protected service together."
+            ),
         }
     }
 
@@ -298,10 +326,7 @@ impl DesktopOwner {
         match self {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::Service(owner) => owner.clear_activity_history().await,
-            Self::Local(owner) => {
-                let owner = owner.clone();
-                tokio::task::spawn_blocking(move || owner.clear_activity_history()).await?
-            }
+            Self::Local(owner) => owner.clear_activity_history().await,
         }
     }
 
@@ -580,10 +605,7 @@ impl DesktopOwner {
         match self {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::Service(owner) => owner.delete_automation(automation_id).await,
-            Self::Local(owner) => {
-                let owner = owner.clone();
-                tokio::task::spawn_blocking(move || owner.delete_automation(automation_id)).await?
-            }
+            Self::Local(owner) => owner.delete_automation(automation_id).await,
         }
     }
 
@@ -1068,12 +1090,7 @@ impl DesktopOwner {
         match self {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             Self::Service(owner) => owner.accept_legal(document, reviewed_digest).await,
-            Self::Local(owner) => {
-                let owner = owner.clone();
-                let reviewed_digest = reviewed_digest.to_owned();
-                tokio::task::spawn_blocking(move || owner.accept_legal(document, &reviewed_digest))
-                    .await?
-            }
+            Self::Local(owner) => owner.accept_legal(document, reviewed_digest).await,
         }
     }
 }

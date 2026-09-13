@@ -41,7 +41,7 @@ fn activation_bus(
 #[tokio::test]
 #[ignore = "requires dbus-daemon and dbus-test-tool; launches an isolated activation fixture"]
 async fn activation_starts_then_authenticates_the_actual_bus_owner() {
-    let name = "org.ekubo.Wallet.Owner.ActivationTest";
+    let name = "org.ekubo.Wallet2.Owner.ActivationTest";
     let (_daemon, _directory, address) = activation_bus(name, |address| {
         format!(
             "[D-BUS Service]\nName={name}\nExec=/usr/bin/env DBUS_SESSION_BUS_ADDRESS={address} /usr/bin/dbus-test-tool echo --name={name}\n"
@@ -84,11 +84,11 @@ async fn activation_starts_then_authenticates_the_actual_bus_owner() {
 #[tokio::test]
 #[ignore = "requires dbus-daemon; launches an isolated activation fixture"]
 async fn activation_errors_are_not_treated_as_an_authenticated_connection() {
-    let name = "org.ekubo.Wallet.Owner.u1001";
+    let name = "org.ekubo.Wallet2.Owner.u1001";
     // Exercise the actual registration asset: with systemd activation disabled,
     // its fallback must fail instead of launching custody outside the unit.
     let (_daemon, _directory, address) = activation_bus(name, |_| {
-        include_str!("../../../contrib/linux-service/org.ekubo.Wallet.Owner.service.in")
+        include_str!("../../../contrib/linux-service/org.ekubo.Wallet2.Owner.service.in")
             .replace("@OWNER_UID@", "1001")
     });
     let bus = zbus::connection::Builder::address(address.trim())
@@ -107,7 +107,7 @@ async fn activation_errors_are_not_treated_as_an_authenticated_connection() {
         .is_err()
     );
     assert!(
-        LinuxOwnerTransport::activate(bus.clone(), "org.ekubo.Wallet.Owner.NotInstalled", uid)
+        LinuxOwnerTransport::activate(bus.clone(), "org.ekubo.Wallet2.Owner.NotInstalled", uid)
             .await
             .is_err()
     );
@@ -125,7 +125,7 @@ async fn activation_errors_are_not_treated_as_an_authenticated_connection() {
 #[ignore = "requires dbus-daemon; launches an isolated test bus"]
 async fn running_endpoint_needs_no_activation_file_and_still_requires_matching_uid() {
     let (_daemon, address) = private_bus();
-    let name = "org.ekubo.Wallet.Owner.RunningActivationTest";
+    let name = "org.ekubo.Wallet2.Owner.RunningActivationTest";
     let calls = Arc::new(AtomicUsize::new(0));
     let original = zbus::connection::Builder::address(address.trim())
         .unwrap()

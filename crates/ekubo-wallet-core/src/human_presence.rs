@@ -4,15 +4,76 @@ use thiserror::Error;
 
 const OWNER_AUTHORIZATION_LIFETIME: Duration = Duration::from_mins(2);
 
+/// Same-user IPC is not evidence that the owner accepted a legal document.
+/// Keep the exact document/digest on this future across native authentication;
+/// no transferable approval token or desktop-provided boolean is accepted.
+pub async fn accept_legal(
+    data_dir: &std::path::Path,
+    document: crate::legal::LegalDocument,
+    reviewed_digest: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(
+            document,
+            crate::legal::LegalDocument::TermsOfService
+                | crate::legal::LegalDocument::PrivacyPolicy
+        ),
+        "informational legal documents are not accepted"
+    );
+    anyhow::ensure!(
+        reviewed_digest == document.digest(),
+        "legal document changed; read it again before accepting"
+    );
+    let scope = match document {
+        crate::legal::LegalDocument::TermsOfService => OwnerAuthorizationScope::AcceptTerms,
+        crate::legal::LegalDocument::PrivacyPolicy => OwnerAuthorizationScope::AcceptPrivacyPolicy,
+        _ => unreachable!("informational documents rejected above"),
+    };
+    let authorization = authorize_owner(scope).await?;
+    authorization.require(scope)?;
+    crate::legal::LegalStore::production(data_dir)?
+        .record_acceptance_authenticated(document, reviewed_digest)
+}
+
+/// Removing evidence requires fresh native authorization, even though it does
+/// not widen a signing policy. Live requests are preserved by the core stores.
+pub async fn clear_activity_history(data_dir: &std::path::Path) -> anyhow::Result<usize> {
+    let authorization = authorize_owner(OwnerAuthorizationScope::ActivityHistory).await?;
+    authorization.require(OwnerAuthorizationScope::ActivityHistory)?;
+    let mut removed = crate::pending::PendingStore::production(data_dir)?
+        .clear_terminal_history_authenticated(None)?;
+    removed +=
+        crate::message::MessageStore::production(data_dir)?.clear_history_authenticated(None)?;
+    removed += crate::typed_data::TypedDataStore::production(data_dir)?
+        .clear_history_authenticated(None)?;
+    Ok(removed)
+}
+
+/// Deletion also erases the automation's run history; stopping it is the
+/// separate, deliberately unprompted reduction. Recheck stopped state in SQL.
+pub async fn delete_stopped_automation(
+    data_dir: &std::path::Path,
+    id: uuid::Uuid,
+) -> anyhow::Result<bool> {
+    let authorization = authorize_owner(OwnerAuthorizationScope::AutomationHistory).await?;
+    authorization.require(OwnerAuthorizationScope::AutomationHistory)?;
+    crate::automation_store::AutomationStore::production(data_dir)?.remove_stopped_authenticated(id)
+}
+
 /// The class of protected owner state one authentication may change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerAuthorizationScope {
+    AcceptTerms,
+    AcceptPrivacyPolicy,
+    ActivityHistory,
+    AutomationHistory,
     DappAccess,
     UpdateTrust,
     PolicySettings,
     NetworkSettings,
     NotificationPrivacy,
     TokenMetadata,
+    LegacyMove,
 }
 
 /// Single-use proof that the owner authenticated the exact dapp review and
@@ -179,6 +240,18 @@ impl PresenceRequest {
                 format!("trust the RPC endpoint for network {}", subject(network))
             }
             Self::ChangeProtectedSettings { scope } => match scope {
+                OwnerAuthorizationScope::AcceptTerms => {
+                    "accept the current Terms of Service for Ekubo Wallet 2".into()
+                }
+                OwnerAuthorizationScope::AcceptPrivacyPolicy => {
+                    "accept the current Privacy Policy for Ekubo Wallet 2".into()
+                }
+                OwnerAuthorizationScope::ActivityHistory => {
+                    "erase finished wallet activity history".into()
+                }
+                OwnerAuthorizationScope::AutomationHistory => {
+                    "delete the stopped automation and its run history".into()
+                }
                 OwnerAuthorizationScope::DappAccess => {
                     "approve the dapp connection shown in Ekubo Wallet".into()
                 }
@@ -193,6 +266,9 @@ impl PresenceRequest {
                 }
                 OwnerAuthorizationScope::NotificationPrivacy => {
                     "change whether notifications reveal wallet activity".into()
+                }
+                OwnerAuthorizationScope::LegacyMove => {
+                    "move the reviewed legacy profile to v2 and retire its verified, unshared 1.x account credentials".into()
                 }
                 OwnerAuthorizationScope::TokenMetadata => {
                     "change trusted token names and amount scaling".into()
@@ -329,59 +405,25 @@ mod macos {
 }
 
 #[cfg(target_os = "windows")]
+#[path = "windows_owner_auth.rs"]
+mod windows_owner_auth;
+
+#[cfg(target_os = "windows")]
 #[async_trait]
 impl HumanPresence for PlatformHumanPresence {
     async fn confirm(&self, request: &PresenceRequest) -> Result<(), HumanPresenceError> {
-        use windows::{
-            Security::Credentials::UI::{
-                UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
-            },
-            core::HSTRING,
-        };
-
-        if crate::windows_service_custody::data_dir().is_some() {
-            // Session 0 must not ask Hello to authenticate the service identity
-            // or trust a desktop boolean. The owner transport must provide a
-            // separately verified, operation-bound proof before this is enabled.
-            return Err(HumanPresenceError::Unavailable(
-                "Windows service owner authentication is not connected".into(),
-            ));
-        }
-
-        let availability = UserConsentVerifier::CheckAvailabilityAsync()
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?
-            .await
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
-        if availability != UserConsentVerifierAvailability::Available {
-            return Err(HumanPresenceError::Unavailable(format!(
-                "Windows Hello availability was {availability:?}"
-            )));
-        }
-
-        let result =
-            UserConsentVerifier::RequestVerificationAsync(&HSTRING::from(request.reason()))
-                .map_err(|error| HumanPresenceError::Backend(error.to_string()))?
-                .await
-                .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
-        if result == UserConsentVerificationResult::Verified {
-            Ok(())
-        } else {
-            Err(HumanPresenceError::Denied(format!(
-                "Windows Hello returned {result:?}"
-            )))
-        }
+        windows_owner_auth::confirm(request)
     }
 }
 
 #[cfg(target_os = "linux")]
 #[async_trait]
 impl HumanPresence for PlatformHumanPresence {
-    async fn confirm(&self, _request: &PresenceRequest) -> Result<(), HumanPresenceError> {
-        use std::collections::HashMap;
+    async fn confirm(&self, request: &PresenceRequest) -> Result<(), HumanPresenceError> {
         use std::os::unix::fs::MetadataExt as _;
-        use zbus_polkit::policykit1::{CheckAuthorizationFlags, Subject};
+        use zbus_polkit::policykit1::Subject;
 
-        use crate::polkit::{ACTION_ID as ACTION, Readiness};
+        use crate::polkit::Readiness;
 
         // The same probe the Settings pane runs, so the two never disagree
         // about what a polkit failure is called.
@@ -445,16 +487,9 @@ impl HumanPresence for PlatformHumanPresence {
             Subject::new_for_owner(std::process::id(), None, Some(uid))
                 .map_err(|error| HumanPresenceError::Backend(error.to_string()))?
         };
-        let result = authority
-            .check_authorization(
-                &subject,
-                ACTION,
-                &HashMap::new(),
-                CheckAuthorizationFlags::AllowUserInteraction.into(),
-                "",
-            )
-            .await
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
+        let result =
+            crate::service_presence::check_authorization(authority, &subject, &request.reason())
+                .await?;
         if result.is_authorized {
             crate::service_presence::verify_after_authentication().await?;
             Ok(())

@@ -1,5 +1,131 @@
 use super::*;
 
+struct TestAuthority {
+    checks: tokio::sync::mpsc::UnboundedSender<(String, tokio::sync::oneshot::Sender<bool>)>,
+    cancellations: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+#[zbus::interface(name = "org.freedesktop.PolicyKit1.Authority")]
+impl TestAuthority {
+    async fn check_authorization(
+        &self,
+        subject: Subject,
+        action_id: &str,
+        details: HashMap<String, String>,
+        flags: u32,
+        cancellation_id: &str,
+    ) -> zbus::fdo::Result<zbus_polkit::policykit1::AuthorizationResult> {
+        assert_eq!(subject.subject_kind, "system-bus-name");
+        assert_eq!(action_id, crate::polkit::ACTION_ID);
+        assert!(details.is_empty()); // this fixture has no service storage
+        assert_eq!(flags, 1);
+        assert!(!cancellation_id.is_empty());
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.checks
+            .send((cancellation_id.to_owned(), reply))
+            .unwrap();
+        Ok(zbus_polkit::policykit1::AuthorizationResult {
+            is_authorized: response.await.unwrap_or(false),
+            is_challenge: false,
+            details: HashMap::new(),
+        })
+    }
+
+    fn cancel_check_authorization(&self, cancellation_id: &str) {
+        self.cancellations.send(cancellation_id.to_owned()).unwrap();
+    }
+}
+
+/// Tests the production cancellation RPC over a real private bus. This double
+/// is NOT evidence of an interactive polkit/PAM authentication success.
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn dropped_authentication_cancels_only_its_own_native_challenge() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::{Command, Stdio};
+    struct Bus(std::process::Child);
+    impl Drop for Bus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut daemon = Bus(Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap());
+    let mut address = String::new();
+    BufReader::new(daemon.0.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    let (checks, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (cancellations, mut cancelled) = tokio::sync::mpsc::unbounded_channel();
+    let _server = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name("org.freedesktop.PolicyKit1")
+        .unwrap()
+        .serve_at(
+            "/org/freedesktop/PolicyKit1/Authority",
+            TestAuthority {
+                checks,
+                cancellations,
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let bus = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let subject = OwnerCall {
+        sender: bus.unique_name().unwrap().clone(),
+        bus: bus.clone(),
+        owner_uid: rustix::process::geteuid().as_raw(),
+    }
+    .subject()
+    .unwrap();
+    let authority = zbus_polkit::policykit1::AuthorityProxy::new(&bus)
+        .await
+        .unwrap();
+    let mut first = Box::pin(check_authorization(authority.clone(), &subject, "first"));
+    let (first_id, first_reply) = tokio::select! {
+        check = received.recv() => check.unwrap(),
+        result = &mut first => panic!("authentication completed before a decision: {result:?}"),
+    };
+    drop(first);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), cancelled.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        first_id
+    );
+    // A late success on the abandoned request cannot settle the next request.
+    let _ = first_reply.send(true);
+    let mut second = Box::pin(check_authorization(authority, &subject, "second"));
+    let (second_id, second_reply) = tokio::select! {
+        check = received.recv() => check.unwrap(),
+        result = &mut second => panic!("replacement consumed a stale approval: {result:?}"),
+    };
+    assert_ne!(first_id, second_id);
+    second_reply.send(false).unwrap();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_authorized
+    );
+    assert!(
+        cancelled.try_recv().is_err(),
+        "completed decision must not cancel another challenge"
+    );
+}
+
 #[tokio::test]
 async fn owner_context_is_required_even_on_a_runtime_thread() {
     assert!(current(1000).is_err());

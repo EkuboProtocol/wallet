@@ -56,7 +56,7 @@ async fn quick_desktop_reopen_cancels_old_workers_without_cancelling_new_session
         .unwrap();
     for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
         let (_, digest) = owner.legal_document(document);
-        owner.accept_legal(document, &digest).unwrap();
+        owner.accept_legal(document, &digest).await.unwrap();
     }
     let receiver = crate::desktop_sessions::DesktopSessions::default();
     let active = receiver.reserve().unwrap().activate();

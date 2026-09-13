@@ -8,7 +8,7 @@ const ADMINISTRATORS: &str = "S-1-5-32-544";
 fn name(profile: uuid::Uuid) -> Result<String> {
     ensure!(!profile.is_nil(), "invalid provisioning pipe profile");
     Ok(format!(
-        r"\\.\pipe\EkuboWallet.Provision.{}",
+        r"\\.\pipe\EkuboWalletV2.Provision.{}",
         profile.simple()
     ))
 }

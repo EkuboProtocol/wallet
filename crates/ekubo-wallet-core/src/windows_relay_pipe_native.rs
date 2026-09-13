@@ -1,4 +1,4 @@
-use super::{ADMINISTRATORS, PREFACE, SOURCE_PREFACE, name, source_name};
+use super::{ADMINISTRATORS, PREFACE, name};
 use crate::{windows_owner_pipe, windows_service_config, windows_service_identity};
 use anyhow::{Result, ensure};
 use tokio::{
@@ -11,37 +11,24 @@ pub struct OwnerRelayListener {
     pipe: NamedPipeServer,
     owner: String,
     endpoint: Uuid,
-    source: bool,
 }
 
 impl OwnerRelayListener {
     pub fn bind() -> Result<Self> {
-        Self::bind_kind(false)
-    }
-
-    pub(crate) fn bind_source() -> Result<Self> {
-        Self::bind_kind(true)
-    }
-
-    fn bind_kind(source: bool) -> Result<Self> {
         let owner = windows_service_identity::current_process_identity()?
             .user_sid()
             .to_owned();
         windows_service_config::validate_owner_component(&owner)?;
-        Self::create(owner, Uuid::new_v4(), true, source)
+        Self::create(owner, Uuid::new_v4(), true)
     }
 
-    fn create(owner: String, endpoint: Uuid, first: bool, source: bool) -> Result<Self> {
+    fn create(owner: String, endpoint: Uuid, first: bool) -> Result<Self> {
         ensure!(
             windows_service_identity::current_process_identity()?.user_sid() == owner,
             "relay owner identity changed"
         );
         let pipe = windows_owner_pipe::create_private_pipe(
-            &if source {
-                source_name(endpoint)?
-            } else {
-                name(endpoint)?
-            },
+            &name(endpoint)?,
             &owner,
             ADMINISTRATORS,
             first,
@@ -50,7 +37,6 @@ impl OwnerRelayListener {
             pipe,
             owner,
             endpoint,
-            source,
         })
     }
 
@@ -69,7 +55,7 @@ pub struct ConnectedInstaller(OwnerRelayListener);
 impl ConnectedInstaller {
     /// Reserve the successor while the connected instance still owns the name.
     pub fn reserve_next(&self) -> Result<OwnerRelayListener> {
-        OwnerRelayListener::create(self.0.owner.clone(), self.0.endpoint, false, self.0.source)
+        OwnerRelayListener::create(self.0.owner.clone(), self.0.endpoint, false)
     }
 
     pub async fn authenticate(mut self) -> Result<NamedPipeServer> {
@@ -79,15 +65,7 @@ impl ConnectedInstaller {
             self.0.pipe.read_exact(&mut preface),
         )
         .await??;
-        let expected = if self.0.source {
-            SOURCE_PREFACE
-        } else {
-            PREFACE
-        };
-        ensure!(
-            &preface == expected,
-            "unsupported installer channel preface"
-        );
+        ensure!(&preface == PREFACE, "unsupported installer channel preface");
         ensure!(
             windows_service_identity::current_process_identity()?.user_sid() == self.0.owner,
             "relay owner identity changed"
@@ -104,26 +82,7 @@ pub async fn connect(
     identity: &windows_service_config::PendingInstallerIdentity,
     endpoint: Uuid,
 ) -> Result<NamedPipeClient> {
-    connect_kind(identity, endpoint, false).await
-}
-
-pub(crate) async fn connect_source(
-    identity: &windows_service_config::PendingInstallerIdentity,
-    endpoint: Uuid,
-) -> Result<NamedPipeClient> {
-    connect_kind(identity, endpoint, true).await
-}
-
-async fn connect_kind(
-    identity: &windows_service_config::PendingInstallerIdentity,
-    endpoint: Uuid,
-    source: bool,
-) -> Result<NamedPipeClient> {
     windows_service_identity::verify_installer_process()?;
-    let name = if source {
-        source_name(endpoint)?
-    } else {
-        name(endpoint)?
-    };
+    let name = name(endpoint)?;
     windows_owner_pipe::open_private_pipe(&name, identity.owner_sid(), ADMINISTRATORS).await
 }

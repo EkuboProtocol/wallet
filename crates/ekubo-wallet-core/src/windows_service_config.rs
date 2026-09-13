@@ -11,26 +11,17 @@ use uuid::Uuid;
 mod native;
 #[cfg(target_os = "windows")]
 pub use native::{
-    committed_installer_identity, find_installed_service_identity, installed_service_identity,
-    pending_installer_identity, service_identity,
+    find_installed_service_identity, installed_service_identity, pending_installer_identity,
+    service_identity,
 };
 #[cfg(target_os = "windows")]
-pub(crate) use native::{
-    machine_trustees, pending_owner_identity, pending_service_identity, record_cutover,
-    require_uncommitted,
-};
+pub(crate) use native::{machine_trustees, pending_owner_identity, pending_service_identity};
 
 /// Read protected pending metadata for the actual primary-token owner. The
 /// identity reader rejects thread impersonation; service SIDs are not owners.
 #[cfg(target_os = "windows")]
 pub fn pending_owner_profile() -> Result<Uuid> {
     Ok(pending_owner_identity()?.profile_id())
-}
-
-/// Public identity only; requires matching protected pending and committed records.
-#[cfg(target_os = "windows")]
-pub fn committed_owner_profile() -> Result<Uuid> {
-    native::committed_owner_profile()
 }
 
 const MAX_CONFIG_BYTES: usize = 4096;
@@ -81,7 +72,7 @@ impl InstalledServiceIdentity {
     }
     #[must_use]
     pub fn service_name(&self) -> String {
-        format!("EkuboWallet-{}", self.0.profile_id.simple())
+        format!("EkuboWalletV2-{}", self.0.profile_id.simple())
     }
 }
 

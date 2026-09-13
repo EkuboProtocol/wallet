@@ -1,419 +1,118 @@
-//! Root-owned pending checkpoint, separate from custody and login relay storage.
+//! Narrow privileged publication of an empty, relay-confirmed fresh profile.
 use super::*;
-use crate::migration_ready::Location;
-use crate::migration_transfer::{Destination, RecoveryCheckpoint, TransferIntent};
 
-/// Serializes privileged installer operations across profiles. The file is a
-/// permanent rendezvous point, never a PID record to remove after a crash.
-/// Holding this guard does not establish source validity or authorize cutover.
 pub struct InstallerLease {
     _lock: ProfileLock,
-    _parent: File,
 }
 
-/// Verified pending files with the service's singleton lock retained. This is
-/// not activation authority: the live source and durable decision remain separate.
-pub struct QuiescentProfile<'a> {
-    _installer: &'a InstallerLease,
-    _lock: ProfileLock,
-    _directory: File,
-    _parent: File,
-    configured: OwnerConfiguration,
-    checkpoint: RecoveryCheckpoint,
-    location: Location,
-}
-
-impl<'a> QuiescentProfile<'a> {
-    /// Record the durable decision while retaining installer and service locks.
-    /// The coordinator must separately retain/revalidate the live source. This
-    /// blocks legacy fallback; it neither promotes files nor permits deletion.
-    pub fn begin_cutover(&self) -> Result<()> {
-        ensure!(
-            self.location == Location::Pending,
-            "cutover decision requires pending files"
-        );
-        require_installer()?;
-        self.require_checkpoint(
-            &load_checkpoint(self.configured.owner_uid)?
-                .context("cutover checkpoint is missing")?,
-        )?;
-        record_cutover_under(&root_directory()?, &self.configured, 0)
-    }
-
-    /// Move a committed, quiescent profile without replacing an existing path.
-    /// The coordinator retains/revalidates the source separately. This publishes
-    /// no active metadata and grants no legacy cleanup authority.
-    pub fn promote(self) -> Result<QuiescentProfile<'a>> {
-        let identity = committed_installer_identity(self.configured.owner_uid)?;
-        ensure!(
-            self.location == Location::Pending && identity.configured == self.configured,
-            "promotion requires the committed pending profile"
-        );
-        self.require_checkpoint(
-            &load_checkpoint(self.configured.owner_uid)?
-                .context("promotion checkpoint is missing")?,
-        )?;
-        let root = root_directory()?;
-        let mut destination = directory(&root, "var", 0, false)?;
-        for component in ["lib", "ekubo-wallet"] {
-            destination = directory(&destination, component, 0, false)?;
-        }
-        let Self {
-            _installer: installer,
-            _lock: lock,
-            _directory: directory,
-            _parent: parent,
-            configured,
-            checkpoint: _,
-            location: _,
-        } = self;
-        let original = rustix::fs::fstat(&directory)?;
-        move_new(
-            &parent,
-            &configured.profile_id.to_string(),
-            &destination,
-            &configured.owner_uid.to_string(),
-        )?;
-        drop(directory);
-        drop(lock);
-        let promoted = installer.verify_promoted(configured.owner_uid)?;
-        let found = promoted.directory_identity()?;
-        ensure!(
-            (original.st_dev, original.st_ino) == found,
-            "promoted directory identity changed"
-        );
-        Ok(promoted)
-    }
-
-    fn directory_identity(&self) -> Result<(u64, u64)> {
-        let Self {
-            _directory: directory,
-            ..
-        } = self;
-        let stat = rustix::fs::fstat(directory)?;
-        Ok((stat.st_dev, stat.st_ino))
-    }
-
-    pub(crate) fn require_checkpoint(&self, checkpoint: &RecoveryCheckpoint) -> Result<()> {
-        ensure!(
-            self.checkpoint
-                .journal_bytes(&self.checkpoint.destination)?
-                == checkpoint.journal_bytes(&self.checkpoint.destination)?,
-            "quiescent profile checkpoint changed"
-        );
-        Ok(())
-    }
-}
-
-pub(crate) fn require_uncommitted(owner_uid: u32) -> Result<()> {
-    require_installer()?;
-    super::require_uncommitted(&root_directory()?, owner_uid, 0)
+pub fn acquire_installer() -> Result<InstallerLease> {
+    ensure!(
+        rustix::process::getuid().as_raw() == 0 && rustix::process::geteuid().as_raw() == 0,
+        "fresh installation requires root"
+    );
+    let root = root_directory()?;
+    let etc = directory(&root, "etc", 0, false)?;
+    let wallet = directory(&etc, "ekubo-wallet-v2", 0, false)?;
+    Ok(InstallerLease {
+        _lock: lock_profile(&wallet, 0)?,
+    })
 }
 
 impl InstallerLease {
-    pub fn verify_prepared(&self, owner_uid: u32) -> Result<QuiescentProfile<'_>> {
-        self.verify_at(owner_uid, Location::Pending)
+    /// Caller must first deliver the exact ciphertext and verify its receipt.
+    /// Stop provisioning before publication. Existing active metadata/storage is
+    /// never replaced, including an incomplete installation awaiting readiness.
+    pub fn publish(
+        &self,
+        owner_uid: u32,
+        relay: &WrappedDataKey,
+        receipt: &crate::custody_relay::RelayReceipt,
+    ) -> Result<()> {
+        let identity = pending_installer_identity(owner_uid)?;
+        receipt.verify_relay(identity.profile_id(), relay)?;
+        write_configuration(&identity.configured, "relay-confirmed")?;
+        self.resume(owner_uid)
     }
 
-    /// Verify moved files before active metadata publication. Requires an existing
-    /// committed decision and absence of the original pending directory.
-    pub fn verify_promoted(&self, owner_uid: u32) -> Result<QuiescentProfile<'_>> {
-        committed_installer_identity(owner_uid)?;
-        self.verify_at(owner_uid, Location::Promoted)
-    }
-
-    fn verify_at(&self, owner_uid: u32, location: Location) -> Result<QuiescentProfile<'_>> {
-        use std::os::fd::AsRawFd as _;
-        require_installer()?;
+    /// Resume only an exact durable relay-confirmed fresh setup. No key is read,
+    /// generated, transferred, or replaced. A published identity is immutable.
+    pub fn resume(&self, owner_uid: u32) -> Result<()> {
         let root = root_directory()?;
-        let configured = pending_configuration(&root, owner_uid, 0)?;
-        let checkpoint =
-            load_checkpoint(owner_uid)?.context("prepared verification requires a checkpoint")?;
-        let mut parent = directory(&root, "var", 0, false)?;
-        for component in ["lib", "ekubo-wallet"] {
-            parent = directory(&parent, component, 0, false)?;
+        let configured = find_configuration_at(&root, owner_uid, 0, "relay-confirmed")?
+            .context("fresh setup has no durable owner-relay confirmation")?;
+        ensure!(
+            find_configuration_at(&root, owner_uid, 0, "pending")? == Some(configured.clone()),
+            "pending setup differs from relay confirmation"
+        );
+        if let Some(active) = find_owner_configuration(&root, owner_uid, 0)? {
+            ensure!(
+                active == configured,
+                "installed profile differs from fresh setup"
+            );
+            return write_configuration(&configured, "owners");
         }
+        let var = directory(&root, "var", 0, false)?;
+        let lib = directory(&var, "lib", 0, false)?;
+        let parent = directory(&lib, "ekubo-wallet-v2", 0, false)?;
         let pending = directory(&parent, "pending", 0, false)?;
-        let (parent, name) = match location {
-            Location::Pending => {
-                require_absent(&parent, &owner_uid.to_string())?;
-                (pending, configured.profile_id.to_string())
-            }
-            Location::Promoted => {
-                require_absent(&pending, &configured.profile_id.to_string())?;
-                (parent, owner_uid.to_string())
-            }
+        let name = configured.profile_id.to_string();
+        let original = open_optional(
+            &pending,
+            &name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        )?;
+        let moved = original.is_none();
+        let profile = match original {
+            Some(profile) => profile,
+            None => directory(
+                &parent,
+                &owner_uid.to_string(),
+                configured.service_uid,
+                true,
+            )?,
         };
-        let directory = directory(&parent, &name, configured.service_uid, true)?;
-        // Never create a missing service lock: this must be an existing prepared
-        // profile. A running/cooperating service prevents verification here.
-        let lock = ProfileLock::acquire(open_regular(
-            &directory,
+        validate_directory(&profile, configured.service_uid, true)?;
+        let _lock = ProfileLock::acquire(open_regular(
+            &profile,
             "service.lock",
             configured.service_uid,
             true,
         )?)?;
-        let entries = std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
-        let accounts =
-            crate::migration_ready::account_instances(entries.map(|entry| Ok(entry?.file_name())))?;
-        crate::migration_ready::verify_ready(&checkpoint, &accounts, |name| {
-            open_regular(&directory, name, configured.service_uid, true)
-        })?;
-        Ok(QuiescentProfile {
-            _installer: self,
-            _lock: lock,
-            _directory: directory,
-            _parent: parent,
-            configured,
-            checkpoint,
-            location,
-        })
-    }
-}
-
-fn record_cutover_under(
-    root: &File,
-    configured: &OwnerConfiguration,
-    system_uid: u32,
-) -> Result<()> {
-    ensure!(
-        pending_configuration(root, configured.owner_uid, system_uid)? == *configured,
-        "cutover pending identity changed"
-    );
-    let etc = directory(root, "etc", system_uid, false)?;
-    let wallet = directory(&etc, "ekubo-wallet", system_uid, false)?;
-    match rustix::fs::mkdirat(&wallet, "committed", Mode::from_raw_mode(0o755)) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(error) => return Err(error.into()),
-    }
-    let parent = directory(&wallet, "committed", system_uid, false)?;
-    let name = format!("{}.json", configured.owner_uid);
-    let bytes = serde_json::to_vec(configured)?;
-    let existing = open_optional(
-        &parent,
-        &name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-    )?;
-    if let Some(file) = existing {
-        validate_file(&file, system_uid, false)?;
-        let mut stored = Vec::new();
-        (&file)
-            .take(MAX_CONFIG_BYTES + 1)
-            .read_to_end(&mut stored)?;
+        let ready = read_stage_record(&profile, configured.service_uid, "fresh-profile-ready")?;
         ensure!(
-            stored == bytes,
-            "cutover decision conflicts with existing evidence"
+            ready.as_slice() == name.as_bytes(),
+            "fresh profile is not ready"
         );
-        file.sync_all()?;
+        if !moved {
+            rustix::fs::renameat_with(
+                &pending,
+                &name,
+                &parent,
+                owner_uid.to_string(),
+                RenameFlags::NOREPLACE,
+            )?;
+        }
         parent.sync_all()?;
-    } else {
-        publish_private_with(&parent, &name, |file| {
-            rustix::fs::fchmod(&*file, Mode::from_raw_mode(0o644))?;
-            std::io::Write::write_all(file, &bytes)?;
-            Ok(())
-        })?;
+        pending.sync_all()?;
+        write_configuration(&configured, "owners")
     }
-    wallet.sync_all()?;
-    ensure!(
-        find_configuration_at(root, configured.owner_uid, system_uid, "committed")?
-            == Some(configured.clone()),
-        "cutover decision readback mismatch"
-    );
-    Ok(())
 }
 
-pub fn acquire_installer() -> Result<InstallerLease> {
-    require_installer()?;
-    acquire_under(&root_directory()?, 0)
-}
-
-fn acquire_under(root: &File, system_uid: u32) -> Result<InstallerLease> {
-    let mut parent = directory(root, "etc", system_uid, false)?;
-    for component in ["ekubo-wallet", "pending"] {
-        parent = directory(&parent, component, system_uid, false)?;
-    }
-    let file = File::from(openat(
-        &parent,
-        "installer.lock",
-        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::from_raw_mode(PRIVATE_FILE_MODE),
-    )?);
-    validate_file(&file, system_uid, true)?;
-    ensure!(file.metadata()?.len() == 0, "installer lock is not empty");
-    let lock = ProfileLock::acquire(file).context("another wallet installer may be running")?;
-    parent.sync_all()?;
-    Ok(InstallerLease {
-        _lock: lock,
-        _parent: parent,
-    })
-}
-
-/// Record an attempt before forwarding its header or keys. Existing conflicting
-/// intent requires explicit recovery/abort; it is never overwritten here.
-pub fn save_intent(owner_uid: u32, intent: &TransferIntent) -> Result<()> {
-    require_installer()?;
-    save_intent_under(&root_directory()?, owner_uid, 0, intent)
-}
-
-pub fn load_intent(owner_uid: u32) -> Result<Option<TransferIntent>> {
-    require_installer()?;
-    let (parent, destination) = journal_parent(&root_directory()?, owner_uid, 0)?;
-    read_intent(&parent, owner_uid, 0, &destination)
-}
-
-/// Persist immutable recovery evidence for the currently configured pending
-/// profile. Requires the actual privileged installer; never activates a profile.
-pub fn save_checkpoint(owner_uid: u32, checkpoint: &RecoveryCheckpoint) -> Result<()> {
-    require_installer()?;
-    save_under(&root_directory()?, owner_uid, 0, checkpoint)
-}
-
-/// Load bounded recovery evidence from the fixed root-owned pending directory.
-/// Absence means no checkpoint, not permission to discard or activate a stage.
-pub fn load_checkpoint(owner_uid: u32) -> Result<Option<RecoveryCheckpoint>> {
-    require_installer()?;
-    let (parent, destination) = journal_parent(&root_directory()?, owner_uid, 0)?;
-    read(&parent, owner_uid, 0, &destination)
-}
-
-fn require_installer() -> Result<()> {
-    ensure!(
-        rustix::process::getuid().as_raw() == 0 && rustix::process::geteuid().as_raw() == 0,
-        "checkpoint access requires the privileged installer"
-    );
-    Ok(())
-}
-
-fn journal_parent(root: &File, owner: u32, system_uid: u32) -> Result<(File, Destination)> {
-    let configured = pending_configuration(root, owner, system_uid)?;
-    let mut parent = directory(root, "etc", system_uid, false)?;
-    for component in ["ekubo-wallet", "pending"] {
-        parent = directory(&parent, component, system_uid, false)?;
-    }
-    Ok((
-        parent,
-        Destination {
-            owner: format!("linux:uid:{}", configured.owner_uid),
-            service: format!("linux:uid:{}", configured.service_uid),
-            profile: configured.profile_id,
-        },
-    ))
-}
-
-fn read(
-    parent: &File,
-    owner: u32,
-    system_uid: u32,
-    destination: &Destination,
-) -> Result<Option<RecoveryCheckpoint>> {
-    let checkpoint = read_record(parent, &format!("{owner}.checkpoint.json"), system_uid)?
-        .map(|bytes| RecoveryCheckpoint::from_journal(&bytes, destination))
-        .transpose()?;
-    if let (Some(checkpoint), Some(intent)) = (
-        &checkpoint,
-        read_intent(parent, owner, system_uid, destination)?,
-    ) {
-        intent.validate_checkpoint(checkpoint)?;
-    }
-    Ok(checkpoint)
-}
-
-fn read_intent(
-    parent: &File,
-    owner: u32,
-    system_uid: u32,
-    destination: &Destination,
-) -> Result<Option<TransferIntent>> {
-    read_record(parent, &format!("{owner}.intent.json"), system_uid)?
-        .map(|bytes| TransferIntent::from_journal(&bytes, destination))
-        .transpose()
-}
-
-fn read_record(parent: &File, name: &str, system_uid: u32) -> Result<Option<Vec<u8>>> {
-    let Some(file) = open_optional(
-        parent,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-    )?
-    else {
-        return Ok(None);
-    };
-    validate_file(&file, system_uid, true)?;
-    ensure!(
-        file.metadata()?.len() <= MAX_CONFIG_BYTES,
-        "installer checkpoint is oversized"
-    );
-    let mut bytes = Vec::new();
-    (&file).take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
-    // A retry after interrupted publication also completes the durability work.
-    file.sync_all()?;
-    parent.sync_all()?;
-    Ok(Some(bytes))
-}
-
-fn save_under(
-    root: &File,
-    owner: u32,
-    system_uid: u32,
-    checkpoint: &RecoveryCheckpoint,
-) -> Result<()> {
-    let (parent, destination) = journal_parent(root, owner, system_uid)?;
-    let bytes = checkpoint.journal_bytes(&destination)?;
-    if let Some(intent) = read_intent(&parent, owner, system_uid, &destination)? {
-        intent.validate_checkpoint(checkpoint)?;
-    }
-    save_record(
-        &parent,
-        &format!("{owner}.checkpoint.json"),
-        system_uid,
-        &bytes,
-    )
-}
-
-fn save_intent_under(
-    root: &File,
-    owner: u32,
-    system_uid: u32,
-    intent: &TransferIntent,
-) -> Result<()> {
-    let (parent, destination) = journal_parent(root, owner, system_uid)?;
-    let bytes = intent.journal_bytes(&destination)?;
-    if let Some(checkpoint) = read(&parent, owner, system_uid, &destination)? {
-        intent.validate_checkpoint(&checkpoint)?;
-    }
-    save_record(&parent, &format!("{owner}.intent.json"), system_uid, &bytes)
-}
-
-fn save_record(parent: &File, name: &str, system_uid: u32, bytes: &[u8]) -> Result<()> {
-    if let Some(existing) = read_record(parent, name, system_uid)? {
-        ensure!(
-            existing == bytes,
-            "installer checkpoint conflicts with existing evidence"
-        );
+fn write_configuration(configured: &OwnerConfiguration, collection: &str) -> Result<()> {
+    let root = root_directory()?;
+    let etc = directory(&root, "etc", 0, false)?;
+    let wallet = directory(&etc, "ekubo-wallet-v2", 0, false)?;
+    let owners = directory(&wallet, collection, 0, false)?;
+    if let Some(existing) = find_configuration_at(&root, configured.owner_uid, 0, collection)? {
+        ensure!(existing == *configured, "fresh setup configuration changed");
+        open_regular(&owners, &format!("{}.json", configured.owner_uid), 0, false)?.sync_all()?;
+        owners.sync_all()?;
         return Ok(());
     }
-    publish_private_record(parent, name, bytes)?;
-    let stored =
-        read_record(parent, name, system_uid)?.context("published checkpoint is missing")?;
-    ensure!(stored == bytes, "installer checkpoint readback mismatch");
-    Ok(())
-}
-
-#[cfg(test)]
-#[path = "linux_installer_journal_test.rs"]
-mod tests;
-
-fn require_absent(parent: &File, name: &str) -> Result<()> {
-    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(error) => Err(error.into()),
-        Ok(_) => anyhow::bail!("both pending and promoted profile locations are present"),
-    }
-}
-
-fn move_new(source: &File, name: &str, target: &File, target_name: &str) -> Result<()> {
-    rustix::fs::renameat_with(source, name, target, target_name, RenameFlags::NOREPLACE)?;
-    source.sync_all()?;
-    target.sync_all()?;
-    Ok(())
+    let bytes = serde_json::to_vec(configured)?;
+    publish_private_with(&owners, &format!("{}.json", configured.owner_uid), |file| {
+        rustix::fs::fchmod(&*file, Mode::from_raw_mode(0o644))?;
+        file.write_all(&bytes)?;
+        Ok(())
+    })
 }

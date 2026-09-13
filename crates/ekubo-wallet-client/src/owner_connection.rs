@@ -61,6 +61,19 @@ impl<T: OwnerTransport> OwnerConnection<T> {
         &self,
         request: &crate::owner_protocol::Request,
     ) -> Result<R> {
+        let response = self.exchange(request).await?;
+        if let Ok(reply) =
+            serde_json::from_str::<crate::preview_page::RecordTransferReply>(&response)
+        {
+            return self.read_pages(reply.owner_record_transfer).await;
+        }
+        Ok(serde_json::from_str(&response)?)
+    }
+
+    async fn exchange(
+        &self,
+        request: &crate::owner_protocol::Request,
+    ) -> Result<Zeroizing<String>> {
         let request = Zeroizing::new(serde_json::to_string(request)?);
         ensure!(
             request.len() <= crate::framing::MAX_FRAME_BYTES,
@@ -71,7 +84,54 @@ impl<T: OwnerTransport> OwnerConnection<T> {
             response.len() <= crate::framing::MAX_FRAME_BYTES,
             "owner response exceeds its size limit"
         );
-        Ok(serde_json::from_str(&response)?)
+        Ok(response)
+    }
+
+    /// Read a complete record/document using the same bounded transfer as
+    /// advisory previews. Never expose a partial document to a decision UI.
+    pub(crate) async fn read<R: serde::de::DeserializeOwned>(
+        &self,
+        request: &crate::owner_protocol::Request,
+    ) -> Result<R> {
+        let page = self.call(request).await?;
+        self.read_pages(page).await
+    }
+
+    async fn read_pages<R: serde::de::DeserializeOwned>(
+        &self,
+        mut page: crate::preview_page::PreviewPage,
+    ) -> Result<R> {
+        use crate::preview_page::{MAX_EVIDENCE_BYTES, PAGE_BYTES};
+        let identity = page.transfer_id;
+        let total = page.total_bytes;
+        ensure!(
+            !identity.is_nil() && total > 0 && total <= MAX_EVIDENCE_BYTES,
+            "invalid record transfer size or identity"
+        );
+        let mut text = Zeroizing::new(String::new());
+        loop {
+            ensure!(
+                page.transfer_id == identity
+                    && page.total_bytes == total
+                    && page.offset == text.len()
+                    && !page.text.is_empty()
+                    && page.text.len() <= PAGE_BYTES
+                    && page.text.len() <= total.saturating_sub(text.len()),
+                "invalid record transfer page"
+            );
+            text.push_str(&page.text);
+            if text.len() == total {
+                break;
+            }
+            let response = self
+                .exchange(&crate::owner_protocol::Request::ReadPage {
+                    transfer_id: identity,
+                    offset: text.len(),
+                })
+                .await?;
+            page = serde_json::from_str(&response)?;
+        }
+        Ok(serde_json::from_str(&text)?)
     }
 }
 

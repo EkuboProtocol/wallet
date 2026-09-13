@@ -1,7 +1,7 @@
 //! Pending Windows host. It stages custody only, with no active wallet runtime.
 use anyhow::Result;
 use ekubo_wallet_core::{
-    migration_transfer, provisioning_io, windows_provisioning_pipe::ProvisioningListener,
+    custody_provisioning, provisioning_io, windows_provisioning_pipe::ProvisioningListener,
     windows_service_storage::PendingCredentialStorage,
 };
 use std::sync::Arc;
@@ -28,15 +28,13 @@ pub async fn run(
         };
         let owned = pending.clone().lock_owned().await;
         let (mut stream, _cancel) =
-            provisioning_io::bridge(pipe, migration_transfer::INSTALLER_TIMEOUT);
+            provisioning_io::bridge(pipe, custody_provisioning::INSTALLER_TIMEOUT);
         let worker = tokio::task::spawn_blocking(move || {
-            let candidate = migration_transfer::receive(
-                &*owned,
-                &mut stream,
-                migration_transfer::INSTALLER_LIMITS,
-            )?;
-            candidate.prepare_runtime_files()?;
-            candidate.write_reply(&mut stream)
+            use std::io::Write as _;
+            let relay = custody_provisioning::enroll(&*owned)?;
+            stream.write_all(&u32::try_from(relay.as_bytes().len())?.to_le_bytes())?;
+            stream.write_all(relay.as_bytes())?;
+            Ok::<_, anyhow::Error>(())
         });
         tokio::select! {
             result = worker => {

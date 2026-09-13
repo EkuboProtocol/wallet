@@ -90,6 +90,10 @@ impl ServiceRuntime {
     /// Reserve bounded capacity without activating jobs. An OS adapter must
     /// authenticate its caller and monitor disconnection before activation.
     pub fn reserve_desktop(&self) -> Result<ReservedDesktopSession> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        ekubo_wallet_core::legacy_move::require_cleanup_finished(
+            self.authority.owner_api().config().data_dir(),
+        )?;
         self.sessions.reserve()
     }
 

@@ -28,7 +28,10 @@ pub async fn run(
                 ConfigStore::production()?,
             )?)))
         },
-        publish: |runtime| publisher.publish(runtime),
+        publish: |runtime| {
+            publisher.publish(runtime)?;
+            ekubo_wallet_core::windows_service_custody::mark_setup_complete()
+        },
     }
     .run(stop)
     .await

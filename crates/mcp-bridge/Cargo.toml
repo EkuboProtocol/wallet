@@ -8,7 +8,7 @@ license = "FSL-1.1-MIT"
 description = "Resilient stdio bridge for Ekubo Wallet MCP"
 
 [[bin]]
-name = "ekubo-wallet-mcp-bridge"
+name = "ekubo-wallet-v2-mcp-bridge"
 path = "src/main.rs"
 
 [dependencies]

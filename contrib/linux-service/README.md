@@ -1,120 +1,95 @@
-# Linux authority service assets
+# Fresh protected v2 installation
 
-These assets are not yet included in release packages or installed by the
-application. Do not start this service against real accounts: key enrollment,
-transactional migration, and protected installation remain unfinished. Installed-profile
-desktop remote startup is implemented but has not been verified in a packaged install. Storage
-now requires encrypted credentials and starts locked. The host waits for the
-authenticated client's enrolled ciphertext before constructing authority.
+These assets are for the signed privileged v2 package. Do not run installation
+while building or testing the repository. No command reads or removes 1.x state.
 
-Credential preparation and protected staging now share a contract with Windows.
-Staging creates fresh immutable record names, verifies readback, and publishes a
-completion marker last. The provisioning host also verifies/rebuilds the encrypted
-database and prepares the runtime filenames within the pending root, with exact
-retry validation and a final readiness marker. It does not activate custody or
-authorize legacy-key deletion. Partial or ambiguous stages require installer recovery; this
-primitive is not a completed migration or an installation procedure.
+## Package integration
 
-Pending bootstrap is separate from active discovery. The installer may provision
-root-owned `/etc/ekubo-wallet/pending/<uid>.json` using the same closed identity
-schema, with service-owned mode-0700 storage at
-`/var/lib/ekubo-wallet/pending/<profile-uuid>`. Both pending parent directories and
-all their ancestors must be root-owned and not writable by ordinary users. Core's
-`pending_credential_staging_root` validates the real service process, metadata,
-directory handles and singleton lock, then exposes staging only. It neither sets
-the global custody backend nor activates an owner/MCP endpoint. Desktop discovery
-continues to read only `owners/<uid>.json`. Existing or malformed active metadata
-rejects pending bootstrap, so this is not a replacement/rotation path. The installer
-must still implement verified transfer, durable activation and interruption recovery;
-these paths are not an instruction to publish active metadata early.
+Build `ekubo-wallet-service` and `ekubo-wallet-v2-enroll` from the service crate
+without `test-hooks`. Install both root-owned, mode 0755, under
+`/usr/lib/ekubo-wallet-v2/`. Install `install-profile` in that same directory,
+root-owned and mode 0755. It requires Python 3 and `pkexec`.
 
-The returned pending handle also supports streamed database receipt with the same
-contract as Windows: declared length and digest, fixed-size buffering, handle-based
-readback, and publication under a new stage name only after verification. This
-checks transferred bytes, not SQLCipher contents or migration authorization. It
-does not write active `wallet.db`; the privileged provisioning transport and final
-activation remain unfinished. Core now verifies the received SQLCipher database
-and key-bound account inventory, then rebuilds a separate candidate using compiled
-schema and data-only copy. Linux and Windows share this contract; source constraints
-and indexes cannot become service authority. Candidate publication does not
-authorize activation or legacy-key deletion; durable installer recovery is still
-required.
+Install:
 
-A separate pending host is now implemented in the service binary:
-`--provision-owner-uid <uid>`. The new `ekubo-wallet-provision@.service` and
-`org.ekubo.Wallet.Provision.conf` are source assets for its installer-only system-bus
-endpoint. The installer creates a connected Unix socketpair while privileged and
-passes one descriptor to `org.ekubo.Wallet.Provision1.Transfer` at
-`/org/ekubo/Wallet/Provision`, destination `org.ekubo.Wallet.Provision.u<uid>`.
-Core validates pending identity/storage before the endpoint is advertised. The host
-requires actual D-Bus UID 0 and socket peer UID 0 with the same process ID, then
-runs the shared bounded provisioning transfer and returns only a staging reply.
-One worker holds the root at a time. Deadline/disconnect cancellation shuts down
-native socket I/O; an in-flight SQLCipher operation retains the lock until it ends.
-It never starts active wallet authority. The installer must stop the pending host
-before later profile promotion. These assets are not installed by current packages;
-the installer executable, source handoff, durable activation and recovery remain
-unfinished. Do not publish active metadata in response to a staging reply.
+- `ekubo-wallet-v2@.service` and `ekubo-wallet-v2-provision@.service` into the
+  system unit directory;
+- both `org.ekubo.Wallet2.*.conf` policies into `/usr/share/dbus-1/system.d/`;
+- `ekubo-wallet-v2.sysusers` into `/usr/lib/sysusers.d/`;
+- `ekubo-wallet-v2.tmpfiles` into `/usr/lib/tmpfiles.d/`;
+- the separately maintained v2 polkit owner-authentication policy.
 
-Core now supplies `linux_provisioning_client::transfer` for the privileged
-installer. It reads only protected pending identity as UID 0, authenticates the
-actual service on the real bus before any key write, and exchanges the descriptor
-method call and bounded transfer concurrently. A successful result retains the
-source database fence and authenticated bus connection through later commit or
-abort; the caller must keep its source lifecycle lock too. The client never starts
-or reconnects a service, and does not grant activation/deletion authority. It takes
-already-held raw keys and a frozen snapshot; owner-authorized elevation, legacy
-source handoff and a packaged privileged round trip remain to be implemented/tested.
+The package postinstall must run systemd-sysusers, systemd-tmpfiles --create for
+the package files, daemon-reload, and reload the system bus configuration.
+Do not recursively chown/chmod existing custody directories during upgrades.
+An upgrade replaces compatible signed binaries and restarts existing units;
+it must not run fresh enrollment on an existing profile.
 
-The installer must install the service executable and all ancestor directories
-as root-owned and unwritable by the desktop user. Its fixed executable path is
-`/usr/lib/ekubo-wallet/ekubo-wallet-service`. Install the unit under
-`/usr/lib/systemd/system/`, the D-Bus policy under `/usr/share/dbus-1/system.d/`,
-and the sysusers/tmpfiles files under `/usr/lib/sysusers.d/ekubo-wallet.conf`
-and `/usr/lib/tmpfiles.d/ekubo-wallet.conf`. The existing polkit policy must also
-be installed; its service-owner annotation names the same `ekubo-wallet` account.
+The login owner runs:
 
-Provisioning one owner requires a canonical, nonzero numeric owner UID, distinct
-from the resolved service UID. Write root-owned, non-writable-by-others public
-metadata at `/etc/ekubo-wallet/owners/<uid>.json`, matching core's closed JSON
-schema: `{"owner_uid":1000,"service_uid":999,"profile_id":"00000000-0000-0000-0000-000000000001"}`
-(values here are illustrative; provision a fresh nonzero profile UUID).
-None of these values may come from an untrusted IPC claim. Create new private state at
-`/var/lib/ekubo-wallet/<uid>` with mode 0700 and the service UID. Create the runtime
-directory `/run/ekubo-wallet/<uid>` with mode 0711 and the service UID; it must be
-recreated after reboot by validated provisioning. Clients need directory search
-permission to reach `mcp.sock`; the host authenticates every socket peer using
-kernel credentials. Do not recursively chown or repair an existing unsafe tree.
-The service retains its own no-follow, ownership, mode, and singleton-lock checks.
+```
+/usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll --owner
+```
 
-The template is started as `ekubo-wallet@<uid>.service`. D-Bus name acquisition
-marks bootstrap availability after protected storage initializes. The
-`org.ekubo.Wallet.Custody1.Unlock` reply succeeds only after authority and its
-owner API are ready. The service being up does not start automations: they require a desktop-session
-lease. Enabling/activation, boot-time runtime-directory creation, installation
-rollback, upgrade coordination, and removal still need installer implementation.
-The install target is intentionally omitted until those steps are implemented.
+This holds the real owner's authenticated relay endpoint while `pkexec` runs
+the fixed installer. The installer creates an unused profile, starts the
+provisioning service, receives only ciphertext, delivers it to the actual
+owner, stops provisioning, publishes storage/configuration without replacement,
+and enables/starts the authority. The owner then authenticates and unlocks the
+normal service through the normal owner client.
 
-For on-demand startup, substitute the validated canonical owner UID for every
-`@OWNER_UID@` in `org.ekubo.Wallet.Owner.service.in` and install it as the
-root-owned `/usr/share/dbus-1/system-services/org.ekubo.Wallet.Owner.u<uid>.service`.
-The resulting `SystemdService` must be `ekubo-wallet@<uid>.service`. Register
-activation only after the matching protected state, metadata, runtime-directory
-provisioning, executable, and unit are ready. The `Exec=/usr/bin/false` fallback
-deliberately refuses activation without systemd rather than launching the service
-outside its unit's sandbox. Do not install the unexpanded template.
+The native hosts call `mark_setup_complete()` after relay unlock and successful
+authority publication. This also captures an immutable, encrypted-database
+first-run baseline for an optional explicitly authorized legacy move. Fresh
+installation itself never reads the legacy profile or legacy credentials.
 
-Initial Linux owner and MCP connections request `StartServiceByName` on the
-pinned system bus if the name is unowned, then resolve and authenticate the
-service's unique name, UID, and PID. Activation failure returns an error; it never permits local-custody
-fallback for an installed profile. Existing connections do not activate again or
-replay interrupted requests. The activation reply is availability only, so the
-client still authenticates the endpoint before reading enrollment ciphertext.
+## Interrupted fresh setup
 
-The unit deliberately avoids systemd's automatic state-directory ownership
-repair. See [systemd's directory semantics](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml).
-The D-Bus policy permits only the dedicated account to own the wallet namespace;
-core still authenticates each owner call. See [D-Bus bus policy](https://dbus.freedesktop.org/doc/dbus-daemon.1.html).
-Native packaged-service tests must verify these assets with polkit, networking,
-SQLCipher, and the protected executable before deployment. Windows must provide
-its own SCM, ACL, and authenticated-pipe provisioning for the same shared runtime.
+Nothing retries key generation over existing records. Before relay confirmation,
+an unpublished, unused pending Linux profile can be explicitly discarded:
+
+```
+sudo /usr/lib/ekubo-wallet-v2/install-profile --discard-unused OWNER_UID
+```
+
+After durable relay confirmation, resume publication with:
+
+```
+sudo systemctl stop ekubo-wallet-v2-provision@OWNER_UID.service
+sudo /usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll --resume-publication OWNER_UID
+sudo systemctl enable --now ekubo-wallet-v2@OWNER_UID.service
+```
+
+The normal owner can instead run `ekubo-wallet-v2-enroll --resume-owner`, which
+elevates the fixed resume action and reconnects the owner. Missing credentials on an installed profile are an
+error, never an invitation to reset. An interruption before protected pending
+metadata was created requires privileged inspection of the unused installation
+artifacts; the recovery command does not guess their provenance.
+
+## Windows package integration
+
+The signed package installs both `.exe` files in `%ProgramFiles%/Ekubo Wallet 2`
+and ships `contrib/install-windows-v2.ps1` and `contrib/recover-windows-v2.ps1`.
+The owner starts `ekubo-wallet-v2-enroll.exe --owner` from a normal login session.
+The helper now launches the fixed installed script through UAC automatically,
+keeps the authenticated owner relay alive, and connects/unlocks the published
+service while the elevated installer waits for readiness. The elevation may
+belong to a different administrator. Packaged UI can launch this same helper and
+wait for its exit status; no SID or endpoint needs to be copied by the user.
+The scripts must also be Authenticode signed and deployable under `AllSigned`;
+the package must address publisher trust rather than bypass execution policy.
+
+The installer creates `EkuboWalletV2-<profile>` under a distinct virtual account,
+protected `ProgramData/EkuboWalletV2` storage and `HKLM/SOFTWARE/EkuboWalletV2`
+metadata. It verifies relay receipt before publication and waits for the
+service's readiness marker. `recover-windows-v2.ps1 -OwnerSid SID` resumes only
+relay-confirmed setup; `-DiscardUnused` explicitly discards an unpublished,
+unconfirmed first-install attempt. The initial script supports one fresh owner
+profile per machine and refuses existing v2 roots. Package upgrades must preserve
+those roots and service registrations rather than invoking this fresh installer.
+The normal owner CLI exposes these explicit choices as `--resume-owner` and
+`--discard-unused`, with UAC elevation of the fixed recovery script.
+
+Native Windows execution, signed package upgrade behavior, and production
+owner-authorization acceptance still require native validation. These scripts
+have not been executed on the development host.

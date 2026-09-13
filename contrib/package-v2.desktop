@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Ekubo Wallet 2
+Exec=ekubo-wallet-v2
+Icon=ekubo-wallet-v2
+Terminal=false
+Categories=Finance;

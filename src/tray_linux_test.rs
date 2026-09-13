@@ -9,6 +9,17 @@ fn snapshot(pending_reviews: usize) -> TraySnapshot {
 }
 
 #[test]
+fn tray_identity_is_distinct_from_v1() {
+    let item = StatusNotifierItem(SharedState {
+        snapshot: Arc::new(RwLock::new(snapshot(0))),
+        pixmap: Arc::new(Vec::new()),
+        revision: Arc::new(AtomicU32::new(1)),
+    });
+    assert_eq!(item.id(), "ekubo-wallet-v2");
+    assert_ne!(item.id(), "ekubo-wallet");
+}
+
+#[test]
 fn dbus_menu_layout_contains_the_complete_stable_order() {
     let layout = layout(0, &snapshot(2), &[]).unwrap();
     assert_eq!(layout.children.len(), 8);

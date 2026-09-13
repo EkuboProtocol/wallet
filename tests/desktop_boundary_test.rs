@@ -216,7 +216,7 @@ fn gpui_revisions_and_desktop_database_identity_are_pinned() {
     }
     let store =
         fs::read_to_string(root().join("crates/ekubo-wallet-core/src/policy_store.rs")).unwrap();
-    assert!(store.contains("org.ekubo.wallet.db"));
+    assert!(store.contains("org.ekubo.wallet.v2.db"));
     assert!(store.contains("wallet.db"));
 }
 

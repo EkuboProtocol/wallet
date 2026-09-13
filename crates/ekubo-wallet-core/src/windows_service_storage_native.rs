@@ -65,6 +65,52 @@ pub struct PrivateStorageRoot {
 }
 
 impl PrivateStorageRoot {
+    pub(crate) fn profile_id(&self) -> uuid::Uuid {
+        self.identity.profile_id()
+    }
+    /// Host calls this only after owner relay unlock and authority readiness.
+    pub fn mark_setup_complete(&self) -> Result<()> {
+        use std::io::Read as _;
+        self.custody.cipher()?;
+        let expected = self.identity.profile_id().to_string();
+        match self.open_file("setup-complete") {
+            Ok(mut file) => {
+                let mut found = String::new();
+                (&mut file).take(64).read_to_string(&mut found)?;
+                ensure!(found == expected, "setup completion profile changed");
+                drop(file);
+                let file = open_native_access(
+                    Some(self.directory.as_handle()),
+                    "setup-complete",
+                    StorageKind::File,
+                    true,
+                )?;
+                validate_private_handle(file.as_handle(), &self.identity, StorageKind::File)?;
+                file.sync_all()?;
+                Ok(())
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<windows::core::Error>()
+                    .is_some_and(|error| {
+                        error.code()
+                            == windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.to_hresult()
+                    }) =>
+            {
+                crate::legacy_move::initialize_baseline(&self.data_dir)?;
+                write::publish(
+                    &self.directory,
+                    "setup-complete",
+                    self.identity.service_sid(),
+                    expected.as_bytes(),
+                    |file| {
+                        validate_private_handle(file.as_handle(), &self.identity, StorageKind::File)
+                    },
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
     /// The owner SID selects protected machine configuration. Actual service
     /// identity must match before any filesystem bootstrap occurs. No caller
     /// path, environment override, provisioning, or permission repair is used.
@@ -76,7 +122,7 @@ impl PrivateStorageRoot {
     fn open_identity(identity: InstalledServiceIdentity, collection: &str) -> Result<Self> {
         let trusted = crate::windows_service_config::machine_trustees()?;
         let mut ancestors = program_data_ancestors(&trusted)?;
-        for component in ["EkuboWallet", collection] {
+        for component in ["EkuboWalletV2", collection] {
             let parent = ancestors.last().expect("drive root is pinned");
             let child = open_relative(parent.as_handle(), component, StorageKind::Directory)?;
             validate_machine_handle(child.as_handle(), &trusted, false)?;
@@ -634,56 +680,6 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
         )?;
         Ok(candidate)
     }
-    fn canonical_database(
-        &self,
-        stage: uuid::Uuid,
-    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
-        let name = crate::database_staging::canonical_file_name(stage)?;
-        let file = self.0.open_file(&name)?;
-        Ok(crate::database_staging::StagedDatabase::new(
-            self.0.data_dir.join(name),
-            file,
-            self,
-        ))
-    }
-
-    fn receive_database(
-        &self,
-        stage: uuid::Uuid,
-        transfer: &crate::database_staging::DatabaseTransfer,
-        input: &mut dyn std::io::Read,
-    ) -> Result<()> {
-        crate::windows_service_identity::verify_service_process(self.0.identity.service_sid())?;
-        validate_private_handle(
-            self.0.directory.as_handle(),
-            &self.0.identity,
-            StorageKind::Directory,
-        )?;
-        write::publish_with(
-            &self.0.directory,
-            &crate::database_staging::file_name(stage)?,
-            self.0.identity.service_sid(),
-            |file| validate_private_handle(file.as_handle(), &self.0.identity, StorageKind::File),
-            |file| crate::database_staging::receive(transfer, input, file),
-        )
-    }
-    fn staged_database(
-        &self,
-        stage: uuid::Uuid,
-    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
-        let file = self.open_staged_database(stage)?;
-        Ok(crate::database_staging::StagedDatabase::new(
-            self.0
-                .data_dir
-                .join(crate::database_staging::file_name(stage)?),
-            file,
-            self,
-        ))
-    }
-    fn open_staged_database(&self, stage: uuid::Uuid) -> Result<File> {
-        self.0
-            .open_file(&crate::database_staging::file_name(stage)?)
-    }
 }
 
 impl crate::pending_profile::sealed::Sealed for PendingCredentialStorage {}
@@ -739,6 +735,3 @@ impl crate::pending_profile::PendingProfileStore for PendingCredentialStorage {
         record.verify(&mut self.0.open_file(&name)?)
     }
 }
-
-#[path = "windows_installer_journal.rs"]
-pub mod installer_journal;

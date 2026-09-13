@@ -4,18 +4,22 @@ use super::*;
 fn service_credentials_accept_only_database_and_non_nil_account_instances() {
     let id = uuid::Uuid::new_v4();
     assert_eq!(
-        Credential::parse("org.ekubo.wallet.db", "default").unwrap(),
+        Credential::parse("org.ekubo.wallet.v2.db", "default").unwrap(),
         Credential::Database
     );
     assert_eq!(
-        Credential::parse("org.ekubo.wallet.private-key.instance", &id.to_string()).unwrap(),
+        Credential::parse("org.ekubo.wallet.v2.private-key.instance", &id.to_string()).unwrap(),
         Credential::Account(id)
     );
     for (service, user) in [
-        ("org.ekubo.wallet.db", "other"),
-        ("org.ekubo.wallet.private-key.instance", "../wrapping.key"),
+        ("org.ekubo.wallet.db", "default"),
+        ("org.ekubo.wallet.v2.db", "other"),
         (
-            "org.ekubo.wallet.private-key.instance",
+            "org.ekubo.wallet.v2.private-key.instance",
+            "../wrapping.key",
+        ),
+        (
+            "org.ekubo.wallet.v2.private-key.instance",
             "00000000-0000-0000-0000-000000000000",
         ),
         ("org.ekubo.wallet.private-key", "default"),
@@ -27,7 +31,7 @@ fn service_credentials_accept_only_database_and_non_nil_account_instances() {
 
 #[test]
 fn service_file_routing_is_confined_to_four_fixed_profile_files() {
-    let root = Path::new(r"C:\ProgramData\EkuboWallet\Owners\profile");
+    let root = Path::new(r"C:\ProgramData\EkuboWalletV2\Owners\profile");
     for name in ["wallet.db", "wallet.lock", "config.lock", "lifecycle.lock"] {
         assert!(database_file(root, &root.join(name)).is_ok());
     }

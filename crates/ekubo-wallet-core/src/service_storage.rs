@@ -84,17 +84,6 @@ fn read_pending_installer_identity(
     })
 }
 
-/// Read an already recorded cutover for privileged recovery. Never records one.
-pub fn committed_installer_identity(owner_uid: u32) -> Result<PendingInstallerIdentity> {
-    let identity = pending_installer_identity(owner_uid)?;
-    ensure!(
-        find_configuration_at(&root_directory()?, owner_uid, 0, "committed")?
-            == Some(identity.configured.clone()),
-        "installer cutover has not been committed"
-    );
-    Ok(identity)
-}
-
 impl InstalledServiceIdentity {
     #[must_use]
     pub const fn profile_id(&self) -> uuid::Uuid {
@@ -138,19 +127,6 @@ pub fn pending_owner_profile() -> Result<uuid::Uuid> {
     Ok(pending_owner_identity()?.profile_id())
 }
 
-/// Public identity only; requires matching protected pending and committed records.
-pub fn committed_owner_profile() -> Result<uuid::Uuid> {
-    let owner = client_uid()?;
-    ensure!(owner != 0, "cutover source requires the ordinary owner");
-    let root = root_directory()?;
-    let pending = pending_configuration(&root, owner, 0)?;
-    ensure!(
-        find_configuration_at(&root, owner, 0, "committed")? == Some(pending.clone()),
-        "source cutover has not been committed"
-    );
-    Ok(pending.profile_id)
-}
-
 pub(crate) fn pending_owner_identity() -> Result<InstalledServiceIdentity> {
     let owner = client_uid()?;
     ensure!(owner != 0, "root cannot persist a desktop custody relay");
@@ -190,22 +166,7 @@ fn find_installation_configuration(
     owner: u32,
     system_uid: u32,
 ) -> Result<Option<OwnerConfiguration>> {
-    let active = find_owner_configuration(root, owner, system_uid)?;
-    if let Some(committed) = find_configuration_at(root, owner, system_uid, "committed")? {
-        ensure!(
-            active.as_ref() == Some(&committed),
-            "wallet service cutover requires installer recovery"
-        );
-    }
-    Ok(active)
-}
-
-fn require_uncommitted(root: &File, owner: u32, system_uid: u32) -> Result<()> {
-    ensure!(
-        find_configuration_at(root, owner, system_uid, "committed")?.is_none(),
-        "wallet service cutover has already been recorded"
-    );
-    Ok(())
+    find_owner_configuration(root, owner, system_uid)
 }
 
 fn find_owner_configuration(
@@ -223,7 +184,7 @@ fn find_configuration_at(
     collection: &str,
 ) -> Result<Option<OwnerConfiguration>> {
     let mut parent = directory(root, "etc", system_uid, false)?;
-    for name in ["ekubo-wallet", collection] {
+    for name in ["ekubo-wallet-v2", collection] {
         let Some(next) = open_optional(
             &parent,
             name,
@@ -316,14 +277,14 @@ pub fn initialize(owner_uid: u32) -> Result<PathBuf> {
     );
     let var = directory(&root, "var", 0, false)?;
     let lib = directory(&var, "lib", 0, false)?;
-    let parent = directory(&lib, "ekubo-wallet", 0, false)?;
+    let parent = directory(&lib, "ekubo-wallet-v2", 0, false)?;
     let directory = Arc::new(directory(
         &parent,
         &owner_uid.to_string(),
         service_uid,
         true,
     )?);
-    let data_dir = PathBuf::from(format!("/var/lib/ekubo-wallet/{owner_uid}"));
+    let data_dir = PathBuf::from(format!("/var/lib/ekubo-wallet-v2/{owner_uid}"));
     let lock = lock_profile(&directory, service_uid)?;
     STORAGE
         .set(Storage {
@@ -380,7 +341,7 @@ async fn connect_agent_under(
 ) -> Result<tokio::net::UnixStream> {
     use std::os::{fd::AsRawFd as _, unix::fs::FileTypeExt as _};
     let run = client_directory(root, "run", system_uid)?;
-    let parent = client_directory(&run, "ekubo-wallet", system_uid)?;
+    let parent = client_directory(&run, "ekubo-wallet-v2", system_uid)?;
     let runtime = client_directory(
         &parent,
         &identity.owner_uid.to_string(),
@@ -440,7 +401,7 @@ pub fn runtime_directory() -> Result<File> {
         Mode::empty(),
     )?);
     validate_directory(&run, 0, false)?;
-    let parent = directory(&run, "ekubo-wallet", 0, false)?;
+    let parent = directory(&run, "ekubo-wallet-v2", 0, false)?;
     directory(
         &parent,
         &storage.owner_uid.to_string(),
@@ -462,6 +423,10 @@ fn lock_profile(parent: &File, uid: u32) -> Result<ProfileLock> {
 
 pub(crate) fn owner_uid() -> Option<u32> {
     STORAGE.get().map(|storage| storage.owner_uid)
+}
+
+pub(crate) fn profile_id() -> Option<uuid::Uuid> {
+    STORAGE.get().map(|storage| storage.profile_id)
 }
 
 pub(crate) fn data_dir() -> Option<&'static Path> {
@@ -490,6 +455,40 @@ pub fn unlock(wrapped: &WrappedDataKey) -> Result<()> {
         .get()
         .context("service storage is not initialized")?
         .unlock(wrapped)
+}
+
+/// Called by the host only after relay unlock and successful authority startup.
+/// Idempotent exact readback supports a restart; it never recreates custody.
+pub fn mark_setup_complete() -> Result<()> {
+    let storage = STORAGE
+        .get()
+        .context("service storage is not initialized")?;
+    storage.custody.cipher()?;
+    let bytes = storage.profile_id.to_string();
+    match open_regular(
+        &storage.directory,
+        "setup-complete",
+        storage.service_uid,
+        true,
+    ) {
+        Ok(mut file) => {
+            let mut found = String::new();
+            (&mut file).take(64).read_to_string(&mut found)?;
+            ensure!(
+                found == bytes,
+                "setup completion belongs to another profile"
+            );
+            file.sync_all()?;
+            storage.directory.sync_all().map_err(anyhow::Error::from)
+        }
+        Err(error)
+            if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) =>
+        {
+            crate::legacy_move::initialize_baseline(&storage.data_dir)?;
+            publish_private_record(&storage.directory, "setup-complete", bytes.as_bytes())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub struct CredentialStagingRoot {
@@ -534,14 +533,13 @@ fn open_pending_storage(
 ) -> Result<PendingCredentialStorage> {
     let service_uid = rustix::process::geteuid().as_raw();
     let configured = pending_configuration(root, owner_uid, system_uid)?;
-    require_uncommitted(root, owner_uid, system_uid)?;
     ensure!(
         configured.service_uid == service_uid,
         "pending service identity mismatch"
     );
     let var = directory(root, "var", system_uid, false)?;
     let lib = directory(&var, "lib", system_uid, false)?;
-    let parent = directory(&lib, "ekubo-wallet", system_uid, false)?;
+    let parent = directory(&lib, "ekubo-wallet-v2", system_uid, false)?;
     let pending = directory(&parent, "pending", system_uid, false)?;
     let directory = Arc::new(directory(
         &pending,
@@ -550,7 +548,6 @@ fn open_pending_storage(
         true,
     )?);
     let lock = lock_profile(&directory, service_uid)?;
-    require_uncommitted(root, owner_uid, system_uid)?;
     ensure!(
         pending_configuration(root, owner_uid, system_uid)? == configured,
         "pending configuration changed during bootstrap"
@@ -575,12 +572,6 @@ fn pending_configuration(
     );
     let pending = find_configuration_at(root, owner_uid, system_uid, "pending")?
         .context("pending service profile is missing")?;
-    if let Some(committed) = find_configuration_at(root, owner_uid, system_uid, "committed")? {
-        ensure!(
-            pending == committed,
-            "pending profile differs from committed cutover"
-        );
-    }
     Ok(pending)
 }
 
@@ -652,8 +643,8 @@ impl Storage {
     fn entry(&self, service: &str, user: &str) -> Result<Entry> {
         let cipher = self.custody.cipher()?;
         let (name, instance) = match (service, user) {
-            ("org.ekubo.wallet.db", "default") => ("key-database".to_owned(), None),
-            ("org.ekubo.wallet.private-key.instance", id) => {
+            ("org.ekubo.wallet.v2.db", "default") => ("key-database".to_owned(), None),
+            ("org.ekubo.wallet.v2.private-key.instance", id) => {
                 let id = uuid::Uuid::parse_str(id).context("invalid wallet instance identifier")?;
                 ensure!(!id.is_nil(), "invalid wallet instance identifier");
                 (format!("key-account-{id}"), Some(id))
@@ -875,57 +866,6 @@ impl crate::database_staging::DatabaseStagingStore for PendingCredentialStorage 
         );
         validate_file(candidate.file(), self.0.service_uid, true)?;
         Ok(candidate)
-    }
-    fn canonical_database(
-        &self,
-        stage: uuid::Uuid,
-    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
-        self.validate_process()?;
-        let name = crate::database_staging::canonical_file_name(stage)?;
-        let file = open_regular(&self.0.directory, &name, self.0.service_uid, true)?;
-        Ok(crate::database_staging::StagedDatabase::new(
-            self.directory_path()?.join(name),
-            file,
-            self,
-        ))
-    }
-
-    fn receive_database(
-        &self,
-        stage: uuid::Uuid,
-        transfer: &crate::database_staging::DatabaseTransfer,
-        input: &mut dyn std::io::Read,
-    ) -> Result<()> {
-        self.validate_process()?;
-        publish_private_with(
-            &self.0.directory,
-            &crate::database_staging::file_name(stage)?,
-            |file| crate::database_staging::receive(transfer, input, file),
-        )
-    }
-    fn open_staged_database(&self, stage: uuid::Uuid) -> Result<File> {
-        self.validate_process()?;
-        open_regular(
-            &self.0.directory,
-            &crate::database_staging::file_name(stage)?,
-            self.0.service_uid,
-            true,
-        )
-    }
-    fn staged_database(
-        &self,
-        stage: uuid::Uuid,
-    ) -> Result<crate::database_staging::StagedDatabase<'_>> {
-        let file = self.open_staged_database(stage)?;
-        // Resolve only our kernel-owned directory descriptor, never an IPC path.
-        // Its root-owned parent prevents service/desktop renames; stage records
-        // are immutable while this pending profile's singleton lock is held.
-        let directory = self.directory_path()?;
-        Ok(crate::database_staging::StagedDatabase::new(
-            directory.join(crate::database_staging::file_name(stage)?),
-            file,
-            self,
-        ))
     }
 }
 impl PendingCredentialStorage {

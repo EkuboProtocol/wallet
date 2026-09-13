@@ -603,7 +603,12 @@ impl AutomationStore {
 
     /// Delete only a stopped automation. The state predicate and deletion are
     /// one statement so a concurrent restart cannot be deleted by stale UI intent.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn remove_stopped(&mut self, id: Uuid) -> Result<bool> {
+        self.remove_stopped_authenticated(id)
+    }
+
+    pub(crate) fn remove_stopped_authenticated(&mut self, id: Uuid) -> Result<bool> {
         let changed = self.database.connection.execute(
             "DELETE FROM automations WHERE automation_id = ?1 AND state != 'enabled'",
             params![Blob(*id.as_bytes())],

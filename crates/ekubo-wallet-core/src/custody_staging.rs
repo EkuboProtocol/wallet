@@ -1,6 +1,6 @@
-//! Immutable staging only. A completed stage is not activation authority or a
-//! receipt authorizing deletion of a legacy key. Platform stores validate live
-//! handles and identities and must durably publish each create-new record.
+//! Immutable native storage primitives. Platform stores validate live handles
+//! and identities and durably publish each create-new record. Fresh enrollment
+//! generates its own material; these primitives perform no credential import.
 use anyhow::{Result, ensure};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -30,9 +30,6 @@ impl ServiceCredentialRecord {
 pub enum StagedRecord {
     Credential(ServiceCredentialRecord),
     Complete,
-    /// Verified migration candidate, published after the canonical database.
-    /// This is staging evidence, never an activation or deletion receipt.
-    Candidate,
 }
 impl StagedRecord {
     pub fn file_name(self, stage: Uuid) -> Result<String> {
@@ -44,7 +41,6 @@ impl StagedRecord {
             }
             Self::Credential(record) => record.file_name(),
             Self::Complete => "complete.json".into(),
-            Self::Candidate => "candidate.json".into(),
         };
         Ok(format!("custody-stage-{stage}-{suffix}"))
     }
@@ -56,33 +52,4 @@ pub trait CredentialStagingStore {
     fn identity(&self) -> (String, String, Uuid);
     fn create_new(&self, stage: Uuid, record: StagedRecord, bytes: &[u8]) -> Result<()>;
     fn read(&self, stage: Uuid, record: StagedRecord) -> Result<Zeroizing<Vec<u8>>>;
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialStage {
-    pub(crate) version: u8,
-    pub(crate) stage: Uuid,
-    pub(crate) records: u64,
-    pub(crate) digest: [u8; 32],
-}
-impl CredentialStage {
-    #[must_use]
-    pub const fn id(&self) -> Uuid {
-        self.stage
-    }
-}
-
-pub(crate) fn digest_record(
-    digest: &mut sha2::Sha256,
-    record: ServiceCredentialRecord,
-    bytes: &[u8],
-) -> Result<()> {
-    use sha2::Digest as _;
-    let name = record.file_name();
-    digest.update(u64::try_from(name.len())?.to_le_bytes());
-    digest.update(name.as_bytes());
-    digest.update(u64::try_from(bytes.len())?.to_le_bytes());
-    digest.update(bytes);
-    Ok(())
 }

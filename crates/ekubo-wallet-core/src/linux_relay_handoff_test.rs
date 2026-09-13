@@ -47,9 +47,10 @@ async fn installer_policy_admits_only_the_exact_relay_method() {
     let uid = rustix::process::geteuid().as_raw().to_string();
     // Map only policy principals to this test's UID. No system bus, root
     // process, service installation or real credential store is involved.
-    let production = include_str!("../../../contrib/linux-service/org.ekubo.Wallet.Provision.conf")
-        .replace("user=\"root\"", &format!("user=\"{uid}\""))
-        .replace("user=\"ekubo-wallet\"", &format!("user=\"{uid}\""));
+    let production =
+        include_str!("../../../contrib/linux-service/org.ekubo.Wallet2.Provision.conf")
+            .replace("user=\"root\"", &format!("user=\"{uid}\""))
+            .replace("user=\"ekubo-wallet-v2\"", &format!("user=\"{uid}\""));
     let rules = production
         .split_once("<busconfig>")
         .unwrap()

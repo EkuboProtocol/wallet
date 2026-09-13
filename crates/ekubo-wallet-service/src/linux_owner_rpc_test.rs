@@ -51,7 +51,7 @@ async fn desktop_disconnect_releases_its_execution_session() {
         &desktop,
         service_name.as_str(),
         ekubo_wallet_client::owner_protocol::OBJECT_PATH,
-        "org.ekubo.Wallet.Owner1",
+        "org.ekubo.Wallet2.Owner1",
     )
     .await
     .unwrap();

@@ -72,8 +72,8 @@ async fn receive(
     write_frame(&mut stream, &serde_json::to_vec(&receipt)?).await
 }
 
-/// No retry after writing the preface. The caller retains the source fence and
-/// lifecycle lock; the returned correlation receipt never authorizes activation.
+/// No retry after writing the preface. The caller retains fresh-setup exclusion;
+/// the returned receipt records the authenticated owner credential readback.
 pub async fn deliver(
     owner_sid: &str,
     endpoint: Uuid,

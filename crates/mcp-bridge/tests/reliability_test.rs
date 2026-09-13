@@ -1,5 +1,6 @@
 //! Real stdio/socket regressions: no wallet database, keys or transactions.
-#![cfg(unix)]
+// This process harness injects a local socket, which is the macOS backend.
+#![cfg(target_os = "macos")]
 
 use serde_json::{Value, json};
 use std::{
@@ -26,9 +27,9 @@ struct Harness {
 
 impl Harness {
     fn start(home: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
             .args(["--client", "codex"])
-            .env("EKUBO_WALLET_HOME", home)
+            .env("EKUBO_WALLET_V2_HOME", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -177,7 +178,7 @@ fn slow_startup_keeps_the_same_handshake_and_announces_real_tools() {
     let mut harness = Harness::start(home.path());
     assert_eq!(
         harness.receive()["result"]["serverInfo"]["name"],
-        "ekubo-wallet-mcp-bridge"
+        "ekubo-wallet-v2-mcp-bridge"
     );
     harness.initialized();
     harness.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));

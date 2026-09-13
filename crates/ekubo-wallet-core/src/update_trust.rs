@@ -25,9 +25,11 @@ pub const PACKAGE_VERSION_MARKER: &str = concat!(
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 const PACKAGE_VERSION_MARKER_PREFIX: &[u8] = b"\0EKUBO-WALLET-PACKAGE-VERSION:";
 const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json";
+    "https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json";
 const UPDATE_MANIFEST_SIGNATURE_URL: &str =
-    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json.sig";
+    "https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json.sig";
+const UPDATE_PRODUCT: &str = "org.ekubo.wallet.v2";
+const UPDATE_CHANNEL: &str = "v2";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 const MAX_SIGNATURE_BYTES: u64 = 64 << 10;
@@ -162,10 +164,9 @@ pub fn check_installable() -> Result<Option<InstallableUpdate>> {
         !UPDATER_PUBLIC_KEY.is_empty(),
         "this development build has no updater verification key"
     );
-    #[cfg(target_os = "linux")]
     ensure!(
-        std::env::var_os("APPIMAGE").is_some(),
-        "automatic updates are available for the AppImage distribution"
+        cfg!(target_os = "macos"),
+        "Ekubo Wallet 2 service updates require the signed privileged installer"
     );
 
     let current = cargo_packager_updater::semver::Version::parse(env!("CARGO_PKG_VERSION"))
@@ -186,6 +187,7 @@ pub fn check_installable() -> Result<Option<InstallableUpdate>> {
     .context("the update manifest signature is not UTF-8")?;
     verify_packager_signature(&manifest, &manifest_signature, UPDATER_PUBLIC_KEY)
         .context("the update manifest signature did not verify")?;
+    verify_product_channel(&manifest)?;
 
     let release: RemoteRelease =
         serde_json::from_slice(&manifest).context("signed update manifest is malformed")?;
@@ -253,6 +255,10 @@ pub fn install_update(
     );
     let PreparedUpdate { update, bytes } = prepared;
     update.verify_authenticated_payload(&bytes)?;
+    ensure!(
+        cfg!(target_os = "macos"),
+        "Ekubo Wallet 2 service updates require the signed privileged installer"
+    );
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let relaunch_path = Some(update.update.extract_path.clone());
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -485,6 +491,7 @@ fn decode_packager_box(encoded: &str, label: &str) -> Result<String> {
 }
 
 fn update_matches_signed_manifest(update: &Update, manifest: &[u8]) -> Result<String> {
+    verify_product_channel(manifest)?;
     let signed: RemoteRelease =
         serde_json::from_slice(manifest).context("signed update manifest is malformed")?;
     let target = cargo_packager_updater::target().context("this updater target is unsupported")?;
@@ -502,6 +509,10 @@ fn update_matches_signed_manifest(update: &Update, manifest: &[u8]) -> Result<St
     );
     let current = cargo_packager_updater::semver::Version::parse(&update.current_version)
         .context("the installed application version is malformed")?;
+    ensure!(
+        current.major == 2,
+        "the installed application is not Ekubo Wallet 2"
+    );
     ensure!(
         signed.version > current,
         "the authenticated update is not newer than the installed application"
@@ -541,6 +552,10 @@ fn verify_embedded_version_claim(
 ) -> Result<()> {
     let authenticated = cargo_packager_updater::semver::Version::parse(&update.version)
         .context("the authenticated update version is malformed")?;
+    ensure!(
+        embedded.major == 2,
+        "the packaged application is not Ekubo Wallet 2"
+    );
     ensure!(
         embedded == &authenticated,
         "the packaged application version {embedded} does not match authenticated update version {authenticated}"
@@ -603,7 +618,7 @@ fn embedded_package_version(
             .path()
             .context("the macOS update archive path is invalid")?;
         if entry.header().entry_type().is_file()
-            && path.ends_with(std::path::Path::new("Contents/MacOS/ekubo-wallet"))
+            && path.ends_with(std::path::Path::new("Contents/MacOS/ekubo-wallet-v2"))
         {
             ensure!(
                 version.is_none(),
@@ -646,7 +661,7 @@ fn embedded_package_version(
         for node in filesystem.files() {
             if !node
                 .fullpath
-                .ends_with(std::path::Path::new("usr/bin/ekubo-wallet"))
+                .ends_with(std::path::Path::new("usr/bin/ekubo-wallet-v2"))
             {
                 continue;
             }
@@ -688,6 +703,10 @@ fn embedded_package_version(
         .context("the NSIS package has no version information")?;
     let mut versions = BTreeSet::new();
     for language in information.translation() {
+        ensure!(
+            information.value(*language, "ProductName") == Some("Ekubo Wallet 2"),
+            "the NSIS package belongs to another product"
+        );
         if let Some(value) = information.value(*language, "ProductVersion") {
             versions.insert(
                 cargo_packager_updater::semver::Version::parse(value.trim())
@@ -710,6 +729,25 @@ fn embedded_package_version(
     _format: UpdateFormat,
 ) -> Result<cargo_packager_updater::semver::Version> {
     anyhow::bail!("automatic updates are unsupported on this platform")
+}
+
+fn verify_product_channel(manifest: &[u8]) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_slice(manifest)?;
+    ensure!(
+        value.get("product").and_then(serde_json::Value::as_str) == Some(UPDATE_PRODUCT)
+            && value.get("channel").and_then(serde_json::Value::as_str) == Some(UPDATE_CHANNEL),
+        "signed update metadata belongs to another product or channel"
+    );
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .context("signed update metadata has no version")?;
+    let version = cargo_packager_updater::semver::Version::parse(version)?;
+    ensure!(
+        version.major == 2,
+        "signed update metadata is not a v2 release"
+    );
+    Ok(())
 }
 
 fn manifest_digest(manifest: &[u8], target: &str) -> Result<String> {

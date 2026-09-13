@@ -798,7 +798,12 @@ impl TypedDataStore {
 
     /// Forget every decided typed-data request, optionally for one wallet.
     /// Requests still awaiting a decision stay.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn clear_history(&mut self, wallet_id: Option<&str>) -> Result<usize> {
+        self.clear_history_authenticated(wallet_id)
+    }
+
+    pub(crate) fn clear_history_authenticated(&mut self, wallet_id: Option<&str>) -> Result<usize> {
         QUEUE.clear_decided(&self.database.connection, wallet_id)
     }
 

@@ -31,14 +31,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// model has then never been shown. That mismatch made the wallet's own
 /// skill and security-model resources unreachable by name. An underscore
 /// key survives the rewrite unchanged, so both spellings agree.
-pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
+pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet_v2";
 /// Every key this wallet manages in an agent's MCP configuration: its own
 /// local bridge entry, plus one entry per hosted Ekubo server.
 ///
 /// It is the removal and diff list, not the write list — a companion the owner
-/// has switched off is still ours to take back out, and the pre-split `ekubo`
-/// key is in here because Ekubo's own server kept it. Everything outside this
-/// list belongs to the harness and is never touched.
+/// has switched off is still ours to take back out. The 1.x local and companion
+/// keys are deliberately absent: both products may use the same harness file.
+/// Everything outside this list belongs to the harness and is never touched.
 fn managed_keys() -> impl Iterator<Item = &'static str> {
     std::iter::once(LOCAL_SERVER_NAME)
         .chain(COMPANION_SERVERS.iter().map(|server| server.config_key))
@@ -46,7 +46,7 @@ fn managed_keys() -> impl Iterator<Item = &'static str> {
 
 /// Every helper image this wallet has ever installed starts with this, so a
 /// single prefix identifies both the file to keep and the debris to collect.
-const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-mcp-bridge";
+const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-v2-mcp-bridge";
 /// The one filename a harness is ever configured to execute.
 ///
 /// It carries no version. An agent config written once therefore keeps
@@ -55,14 +55,14 @@ const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-mcp-bridge";
 /// Earlier releases installed `…-<version>` instead, which invalidated every
 /// managed config on each update and made the user re-enable each agent.
 #[cfg(windows)]
-const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge.exe";
+const BRIDGE_FILE_NAME: &str = "ekubo-wallet-v2-mcp-bridge.exe";
 #[cfg(not(windows))]
-const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge";
+const BRIDGE_FILE_NAME: &str = "ekubo-wallet-v2-mcp-bridge";
 
 /// Whether this process is the one entitled to write the shared helper.
 ///
-/// The helper path is shared by every wallet build and every wallet process on
-/// a machine, and the only process that may own it is the one answering
+/// The helper path is shared by every v2 build and v2 process on a machine,
+/// separately from 1.x, and the only process that may own it is the one answering
 /// `mcp.sock` — the holder of the single-instance lock. That is a property of
 /// the process, not of any view or data directory, so it is recorded once here
 /// rather than threaded through the callers.
@@ -88,6 +88,8 @@ pub fn holds_helper_write_authority() -> bool {
 }
 
 fn helpers_dir() -> Result<PathBuf> {
+    // default_data_dir is the v2 product root. Never install into the 1.x
+    // helpers directory: released 1.x builds collect helpers by name prefix.
     Ok(ekubo_wallet_core::config::default_data_dir()?.join("helpers"))
 }
 
@@ -155,7 +157,7 @@ fn installed_image_matches(installed: &Path, packaged: &[u8]) -> Result<bool> {
 /// survive an update untouched. Replacing it is still a rename, so a bridge
 /// already running out of the old bytes keeps its own image and no harness
 /// ever sees a half-written helper. Two wallet versions sharing a data
-/// directory therefore share one helper — whichever launched last owns it,
+/// directory within v2 therefore share one helper — whichever launched last owns it,
 /// which is the same bridge the running wallet answers.
 pub fn install_bridge_helper() -> Result<PathBuf> {
     ensure!(
@@ -224,7 +226,7 @@ fn reassert_is_due(last: &mut Option<Instant>, now: Instant) -> bool {
 
 /// Restore this build's helper at the shared path when a bridge connects.
 ///
-/// The helper lives at one fixed path shared by every wallet build on this
+/// The helper lives at one fixed path shared by every v2 wallet build on this
 /// machine, and [`install_bridge_helper`] claims it once, at launch. That
 /// leaves a gap the user cannot get out of: anything writing another build's
 /// bytes there afterwards goes unnoticed by the wallet already running, so
@@ -550,6 +552,8 @@ impl ConfigPreview {
 }
 
 fn config_lock_path(path: &Path) -> Result<PathBuf> {
+    // This is a document lock, not a product lock. Keep the released 1.x
+    // sidecar name so v1 and v2 serialize edits to their shared harness files.
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -660,9 +664,9 @@ impl AgentAdapter {
     /// the wallet to one they did not.
     ///
     /// It deliberately does not check the bridge path's bytes or the
-    /// companion shape. A config left by an older release names the same fixed
-    /// helper path and the pre-split `ekubo` URL; that is a wallet the owner
-    /// installed, and answering `false` would strand it.
+    /// companion shape. A stale v2 entry still represents an installed v2
+    /// integration. A 1.x entry alone does not: launch repair or selection sync
+    /// must not silently opt a 1.x-connected harness into v2.
     pub fn has_wallet_entry(&self) -> Result<bool> {
         let Some(contents) = self.readable_config()? else {
             return Ok(false);
@@ -870,8 +874,7 @@ fn merge_json(
             remote_json_server(shape, server.url),
         );
     }
-    // Everything the owner did not select comes out, including the pre-split
-    // `ekubo` entry when Ekubo's own server is off. `None` removes them all:
+    // Every v2 companion the owner did not select comes out. `None` removes them all:
     // that is Claude Desktop, whose remote MCP services are account-level
     // custom connectors managed in Claude's UI rather than entries in this
     // file, so an obsolete remote JSON entry here is cleaned up.
@@ -1321,3 +1324,7 @@ fn validate_json_companions(
 #[cfg(test)]
 #[path = "agent_config_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_config_coexistence_test.rs"]
+mod coexistence_tests;

@@ -20,12 +20,12 @@ pub(crate) struct DesktopStartup {
     pub owner: DesktopOwner,
     pub dapps: DesktopDapps,
     pub local: Option<LocalServices>,
-    pub session: Option<ekubo_wallet_client::desktop_session::DesktopSession>,
 }
 
 impl DesktopStartup {
     pub fn open(runtime: &tokio::runtime::Runtime, presenter: ProposalPresenter) -> Result<Self> {
         select(
+            cfg!(any(target_os = "linux", target_os = "windows")),
             installed(),
             || Self::local(presenter),
             || Self::service(runtime),
@@ -48,7 +48,6 @@ impl DesktopStartup {
                 agent: authority.agent_api(),
                 events: authority.events(),
             }),
-            session: None,
         })
     }
 
@@ -56,15 +55,30 @@ impl DesktopStartup {
     fn service(runtime: &tokio::runtime::Runtime) -> Result<Self> {
         runtime.block_on(async {
             let owner = ekubo_wallet_client::OwnerClient::connect().await?;
-            let session = owner.start_desktop_session();
-            session.ready().await?;
             Ok(Self {
                 dapps: DesktopDapps::service(owner.clone()),
                 owner: DesktopOwner::Service(owner),
                 local: None,
-                session: Some(session),
             })
         })
+    }
+
+    /// Keep first-run import quiescent. Only the normal desktop, after the move
+    /// chooser has finished, may enable the service's execution period.
+    pub(crate) fn start_service_session(
+        owner: &DesktopOwner,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Option<ekubo_wallet_client::desktop_session::DesktopSession>> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if let DesktopOwner::Service(owner) = owner {
+            return runtime.block_on(async {
+                let session = owner.start_desktop_session();
+                session.ready().await?;
+                Ok(Some(session))
+            });
+        }
+        let _ = (owner, runtime);
+        Ok(None)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -73,7 +87,7 @@ impl DesktopStartup {
     }
 }
 
-fn installed() -> Result<bool> {
+pub(crate) fn installed() -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
         Ok(ekubo_wallet_core::service_storage::find_installed_service_identity()?.is_some())
@@ -89,11 +103,20 @@ fn installed() -> Result<bool> {
 }
 
 fn select<T>(
+    service_required: bool,
     installed: Result<bool>,
     local: impl FnOnce() -> Result<T>,
     service: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if installed? { service() } else { local() }
+    if installed? {
+        service()
+    } else {
+        anyhow::ensure!(
+            !service_required,
+            "Ekubo Wallet 2 requires its protected wallet service. Run the signed Ekubo Wallet 2 installer to complete setup, then reopen the wallet."
+        );
+        local()
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,8 @@
 //! Ekubo serves one MCP endpoint per protocol. Each is credential-free, each
 //! carries only that protocol's tools, and the owner chooses which of them the
 //! wallet writes into a harness configuration alongside the local
-//! `ekubo_wallet` bridge entry.
+//! `ekubo_wallet_v2` bridge entry. Configuration keys are product-scoped so
+//! v2 sync and removal preserve every 1.x-managed companion.
 //!
 //! Nothing here signs, authorizes, or holds a secret. It is a fixed table of
 //! public URLs plus the owner's selection over it, kept in the kernel because
@@ -56,7 +57,7 @@ pub struct CompanionServer {
 pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     CompanionServer {
         slug: "ekubo",
-        config_key: "ekubo",
+        config_key: "ekubo_v2",
         title: "Ekubo",
         description: "Swaps and bridges, pools, LP positions, TWAMM, auctions, incentives, and ve(3,3) STONX voting.",
         url: "https://mcp.ekubo.org/mcp/ekubo",
@@ -64,7 +65,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "aave",
-        config_key: "ekubo_aave",
+        config_key: "ekubo_v2_aave",
         title: "Aave V3",
         description: "Aave V3 market discovery and supply, withdraw, borrow, repay, collateral, and eMode preparation.",
         url: "https://mcp.ekubo.org/mcp/aave",
@@ -72,7 +73,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "aerodrome",
-        config_key: "ekubo_aerodrome",
+        config_key: "ekubo_v2_aerodrome",
         title: "Aerodrome",
         description: "Aerodrome Sugar lens reads and liquidity, gauge, lock, vote, and incentive-claim preparation on Base.",
         url: "https://mcp.ekubo.org/mcp/aerodrome",
@@ -80,7 +81,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "lido",
-        config_key: "ekubo_lido",
+        config_key: "ekubo_v2_lido",
         title: "Lido",
         description: "Lido staking, wrapping, and unstETH withdrawal preparation.",
         url: "https://mcp.ekubo.org/mcp/lido",
@@ -88,7 +89,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "merkl",
-        config_key: "ekubo_merkl",
+        config_key: "ekubo_v2_merkl",
         title: "Merkl",
         description: "Merkl reward discovery and proof-verified claim preparation.",
         url: "https://mcp.ekubo.org/mcp/merkl",
@@ -96,7 +97,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "morpho",
-        config_key: "ekubo_morpho",
+        config_key: "ekubo_v2_morpho",
         title: "Morpho",
         description: "Morpho Vault V2 discovery and deposit, withdraw, and redeem preparation.",
         url: "https://mcp.ekubo.org/mcp/morpho",
@@ -104,7 +105,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "sky",
-        config_key: "ekubo_sky",
+        config_key: "ekubo_v2_sky",
         title: "Sky",
         description: "Sky savings discovery and sUSDS deposit, withdraw, and redeem preparation.",
         url: "https://mcp.ekubo.org/mcp/sky",
@@ -128,16 +129,12 @@ pub const TOTAL_TOOL_COUNT: usize = 84;
 /// longer writes it: an agent given this *and* the per-protocol servers would
 /// carry every tool twice.
 ///
-/// Nothing has to recognize it to retarget one. Ekubo's own server kept the
-/// `ekubo` key, so the ordinary managed upsert overwrites a pre-split entry
-/// with `/mcp/ekubo` in place. [`is_legacy_companion`] names the URL for the
-/// tests that pin that, and for anything that needs to tell a stale entry from
-/// a current one without re-deriving the string.
+/// A 1.x entry using this URL is preserved by v2. [`is_legacy_companion`]
+/// identifies the endpoint without granting ownership of its config entry.
 pub const LEGACY_COMPANION_URL: &str = "https://mcp.ekubo.org/mcp";
 
-/// The one config key that predates the split, and still names Ekubo's own
-/// protocol so an owner's existing entry is updated in place rather than
-/// replaced by a differently named one.
+/// The 1.x config key that predates the split. Kept for identification only;
+/// v2 must never write or remove this key.
 pub const LEGACY_COMPANION_KEY: &str = "ekubo";
 
 #[must_use]
@@ -223,7 +220,7 @@ impl CompanionSelection {
 
     /// Whether nothing is selected.
     ///
-    /// The wallet still writes its own `ekubo_wallet` bridge entry in this
+    /// The wallet still writes its own `ekubo_wallet_v2` bridge entry in this
     /// case — an agent that can reach the wallet but no hosted server is a
     /// coherent choice, and is what an owner who prepares plans some other way
     /// wants.

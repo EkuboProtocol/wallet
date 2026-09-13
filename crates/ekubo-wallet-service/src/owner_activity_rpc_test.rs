@@ -1,6 +1,8 @@
 use super::*;
 use crate::dapp_reviews::DappReviews;
-use ekubo_wallet_client::activity::{OwnerActivityRecord, OwnerReviewQueues};
+use ekubo_wallet_client::activity::{
+    OwnerActivityRecord, OwnerActivityReference, OwnerReviewReference,
+};
 use ekubo_wallet_core::{
     config::WalletMetadata,
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy, source::RequestSource},
@@ -14,19 +16,53 @@ async fn call<T: serde::de::DeserializeOwned>(
     request: Request,
 ) -> anyhow::Result<T> {
     let wire = serde_json::to_vec(&request)?;
-    let response = dispatch(
-        owner,
-        &DappReviews::default(),
-        serde_json::from_slice(&wire)?,
-    )
-    .await?;
+    let paged = matches!(
+        &request,
+        Request::Reviews { .. }
+            | Request::ReviewRecord { .. }
+            | Request::Message { .. }
+            | Request::Transaction { .. }
+            | Request::TypedData { .. }
+            | Request::ActivityRecord { .. }
+            | Request::MessageReviewDocument { .. }
+            | Request::TypedDataReviewDocument { .. }
+    );
+    let dapps = Arc::new(DappRuntime::new(
+        owner.clone(),
+        DappReviews::default(),
+        crate::desktop_sessions::DesktopSessions::default(),
+    ));
+    let dispatcher = OwnerDispatcher::new(owner.clone(), dapps);
+    let response = dispatcher.dispatch(serde_json::from_slice(&wire)?).await?;
+    if paged {
+        let mut page: ekubo_wallet_client::preview_page::PreviewPage =
+            serde_json::from_value(response)?;
+        let mut text = page.text.clone();
+        while text.len() < page.total_bytes {
+            page = serde_json::from_value(
+                dispatcher
+                    .dispatch(Request::ReadPage {
+                        transfer_id: page.transfer_id,
+                        offset: text.len(),
+                    })
+                    .await?,
+            )?;
+            text.push_str(&page.text);
+        }
+        return Ok(serde_json::from_str(&text)?);
+    }
     Ok(serde_json::from_value(response)?)
 }
 
 async fn register(owner: &OwnerApi, id: &str) -> WalletMetadata {
+    let address = if id == "primary" {
+        "0x1111111111111111111111111111111111111111"
+    } else {
+        "0x2222222222222222222222222222222222222222"
+    };
     let wallet: WalletMetadata = serde_json::from_value(serde_json::json!({
         "instance_id": uuid::Uuid::new_v4(), "id": id,
-        "address": "0x1111111111111111111111111111111111111111",
+        "address": address,
         "created_at": chrono::Utc::now(), "source": "created"
     }))
     .unwrap();
@@ -50,6 +86,134 @@ async fn register(owner: &OwnerApi, id: &str) -> WalletMetadata {
 
 fn plan() -> ExecutionPlan {
     plan_with_value("1")
+}
+
+#[tokio::test]
+async fn accepted_review_queue_larger_than_one_frame_is_indexed_and_paged_exactly() {
+    use ekubo_wallet_client::activity::OwnerReviewRecord;
+    use ekubo_wallet_core::typed_data::{TypedDataStore, parse_typed_data};
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    let wallet = register(&owner, "primary").await;
+    let second = register(&owner, "secondary").await;
+    let mut store = TypedDataStore::production(directory.path()).unwrap();
+    let mut expected = std::collections::BTreeSet::new();
+    for number in 0..90 {
+        // Stay below the existing 64-request per-account queue limit.
+        let wallet = if number < 45 { &wallet } else { &second };
+        let payload = serde_json::json!({
+            "types": {
+                "EIP712Domain": [{"name":"chainId", "type":"uint256"}],
+                "Record": [{"name":"payload", "type":"string"}]
+            },
+            "primaryType":"Record", "domain":{"chainId":1},
+            "message":{"payload":format!("{number}:{}", "x".repeat(240_000))}
+        });
+        let (_, chain, digest) = parse_typed_data(&payload).unwrap();
+        let row = store
+            .create_for_wallet(
+                wallet,
+                chain,
+                &payload,
+                digest,
+                None,
+                &RequestSource::Unknown,
+            )
+            .unwrap();
+        expected.insert(OwnerReviewReference::Activity(
+            OwnerActivityReference::TypedData(row.request_id),
+        ));
+    }
+    assert!(
+        serde_json::to_vec(&owner.reviews(None).unwrap())
+            .unwrap()
+            .len()
+            > crate::framing::MAX_FRAME_BYTES
+    );
+    let index: Vec<OwnerReviewReference> = call(&owner, Request::Reviews { wallet_id: None })
+        .await
+        .unwrap();
+    assert_eq!(
+        index
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    let mut offset = 0;
+    while offset < index.len() {
+        let selectors = &index[offset..index.len().min(offset + 64)];
+        let batch: Vec<OwnerReviewRecord> = call(
+            &owner,
+            Request::ReviewRecords {
+                references: selectors.to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!batch.is_empty());
+        assert!(serde_json::to_vec(&batch).unwrap().len() <= crate::framing::MAX_FRAME_BYTES);
+        assert_eq!(
+            batch
+                .iter()
+                .map(OwnerReviewRecord::reference)
+                .collect::<Vec<_>>(),
+            selectors[..batch.len()]
+        );
+        offset += batch.len();
+    }
+    assert_eq!(offset, 90);
+    // The response encoder also pages complete record-bearing replies. Exercise
+    // the real wire path so a page cannot itself be wrapped recursively.
+    let dapps = Arc::new(DappRuntime::new(
+        owner.clone(),
+        DappReviews::default(),
+        crate::desktop_sessions::DesktopSessions::default(),
+    ));
+    let dispatcher = OwnerDispatcher::new(owner, dapps);
+    let wire = dispatcher
+        .encode(Request::Activity {
+            wallet_id: None,
+            limit: 100,
+        })
+        .await
+        .unwrap();
+    assert!(wire.len() < crate::framing::MAX_FRAME_BYTES);
+    let reply: ekubo_wallet_client::preview_page::RecordTransferReply =
+        serde_json::from_str(&wire).unwrap();
+    let mut page = reply.owner_record_transfer;
+    let mut text = page.text.clone();
+    while text.len() < page.total_bytes {
+        let wire = dispatcher
+            .encode(Request::ReadPage {
+                transfer_id: page.transfer_id,
+                offset: text.len(),
+            })
+            .await
+            .unwrap();
+        assert!(wire.len() < crate::framing::MAX_FRAME_BYTES);
+        page = serde_json::from_str(&wire).unwrap();
+        assert_eq!(page.offset, text.len());
+        text.push_str(&page.text);
+    }
+    let activity: Vec<OwnerActivityRecord> = serde_json::from_str(&text).unwrap();
+    assert_eq!(activity.len(), 90);
+    assert_eq!(
+        activity
+            .iter()
+            .map(|row| OwnerReviewReference::Activity(row.reference()))
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    assert!(
+        dispatcher
+            .dispatch(Request::ReadPage {
+                transfer_id: page.transfer_id,
+                offset: 0
+            })
+            .await
+            .is_err()
+    );
 }
 
 fn plan_with_value(value: &str) -> ExecutionPlan {
@@ -84,7 +248,7 @@ async fn activity_reads_keep_terminal_records_out_of_the_review_queue() {
             &RequestSource::Unknown,
         )
         .unwrap();
-    let queues: OwnerReviewQueues = call(
+    let index: Vec<OwnerReviewReference> = call(
         &owner,
         Request::Reviews {
             wallet_id: Some(wallet.id.clone()),
@@ -92,14 +256,25 @@ async fn activity_reads_keep_terminal_records_out_of_the_review_queue() {
     )
     .await
     .unwrap();
-    assert_eq!(queues.transactions, vec![transaction.clone()]);
-    assert_eq!(queues.messages, vec![message.clone()]);
+    assert_eq!(
+        index,
+        vec![
+            OwnerReviewReference::Activity(OwnerActivityReference::Transaction(
+                transaction.request_id
+            )),
+            OwnerReviewReference::Activity(OwnerActivityReference::Message(message.request_id))
+        ]
+    );
     let rejected = messages.reject(message.request_id).unwrap();
-    let queues: OwnerReviewQueues = call(&owner, Request::Reviews { wallet_id: None })
+    let index: Vec<OwnerReviewReference> = call(&owner, Request::Reviews { wallet_id: None })
         .await
         .unwrap();
-    assert!(queues.messages.is_empty());
-    assert_eq!(queues.transactions.len(), 1);
+    assert_eq!(
+        index,
+        vec![OwnerReviewReference::Activity(
+            OwnerActivityReference::Transaction(transaction.request_id)
+        )]
+    );
     let activity: Vec<OwnerActivityRecord> = call(
         &owner,
         Request::Activity {
@@ -343,7 +518,7 @@ async fn transaction_actions_cannot_send_or_cancel_an_unapproved_record() {
         if accepted {
             for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
                 let (_, digest) = owner.legal_document(document);
-                owner.accept_legal(document, &digest).unwrap();
+                owner.accept_legal(document, &digest).await.unwrap();
             }
         }
         for request in [

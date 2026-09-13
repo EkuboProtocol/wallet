@@ -1,16 +1,20 @@
 use serde_json::{Value, json};
+#[cfg(target_os = "macos")]
+use std::sync::mpsc;
 use std::{
     io::{BufRead as _, BufReader, Write as _},
     process::{Command, Stdio},
-    sync::mpsc,
     time::Duration,
 };
 
 const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
 
 #[path = "../../../bridge_protocol.rs"]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod bridge_protocol;
-use bridge_protocol::{BRIDGE_PROTOCOL_META_KEY, BRIDGE_PROTOCOL_VERSION};
+#[cfg(target_os = "macos")]
+use bridge_protocol::BRIDGE_PROTOCOL_META_KEY;
+use bridge_protocol::BRIDGE_PROTOCOL_VERSION;
 
 /// The offline capability set recorded for each bridge protocol version.
 ///
@@ -78,9 +82,9 @@ fn receive(stdout: &mut BufReader<std::process::ChildStdout>) -> Value {
 #[test]
 fn initializes_and_stays_useful_before_wallet_startup() {
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "codex"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -169,7 +173,7 @@ fn initializes_and_stays_useful_before_wallet_startup() {
 
 #[test]
 fn rejects_unknown_harness_without_writing_protocol_to_stdout() {
-    let output = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "unknown"])
         .output()
         .unwrap();
@@ -185,9 +189,9 @@ fn rejects_unknown_harness_without_writing_protocol_to_stdout() {
 #[test]
 fn accepts_grok_build_as_a_supported_harness() {
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "grok-build"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -206,9 +210,9 @@ fn accepts_grok_build_as_a_supported_harness() {
 #[test]
 fn malformed_json_returns_a_protocol_error_without_stopping() {
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "cursor"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -235,9 +239,9 @@ fn malformed_json_returns_a_protocol_error_without_stopping() {
 #[test]
 fn oversized_harness_frames_are_rejected_at_the_transport_ceiling() {
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "gemini-cli"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -263,7 +267,9 @@ fn oversized_harness_frames_are_rejected_at_the_transport_ceiling() {
     );
 }
 
-#[cfg(unix)]
+// Fake local sockets exercise the macOS backend only. Linux/Windows require
+// the installed protected service and never consult these user-data paths.
+#[cfg(target_os = "macos")]
 #[test]
 fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     use std::{
@@ -390,9 +396,9 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         );
     });
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "codex"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -478,7 +484,7 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn a_wallet_frame_split_across_writes_survives_a_racing_harness_frame() {
     use std::{
@@ -558,9 +564,9 @@ fn a_wallet_frame_split_across_writes_survives_a_racing_harness_frame() {
         assert_eq!(read(&mut reader)["id"], "racer");
     });
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "codex"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -605,7 +611,7 @@ fn a_wallet_frame_split_across_writes_survives_a_racing_harness_frame() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn standard_server_version_mismatch_terminates_the_bridge() {
     use std::{
@@ -651,9 +657,9 @@ fn standard_server_version_mismatch_terminates_the_bridge() {
     // told the session cannot start instead of recording a handshake from a
     // bridge that is about to stop.
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "codex"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -680,7 +686,7 @@ fn standard_server_version_mismatch_terminates_the_bridge() {
 /// Shared fake wallet for the protocol tests: answers `initialize` with the
 /// given build version and optional advertised protocol, then serves both
 /// catalogs so a compatible bridge can finish its handshake.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn spawn_fake_wallet(
     home: &std::path::Path,
     version: &str,
@@ -741,7 +747,7 @@ fn spawn_fake_wallet(
 /// The point of versioning the contract rather than the build: a wallet that
 /// updated underneath a running harness, or a helper left behind by another
 /// build, stays usable as long as the shared contract did not move.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn a_different_build_speaking_the_same_protocol_is_served() {
     use std::{fs, os::unix::fs::PermissionsExt as _};
@@ -750,9 +756,9 @@ fn a_different_build_speaking_the_same_protocol_is_served() {
     fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let wallet = spawn_fake_wallet(home.path(), "999.0.0", Some(BRIDGE_PROTOCOL_VERSION));
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "codex"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -776,7 +782,7 @@ fn a_different_build_speaking_the_same_protocol_is_served() {
 
 /// A moved contract is still a hard stop, and still after exactly one attempt:
 /// reconnecting would spin against a wallet that can never answer.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn a_wallet_speaking_another_protocol_terminates_the_bridge() {
     use std::{fs, os::unix::fs::PermissionsExt as _};
@@ -790,9 +796,9 @@ fn a_wallet_speaking_another_protocol_terminates_the_bridge() {
         Some(BRIDGE_PROTOCOL_VERSION + 999),
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
         .args(["--client", "codex"])
-        .env("EKUBO_WALLET_HOME", home.path())
+        .env("EKUBO_WALLET_V2_HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

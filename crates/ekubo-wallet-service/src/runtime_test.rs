@@ -7,7 +7,7 @@ async fn runtime_desktop_leases_gate_dapp_admission_until_the_last_disconnect() 
     let owner = OwnerApi::for_test(directory.path()).unwrap();
     for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
         let (_, digest) = owner.legal_document(document);
-        owner.accept_legal(document, &digest).unwrap();
+        owner.accept_legal(document, &digest).await.unwrap();
     }
     let authority = ApplicationAuthority::open(owner.config().clone()).unwrap();
     let runtime = ServiceRuntime::new(authority);

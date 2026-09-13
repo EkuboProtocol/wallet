@@ -4529,7 +4529,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4583,7 +4583,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-client"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4601,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-core"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -4659,7 +4659,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-preview"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "alloy",
  "burn",
@@ -4674,7 +4674,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-preview-wasm"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "ekubo-wallet-preview",
  "serde",
@@ -4685,7 +4685,7 @@ dependencies = [
 
 [[package]]
 name = "ekubo-wallet-service"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4696,8 +4696,6 @@ dependencies = [
  "ekubo-wallet-core",
  "futures",
  "hex",
- "keyring",
- "keyring-core",
  "reqwest 0.13.4",
  "rmcp",
  "rustix",
@@ -4713,7 +4711,6 @@ dependencies = [
  "uuid 1.26.0",
  "walletconnect-session",
  "zbus",
- "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
@@ -8004,7 +8001,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-bridge"
-version = "1.8.2"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "directories",

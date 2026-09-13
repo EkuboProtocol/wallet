@@ -9,8 +9,8 @@ use ekubo_wallet_core::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const OBJECT_PATH: &str = "/org/ekubo/Wallet/Owner";
-pub const CUSTODY_OBJECT_PATH: &str = "/org/ekubo/Wallet/Custody";
+pub const OBJECT_PATH: &str = "/org/ekubo/Wallet2/Owner";
+pub const CUSTODY_OBJECT_PATH: &str = "/org/ekubo/Wallet2/Custody";
 
 #[derive(Serialize, Deserialize)]
 #[serde(
@@ -20,6 +20,7 @@ pub const CUSTODY_OBJECT_PATH: &str = "/org/ekubo/Wallet/Custody";
     deny_unknown_fields
 )]
 pub enum Request {
+    LegacyMoveStatus,
     ClearActivityHistory,
     Portfolio {
         wallet_id: Option<String>,
@@ -115,6 +116,16 @@ pub enum Request {
     },
     Reviews {
         wallet_id: Option<String>,
+    },
+    ReviewRecord {
+        reference: crate::activity::OwnerReviewReference,
+    },
+    ReviewRecords {
+        references: Vec<crate::activity::OwnerReviewReference>,
+    },
+    ReadPage {
+        transfer_id: uuid::Uuid,
+        offset: usize,
     },
     MessageReviewDocument {
         request_id: uuid::Uuid,

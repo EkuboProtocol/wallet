@@ -44,7 +44,7 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// queues and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-pub(crate) const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
+pub(crate) const KEYRING_SERVICE: &str = "org.ekubo.wallet.v2.db";
 pub(crate) const KEYRING_USER: &str = "default";
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -2635,6 +2635,17 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
     #[cfg(not(debug_assertions))]
     let _ = data_dir;
 
+    #[cfg(target_os = "linux")]
+    ensure!(
+        crate::service_storage::data_dir().is_some(),
+        "v2 database authority requires the installed protected service"
+    );
+    #[cfg(target_os = "windows")]
+    ensure!(
+        crate::windows_service_custody::data_dir().is_some(),
+        "v2 database authority requires the installed protected service"
+    );
+
     // `block_in_place`, not a direct call: on Linux, `keyring`'s backend
     // connects to D-Bus through `zbus`'s *blocking* API, which starts its
     // own Tokio runtime on first use. Every caller of this function runs
@@ -2654,6 +2665,11 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
                 result.context("policy database credential is invalid")
             }
             Err(KeyringError::NoEntry) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                ensure!(
+                    !matches!(&entry, crate::credential_store::Entry::Service(_)),
+                    "installed v2 database credential is missing; enrollment cannot be reset"
+                );
                 ensure!(
                     !database_exists,
                     "policy database exists but its credential-store key is missing"
@@ -2693,11 +2709,6 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
 #[path = "policy_store_test.rs"]
 mod tests;
 
-#[path = "migration_database.rs"]
-pub mod migration_database;
-
-#[path = "migration_rebuild.rs"]
-pub(crate) mod migration_rebuild;
-
-#[path = "migration_fingerprint.rs"]
-mod migration_fingerprint;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "legacy_move_database.rs"]
+pub(crate) mod legacy_move_database;

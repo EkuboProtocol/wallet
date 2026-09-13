@@ -64,7 +64,7 @@ impl OwnerActivityRecord {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct OwnerReviewQueues {
     pub transactions: Vec<PendingTransaction>,
     pub typed_data: Vec<PendingTypedData>,
@@ -72,6 +72,93 @@ pub struct OwnerReviewQueues {
     pub policy_proposals: Vec<PolicyProposal>,
     pub network_proposals: Vec<NetworkConfig>,
     pub token_proposals: Vec<TokenProposal>,
+}
+
+/// Exact inventory selectors; no selector grants decision authority. A record
+/// removed while reading fails the refresh rather than substituting another row.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "id",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum OwnerReviewReference {
+    Activity(OwnerActivityReference),
+    Policy(Uuid),
+    Network(u64),
+    Token { chain_id: u64, address: String },
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum OwnerReviewRecord {
+    Activity(Box<OwnerActivityRecord>),
+    Policy(Box<PolicyProposal>),
+    Network(Box<NetworkConfig>),
+    Token(Box<TokenProposal>),
+}
+
+impl OwnerReviewRecord {
+    #[must_use]
+    pub fn reference(&self) -> OwnerReviewReference {
+        match self {
+            Self::Activity(record) => OwnerReviewReference::Activity(record.reference()),
+            Self::Policy(record) => OwnerReviewReference::Policy(record.wallet_instance_id),
+            Self::Network(record) => OwnerReviewReference::Network(record.chain_id),
+            Self::Token(record) => OwnerReviewReference::Token {
+                chain_id: record.token.chain_id,
+                address: record.token.address.to_string(),
+            },
+        }
+    }
+}
+
+impl OwnerReviewQueues {
+    #[must_use]
+    pub fn into_records(self) -> Vec<OwnerReviewRecord> {
+        self.transactions
+            .into_iter()
+            .map(|row| {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::Transaction(Box::new(
+                    row,
+                ))))
+            })
+            .chain(self.messages.into_iter().map(|row| {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::Message(row)))
+            }))
+            .chain(self.typed_data.into_iter().map(|row| {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::TypedData(row)))
+            }))
+            .chain(
+                self.policy_proposals
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Policy(Box::new(row))),
+            )
+            .chain(
+                self.network_proposals
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Network(Box::new(row))),
+            )
+            .chain(
+                self.token_proposals
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Token(Box::new(row))),
+            )
+            .collect()
+    }
+
+    pub fn push(&mut self, record: OwnerReviewRecord) {
+        match record {
+            OwnerReviewRecord::Activity(row) => match *row {
+                OwnerActivityRecord::Transaction(row) => self.transactions.push(*row),
+                OwnerActivityRecord::Message(row) => self.messages.push(row),
+                OwnerActivityRecord::TypedData(row) => self.typed_data.push(row),
+            },
+            OwnerReviewRecord::Policy(row) => self.policy_proposals.push(*row),
+            OwnerReviewRecord::Network(row) => self.network_proposals.push(*row),
+            OwnerReviewRecord::Token(row) => self.token_proposals.push(*row),
+        }
+    }
 }
 
 /// A human-readable, read-only inspection of one transaction lifecycle row.

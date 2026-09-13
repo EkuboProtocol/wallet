@@ -1,0 +1,138 @@
+#!/usr/bin/python3
+"""Privileged fresh v2 profile setup; installed by the package, never run at build."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import pwd
+import shutil
+import stat
+import subprocess
+import sys
+import uuid
+
+ETC = Path('/etc/ekubo-wallet-v2')
+STATE = Path('/var/lib/ekubo-wallet-v2')
+RUN = Path('/run/ekubo-wallet-v2')
+
+
+def protected(path, mode=0o755, uid=0, gid=0):
+    """Never chmod/chown a pre-existing path to make an unsafe tree look safe."""
+    if not path.exists() and not path.is_symlink():
+        path.mkdir(mode=mode)
+        os.chown(path, uid, gid)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) != mode:
+        raise RuntimeError(f'Unsafe pre-existing directory: {path}')
+
+
+def publish(path, payload):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, 'wb') as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def main():
+    if os.getuid() != 0 or os.geteuid() != 0 or len(sys.argv) != 3:
+        raise RuntimeError('Usage: install-profile <ordinary-owner-uid> <unique-bus-name> (root)')
+    if sys.argv[1] == '--discard-unused':
+        discard_unused(int(sys.argv[2]))
+        return
+    if sys.argv[1] == '--resume':
+        resume(int(sys.argv[2]))
+        return
+    owner = int(sys.argv[1])
+    if owner <= 0 or not sys.argv[2].startswith(':'):
+        raise RuntimeError('An ordinary owner and unique bus name are required')
+    pwd.getpwuid(owner)
+    account = pwd.getpwnam('ekubo-wallet-v2')
+    if account.pw_uid in (0, owner):
+        raise RuntimeError('Service identity must be distinct')
+    for parent in (ETC, STATE, RUN):
+        protected(parent)
+    # Separate lock from the Rust publication lease, retained across all subprocesses.
+    fd = os.open(ETC / 'install.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+        os.close(fd)
+        raise RuntimeError('Unsafe installer lock')
+    with os.fdopen(fd, 'r+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        install(owner, account, sys.argv[2])
+
+
+def install(owner, account, recipient):
+    for parent in (ETC / 'owners', ETC / 'pending', ETC / 'relay-confirmed', STATE / 'pending'):
+        protected(parent)
+    active = ETC / 'owners' / f'{owner}.json'
+    pending = ETC / 'pending' / f'{owner}.json'
+    if active.exists() or pending.exists() or (STATE / str(owner)).exists():
+        raise RuntimeError('Existing v2 profile retained. Use restart/upgrade; fresh setup never resets it.')
+    profile = str(uuid.uuid4())
+    protected(STATE / 'pending' / profile, 0o700, account.pw_uid, account.pw_gid)
+    protected(RUN / str(owner), 0o711, account.pw_uid, account.pw_gid)
+    publish(pending, json.dumps(dict(owner_uid=owner, service_uid=account.pw_uid, profile_id=profile)).encode())
+    # Runtime directory must survive reboot; tmpfiles does not recursively repair state.
+    publish(Path('/etc/tmpfiles.d') / f'ekubo-wallet-v2-{owner}.conf',
+            f'd /run/ekubo-wallet-v2/{owner} 0711 ekubo-wallet-v2 ekubo-wallet-v2 -\n'.encode())
+    subprocess.run(['/usr/bin/systemctl', 'start', f'ekubo-wallet-v2-provision@{owner}.service'], check=True)
+    subprocess.run(['/usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll', '--installer', str(owner), recipient], check=True)
+    subprocess.run(['/usr/bin/systemctl', 'enable', '--now', f'ekubo-wallet-v2@{owner}.service'], check=True)
+
+
+def discard_unused(owner):
+    """Explicit recovery of an unpublished v2 attempt; never touches owner keys."""
+    if owner <= 0:
+        raise RuntimeError('An ordinary owner is required')
+    for parent in (ETC, ETC / 'pending', ETC / 'owners', STATE, STATE / 'pending'):
+        protected(parent)
+    fd = os.open(ETC / 'install.lock', os.O_RDWR | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'r+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        pending = ETC / 'pending' / f'{owner}.json'
+        if (ETC / 'owners' / f'{owner}.json').exists() or (STATE / str(owner)).exists() or (ETC / 'relay-confirmed' / f'{owner}.json').exists():
+            raise RuntimeError('Published profiles cannot be discarded or reset')
+        with os.fdopen(os.open(pending, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as source:
+            info = os.fstat(source.fileno())
+            if info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 4096:
+                raise RuntimeError('Unsafe pending configuration')
+            metadata = json.load(source)
+        account = pwd.getpwnam('ekubo-wallet-v2')
+        if metadata['owner_uid'] != owner or metadata['service_uid'] != account.pw_uid or account.pw_uid in (0, owner):
+            raise RuntimeError('Pending owner mismatch')
+        profile = str(uuid.UUID(metadata['profile_id']))
+        subprocess.run(['/usr/bin/systemctl', 'stop', f'ekubo-wallet-v2-provision@{owner}.service'], check=True)
+        path = STATE / 'pending' / profile
+        protected(path, 0o700, metadata['service_uid'], pwd.getpwnam('ekubo-wallet-v2').pw_gid)
+        if any(p.name.startswith('key-account-') or p.name == 'setup-complete' for p in path.iterdir()):
+            raise RuntimeError('Pending profile has signs of active authority; refusing cleanup')
+        shutil.rmtree(path)
+        pending.unlink()
+        # Leave any opaque orphan relay in its unique v2 namespace; never read
+        # or delete login credentials from an elevated process.
+        runtime = Path('/etc/tmpfiles.d') / f'ekubo-wallet-v2-{owner}.conf'
+        runtime.unlink(missing_ok=True)
+        print(f'Discarded only unpublished fresh v2 profile {profile}.')
+
+
+def resume(owner):
+    if owner <= 0:
+        raise RuntimeError('An ordinary owner is required')
+    protected(ETC)
+    fd = os.open(ETC / 'install.lock', os.O_RDWR | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'r+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        subprocess.run(['/usr/bin/systemctl', 'stop', f'ekubo-wallet-v2-provision@{owner}.service'], check=True)
+        subprocess.run(['/usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll', '--resume-publication', str(owner)], check=True)
+        subprocess.run(['/usr/bin/systemctl', 'enable', '--now', f'ekubo-wallet-v2@{owner}.service'], check=True)
+
+
+if __name__ == '__main__':
+    main()
