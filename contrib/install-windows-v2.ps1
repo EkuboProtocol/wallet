@@ -35,10 +35,34 @@ try {
     if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage)) { throw 'Concurrent v2 setup detected.' }
     $profile = [Guid]::NewGuid()
     $service = 'EkuboWalletV2-' + $profile.ToString('N')
-    # Pass the command directly through SCM rather than PowerShell 5's legacy
-    # native-argument quoting (which strips embedded Program Files quotes).
-    $credential = [Management.Automation.PSCredential]::new(('NT SERVICE\' + $service), [Security.SecureString]::new())
-    New-Service -Name $service -BinaryPathName ('"' + $binary + '" --provision-owner-sid ' + $OwnerSid) -StartupType Manual -Credential $credential | Out-Null
+    # Virtual accounts require a NULL password, not PSCredential's empty string.
+    # Pass the quoted command directly to SCM, without native-argv reparsing.
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class EkuboV2VirtualService {
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr OpenSCManagerW(string machine, string database, uint access);
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr CreateServiceW(IntPtr manager, string name, string display,
+        uint access, uint type, uint start, uint error, string binary, string group,
+        IntPtr tag, string dependencies, string account, string password);
+    [DllImport("advapi32.dll")]
+    private static extern bool CloseServiceHandle(IntPtr handle);
+    public static void Create(string name, string command) {
+        IntPtr manager = OpenSCManagerW(null, null, 2);
+        if (manager == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            IntPtr service = CreateServiceW(manager, name, name, 4, 0x10, 3, 1,
+                command, null, IntPtr.Zero, null, @"NT SERVICE\" + name, null);
+            if (service == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            CloseServiceHandle(service);
+        } finally { CloseServiceHandle(manager); }
+    }
+}
+'@
+    [EkuboV2VirtualService]::Create($service, ('"' + $binary + '" --provision-owner-sid ' + $OwnerSid))
     $sid = [Security.Principal.NTAccount]::new('NT SERVICE', $service).Translate([Security.Principal.SecurityIdentifier]).Value
     $machineAcl = [Security.AccessControl.DirectorySecurity]::new()
     $machineAcl.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)(A;OICI;FRFX;;;$sid)")
