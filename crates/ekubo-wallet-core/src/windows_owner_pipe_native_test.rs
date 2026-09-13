@@ -11,18 +11,69 @@ async fn native_authorization_lease_rejects_extra_traffic_and_disconnect() {
     let mut server = create(&pipe_name, &sid, &sid, true).unwrap();
     let mut client = open(&pipe_name, &sid, &sid).unwrap();
     server.connect().await.unwrap();
-    let retained = retain_auth_connection(&server).unwrap();
-    verify_auth_connection(&retained).unwrap();
-    client.write_all(b"x").await.unwrap();
-    assert!(verify_auth_connection(&retained).is_err());
-    let mut byte = [0];
-    server.read_exact(&mut byte).await.unwrap();
+    client.write_all(b"request").await.unwrap();
+    let mut request = [0; 7];
+    server.read_exact(&mut request).await.unwrap();
     authenticate_auth_service(&server, &sid).unwrap();
     assert!(authenticate_auth_service(&server, "S-1-5-80-1-2-3-4-5").is_err());
+    let retained = retain_auth_connection(&server).unwrap();
+    client.write_all(b"x").await.unwrap();
+    // Deterministically prefetch through the real native transport. The byte is
+    // now in userspace, not the kernel pipe; no timing/readiness assumption is
+    // needed to reproduce the distinction that Mio/IOCP exposed in CI.
+    let mut buffered = tokio::io::BufReader::new(&mut server);
+    assert_eq!(
+        tokio::io::AsyncBufReadExt::fill_buf(&mut buffered)
+            .await
+            .unwrap(),
+        b"x"
+    );
     verify_auth_connection(&retained).unwrap();
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(buffered);
+    let binding = monitor.binding();
+    let mut ran = false;
+    assert!(
+        monitor
+            .run(async {
+                ran = true;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    assert!(binding.ensure_live().is_err());
     drop(client);
-    assert_eq!(server.read(&mut byte).await.unwrap(), 0);
-    assert!(verify_auth_connection(&retained).is_err());
+    assert!(
+        monitor
+            .run(async {
+                ran = true;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    drop(monitor);
+}
+
+#[tokio::test]
+async fn native_transport_monitor_revokes_a_pending_call_on_disconnect() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(server);
+    let binding = monitor.binding();
+    let mut operation = Box::pin(monitor.run(std::future::pending::<Result<()>>()));
+    assert!(futures::poll!(&mut operation).is_pending());
+    drop(client);
+    assert!(operation.await.is_err());
+    assert!(binding.ensure_live().is_err());
 }
 
 #[tokio::test]

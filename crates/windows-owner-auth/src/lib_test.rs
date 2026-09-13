@@ -1,5 +1,12 @@
 use super::*;
 
+#[test]
+fn every_availability_result_is_disjoint_from_authorization() {
+    for value in 0..=4 {
+        assert_ne!(AVAILABILITY_EXIT_BASE + value, VERIFIED_EXIT);
+    }
+}
+
 fn challenge() -> Challenge {
     Challenge {
         nonce: "a".repeat(64),

@@ -4,9 +4,13 @@
 fn main() {
     // There is no test approval mode, including in debug executables. A process
     // launched independently cannot provide the broker's retained process handle.
-    let verified = (|| -> anyhow::Result<bool> {
+    let outcome = (|| -> anyhow::Result<u32> {
         let mut args = std::env::args().skip(1);
-        anyhow::ensure!(args.next().as_deref() == Some("--verify"), "invalid mode");
+        let mode = args.next();
+        anyhow::ensure!(
+            matches!(mode.as_deref(), Some("--verify" | "--probe-availability")),
+            "invalid mode"
+        );
         let input = args
             .next()
             .ok_or_else(|| anyhow::anyhow!("missing challenge"))?;
@@ -16,13 +20,29 @@ fn main() {
         );
         let challenge: ekubo_wallet_windows_owner_auth::Challenge = serde_json::from_str(&input)?;
         challenge.validate()?;
-        ekubo_wallet_windows_owner_auth::collect(&challenge)
+        if mode.as_deref() == Some("--probe-availability") {
+            // A diagnostic never maps Available (or any error) to VERIFIED_EXIT.
+            return Ok(
+                match ekubo_wallet_windows_owner_auth::probe_availability(&challenge) {
+                    Ok(code) => code,
+                    // Preserve a failing Windows HRESULT for CI diagnostics. Only
+                    // failure HRESULTs (high bit set) are emitted on this path, so
+                    // no error can coincide with an authorization success sentinel.
+                    Err(error) => error
+                        .downcast_ref::<windows::core::Error>()
+                        .map(|error| error.code().0.cast_unsigned())
+                        .filter(|code| code & 0x8000_0000 != 0)
+                        .unwrap_or(1),
+                },
+            );
+        }
+        Ok(if ekubo_wallet_windows_owner_auth::collect(&challenge)? {
+            ekubo_wallet_windows_owner_auth::VERIFIED_EXIT
+        } else {
+            1
+        })
     })();
-    std::process::exit(if matches!(verified, Ok(true)) {
-        ekubo_wallet_windows_owner_auth::VERIFIED_EXIT.cast_signed()
-    } else {
-        1
-    });
+    std::process::exit(outcome.unwrap_or(1).cast_signed());
 }
 
 #[cfg(not(windows))]

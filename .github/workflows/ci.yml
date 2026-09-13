@@ -55,6 +55,9 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.windows_primitives_only
     name: Real Windows native diagnostics
     runs-on: windows-2025
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup update stable --no-self-update
@@ -62,6 +65,9 @@ jobs:
         with:
           cache-on-failure: false
       - run: python contrib/check-windows-service.py
+      - name: Protected collector boundary and availability (no consent)
+        shell: pwsh
+        run: contrib/test-windows-auth-boundary.ps1
 
   execution-plan:
     if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only

@@ -38,8 +38,9 @@ impl Drop for Revert {
     }
 }
 
-/// Explicitly executed under SYSTEM on the disposable CI VM. The collector is
-/// NEVER resumed: no Hello UI, account mutation, or biometric operation occurs.
+/// Explicitly executed under SYSTEM on the disposable CI VM. The negative
+/// fixture stays suspended. A separate compiled collector is resumed only for
+/// read-only availability; neither child requests consent or changes an account.
 #[test]
 #[ignore = "requires disposable Windows CI SYSTEM context and an interactive session"]
 fn system_created_collector_denies_owner_mutation_from_birth() {
@@ -150,6 +151,68 @@ fn system_created_collector_denies_owner_mutation_from_birth() {
     assert_eq!(
         unsafe { WaitForSingleObject(observed.0, 5_000) },
         WAIT_OBJECT_0
+    );
+    assert_protected_availability(&sid, session, logon, &challenge);
+}
+
+fn assert_protected_availability(sid: &str, session: u32, logon: [u32; 2], challenge: &Challenge) {
+    // Supplied by the disposable CI driver from Cargo's actual binary artifact.
+    // This environment selector exists only in this test module, never in the
+    // production launcher or the collector's clean environment.
+    let executable = std::path::PathBuf::from(
+        std::env::var_os("EKUBO_WALLET_AUTH_FIXTURE_COLLECTOR")
+            .expect("CI must build and supply the actual collector binary"),
+    );
+    assert_eq!(
+        executable.file_name().unwrap(),
+        "ekubo-wallet-v2-owner-auth.exe"
+    );
+    assert!(executable.is_absolute() && executable.is_file());
+    let (mut process, thread) = create_suspended_mode(
+        &executable,
+        sid,
+        session,
+        logon,
+        challenge,
+        CollectorMode::ProbeAvailability,
+    )
+    .unwrap();
+    let mut primary = HANDLE::default();
+    unsafe { OpenProcessToken(process.process.0, TOKEN_QUERY, &raw mut primary) }.unwrap();
+    let primary = Handle(primary);
+    assert_eq!(token_sid(primary.0).unwrap(), sid);
+    assert_eq!(logon_identity(primary.0).unwrap(), (session, logon));
+    // Same token/default ACL, process/thread descriptors, mitigations, job,
+    // desktop and environment as production; no relaxation to make WinRT pass.
+    process.deadline = Instant::now() + Duration::from_secs(45);
+    assert_eq!(unsafe { ResumeThread(thread.0) }, 1);
+    loop {
+        if let Some(authorized) = process
+            .poll()
+            .expect("protected availability query timed out or lost its owner")
+        {
+            assert!(
+                !authorized,
+                "availability diagnostic authorized an operation"
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut exit = 0;
+    unsafe { GetExitCodeProcess(process.process.0, &raw mut exit) }.unwrap();
+    assert!(
+        (crate::AVAILABILITY_EXIT_BASE..=crate::AVAILABILITY_EXIT_BASE + 4).contains(&exit),
+        "protected WinRT availability query failed: exit/HRESULT {exit:#010x}"
+    );
+    assert_ne!(exit, VERIFIED_EXIT);
+    assert!(
+        process.poll().is_err(),
+        "collector result was consumable twice"
+    );
+    eprintln!(
+        "Protected collector queried Windows availability successfully: enum {} (not authorization)",
+        exit - crate::AVAILABILITY_EXIT_BASE
     );
 }
 

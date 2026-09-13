@@ -51,6 +51,7 @@ pub mod mcp_companions;
 pub mod message;
 pub mod networks;
 pub mod orchestrator;
+pub mod owner_call_monitor;
 pub mod owner_framing;
 pub mod owner_stream_protocol;
 pub mod pending;

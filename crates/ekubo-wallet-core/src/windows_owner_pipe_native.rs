@@ -341,23 +341,11 @@ pub(crate) fn verify_auth_connection(connection: &OwnedHandle) -> Result<()> {
 }
 
 fn verify_pipe_connection(connection: HANDLE) -> Result<()> {
-    let mut available = 0;
-    // SAFETY: retained overlapped server handle; this consumes no data and does
-    // not change the last-read impersonation context. Broken pipes fail.
-    unsafe {
-        windows::Win32::System::Pipes::PeekNamedPipe(
-            connection,
-            None,
-            0,
-            None,
-            Some(&raw mut available),
-            None,
-        )
-    }?;
-    ensure!(
-        available == 0,
-        "unexpected traffic on native authorization owner connection"
-    );
+    // Best-effort kernel liveness only. Mio/IOCP can already have consumed bytes
+    // into its own read buffer, so a kernel peek cannot enforce empty transport
+    // input. OwnerCallMonitor polls the actual AsyncRead implementation instead.
+    // SAFETY: live handle, no data consumed or impersonation state changed.
+    unsafe { windows::Win32::System::Pipes::PeekNamedPipe(connection, None, 0, None, None, None) }?;
     Ok(())
 }
 

@@ -52,10 +52,16 @@ fn marker(binding: &MoveBinding) -> Result<Vec<u8>> {
 }
 
 fn read_database_key() -> Result<Option<Zeroizing<Vec<u8>>>> {
-    match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")?.get_secret() {
+    // All production callers run in blocking_phase (review/resume or cleanup).
+    match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
+        .context("open legacy global database credential store")?
+        .get_secret()
+    {
         Ok(value) => Ok(Some(Zeroizing::new(value))),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => {
+            Err(anyhow::Error::from(error).context("read legacy global database credential"))
+        }
     }
 }
 
@@ -84,11 +90,14 @@ fn check_key(identity: &Identity, preserved: bool, key: Option<&[u8]>) -> Result
 
 pub(super) fn retire_database_key(identity: &Identity, preserved: bool) -> Result<bool> {
     retire_key_with(identity, preserved, read_database_key, || {
-        match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")?
+        match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
+            .context("open legacy global database credential for deletion")?
             .delete_credential()
         {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error.into()),
+            Err(error) => {
+                Err(anyhow::Error::from(error).context("delete legacy global database credential"))
+            }
         }
     })
 }
@@ -236,7 +245,10 @@ impl Frozen {
 impl LegacySource {
     pub(super) fn resume(receipt: Receipt) -> Result<Self> {
         require_legacy_owner()?;
-        Self::resume_with_key(receipt, read_database_key()?)
+        Self::resume_with_key(
+            receipt,
+            read_database_key().context("read old database credential during cleanup recovery")?,
+        )
     }
 
     fn resume_with_key(receipt: Receipt, key: Option<Zeroizing<Vec<u8>>>) -> Result<Self> {
@@ -320,3 +332,7 @@ impl LegacySource {
 #[cfg(test)]
 #[path = "legacy_move_retirement_test.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "legacy_move_secret_service_test.rs"]
+mod secret_service_tests;

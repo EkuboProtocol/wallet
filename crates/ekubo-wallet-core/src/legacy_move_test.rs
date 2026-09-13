@@ -1,6 +1,52 @@
 use super::*;
 use std::{cell::RefCell, collections::BTreeMap};
 
+async fn synchronous_platform_runtime_phase() {
+    let value = blocking_phase("platform runtime regression", || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        Ok(runtime.block_on(async { 17 }))
+    })
+    .await
+    .unwrap();
+    assert_eq!(value, 17);
+    let error = blocking_phase::<()>("credential read regression", || {
+        anyhow::bail!("native backend failure")
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{error:#}")
+            .contains("legacy move credential read regression: native backend failure")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_platform_phases_support_current_thread_callers() {
+    synchronous_platform_runtime_phase().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_platform_phases_support_multithread_cli_callers() {
+    synchronous_platform_runtime_phase().await;
+}
+
+#[test]
+fn legacy_platform_phases_support_desktop_worker_block_on() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = runtime.handle().clone();
+    runtime.block_on(async move {
+        tokio::task::spawn_blocking(move || handle.block_on(synchronous_platform_runtime_phase()))
+            .await
+            .unwrap();
+    });
+}
+
 #[test]
 fn move_owner_request_uses_the_shared_protocol_envelope() {
     let nonce = Uuid::new_v4();

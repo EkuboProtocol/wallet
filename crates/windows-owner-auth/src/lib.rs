@@ -7,6 +7,9 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 pub const VERIFIED_EXIT: u32 = 0x4557_3201;
+/// Read-only diagnostic completion plus the Windows availability enum (0..=4).
+/// This range is deliberately disjoint from every authorization success code.
+pub const AVAILABILITY_EXIT_BASE: u32 = 0x4557_3300;
 pub const MAX_REASON_BYTES: usize = 1024;
 
 /// Fixed-mode launch input. No executable, DLL, handle, or credential can be
@@ -71,7 +74,7 @@ pub use native::{CollectorProcess, installed_helper_path, launch, logon_identity
 #[cfg(windows)]
 mod hello;
 #[cfg(windows)]
-pub use hello::collect;
+pub use hello::{collect, probe_availability};
 
 #[cfg(test)]
 #[path = "lib_test.rs"]

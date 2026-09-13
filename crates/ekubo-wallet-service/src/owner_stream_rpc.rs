@@ -156,19 +156,48 @@ impl OwnerStreamService {
         let runtime = self.runtime()?;
         let request: Request = serde_json::from_slice(frame.body())
             .map_err(|_| anyhow::anyhow!("invalid owner operation"))?;
-        let operation = runtime.owner.encode(request);
         #[cfg(windows)]
-        let operation = ekubo_wallet_core::windows_service_presence::scope(
-            peer.owner_call_context(frame.body())?,
-            operation,
-        );
-        let response = tokio::select! {
-            biased;
-            departed = wait_for_departure(peer.stream()) => return Err(departed),
-            response = operation => response?,
-        };
-        wire::write(peer.stream(), Kind::Ok, response.as_bytes()).await
+        let context = peer.owner_call_context(frame.body())?;
+        run_call(peer.stream(), |binding| async move {
+            #[cfg(windows)]
+            {
+                let context = context
+                    .map(|context| context.with_transport(binding))
+                    .transpose()?;
+                ekubo_wallet_core::windows_service_presence::scope(
+                    context,
+                    runtime.owner.encode(request),
+                )
+                .await
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = binding;
+                runtime.owner.encode(request).await
+            }
+        })
+        .await
     }
+}
+
+async fn run_call<S, F>(
+    stream: &mut S,
+    operation: impl FnOnce(ekubo_wallet_core::owner_call_monitor::OwnerCallBinding) -> F,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: std::future::Future<Output = Result<zeroize::Zeroizing<String>>>,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut monitor = ekubo_wallet_core::owner_call_monitor::OwnerCallMonitor::new(reader);
+    let binding = monitor.binding();
+    // Delay even construction of the operation until input has been checked.
+    let response = monitor.run(async { operation(binding).await }).await?;
+    // Keep the same monitor alive through response backpressure, rather than
+    // abandoning the AsyncRead as soon as the operation future completes.
+    monitor
+        .run(wire::write(&mut writer, Kind::Ok, response.as_bytes()))
+        .await
 }
 
 async fn read_request(peer: &mut impl Peer) -> Result<Frame> {
@@ -193,6 +222,10 @@ async fn wait_for_departure(stream: &mut (impl AsyncRead + Unpin)) -> anyhow::Er
 #[cfg(test)]
 #[path = "owner_stream_rpc_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "owner_stream_call_test.rs"]
+mod owner_call_tests;
 
 #[cfg(test)]
 #[path = "owner_stream_mcp_test.rs"]

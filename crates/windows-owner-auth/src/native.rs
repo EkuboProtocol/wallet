@@ -366,6 +366,43 @@ fn create_suspended(
     logon: [u32; 2],
     challenge: &Challenge,
 ) -> Result<(CollectorProcess, Handle)> {
+    create_suspended_mode(
+        installed_helper,
+        owner,
+        session,
+        logon,
+        challenge,
+        CollectorMode::Verify,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CollectorMode {
+    Verify,
+    // Only native test code can select a diagnostic launch. The production
+    // broker/launch API has no mode or executable parameter and always verifies.
+    #[cfg(test)]
+    ProbeAvailability,
+}
+
+impl CollectorMode {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Verify => "--verify",
+            #[cfg(test)]
+            Self::ProbeAvailability => "--probe-availability",
+        }
+    }
+}
+
+fn create_suspended_mode(
+    installed_helper: &Path,
+    owner: &str,
+    session: u32,
+    logon: [u32; 2],
+    challenge: &Challenge,
+    mode: CollectorMode,
+) -> Result<(CollectorProcess, Handle)> {
     challenge.validate()?;
     let token = collector_token(owner, session, logon)?;
     let descriptor = descriptor("O:SYD:P(A;;GA;;;SY)(A;;0;;;OW)S:(ML;;NW;;;HI)")?;
@@ -414,8 +451,9 @@ fn create_suspended(
     );
     let serialized = serde_json::to_string(challenge)?;
     let mut command = wide(&format!(
-        "{} --verify {}",
+        "{} {} {}",
         crate::quote_argument(installed_helper.to_str().context("invalid helper path")?),
+        mode.argument(),
         crate::quote_argument(&serialized)
     ));
     // No inherited environment, standard handles, or caller-controlled DLL path.

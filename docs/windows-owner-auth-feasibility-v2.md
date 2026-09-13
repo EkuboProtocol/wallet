@@ -30,7 +30,17 @@ Installer, recovery, upgrade, NSIS, and trusted-signing inputs include the helpe
 and broker registration. Native negative fixtures cover process/thread access,
 wrong owner/logon generation, default ACL owner rights, expiry, cancellation,
 pipe closure and malformed/replayed receipts. The SYSTEM fixture is explicitly
-limited to disposable Windows CI and never resumes its child or invokes Hello.
+limited to disposable Windows CI. Its negative-test child stays suspended; it
+also resumes the actual compiled collector in `--probe-availability` mode under
+the identical token/default ACL, process/thread descriptors, mitigations and job.
+That mode calls only `IUserConsentVerifierStatics::CheckAvailabilityAsync` through
+the fixed System32 factory and shared registry/apartment/HWND initialization and
+bounded message loop. Any documented availability value is a successful query,
+including no device or no user configuration. Its diagnostic exit-code range is
+disjoint from `VERIFIED_EXIT`, and the fixture asserts that production polling
+returns non-authorization. The production broker always selects `--verify`.
+This readiness check does not establish an actual owner gesture: no fixture
+calls verification, enrollment, reset, or biometric-input APIs.
 
 Validation in this worker: the helper crate passes Windows GNU-target Clippy for
 all targets with warnings denied. A read-only probe on the Windows build host

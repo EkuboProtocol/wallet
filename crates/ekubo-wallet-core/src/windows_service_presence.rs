@@ -22,14 +22,38 @@ pub struct OwnerCallContext {
     logon: [u32; 2],
     operation_digest: String,
     connection: Arc<std::os::windows::io::OwnedHandle>,
+    transport: Option<crate::owner_call_monitor::OwnerCallBinding>,
 }
 
 impl OwnerCallContext {
+    /// Attach only the guard owned by the transport's actual AsyncRead monitor.
+    pub fn with_transport(
+        mut self,
+        binding: crate::owner_call_monitor::OwnerCallBinding,
+    ) -> Result<Self> {
+        ensure!(
+            self.transport.is_none(),
+            "owner call transport is already bound"
+        );
+        binding.ensure_live()?;
+        self.transport = Some(binding);
+        Ok(self)
+    }
+
     pub(crate) fn verify_current(&self) -> Result<()> {
         let current = current_binding()?;
+        let transport = self
+            .transport
+            .as_ref()
+            .context("owner authorization has no transport binding")?;
+        transport.ensure_live()?;
         ensure!(
             Arc::ptr_eq(&self.connection, &current.connection)
-                && self.operation_digest == current.operation_digest,
+                && self.operation_digest == current.operation_digest
+                && current
+                    .transport
+                    .as_ref()
+                    .is_some_and(|other| transport.same_call(other)),
             "owner authorization belongs to a different initiating call"
         );
         Ok(())
@@ -48,6 +72,7 @@ impl OwnerCallContext {
             logon,
             operation_digest: hex::encode(Sha256::digest(request)),
             connection: Arc::new(connection),
+            transport: None,
         }
     }
 }
@@ -60,6 +85,13 @@ pub(crate) fn current_binding() -> Result<OwnerCallContext> {
         .ok()
         .flatten()
         .context("Windows owner call is no longer active")?;
+    context
+        .transport
+        .as_ref()
+        .context("Windows owner call has no transport monitor")?
+        .ensure_live()?;
+    // Additional best-effort kernel check; unread Tokio/Mio bytes are governed
+    // by the AsyncRead monitor, not PeekNamedPipe's kernel buffer count.
     crate::windows_owner_pipe::verify_auth_connection(&context.connection)?;
     Ok(context)
 }
@@ -222,37 +254,32 @@ async fn broker_request(
     let request: Request = read(pipe).await?;
     crate::windows_owner_pipe::authenticate_auth_service(pipe, identity.service_sid())?;
     request.challenge.validate()?;
-    let image = crate::windows_auth_image::installed_collector()?;
-    let mut process = ekubo_wallet_windows_owner_auth::launch(
-        identity.owner_sid(),
-        request.session,
-        request.logon,
-        &request.challenge,
-    )?;
-    drop(image);
-    let complete = async {
-        loop {
-            if let Some(verified) = process.poll()? {
-                ensure!(verified, "native owner authentication declined or failed");
-                return Ok::<(), anyhow::Error>(());
+    let (reader, mut writer) = tokio::io::split(pipe);
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(reader);
+    let receipt = monitor
+        .run(async {
+            let image = crate::windows_auth_image::installed_collector()?;
+            let mut process = ekubo_wallet_windows_owner_auth::launch(
+                identity.owner_sid(),
+                request.session,
+                request.logon,
+                &request.challenge,
+            )?;
+            drop(image);
+            loop {
+                if let Some(verified) = process.poll()? {
+                    ensure!(verified, "native owner authentication declined or failed");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    };
-    let mut extra = [0];
-    tokio::select! {
-        biased;
-        _ = pipe.read(&mut extra) => anyhow::bail!("native authorization connection closed or sent additional data"),
-        result = complete => result?,
-    }
-    write(
-        pipe,
-        &Receipt {
-            nonce: request.challenge.nonce,
-            operation_digest: request.challenge.operation_digest,
-        },
-    )
-    .await
+            Ok(Receipt {
+                nonce: request.challenge.nonce,
+                operation_digest: request.challenge.operation_digest,
+            })
+        })
+        .await?;
+    monitor.run(write(&mut writer, &receipt)).await
 }
 
 #[cfg(test)]

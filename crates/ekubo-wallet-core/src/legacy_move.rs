@@ -197,6 +197,19 @@ pub enum ProfileInventory {
     Unknown,
 }
 
+// Secret Service's synchronous platform adapter owns a Tokio runtime. Its
+// construction, operations AND drop must run outside async execution. Unlike
+// block_in_place, spawn_blocking also supports current-thread caller runtimes.
+async fn blocking_phase<T: Send + 'static>(
+    phase: &'static str,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .with_context(|| format!("legacy move {phase}: blocking worker failed"))?
+        .with_context(|| format!("legacy move {phase}"))
+}
+
 /// Suggest the released 1.x path only when the owner explicitly opens the move
 /// flow. This is never a v2 data-root fallback and performs no credential access.
 pub fn suggested_legacy_root() -> Result<PathBuf> {
@@ -262,7 +275,7 @@ impl LegacySource {
         #[cfg(target_os = "linux")]
         let receipt = peer.call(&ServiceCommand::Inspect { nonce }).await?;
         ensure!(receipt.nonce == nonce, "stale move inspection");
-        tokio::task::spawn_blocking(move || {
+        blocking_phase("source review or cleanup recovery", move || {
             ensure!(
                 source.canonicalize()? == source
                     && preserve_profiles
@@ -288,7 +301,7 @@ impl LegacySource {
             reviewed.authorized_profile = authorized_profile;
             Ok(reviewed)
         })
-        .await?
+        .await
     }
 
     fn open(source: &Path, preserve_profiles: Vec<PathBuf>) -> Result<Self> {
@@ -309,8 +322,10 @@ impl LegacySource {
         );
         paths.insert(source.clone());
         let raw = Zeroizing::new(
-            crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")?
-                .get_secret()?,
+            crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
+                .context("open legacy database credential store")?
+                .get_secret()
+                .context("read legacy database credential for source review")?,
         );
         let retirement_key = retirement::hash(&raw);
         let key = DatabaseKey::new(
@@ -388,6 +403,30 @@ impl LegacySource {
             retained_shared_accounts: self.summary.retained_shared_accounts.clone(),
             retirement: Some(self.retirement.clone()),
         };
+        let preparation_binding = binding.clone();
+        let (source, command) = blocking_phase("prepare source account transfer", move || {
+            self.revalidate()?;
+            let command = self.prepare_import(preparation_binding)?;
+            Ok((self, command))
+        })
+        .await?;
+        self = source;
+        if let Some(command) = command {
+            let imported = peer
+                .call(&command)
+                .await
+                .context("legacy move destination import")?;
+            ensure!(
+                imported.digest == self.digest,
+                "destination import identity mismatch"
+            );
+        }
+        self.finish_move(peer, binding).await
+    }
+
+    // Called only by the blocking preparation worker, which owns the locked
+    // source until all credential handles have been dropped and the payload is ready.
+    fn prepare_import(&mut self, binding: MoveBinding) -> Result<Option<ServiceCommand>> {
         if let Some(snapshot) = self.snapshot.take() {
             let mut keys = Vec::new();
             for wallet in &self.summary.accounts {
@@ -401,22 +440,25 @@ impl LegacySource {
             let transfer = Transfer {
                 snapshot,
                 keys,
-                binding: binding.clone(),
+                binding,
             };
             let bytes = Zeroizing::new(serde_json::to_vec(&transfer)?);
             ensure!(
                 bytes.len() <= database::MAX_BYTES,
                 "legacy move exceeds bounded transfer size; no source credentials were deleted"
             );
-            let command = ServiceCommand::Import {
+            return Ok(Some(ServiceCommand::Import {
                 payload: STANDARD.encode(bytes.as_slice()),
-            };
-            let imported = peer.call(&command).await?;
-            ensure!(
-                imported.digest == self.digest,
-                "destination import identity mismatch"
-            );
+            }));
         }
+        Ok(None)
+    }
+
+    async fn finish_move(
+        mut self,
+        mut peer: transport::Peer,
+        binding: MoveBinding,
+    ) -> Result<CleanupReport> {
         // Authentication is renewed immediately before destructive cleanup. The
         // same locks and exact source identity remain alive through the prompt.
         #[cfg(target_os = "linux")]
@@ -431,7 +473,8 @@ impl LegacySource {
                 nonce,
                 binding: binding.clone(),
             })
-            .await?;
+            .await
+            .context("legacy move authorize cleanup and verify destination")?;
         let expected: BTreeSet<_> = self
             .summary
             .accounts
@@ -445,21 +488,33 @@ impl LegacySource {
                 && verified.accounts.into_iter().collect::<BTreeSet<_>>() == expected,
             "destination did not freshly verify every moved account"
         );
-        // Moving snapshot above intentionally prevents retaining another copy of
-        // its sensitive cells. Revalidation uses the retained source connections.
-        for profile in &self.frozen {
-            profile.revalidate()?;
-        }
-        retirement::check_database_key(
-            &self.retirement,
-            self.frozen[0].connection.is_some() || !self.summary.preserved_profiles.is_empty(),
-        )?;
-        self.frozen[0].retire(&binding)?;
-        let mut report = tokio::task::block_in_place(|| cleanup(&self.summary))?;
-        report.shared_database_credential_retained = retirement::retire_database_key(
-            &self.retirement,
-            !self.summary.preserved_profiles.is_empty(),
-        )?;
+        let cleanup_binding = binding.clone();
+        // Own the locks in the worker: cancelling the caller must not release
+        // them while an already-started credential deletion is still running.
+        let (source, report) =
+            blocking_phase("source retirement and credential cleanup", move || {
+                self.revalidate()
+                    .context("revalidate locked source before cleanup")?;
+                retirement::check_database_key(
+                    &self.retirement,
+                    self.frozen[0].connection.is_some()
+                        || !self.summary.preserved_profiles.is_empty(),
+                )
+                .context("check old global database credential before retirement")?;
+                self.frozen[0]
+                    .retire(&cleanup_binding)
+                    .context("publish encrypted backup and source tombstone")?;
+                let mut report =
+                    cleanup(&self.summary).context("retire unshared source account credentials")?;
+                report.shared_database_credential_retained = retirement::retire_database_key(
+                    &self.retirement,
+                    !self.summary.preserved_profiles.is_empty(),
+                )
+                .context("retire old global database credential and confirm absence")?;
+                Ok((self, report))
+            })
+            .await?;
+        self = source;
         // A crash here leaves the durable receipt pending. Explicit resume can
         // verify the destination keys even when old keys are already absent.
         let nonce = Uuid::new_v4();
@@ -469,7 +524,8 @@ impl LegacySource {
                 nonce,
                 binding,
             })
-            .await?;
+            .await
+            .context("legacy move record durable cleanup completion")?;
         ensure!(
             completed.digest == self.digest
                 && completed.nonce == nonce
@@ -620,22 +676,21 @@ fn shared_accounts(source: &[WalletMetadata], preserved: &[WalletMetadata]) -> V
 }
 
 fn legacy_key(wallet: &WalletMetadata) -> Result<Option<Zeroizing<Vec<u8>>>> {
-    tokio::task::block_in_place(|| {
-        match crate::credential_store::legacy_entry(
-            "org.ekubo.wallet.private-key.instance",
-            &wallet.instance_id.to_string(),
-        )?
-        .get_secret()
-        {
-            Ok(bytes) => {
-                let bytes = Zeroizing::new(bytes);
-                verify_key(wallet, &bytes)?;
-                Ok(Some(bytes))
-            }
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error.into()),
+    match crate::credential_store::legacy_entry(
+        "org.ekubo.wallet.private-key.instance",
+        &wallet.instance_id.to_string(),
+    )
+    .context("open legacy account credential store")?
+    .get_secret()
+    {
+        Ok(bytes) => {
+            let bytes = Zeroizing::new(bytes);
+            verify_key(wallet, &bytes)?;
+            Ok(Some(bytes))
         }
-    })
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(anyhow::Error::from(error).context("read legacy account credential")),
+    }
 }
 fn verify_key(wallet: &WalletMetadata, bytes: &[u8]) -> Result<()> {
     ensure!(
@@ -651,15 +706,22 @@ fn cleanup(summary: &MoveSummary) -> Result<CleanupReport> {
         let entry = crate::credential_store::legacy_entry(
             "org.ekubo.wallet.private-key.instance",
             &wallet.instance_id.to_string(),
-        )?;
-        let current = Zeroizing::new(entry.get_secret()?);
+        )
+        .context("open legacy account credential for deletion")?;
+        let current = Zeroizing::new(
+            entry
+                .get_secret()
+                .context("reread legacy account credential before deletion")?,
+        );
         ensure!(
             current.as_slice() == expected,
             "legacy credential changed before deletion"
         );
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error.into()),
+            Err(error) => {
+                Err(anyhow::Error::from(error).context("delete legacy account credential"))
+            }
         }
     })
 }
