@@ -24,6 +24,13 @@ VIAddVersionKey "LegalCopyright" "Ekubo, Inc."
 ; stdout handle. The smoke runner owns that pipe/file: no elevated arbitrary
 ; logfile path or environment-controlled destination is introduced here.
 !macro Lifecycle MODE SCRIPT
+  ; A native intermediary otherwise carries PowerShell 7's module paths into
+  ; Windows PowerShell 5, breaking Security module loading (and allowing user
+  ; module paths into this privileged operation). This changes only our process.
+  System::Call 'kernel32::SetEnvironmentVariableW(w "PSModulePath", w "$WINDIR\System32\WindowsPowerShell\v1.0\Modules") i.r6'
+  StrCmp $6 0 0 +3
+    SetErrorLevel 1
+    Abort "Could not select the system PowerShell modules."
   nsExec::ExecToStack '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${SCRIPT}" -Mode ${MODE}'
   Pop $0
   Pop $1
@@ -81,7 +88,7 @@ Section "Install"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\org.ekubo.wallet.v2" "DisplayName" "Ekubo Wallet 2"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\org.ekubo.wallet.v2" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\org.ekubo.wallet.v2" "UninstallString" '$"$INSTDIR\uninstall.exe$"'
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\org.ekubo.wallet.v2" "UninstallString" '"$INSTDIR\uninstall.exe"'
   CreateShortcut "$SMPROGRAMS\Ekubo Wallet 2.lnk" "$INSTDIR\ekubo-wallet-v2.exe"
   ; Toast identity is installer-owned; desktop startup does not write registry state.
   WriteRegStr HKLM "Software\Classes\AppUserModelId\org.ekubo.wallet.v2" "DisplayName" "Ekubo Wallet 2"

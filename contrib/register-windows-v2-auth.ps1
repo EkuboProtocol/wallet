@@ -1,6 +1,7 @@
 # Fixed per-profile SYSTEM broker registration. No owner credentials are used.
 param([Parameter(Mandatory=$true)][string]$OwnerSid)
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 Set-StrictMode -Version Latest
 if (-not [Environment]::Is64BitProcess -or $OwnerSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'Invalid native authentication installation context.' }
 $record = Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\EkuboWalletV2\Owners\' + $OwnerSid)

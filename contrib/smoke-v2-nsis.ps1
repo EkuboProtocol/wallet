@@ -42,6 +42,7 @@ foreach ($attempt in 1..2) {
     }
     $registration = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\org.ekubo.wallet.v2'
     if ($registration.DisplayName -ne 'Ekubo Wallet 2') { throw 'Wrong installed product identity.' }
+    if ($registration.UninstallString -ne ('"' + (Join-Path $install 'uninstall.exe') + '"')) { throw 'The registered uninstall command is not correctly quoted.' }
 }
 Invoke-Installer (Join-Path $install 'uninstall.exe') @('/S', "_?=$install") 'uninstall'
 if (Test-Path -LiteralPath (Join-Path $install 'ekubo-wallet-service.exe')) { throw 'Service binary survived uninstall.' }

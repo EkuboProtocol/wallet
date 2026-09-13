@@ -10,6 +10,7 @@ trap {
     exit 1
 }
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 Set-StrictMode -Version Latest
 $install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2'
 if (-not [Environment]::Is64BitProcess) { throw 'Package lifecycle requires 64-bit PowerShell.' }

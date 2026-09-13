@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory=$true)][Guid]$RelayEndpoint
 )
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 Set-StrictMode -Version Latest
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or -not [Environment]::Is64BitProcess) {

@@ -70,7 +70,12 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
         ps_literal(&powershell.to_string_lossy()),
         ps_literal(&arguments)
     );
+    let modules = powershell
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing system PowerShell directory"))?
+        .join("Modules");
     let status = std::process::Command::new(powershell)
+        .env("PSModulePath", modules)
         .args(["-NoProfile", "-NonInteractive", "-Command", &expression])
         .status()?;
     ensure!(
