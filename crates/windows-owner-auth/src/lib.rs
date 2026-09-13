@@ -10,6 +10,37 @@ pub const VERIFIED_EXIT: u32 = 0x4557_3201;
 /// Read-only diagnostic completion plus the Windows availability enum (0..=4).
 /// This range is deliberately disjoint from every authorization success code.
 pub const AVAILABILITY_EXIT_BASE: u32 = 0x4557_3300;
+
+/// Diagnostic-only tag: stage in bits 24..27 and the lower 24 HRESULT bits.
+/// Only HRESULTs with upper byte 0x80 use this lossless encoding; others remain
+/// raw failures. The positive 0x7 tag cannot collide with a failing HRESULT or
+/// `VERIFIED_EXIT`, making tagged versus raw failures unambiguous.
+#[must_use]
+pub fn decode_probe_failure(code: u32) -> Option<(&'static str, u32)> {
+    const STAGES: [&str; 16] = [
+        "unknown",
+        "DLL search policy",
+        "registry cache",
+        "registry open",
+        "registry override",
+        "native apartment",
+        "HWND creation",
+        "factory activation/interop QI",
+        "statics QI",
+        "CheckAvailabilityAsync",
+        "async status",
+        "async GetResults",
+        "async cancellation",
+        "availability completion",
+        "System32 DLL load",
+        "System32 DLL pin",
+    ];
+    if code & 0xf000_0000 != 0x7000_0000 {
+        return None;
+    }
+    let stage = usize::try_from((code >> 24) & 0xf).ok()?;
+    Some((*STAGES.get(stage)?, 0x8000_0000 | (code & 0x00ff_ffff)))
+}
 pub const MAX_REASON_BYTES: usize = 1024;
 
 /// Fixed-mode launch input. No executable, DLL, handle, or credential can be
@@ -74,7 +105,7 @@ pub use native::{CollectorProcess, installed_helper_path, launch, logon_identity
 #[cfg(windows)]
 mod hello;
 #[cfg(windows)]
-pub use hello::{collect, probe_availability};
+pub use hello::{collect, probe_availability, probe_failure_exit};
 
 #[cfg(test)]
 #[path = "lib_test.rs"]

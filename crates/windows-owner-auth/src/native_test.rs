@@ -201,9 +201,13 @@ fn assert_protected_availability(sid: &str, session: u32, logon: [u32; 2], chall
     }
     let mut exit = 0;
     unsafe { GetExitCodeProcess(process.process.0, &raw mut exit) }.unwrap();
+    let diagnostic = crate::decode_probe_failure(exit).map_or_else(
+        || format!("raw exit/HRESULT {exit:#010x}"),
+        |(stage, hr)| format!("{stage}: HRESULT {hr:#010x}"),
+    );
     assert!(
         (crate::AVAILABILITY_EXIT_BASE..=crate::AVAILABILITY_EXIT_BASE + 4).contains(&exit),
-        "protected WinRT availability query failed: exit/HRESULT {exit:#010x}"
+        "protected WinRT availability query failed: {diagnostic} (exit {exit:#010x})"
     );
     assert_ne!(exit, VERIFIED_EXIT);
     assert!(

@@ -25,14 +25,7 @@ fn main() {
             return Ok(
                 match ekubo_wallet_windows_owner_auth::probe_availability(&challenge) {
                     Ok(code) => code,
-                    // Preserve a failing Windows HRESULT for CI diagnostics. Only
-                    // failure HRESULTs (high bit set) are emitted on this path, so
-                    // no error can coincide with an authorization success sentinel.
-                    Err(error) => error
-                        .downcast_ref::<windows::core::Error>()
-                        .map(|error| error.code().0.cast_unsigned())
-                        .filter(|code| code & 0x8000_0000 != 0)
-                        .unwrap_or(1),
+                    Err(error) => ekubo_wallet_windows_owner_auth::probe_failure_exit(&error),
                 },
             );
         }

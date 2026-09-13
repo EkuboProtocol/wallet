@@ -1,5 +1,5 @@
 name: Tests
-run-name: ${{ github.event_name == 'pull_request' && 'Scoped PR checks (no Rust compilation)' || (inputs.linux_acceptance_only && 'Installed Linux acceptance (no desktop rebuild)' || (inputs.windows_primitives_only && 'Windows native diagnostics (not full CI)' || 'Full wallet milestone CI')) }}
+run-name: ${{ github.event_name == 'pull_request' && 'Scoped PR checks (no Rust compilation)' || inputs.linux_acceptance_only && 'Installed Linux acceptance (no desktop rebuild)' || inputs.windows_auth_only && 'Windows collector acceptance (helper only)' || inputs.windows_primitives_only && 'Windows native diagnostics (not full CI)' || 'Full wallet milestone CI' }}
 
 on:
   pull_request:
@@ -25,6 +25,10 @@ on:
         description: Run installed Linux acceptance without rebuilding the desktop test suite
         type: boolean
         default: false
+      windows_auth_only:
+        description: Test the protected Windows collector without rebuilding the wallet
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,7 +36,7 @@ permissions:
 concurrency:
   # Cheap PR checks must not cancel a manually dispatched native milestone.
   # Repeated runs of the same class still supersede one another on this branch.
-  group: wallet-ci-${{ github.event_name == 'pull_request' && 'source' || (inputs.linux_acceptance_only && 'installed-linux' || (inputs.windows_primitives_only && 'windows-diagnostics' || 'native')) }}-${{ github.head_ref || github.ref_name }}
+  group: wallet-ci-${{ github.event_name == 'pull_request' && 'source' || inputs.linux_acceptance_only && 'installed-linux' || inputs.windows_auth_only && 'windows-auth' || inputs.windows_primitives_only && 'windows-diagnostics' || 'native' }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -69,8 +73,27 @@ jobs:
         shell: pwsh
         run: contrib/test-windows-auth-boundary.ps1
 
+  windows-auth:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_auth_only
+    runs-on: windows-2025
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v2-collector-acceptance
+          cache-on-failure: true
+      - run: cargo build --locked -p ekubo-wallet-windows-owner-auth --bin ekubo-wallet-v2-owner-auth
+      - name: Ordinary read-only availability control
+        run: cargo test --locked -p ekubo-wallet-windows-owner-auth --lib ordinary_process_completes_read_only_availability_query -- --nocapture
+      - name: Protected process boundary and availability
+        shell: pwsh
+        run: contrib/test-windows-auth-boundary.ps1
+
   execution-plan:
-    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only
+    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,7 +111,7 @@ jobs:
           node crates/erc8410-wasm/smoke-test.cjs
 
   test:
-    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only
+    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only
     name: Native milestone (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -165,7 +188,7 @@ jobs:
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" python3 contrib/accept-installed-linux.py --run-migration-disposable "$PWD/target/debug"
 
   lint:
-    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only
+    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

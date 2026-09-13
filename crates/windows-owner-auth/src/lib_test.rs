@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn staged_failures_preserve_hresult_without_colliding_with_raw_errors_or_authorization() {
+    for stage in 0..16 {
+        let exit = 0x7000_0000 | (stage << 24) | 0x0007_0006;
+        assert_eq!(decode_probe_failure(exit).unwrap().1, 0x8007_0006);
+        assert_ne!(exit, VERIFIED_EXIT);
+        assert!(!(AVAILABILITY_EXIT_BASE..=AVAILABILITY_EXIT_BASE + 4).contains(&exit));
+    }
+    assert!(decode_probe_failure(0xd000_0005).is_none());
+    assert!(decode_probe_failure(0x8007_0006).is_none());
+}
+
+#[test]
 fn every_availability_result_is_disjoint_from_authorization() {
     for value in 0..=4 {
         assert_ne!(AVAILABILITY_EXIT_BASE + value, VERIFIED_EXIT);
