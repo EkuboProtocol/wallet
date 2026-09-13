@@ -109,6 +109,41 @@ public sealed class WalletAcceptanceServiceProcess : IDisposable {
     }
     public void Dispose() { if(handle!=IntPtr.Zero) { CloseHandle(handle); handle=IntPtr.Zero; } }
 }
+// A synthetic, uniquely named credential in the disposable coordinator account.
+// Never enumerate or read any pre-existing credential.
+public static class WalletAcceptanceCredential {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Credential {
+        public uint flags,type; public string target,comment; public long written;
+        public uint size; public IntPtr blob; public uint persist,count;
+        public IntPtr attributes; public string alias,user;
+    }
+    [DllImport("advapi32.dll", EntryPoint="CredWriteW", ExactSpelling=true, CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CredWriteW(ref Credential value,uint flags);
+    [DllImport("advapi32.dll", EntryPoint="CredReadW", ExactSpelling=true, CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CredReadW(string target,uint type,uint flags,out IntPtr value);
+    [DllImport("advapi32.dll", EntryPoint="CredDeleteW", ExactSpelling=true, CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CredDeleteW(string target,uint type,uint flags);
+    [DllImport("advapi32.dll", ExactSpelling=true)] static extern void CredFree(IntPtr value);
+    public static void Create(string target) {
+        IntPtr existing;
+        if(CredReadW(target,1,0,out existing)) { CredFree(existing); throw new InvalidOperationException("Existing fixture credential"); }
+        if(Marshal.GetLastWin32Error()!=1168) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var bytes=Encoding.UTF8.GetBytes("disposable-recovery-sentinel");
+        IntPtr blob=Marshal.AllocHGlobal(bytes.Length);
+        try {
+            Marshal.Copy(bytes,0,blob,bytes.Length);
+            var value=new Credential {type=1,target=target,user="fixture",size=(uint)bytes.Length,blob=blob,persist=2};
+            if(!CredWriteW(ref value,0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        } finally { Marshal.FreeHGlobal(blob); }
+    }
+    public static void Verify(string target) {
+        IntPtr pointer;
+        if(!CredReadW(target,1,0,out pointer)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            var value=(Credential)Marshal.PtrToStructure(pointer,typeof(Credential));
+            var bytes=new byte[value.size]; Marshal.Copy(value.blob,bytes,0,bytes.Length);
+            if(value.user!="fixture" || Encoding.UTF8.GetString(bytes)!="disposable-recovery-sentinel") throw new InvalidOperationException("Unrelated credential changed");
+        } finally { CredFree(pointer); }
+    }
+    public static void Delete(string target) { if(!CredDeleteW(target,1,0)) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+}
 '@
 
 function Set-DirectoryAcl($path, $ownerSid, $rights) {
@@ -317,6 +352,52 @@ try {
             if ($relay.owner_sid -ne $ownerSid -or $relay.owner_sid -eq $administrator.User.Value) { throw 'Relay is not owned by the standard fixture user.' }
             $stdout = Join-Path $work 'installer.stdout.log'; $stderr = Join-Path $work 'installer.stderr.log'
             $startedInstall = $true
+            $stage = 'interrupted enrollment / production provisioning with absent relay'
+            $unrelated = Join-Path $work 'unrelated-recovery-sentinel'
+            [IO.File]::WriteAllText($unrelated, 'unrelated disposable data')
+            $unrelatedHash = (Get-FileHash -LiteralPath $unrelated).Hash
+            $profilesBefore = @(Get-CimInstance Win32_UserProfile | Select-Object SID, LocalPath)
+            $credentialTarget = "EkuboWalletV2-Acceptance-$nonce"
+            [WalletAcceptanceCredential]::Create($credentialTarget)
+            try {
+                # This really asks the production authority to create its empty
+                # SQLCipher/key files, then loses the owner handoff. No fixture
+                # switch or fabricated pending metadata enters production.
+                $missingRelay = [Guid]::NewGuid().ToString()
+                $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $missingRelay) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+                if (-not $installer.WaitForExit(120000)) { throw 'Interrupted enrollment did not fail within 120 seconds.' }
+                if ($installer.ExitCode -eq 0) { throw 'Absent owner relay unexpectedly completed enrollment.' }
+                $pendingRecord = Get-ItemProperty -LiteralPath (Join-Path $registry "Pending/$ownerSid")
+                if ($pendingRecord.PSObject.Properties['RelayConfirmed']) { throw 'Interrupted enrollment published relay confirmation.' }
+                $pendingIdentity = [Text.Encoding]::UTF8.GetString([byte[]]$pendingRecord.Profile) | ConvertFrom-Json
+                $pendingPath = Join-Path $storage ('Pending/' + ([Guid]$pendingIdentity.profile_id).ToString('N'))
+                foreach ($name in @('wallet.db', 'key-database', 'wrapping.key', 'fresh-profile-ready')) {
+                    if (-not (Test-Path -LiteralPath (Join-Path $pendingPath $name))) { throw "Interruption did not reach actual service-created $name" }
+                }
+                $stage = 'interrupted enrollment / signed production SYSTEM discard'
+                # Parent AllSigned approval is user-scoped; SYSTEM has no publisher
+                # approval. Exercise explicit signature/hash verification rather
+                # than hiding an extra production prerequisite behind fixture trust.
+                Import-Certificate -FilePath $public -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+                Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)"
+                try {
+                    Invoke-SetupScript (Join-Path $install 'recover-windows-v2.ps1') @('-OwnerSid', $ownerSid, '-DiscardUnused')
+                } finally {
+                    Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+                    Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPublisher\$($certificate.Thumbprint)"
+                }
+                if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage) -or
+                    @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue).Count) { throw 'Production discard left setup-blocking state.' }
+                if ((Get-FileHash -LiteralPath $unrelated).Hash -ne $unrelatedHash) { throw 'Discard changed unrelated files.' }
+                foreach ($before in $profilesBefore) {
+                    $after = Get-CimInstance Win32_UserProfile -Filter "SID='$($before.SID)'"
+                    if (-not $after -or $after.LocalPath -ne $before.LocalPath) { throw 'Discard changed an unrelated Windows profile.' }
+                }
+                [WalletAcceptanceCredential]::Verify($credentialTarget)
+                Remove-FixtureProfile $pendingIdentity.service_sid -AllowCachedVirtualProfile
+                Write-Output 'interruption PASS: real unpublished custody discarded via signed SYSTEM recovery; unrelated profile mappings, file and synthetic credential unchanged.'
+            } finally { [WalletAcceptanceCredential]::Delete($credentialTarget) }
+            $stage = 'enroll / retry production installer after discard'
             $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $relay.endpoint) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             if (-not $installer.WaitForExit(120000)) { throw 'Production enrollment exceeded 120 seconds.' }
             Get-Content $stdout, $stderr | Write-Output
@@ -345,6 +426,14 @@ try {
         if ([IO.File]::ReadAllText((Join-Path $active 'setup-complete')) -ne $ready.profile_id) { throw 'Published profile is not durably ready.' }
         $raw = @('wallet.db', 'wrapping.key', 'key-database', ('key-account-' + $ready.account.instance_id)) | ForEach-Object { Join-Path $active $_ }
         foreach ($file in $raw) { if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing actual protected file: $file" } }
+        if ($phase -eq 'enroll') {
+            $stage = 'active profile / production discard must refuse'
+            & $powershell -NoProfile -NonInteractive -ExecutionPolicy AllSigned -File (Join-Path $install 'recover-windows-v2.ps1') -OwnerSid $ownerSid -DiscardUnused
+            if ($LASTEXITCODE -eq 0) { throw 'Production discard accepted an active wallet.' }
+            $stillRunning = Get-CimInstance Win32_Service -Filter "Name='$($ready.service_name)'"
+            if ($stillRunning.ProcessId -ne $service.ProcessId -or $stillRunning.State -ne 'Running') { throw 'Rejected discard disrupted the active authority.' }
+            foreach ($file in $raw) { if (-not (Test-Path -LiteralPath $file)) { throw 'Rejected discard removed active custody.' } }
+        }
         $trace = "wallet-collector-$nonce-$phase"
         $stage = "$phase / raw access and negative native authorization"
         if ($installerSession -ne 0) {
@@ -443,6 +532,10 @@ try {
     } catch { $cleanupErrors.Add((Write-FixtureFailure "CLEANUP [owner profile: $ownerSid]" $_)) }
     try { if ($ownerSid) { Remove-LocalUser -SID $ownerSid } } catch { $cleanupErrors.Add((Write-FixtureFailure "CLEANUP [owner account: $ownerSid]" $_)) }
     if ($certificate) {
+        try {
+            $path = "Cert:\CurrentUser\TrustedPublisher\$($certificate.Thumbprint)"
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+        } catch { $cleanupErrors.Add((Write-FixtureFailure "CLEANUP [user publisher: $path]" $_)) }
         foreach ($store in @('Root', 'TrustedPublisher', 'My')) {
             try {
                 $path = "Cert:\LocalMachine\$store\$($certificate.Thumbprint)"

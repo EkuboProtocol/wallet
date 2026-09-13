@@ -15,15 +15,31 @@ Install:
 - `ekubo-wallet-v2@.service` and `ekubo-wallet-v2-provision@.service` into the
   system unit directory;
 - both `org.ekubo.Wallet2.*.conf` policies into `/usr/share/dbus-1/system.d/`;
+- `org.ekubo.Wallet2.Owner.service.in` into `/usr/lib/ekubo-wallet-v2/`;
 - `ekubo-wallet-v2.sysusers` into `/usr/lib/sysusers.d/`;
 - `ekubo-wallet-v2.tmpfiles` into `/usr/lib/tmpfiles.d/`;
 - the separately maintained v2 polkit owner-authentication policy.
 
 The package postinstall must run systemd-sysusers, systemd-tmpfiles --create for
-the package files, daemon-reload, and reload the system bus configuration.
+the package files, daemon-reload, `install-profile --restore-activations`, and
+reload the system bus configuration (never restart D-Bus).
 Do not recursively chown/chmod existing custody directories during upgrades.
 An upgrade replaces compatible signed binaries and restarts existing units;
 it must not run fresh enrollment on an existing profile.
+
+Enrollment and resume publish the exact UID-substituted activation file into
+`/usr/share/dbus-1/system-services/org.ekubo.Wallet2.Owner.uOWNER_UID.service`.
+Publication fsyncs complete bytes before a Linux no-replace rename, then fsyncs the
+directory. Exact protected files are idempotent; conflicts, unsafe paths,
+malformed metadata and altered templates fail without replacement. The file's
+`User` is `ekubo-wallet-v2`, and `SystemdService` is the exact
+`ekubo-wallet-v2@OWNER_UID.service` instance. `Exec=/usr/bin/false` deliberately
+fails closed when systemd activation is unavailable; it cannot bypass the unit's
+sandbox. The generated file is retained outside the package manifest. Postinstall
+also regenerates missing files from root-protected `owners/*.json` identities,
+without reading custody files or owner proofs. This allows stopped retained
+profiles to activate via `StartServiceByName` after reinstall; `try-restart`
+alone cannot start a stopped unit.
 
 The login owner runs:
 
@@ -55,9 +71,7 @@ sudo /usr/lib/ekubo-wallet-v2/install-profile --discard-unused OWNER_UID
 After durable relay confirmation, resume publication with:
 
 ```
-sudo systemctl stop ekubo-wallet-v2-provision@OWNER_UID.service
-sudo /usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll --resume-publication OWNER_UID
-sudo systemctl enable --now ekubo-wallet-v2@OWNER_UID.service
+sudo /usr/lib/ekubo-wallet-v2/install-profile --resume OWNER_UID
 ```
 
 The normal owner can instead run `ekubo-wallet-v2-enroll --resume-owner`, which

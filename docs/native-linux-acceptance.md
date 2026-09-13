@@ -28,7 +28,13 @@ and runs the installed enrollment helper's `--owner` flow.
   identical inventory after restart. Its sealed account credential is included
   in the persistence fingerprints and owner read/write-denial checks. No private
   key is exported and no external-chain signing is performed.
-- A real systemd service restart followed by the installed `--resume-owner`
+- A focused real dpkg install/reinstall of the production service assets and
+  preinst/postinst hooks, with a populated profile explicitly stopped before
+  reinstall. The fixture removes the generated activation file to exercise
+  protected-metadata regeneration, verifies the unit remains stopped after
+  `try-restart`, then calls `StartServiceByName` as the ordinary owner. This uses
+  a disposable `ekubo-wallet-v2-activation-acceptance` package, not the full desktop
+  release artifact. It is followed by the installed `--resume-owner`
   connection/unlock, another live MCP read, a new service PID, and identical
   enrollment metadata, wrapping key, sealed database key and setup marker.
   Before that owner reconnect, the restarted service must not expose MCP.
@@ -50,6 +56,7 @@ Safe on a development host (no installation or Cargo build):
 
 ```sh
 python3 contrib/accept-installed-linux.py --check-guards
+python3 contrib/linux-service/install-profile_test.py
 pipx run ruff==0.16.4 check contrib/accept-installed-linux.py contrib/verify-mcp-bridge.py
 ```
 

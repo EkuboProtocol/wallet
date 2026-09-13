@@ -26,6 +26,7 @@ LIB = Path('/usr/lib/ekubo-wallet-v2')
 ROOTS = [LIB, Path('/etc/ekubo-wallet-v2'), Path('/var/lib/ekubo-wallet-v2'),
          Path('/run/ekubo-wallet-v2')]
 SERVICE = 'ekubo-wallet-v2'
+ACCEPTANCE_PACKAGE = 'ekubo-wallet-v2-activation-acceptance'
 UNITS = ['ekubo-wallet-v2@.service', 'ekubo-wallet-v2-provision@.service']
 FAULT_DIR = Path('/run/ekubo-wallet-v2/acceptance-fault')
 ASSETS = {
@@ -36,6 +37,7 @@ ASSETS = {
     'linux-service/ekubo-wallet-v2.sysusers': Path('/usr/lib/sysusers.d/ekubo-wallet-v2.conf'),
     'linux-service/ekubo-wallet-v2.tmpfiles': Path('/usr/lib/tmpfiles.d/ekubo-wallet-v2.conf'),
     'polkit/com.ekubo.wallet.v2.policy': Path('/usr/share/polkit-1/actions/com.ekubo.wallet.v2.policy'),
+    'linux-service/org.ekubo.Wallet2.Owner.service.in': LIB / 'org.ekubo.Wallet2.Owner.service.in',
 }
 
 
@@ -77,11 +79,19 @@ def unused_accounts(owner, include_service=True):
             raise RuntimeError(f'REFUSED: existing {kind} {name}')
 
 
+def absent_activation_fixture():
+    if list(Path('/usr/share/dbus-1/system-services').glob('org.ekubo.Wallet2.Owner.u*.service')):
+        raise RuntimeError('REFUSED: existing v2 activation files')
+    if subprocess.run(['dpkg-query', '-W', ACCEPTANCE_PACKAGE], capture_output=True).returncode == 0:
+        raise RuntimeError('REFUSED: existing acceptance package')
+
+
 def preflight(binary_dir, owner, home, rule, migration):
     require_runner(os.environ, os.geteuid(), sys.platform, True)
     if Path('/proc/1/comm').read_text().strip() != 'systemd':
         raise RuntimeError('REFUSED: PID 1 must be real systemd')
     absent([*ROOTS, *ASSETS.values(), home, rule])
+    absent_activation_fixture()
     for base in ['/etc/systemd/system', '/run/systemd/system', '/usr/lib/systemd/system']:
         if list(Path(base).glob('ekubo-wallet-v2*')):
             raise RuntimeError(f'REFUSED: existing v2 units in {base}')
@@ -372,6 +382,7 @@ def cleanup(created, owner, uid, home, account_created, service_created):
             subprocess.run(['systemctl', 'disable', '--now', unit], check=False, timeout=40)
             subprocess.run(['systemctl', 'reset-failed', unit], check=False, timeout=10)
         Path(f'/etc/tmpfiles.d/ekubo-wallet-v2-{uid}.conf').unlink(missing_ok=True)
+        Path(f'/usr/share/dbus-1/system-services/org.ekubo.Wallet2.Owner.u{uid}.service').unlink(missing_ok=True)
     for path in reversed(created):
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
@@ -398,6 +409,46 @@ def stop_session(process):
         process.wait()
 
 
+def reinstall_and_activate(owner, uid):
+    # A focused real dpkg payload, with the production installer/template and
+    # maintainer hooks. No Rust build or production desktop package is needed.
+    with tempfile.TemporaryDirectory(prefix='ewv2-reinstall-') as temporary:
+        root = Path(temporary) / 'root'
+        for source in [*ASSETS.values(), LIB / 'install-profile',
+                       LIB / 'ekubo-wallet-service', LIB / 'ekubo-wallet-v2-enroll']:
+            target = root / source.relative_to('/')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        control = root / 'DEBIAN'
+        control.mkdir()
+        (control / 'control').write_text(
+            f'Package: {ACCEPTANCE_PACKAGE}\nVersion: 1\nArchitecture: all\n'
+            'Maintainer: Acceptance <noreply@ekubo.org>\nDescription: Disposable activation acceptance\n')
+        for hook in ['preinst', 'postinst']:
+            shutil.copy2(REPO / f'contrib/deb-v2-{hook}', control / hook)
+            (control / hook).chmod(0o755)
+        package = Path(temporary) / 'acceptance.deb'
+        run('dpkg-deb', '--build', str(root), str(package))
+        run('dpkg', '--install', str(package))
+        unit = f'ekubo-wallet-v2@{uid}.service'
+        run('systemctl', 'stop', unit)
+        activation = Path(f'/usr/share/dbus-1/system-services/org.ekubo.Wallet2.Owner.u{uid}.service')
+        original = activation.read_bytes()
+        # Model an older package/profile with no published activation asset.
+        activation.unlink()
+        run('dpkg', '--install', str(package))
+        assert activation.read_bytes() == original
+        assert run('systemctl', 'show', unit, '--property=ActiveState', '--value',
+                   capture_output=True, text=True).stdout.strip() == 'inactive'
+        run('runuser', '-u', owner, '--', 'python3', '-c', '''
+import dbus, sys
+bus = dbus.SystemBus()
+registry = dbus.Interface(bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus"), "org.freedesktop.DBus")
+assert registry.StartServiceByName("org.ekubo.Wallet2.Owner.u" + sys.argv[1], 0) == 1
+''', str(uid))
+        run('systemctl', 'is-active', unit)
+
+
 def restart_and_compare(owner, uid, service_uid, home, process):
     first_pid, before = inspect_active(owner, uid, service_uid)
     metadata = Path(f'/etc/ekubo-wallet-v2/owners/{uid}.json')
@@ -405,7 +456,7 @@ def restart_and_compare(owner, uid, service_uid, home, process):
     if identity['owner_uid'] != uid or identity['service_uid'] != service_uid:
         raise RuntimeError('Published enrollment identity mismatch')
     before_metadata = fingerprint(metadata)
-    run('systemctl', 'restart', f'ekubo-wallet-v2@{uid}.service')
+    reinstall_and_activate(owner, uid)
     # The bus name is now available, but no authority may reopen itself from
     # service-local data alone. A stale socket inode is not an unlocked runtime.
     run('runuser', '-u', owner, '--', 'python3', '-c', '''
@@ -562,6 +613,7 @@ def acceptance(binary_dir, migration=False):
         raise
     finally:
         cleanup(created, owner, uid, home, account_created, service_created)
+        subprocess.run(['dpkg', '--remove', ACCEPTANCE_PACKAGE], check=False, timeout=120)
 
 
 def check_guards():

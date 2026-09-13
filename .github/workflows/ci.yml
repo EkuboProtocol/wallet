@@ -57,6 +57,7 @@ jobs:
       - run: pipx run ruff==0.16.4 check --output-format concise .
       - run: python3 contrib/check-v2-packaging.py
       - run: python3 contrib/accept-installed-linux.py --check-guards
+      - run: python3 contrib/linux-service/install-profile_test.py
       - run: for file in contrib/deb-v2-* contrib/smoke-v2-*.sh; do bash -n "$file"; done
 
   windows-service:

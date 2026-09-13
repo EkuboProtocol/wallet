@@ -1,19 +1,137 @@
 #!/usr/bin/python3
 """Privileged fresh v2 profile setup; installed by the package, never run at build."""
+import ctypes
+import errno
 import fcntl
 import json
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 
 ETC = Path('/etc/ekubo-wallet-v2')
 STATE = Path('/var/lib/ekubo-wallet-v2')
 RUN = Path('/run/ekubo-wallet-v2')
+LIB = Path('/usr/lib/ekubo-wallet-v2')
+ACTIVATION = Path('/usr/share/dbus-1/system-services')
+ROOT_UID = 0
+ACTIVATION_TEMPLATE = '''[D-BUS Service]
+Name=org.ekubo.Wallet2.Owner.u@OWNER_UID@
+User=ekubo-wallet-v2
+# Activation must go through the sandboxed unit, never a direct daemon launch.
+Exec=/usr/bin/false
+SystemdService=ekubo-wallet-v2@@OWNER_UID@.service
+'''.encode()
+
+
+def owner_uid(value):
+    if not re.fullmatch(r'[1-9][0-9]{0,9}', str(value)) or int(value) >= 2**32 - 1:
+        raise RuntimeError('A canonical non-root owner UID is required')
+    return int(value)
+
+
+def trusted_directory(path):
+    # Check every ancestor without repairing permissions or following symlinks.
+    for parent in [*reversed(path.parents), path]:
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != ROOT_UID or info.st_mode & 0o022:
+            raise RuntimeError(f'Unsafe protected directory: {parent}')
+
+
+def protected_bytes(path, exact_mode=None):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != ROOT_UID
+                or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 4096):
+            raise RuntimeError(f'Unsafe protected file: {path}')
+        if exact_mode is not None and stat.S_IMODE(info.st_mode) != exact_mode:
+            raise RuntimeError(f'Unexpected protected file mode: {path}')
+        return source.read(4097)
+
+
+def unique_fields(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise RuntimeError('Duplicate owner metadata fields')
+    return result
+
+
+def activation_payload(owner, account):
+    owner = owner_uid(owner)
+    trusted_directory(ETC / 'owners')
+    metadata = json.loads(protected_bytes(ETC / 'owners' / f'{owner}.json'),
+                          object_pairs_hook=unique_fields)
+    if (set(metadata) != {'owner_uid', 'service_uid', 'profile_id'}
+            or type(metadata['owner_uid']) is not int or metadata['owner_uid'] != owner
+            or type(metadata['service_uid']) is not int or metadata['service_uid'] != account.pw_uid
+            or account.pw_uid in (0, owner)):
+        raise RuntimeError('Published owner identity mismatch')
+    if str(uuid.UUID(metadata['profile_id'])) != metadata['profile_id']:
+        raise RuntimeError('Noncanonical profile identity')
+    trusted_directory(LIB)
+    template = protected_bytes(LIB / 'org.ekubo.Wallet2.Owner.service.in')
+    if template != ACTIVATION_TEMPLATE:
+        raise RuntimeError('Invalid owner activation template')
+    return template.replace(b'@OWNER_UID@', str(owner).encode())
+
+
+def publish_exact(path, payload):
+    """Fsync complete bytes before atomic no-replace rename; exact retries only."""
+    trusted_directory(path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.ekubo-wallet-v2-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), 0o644)
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        # Unlike link+unlink, a crash cannot leave the published file with two
+        # links and make an otherwise exact resume fail the protected-file check.
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        if rename(-100, os.fsencode(temporary), -100, os.fsencode(path), 1) != 0:
+            error = ctypes.get_errno()
+            if error != errno.EEXIST:
+                raise OSError(error, 'Activation no-replace publication failed')
+            if protected_bytes(path, exact_mode=0o644) != payload:
+                raise RuntimeError(f'Conflicting activation file: {path}') from None
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def publish_activation(owner, account):
+    payload = activation_payload(owner, account)
+    publish_exact(ACTIVATION / f'org.ekubo.Wallet2.Owner.u{owner_uid(owner)}.service', payload)
+
+
+def reload_bus():
+    subprocess.run(['/usr/bin/systemctl', 'reload', 'dbus.service'], check=True)
+
+
+def restore_activations():
+    """Package configure: public root-owned identity metadata only, no custody reads."""
+    trusted_directory(ETC)
+    if not os.path.lexists(ETC / 'owners'):
+        return
+    trusted_directory(ETC / 'owners')
+    account = pwd.getpwnam('ekubo-wallet-v2')
+    for path in sorted((ETC / 'owners').iterdir()):
+        if path.suffix != '.json':
+            raise RuntimeError('Unexpected owner metadata entry')
+        publish_activation(owner_uid(path.stem), account)
 
 
 def protected(path, mode=0o755, uid=0, gid=0):
@@ -40,15 +158,20 @@ def publish(path, payload):
 
 
 def main():
-    if os.getuid() != 0 or os.geteuid() != 0 or len(sys.argv) != 3:
+    if os.getuid() != 0 or os.geteuid() != 0:
+        raise RuntimeError('Root is required')
+    if sys.argv[1:] == ['--restore-activations']:
+        restore_activations()
+        return  # Package postinstall reloads the bus after all assets are ready.
+    if len(sys.argv) != 3:
         raise RuntimeError('Usage: install-profile <ordinary-owner-uid> <unique-bus-name> (root)')
     if sys.argv[1] == '--discard-unused':
-        discard_unused(int(sys.argv[2]))
+        discard_unused(owner_uid(sys.argv[2]))
         return
     if sys.argv[1] == '--resume':
-        resume(int(sys.argv[2]))
+        resume(owner_uid(sys.argv[2]))
         return
-    owner = int(sys.argv[1])
+    owner = owner_uid(sys.argv[1])
     if owner <= 0 or not sys.argv[2].startswith(':'):
         raise RuntimeError('An ordinary owner and unique bus name are required')
     pwd.getpwuid(owner)
@@ -84,6 +207,8 @@ def install(owner, account, recipient):
             f'd /run/ekubo-wallet-v2/{owner} 0711 ekubo-wallet-v2 ekubo-wallet-v2 -\n'.encode())
     subprocess.run(['/usr/bin/systemctl', 'start', f'ekubo-wallet-v2-provision@{owner}.service'], check=True)
     subprocess.run(['/usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll', '--installer', str(owner), recipient], check=True)
+    publish_activation(owner, account)
+    reload_bus()
     subprocess.run(['/usr/bin/systemctl', 'enable', '--now', f'ekubo-wallet-v2@{owner}.service'], check=True)
 
 
@@ -131,6 +256,8 @@ def resume(owner):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         subprocess.run(['/usr/bin/systemctl', 'stop', f'ekubo-wallet-v2-provision@{owner}.service'], check=True)
         subprocess.run(['/usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll', '--resume-publication', str(owner)], check=True)
+        publish_activation(owner, pwd.getpwnam('ekubo-wallet-v2'))
+        reload_bus()
         subprocess.run(['/usr/bin/systemctl', 'enable', '--now', f'ekubo-wallet-v2@{owner}.service'], check=True)
 
 
