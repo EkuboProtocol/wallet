@@ -37,10 +37,24 @@ try {
     & $script -OwnerSid '__OWNER__' -DiscardUnused
     exit 0
 } catch {
-    [Console]::Error.WriteLine($_.Exception.Message)
-    # Task Scheduler cannot return stderr. Preserve the failing source line in
-    # its exit status without publishing protected state or creating log files.
-    exit (10000 + $_.InvocationInfo.ScriptLineNumber)
+    $failure = $_
+    # Task Scheduler discards stderr. Its existing task description is a bounded
+    # diagnostic channel, never authority or an input to cleanup. No new file,
+    # registry state, credential data, or caller-selected destination is written.
+    $detail = "Recovery line=$($failure.InvocationInfo.ScriptLineNumber); errorId=$($failure.FullyQualifiedErrorId)"
+    $exception = $failure.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -lt 4; $depth++) {
+        $detail += "; $($exception.GetType().FullName) HResult=$($exception.HResult.ToString('X8')): $($exception.Message)"
+        $exception = $exception.InnerException
+    }
+    if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
+    [Console]::Error.WriteLine($detail)
+    try {
+        $task = Get-ScheduledTask -TaskPath '\' -TaskName 'EkuboWalletV2-Discard-__OWNER__'
+        $task.Description = $detail
+        Set-ScheduledTask -InputObject $task | Out-Null
+    } catch { [Console]::Error.WriteLine('Could not publish recovery task diagnostic.') }
+    exit (10000 + $failure.InvocationInfo.ScriptLineNumber)
 }
 '@
     $bootstrap = $bootstrap.Replace('__HASH__', $approvedHash).Replace('__OWNER__', $OwnerSid)
@@ -80,7 +94,11 @@ try {
         }
     } until ($finished)
     Unregister-ScheduledTask -TaskPath '\' -TaskName $taskName -Confirm:$false
-    if ($info.LastTaskResult -ne 0) { throw "SYSTEM discard failed ($($info.LastTaskResult)); codes above 10000 identify the failing recovery source line after subtracting 10000. Inspect pending state before retrying. A Group Policy enforcing AllSigned can require SYSTEM publisher trust; recovery neither installs trust nor overrides Group Policy." }
+    if ($info.LastTaskResult -ne 0) {
+        $detail = [string]$task.Description
+        if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
+        throw "SYSTEM discard failed ($($info.LastTaskResult)); codes above 10000 identify the source line. Task diagnostic: $detail. Inspect pending state before retrying."
+    }
     Write-Output 'SYSTEM discarded the unused pending setup; fresh setup can retry.'
     return
 }
@@ -141,7 +159,23 @@ function Assert-DirectoryChildren([string]$path, [string[]]$allowedNames) {
     }
 }
 function Assert-ProtectedRegistry($path, [bool]$requireProtected = $false) {
-    $acl = Get-Acl -LiteralPath $path
+    # Decode only the three fixed product keys, never an arbitrary provider path.
+    # Registry64 is explicit even if an invoking environment changes its view.
+    $root = 'HKLM:\SOFTWARE\EkuboWalletV2'
+    if ([string]::IsNullOrEmpty($path) -or $path -cnotin @($root, ($root + '\Pending'), ($root + '\Pending\' + $OwnerSid))) {
+        throw 'Unexpected or empty registry security path.'
+    }
+    $machine = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    $key = $null
+    try {
+        $key = $machine.OpenSubKey($path.Substring(6), [Microsoft.Win32.RegistryKeyPermissionCheck]::Default, [Security.AccessControl.RegistryRights]::ReadPermissions)
+        if ($null -eq $key) { throw "Missing fixed recovery registry key: $path" }
+        $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+        $acl = $key.GetAccessControl($sections)
+    } finally {
+        if ($null -ne $key) { $key.Dispose() }
+        $machine.Dispose()
+    }
     # Installer sets D:P on the product root; Pending and owner keys inherit its
     # CI entries. Do not require protected-DACL mode on those inherited children.
     if ($requireProtected -and -not $acl.AreAccessRulesProtected) { throw 'Product registry DACL is not protected.' }
