@@ -394,7 +394,20 @@ try {
             $cleanupStep = "remove registry: $registry"
             if (Test-Path $registry) { Remove-Item -LiteralPath $registry -Recurse -Force }
             $cleanupStep = "remove protected storage: $storage"
-            if (Test-Path $storage) { Remove-Item -LiteralPath $storage -Recurse -Force }
+            if (Test-Path $storage) {
+                if (@(Get-ChildItem -LiteralPath $storage -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) {
+                    throw 'Refusing redirected fixture storage during administrative cleanup.'
+                }
+                # Native private files intentionally do not grant the installer
+                # ordinary access. Only after the denial assertions, process exit
+                # and fixture-provenance checks may this VM's admin take ownership
+                # to remove its own synthetic state. Never weaken production ACLs.
+                & "$env:WINDIR/System32/takeown.exe" /F $storage /A /R /D Y | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Could not take ownership of fixture storage for deletion.' }
+                & "$env:WINDIR/System32/icacls.exe" $storage /grant '*S-1-5-32-544:(OI)(CI)F' /T /Q | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Could not authorize fixture storage deletion.' }
+                Remove-Item -LiteralPath $storage -Recurse -Force
+            }
         }
         $cleanupStep = "remove code: $install"
         if ($createdInstall -and (Test-Path $install)) { Remove-Item -LiteralPath $install -Recurse -Force }
