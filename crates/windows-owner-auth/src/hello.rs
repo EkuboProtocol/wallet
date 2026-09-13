@@ -18,7 +18,7 @@ use windows::{
             },
             Registry::{
                 HKEY, HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY,
-                RegCloseKey, RegDisablePredefinedCacheEx, RegOpenKeyExW, RegOverridePredefKey,
+                RegCloseKey, RegOpenKeyExW, RegOverridePredefKey,
             },
             WinRT::{
                 IActivationFactory, IUserConsentVerifierInterop, RO_INIT_MULTITHREADED,
@@ -81,9 +81,9 @@ impl RegistryIsolation {
         // This is a per-process classes view, not a registry write. Native COM
         // activation must not select a same-user class registration. User data
         // remains available to Windows itself under the actual owner's token.
-        unsafe { RegDisablePredefinedCacheEx() }
-            .ok()
-            .context(ProbeStage(2))?;
+        // Override the predefined mapping before COM/WinRT initialization.
+        // Disabling that mapping's cache first makes RegOverridePredefKey reject
+        // HKEY_CLASSES_ROOT with ERROR_INVALID_HANDLE on supported Windows builds.
         let mut classes = HKEY::default();
         unsafe {
             RegOpenKeyExW(
