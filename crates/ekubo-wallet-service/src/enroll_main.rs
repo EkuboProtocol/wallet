@@ -27,7 +27,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("--resume-publication") if args.len() == 2 => {
             let uid: u32 = args[1].parse()?;
-            require_zero_account_pending(uid)?;
+            // No zero-account gate here: this entry also serves the idempotent
+            // restart of an already-published profile (no pending identity),
+            // and InstallerLease::resume is itself fail-closed on the durable
+            // relay confirmation plus an exact-identity match that never
+            // replaces active metadata. The zero-account gate lives on
+            // --installer, the only entry that publishes a new profile.
             service_storage::installer_journal::acquire_installer()?.resume(uid)
         }
         Some("--owner" | "--resume-owner") if args.len() == 1 => {
@@ -95,7 +100,7 @@ fn refuse_published_reset(owner_uid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Admin reset guard: publication and resume require a zero-account pending
+/// Admin reset guard: first-time publication requires a zero-account pending
 /// profile. Refuse when any `key-account-*` or `setup-complete` record exists,
 /// mirroring the Windows pending-profile allowlist. Fail closed, including on
 /// unreadable state; no owner credential is read or deleted here.
