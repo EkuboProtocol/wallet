@@ -159,7 +159,11 @@ class NativeBrokerTest(unittest.TestCase):
         peer = subprocess.Popen([sys.executable, "-c", ECHO, address],
                                 stdout=subprocess.PIPE, stderr=log, text=True)
         self.addCleanup(stop, peer)
-        self.assertTrue(select.select([peer.stdout], [], [], 10)[0], "echo peer startup timeout")
+        ready = select.select([peer.stdout], [], [], 10)[0]
+        if not ready:
+            log.flush()
+            log.seek(0)
+            self.fail(f"echo peer startup timeout; broker={broker.poll()}: {log.read()}")
         name = peer.stdout.readline().strip()
         log.flush()
         log.seek(0)

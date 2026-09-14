@@ -19,8 +19,7 @@ docker run --rm --user "$(id -u)" \
     -e "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" \
     --mount "type=bind,src=$root,dst=/workspace,readonly" \
     --mount "type=bind,src=$root/target/release,dst=/workspace/target/release" \
-    --workdir /workspace "$image" bash -euc \
-    'python3 contrib/build-v2-packages.py arch; python3 contrib/linux-service-policy_test.py -v'
+    --workdir /workspace "$image" python3 contrib/build-v2-packages.py arch
 # A disposable PID-1 systemd container gives pacman real systemd/D-Bus hooks.
 # No host runtime, credentials, bus, home, or cgroup directory is bind-mounted.
 docker run -d --name "$name" --privileged --cgroupns=private \
@@ -36,3 +35,4 @@ for attempt in {1..60}; do
 done
 docker exec "$name" test -S /run/systemd/private
 docker exec "$name" bash /checks/smoke-v2-arch.sh
+docker exec --user "$(id -u)" "$name" python3 /checks/linux-service-policy_test.py -v
