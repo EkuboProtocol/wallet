@@ -41,7 +41,7 @@ test = false
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }
 ekubo-wallet-preview = { path = "crates/ekubo-wallet-preview", default-features = false }
 walletconnect-session = { path = "crates/walletconnect-session" }
-alloy = { version = "=2.4.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
+alloy = { version = "=2.4.2", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 base64 = "0.23.0"
