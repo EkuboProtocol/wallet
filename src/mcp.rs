@@ -416,6 +416,7 @@ struct PolicyOutput {
     wallet_id: String,
     revision: u64,
     updated_at: DateTime<Utc>,
+    #[schemars(schema_with = "ekubo_wallet_core::core::policy::wallet_policy_output_schema")]
     policy: WalletPolicy,
 }
 
@@ -535,6 +536,7 @@ struct DecodeAbiInput {
     return_data: String,
     /// How to read those bytes. A plan that does not fit them fails the
     /// decode and reports why rather than guessing.
+    #[schemars(schema_with = "ekubo_wallet_core::abi_decoder::abi_decode_plan_object_schema")]
     decode: AbiDecodePlan,
     /// Echo `return_data` back beside the decoded value. Default true.
     #[serde(default = "default_true")]

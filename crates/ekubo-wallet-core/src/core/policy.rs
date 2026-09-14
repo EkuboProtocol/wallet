@@ -997,6 +997,30 @@ pub fn policy_object_schema(_generator: &mut schemars::SchemaGenerator) -> schem
     })
 }
 
+/// Shallow, non-recursive envelope for a policy document in MCP tool output.
+///
+/// Same shape as [`policy_object_schema`], with output-appropriate wording:
+/// this is the active document to base a proposal on, not something the
+/// caller supplies for validation.
+#[must_use]
+pub fn wallet_policy_output_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "$schema": { "type": "string" },
+            "version": { "type": "integer", "minimum": 1, "maximum": 1 },
+            "rules": {
+                "type": "array",
+                "maxItems": 256,
+                "items": { "type": "object" }
+            }
+        },
+        "required": ["version", "rules"],
+        "additionalProperties": false,
+        "description": "The active signing policy document as a JSON object. The full recursive rule and predicate schema lives at wallet://schemas/policy; base a wallet_propose_policy proposal on this exact document."
+    })
+}
+
 /// A minimized, human-readable diff of what the proposed policy permits
 /// relative to the current one, so a reviewer reads the signing authority they
 /// are about to add or remove rather than comparing JSON documents.
