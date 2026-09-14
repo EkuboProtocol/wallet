@@ -5,6 +5,36 @@ while building or testing the repository. No command reads or removes 1.x state.
 
 ## Package integration
 
+### Arch Linux / Omarchy
+
+The unsigned CI build's `unsigned-linux-x86_64` artifact contains both the Debian
+package and the native Arch `ekubo-wallet-v2-2.0.0-1-x86_64.pkg.tar.zst` package.
+Extract the downloaded artifact, then install the Arch file from that directory:
+
+```sh
+sudo pacman -U ./ekubo-wallet-v2-*.pkg.tar.zst
+ekubo-wallet-v2
+```
+
+Run the desktop as your ordinary login user. Its first-run enrollment requests
+Polkit elevation for the protected service. A running Secret Service provider is
+required for owner credentials; Omarchy normally provides GNOME Keyring. Complete
+the desktop's setup flow before attempting an explicit legacy-wallet move.
+
+The Arch package uses the same Linux payload as the DEB, with native pacman
+metadata and lifecycle hooks. It preserves owner profiles on removal and restores
+activation metadata on reinstall. CI checks the Ubuntu-built ELF payload against
+Arch's current libraries and runs real pacman install/reinstall/remove with
+systemd and D-Bus Broker in a disposable container. This is packaging validation,
+not a substitute for interactive desktop/Polkit testing on Omarchy.
+
+To package locally on Arch after building the release workspace, run
+`python3 contrib/build-v2-packages.py arch` as an ordinary user with `base-devel`,
+Python, and zstd installed. Output is under `target/release/`. Package assembly
+never installs it or enrolls a profile.
+
+### Shared Linux files
+
 Build `ekubo-wallet-service` and `ekubo-wallet-v2-enroll` from the service crate
 without `test-hooks`. Install both root-owned, mode 0755, under
 `/usr/lib/ekubo-wallet-v2/`. Install `install-profile` in that same directory,

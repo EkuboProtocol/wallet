@@ -153,6 +153,9 @@ jobs:
       - name: Install and reinstall actual DEB on disposable runner
         if: runner.os == 'Linux'
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS bash contrib/smoke-v2-deb.sh target/release/*.deb
+      - name: Build and test native Arch package for Omarchy
+        if: runner.os == 'Linux'
+        run: bash contrib/build-test-arch-ci.sh
       - name: Install and reinstall actual NSIS on disposable runner
         if: runner.os == 'Windows'
         run: pwsh -NoProfile -File contrib/smoke-v2-nsis.ps1 -Installer (Get-ChildItem target/release/*setup.exe).FullName
@@ -181,6 +184,9 @@ jobs:
               debs=(target/release/*.deb)
               test "${#debs[@]}" -eq 1
               cp "${debs[0]}" dist/
+              arch_packages=(target/release/*.pkg.tar.zst)
+              test "${#arch_packages[@]}" -eq 1
+              cp "${arch_packages[0]}" dist/
               ;;
           esac
           node <<'NODE'

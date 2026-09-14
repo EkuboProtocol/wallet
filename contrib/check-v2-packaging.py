@@ -24,6 +24,8 @@ def check_windows_auth_payload():
 
 def main():
     check_windows_auth_payload()
+    assert (ROOT / 'contrib/arch-v2.install').is_file()
+    assert (ROOT / 'contrib/arch-ci/Dockerfile').is_file()
     with (ROOT / "Cargo.toml").open("rb") as source:
         manifest = tomllib.load(source)
     assert manifest["workspace"]["package"]["version"].split(".")[0] == "2"

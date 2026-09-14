@@ -118,7 +118,8 @@ def publish_activation(owner, account):
 
 
 def reload_bus():
-    subprocess.run(['/usr/bin/systemctl', 'reload', 'dbus.service'], check=True)
+    subprocess.run(['/usr/bin/busctl', '--system', 'call', 'org.freedesktop.DBus',
+                    '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'ReloadConfig'], check=True)
 
 
 def restore_activations():
