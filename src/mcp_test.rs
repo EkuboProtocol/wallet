@@ -522,7 +522,7 @@ fn artifact_reference_inputs_reject_json_encoded_strings() {
 }
 
 #[test]
-fn policy_proposal_schema_is_the_exact_policy_object_shape() {
+fn policy_proposal_schema_is_a_shallow_non_recursive_envelope() {
     let router = WalletMcpServer::sanitized_tool_router();
     let tool = router
         .get("wallet_propose_policy")
@@ -539,7 +539,21 @@ fn policy_proposal_schema_is_the_exact_policy_object_shape() {
         .expect("policy object describes its fields");
     assert!(properties.contains_key("version"));
     assert!(properties.contains_key("rules"));
-    assert!(policy.to_string().contains("tuple"));
+    // The tool input stays non-recursive: rule detail lives at
+    // `wallet://schemas/policy` and `WalletPolicy::parse` validates it.
+    let rendered = policy.to_string();
+    assert!(
+        !rendered.contains("$ref"),
+        "policy tool schema must not recurse: {rendered}"
+    );
+    let rules = properties
+        .get("rules")
+        .expect("policy object describes its rules");
+    assert_eq!(
+        rules.get("items"),
+        Some(&serde_json::json!({"type": "object"})),
+        "rules stay opaque objects; detail lives at wallet://schemas/policy: {rendered}"
+    );
 }
 
 #[test]

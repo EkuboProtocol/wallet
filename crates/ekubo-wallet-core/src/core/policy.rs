@@ -970,15 +970,31 @@ pub fn json_schema() -> Value {
     schema
 }
 
-/// Emit the complete policy document schema inline at MCP argument sites.
+/// Shallow, non-recursive envelope for the policy argument at MCP tool sites.
 ///
-/// Some MCP clients choose an argument encoding from only the field's local
-/// schema and do not follow `$ref` definitions. Keeping this field explicitly
-/// object-shaped makes the required `version` and `rules` input discoverable
-/// without accepting any representation the policy parser would reject.
+/// The predicate language is recursive, so the complete document schema is a
+/// `$ref` cycle several MCP clients fail to decode or display. The tool
+/// argument therefore names only the envelope — `version` plus opaque `rules`
+/// objects — and points at `wallet://schemas/policy` for the complete
+/// recursive schema. `WalletPolicy::parse` remains the admission check, so a
+/// shallow tool schema accepts nothing on its own authority.
 #[must_use]
-pub fn policy_object_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    WalletPolicy::json_schema(generator)
+pub fn policy_object_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "$schema": { "type": "string" },
+            "version": { "type": "integer", "minimum": 1, "maximum": 1 },
+            "rules": {
+                "type": "array",
+                "maxItems": 256,
+                "items": { "type": "object" }
+            }
+        },
+        "required": ["version", "rules"],
+        "additionalProperties": false,
+        "description": "Complete replacement policy document as a JSON object. The full recursive rule and predicate schema lives at wallet://schemas/policy; the wallet validates the complete document with WalletPolicy::parse."
+    })
 }
 
 /// A minimized, human-readable diff of what the proposed policy permits
