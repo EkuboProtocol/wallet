@@ -16,7 +16,11 @@ for binary in /usr/bin/ekubo-wallet-v2 /usr/bin/ekubo-wallet-v2-mcp-bridge \
     printf '%s\n' "$dependencies"
     if [[ "$dependencies" = *'not found'* ]]; then exit 1; fi
 done
-ekubo-wallet-v2 --version
+# The desktop intentionally has no CLI, including --version. Exercise its ELF
+# loader without opening a display, and require the actual argument refusal.
+status=0
+desktop_output=$(ekubo-wallet-v2 --version 2>&1) || status=$?
+[[ $status = 2 && "$desktop_output" = 'Ekubo Wallet does not accept command-line operations.' ]]
 ekubo-wallet-v2-mcp-bridge --version
 systemd-analyze verify /usr/lib/systemd/system/ekubo-wallet-v2@.service \
     /usr/lib/systemd/system/ekubo-wallet-v2-provision@.service
