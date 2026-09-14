@@ -94,6 +94,12 @@ public static class EkuboV2VirtualService {
     if ($LASTEXITCODE -ne 0) { throw 'Enrollment or authenticated owner relay failed; pending setup retained.' }
     New-ItemProperty -LiteralPath $pendingKey -Name RelayConfirmed -PropertyType DWord -Value 1 | Out-Null
     (Get-Item -LiteralPath $pendingKey).Flush()
+    # Verify the durable owner-relay confirmation before publishing: the
+    # privileged enrollment entry (enroll --installer) already bound the relay
+    # recipient to this exact pending profile, and publication below must only
+    # follow that recorded confirmation.
+    $confirmedRecord = Get-ItemProperty -LiteralPath $pendingKey
+    if (-not ($confirmedRecord.PSObject.Properties['RelayConfirmed'] -and $confirmedRecord.RelayConfirmed -eq 1)) { throw 'Owner relay confirmation was not durably recorded; refusing publication.' }
     Stop-Service $service
     (Get-Service $service).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
     if ([IO.File]::ReadAllText((Join-Path $pending 'fresh-profile-ready')) -ne $profile.ToString()) { throw 'Fresh profile did not become ready.' }

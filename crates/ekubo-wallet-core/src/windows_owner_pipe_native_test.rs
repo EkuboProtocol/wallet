@@ -58,6 +58,56 @@ async fn native_authorization_lease_rejects_extra_traffic_and_disconnect() {
 }
 
 #[tokio::test]
+async fn native_authorization_lease_rejects_extra_traffic_unbuffered() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let mut server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let mut client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    client.write_all(b"request").await.unwrap();
+    let mut request = [0; 7];
+    server.read_exact(&mut request).await.unwrap();
+    authenticate_auth_service(&server, &sid).unwrap();
+    assert!(authenticate_auth_service(&server, "S-1-5-80-1-2-3-4-5").is_err());
+    let retained = retain_auth_connection(&server).unwrap();
+    client.write_all(b"x").await.unwrap();
+    // No userspace prefetch this time: the byte stays in the kernel pipe until
+    // the monitor polls the raw transport, which must still reject it. The
+    // completed client write already placed the byte in the pipe, so the first
+    // transport poll deterministically observes it without any timing wait.
+    verify_auth_connection(&retained).unwrap();
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(server);
+    let binding = monitor.binding();
+    let mut ran = false;
+    assert!(
+        monitor
+            .run(async {
+                ran = true;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    assert!(binding.ensure_live().is_err());
+    drop(client);
+    assert!(
+        monitor
+            .run(async {
+                ran = true;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    drop(monitor);
+}
+
+#[tokio::test]
 async fn native_transport_monitor_revokes_a_pending_call_on_disconnect() {
     let sid = crate::windows_service_identity::current_process_identity()
         .unwrap()

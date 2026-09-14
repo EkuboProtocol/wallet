@@ -18,4 +18,18 @@
       <allow_active>auth_self</allow_active>
     </defaults>
   </action>
+  <action id="org.ekubo.wallet.v2.install-profile">
+    <description>Install a fresh Ekubo Wallet 2 profile</description>
+    <message>Authentication is required to install a fresh Ekubo Wallet 2 profile</message>
+    <!-- Elevation hardening: pkexec selects this action only when the executed
+         program is exactly the installed helper below, so no other binary can
+         reuse this authorization. The human-presence action above is intact and
+         unchanged; it remains an owner confirmation, not an install grant. -->
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/ekubo-wallet-v2/install-profile</annotate>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
 </policyconfig>
