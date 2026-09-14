@@ -744,8 +744,8 @@ fn verify_product_channel(manifest: &[u8]) -> Result<()> {
         .context("signed update metadata has no version")?;
     let version = cargo_packager_updater::semver::Version::parse(version)?;
     ensure!(
-        version.major == 2,
-        "signed update metadata is not a v2 release"
+        version.major == 2 && version.pre.is_empty(),
+        "signed update metadata is not a stable v2 release"
     );
     Ok(())
 }

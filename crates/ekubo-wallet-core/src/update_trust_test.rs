@@ -133,6 +133,29 @@ fn even_validly_signed_metadata_cannot_cross_product_channel_or_major() {
 }
 
 #[test]
+fn prerelease_v2_manifest_is_not_installable() {
+    let stable = manifest(
+        "2.1.0",
+        "https://example.test/update",
+        "sig",
+        &"a".repeat(64),
+    );
+    verify_product_channel(&stable).unwrap();
+    for version in ["2.1.0-rc.1", "2.1.0-0", "2.0.0-beta.1+build"] {
+        let prerelease = manifest(
+            version,
+            "https://example.test/update",
+            "sig",
+            &"a".repeat(64),
+        );
+        assert!(
+            verify_product_channel(&prerelease).is_err(),
+            "{version} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn a_correctly_signed_envelope_accepts_only_its_exact_metadata_and_artifact() {
     let minisign::KeyPair { pk, sk } = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
     let public_key = encoded_public_key(&pk);

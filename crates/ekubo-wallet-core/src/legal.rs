@@ -264,10 +264,10 @@ all.
 
 To tell you when the copy you are running is out of date, this software sends
 an unauthenticated HTTPS GET to
-`https://api.github.com/repos/EkuboProtocol/wallet/releases/latest`,
-and uses only the version tag in the answer. Signed builds can additionally
-read update metadata from
-`https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json`
+`https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json`,
+and uses only the version tag in the answer when it names product
+`org.ekubo.wallet.v2`, channel `v2`, and a stable v2 release. Signed builds can additionally
+verify and install the platform artifact named by that same signed metadata
 after that version check reports a newer release. The metadata names the
 platform artifact and carries its signature. Nothing of yours is sent: no
 wallet address, key, credential, cookie, balance, policy, or transaction, and

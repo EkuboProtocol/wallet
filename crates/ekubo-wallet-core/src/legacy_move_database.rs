@@ -101,6 +101,9 @@ pub(crate) fn capture(connection: &Connection, destination: bool) -> Result<Snap
     capture_with_limit(connection, destination, MAX_BYTES)
 }
 
+/// Fail-closed schema gate for the first-run-only move contract: the source
+/// must be exactly `SCHEMA_VERSION`. Anything else refuses the move and
+/// leaves the source unchanged; there is no upgrade or partial path.
 fn capture_with_limit(
     connection: &Connection,
     destination: bool,
@@ -339,6 +342,11 @@ pub(crate) fn import_bound(
         prepare_keys(&wallets(&tx)?)?;
         return Ok(expected);
     }
+    // First-run-only contract: the destination must still match its empty
+    // first-run baseline. Any pre-move v2 write (legal acceptance, settings,
+    // schema bump) permanently refuses the move for this profile; the check
+    // fails closed with no overwrite path. Recovery is a fresh install or
+    // reset of the v2 profile.
     let baseline = state(&tx, "baseline")?.context("v2 has no fresh first-run move baseline")?;
     ensure!(
         capture_with_limit(&tx, true, usize::MAX)?
