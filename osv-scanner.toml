@@ -43,6 +43,18 @@ license.override = ["Apache-2.0"]
 effectiveUntil = 2027-02-15
 reason = "The exact pinned Git package manifest declares Apache-2.0; deps.dev has no matching package-version record."
 
+# deps.dev has no license record for the patched rustls 0.23.45 yet (fixed
+# RUSTSEC-2026-0285 via the 0.23.43 -> 0.23.45 bump), so the scanner reports
+# UNKNOWN. The exact crate manifest declares Apache-2.0 OR ISC OR MIT, all of
+# which are on the allowlist. Drop this override once deps.dev indexes the
+# version.
+[[PackageOverrides]]
+name = "rustls"
+version = "0.23.45"
+license.override = ["Apache-2.0", "ISC", "MIT"]
+effectiveUntil = 2027-02-15
+reason = "deps.dev has no license metadata for the patched version yet; the exact pinned manifest declares Apache-2.0 OR ISC OR MIT."
+
 # OSV-Scanner's allowlist accepts SPDX license identifiers but not standalone
 # exception identifiers. LLVM-exception only relaxes Apache-2.0's conditions,
 # so normalize this one exact package to its underlying allowed license.
