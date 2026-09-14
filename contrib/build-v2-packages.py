@@ -110,7 +110,8 @@ license=('LicenseRef-FSL-1.1-MIT')
 # Runtime libraries for the Ubuntu-built ELF payload, plus service enrollment.
 depends=('alsa-lib' 'fontconfig' 'glib2' 'glibc' 'gcc-libs' 'libx11'
          'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'openssl'
-         'zlib' 'xdotool' 'libsecret' 'dbus' 'polkit' 'systemd' 'python')
+         'zlib' 'xdotool' 'libsecret' 'dbus' 'polkit' 'systemd' 'python'
+         'vulkan-icd-loader' 'libglvnd')
 optdepends=('gnome-keyring: Secret Service provider for owner credentials and legacy-wallet migration')
 options=('!strip' '!debug')
 install=arch-v2.install
@@ -156,6 +157,10 @@ def main():
     elif args.format == "arch":
         arch(version, output)
     else:
+        pinned = subprocess.check_output(["makensis", "/VERSION"], cwd=ROOT, text=True)
+        if "3.12" not in pinned:
+            raise RuntimeError(
+                f"pinned NSIS 3.12.0 required, makensis reported: {pinned.strip()}")
         subprocess.run(["makensis", f"/DVERSION={version}", str(ROOT / "contrib/windows-v2.nsi")],
                        cwd=ROOT, check=True)
 

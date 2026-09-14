@@ -1,4 +1,13 @@
 # Pacman runs these functions as root. Never enroll an owner during installation.
+pre_upgrade() {
+    # Mirror contrib/deb-v2-preinst: do not replace an enrollment protocol
+    # while it is creating custody.
+    units="$(systemctl list-units --state=active,activating --no-legend 'ekubo-wallet-v2-provision@*.service')"
+    if [ -n "$units" ]; then
+        printf '%s\n' 'Complete or recover v2 enrollment before installing this package.' >&2
+        return 1
+    fi
+}
 post_install() {
     # Pacman's global sysusers/tmpfiles hooks run after package install scripts.
     systemd-sysusers /usr/lib/sysusers.d/ekubo-wallet-v2.conf || return
@@ -11,7 +20,10 @@ post_install() {
 }
 
 post_upgrade() {
-    post_install "$@"
+    post_install "$@" || return
+    # pre_upgrade refuses an active enrollment above, so this stop is a
+    # fail-closed belt-and-braces matching pre_remove semantics below.
+    systemctl stop 'ekubo-wallet-v2-provision@*.service'
 }
 
 pre_remove() {

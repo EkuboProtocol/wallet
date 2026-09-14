@@ -53,6 +53,11 @@ jobs:
           V2_RELEASE_ACCEPTANCE: ${{ vars.V2_RELEASE_ACCEPTANCE }}
         run: |
           set -euo pipefail
+          # V2-only channel: v1.* tags never match the v2 regex below and are
+          # rejected here. The 1.x update channel (latest.json, frozen at
+          # 1.5.0) is never written by this workflow; see
+          # docs/service-isolation.md for the 1.x coexistence statement and
+          # the "never upload latest.json" guard in the publish job below.
           [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$RELEASE_TAG" =~ ^v2\.[0-9]+\.[0-9]+$ ]]
           # Windows owner authorization is currently fail closed. A maintainer
@@ -344,7 +349,10 @@ jobs:
           name: verified-unsigned-inputs
           path: input
       - shell: bash
-        run: mkdir dist && cp input/unsigned-linux-x86_64/*.deb dist/
+        run: |
+          mkdir dist
+          cp input/unsigned-linux-x86_64/*.deb dist/
+          cp input/unsigned-linux-x86_64/*.pkg.tar.zst dist/
       - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
         with:
           tool: cargo-packager@0.11.8
@@ -353,7 +361,7 @@ jobs:
         env:
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: for file in dist/*.deb; do cargo packager signer sign "$file"; done
+        run: for file in dist/*.deb dist/*.pkg.tar.zst; do cargo packager signer sign "$file"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signed-linux
@@ -417,28 +425,33 @@ jobs:
             mv "$file" "${file// /.}"
           done
           assets=(dist/*)
-          test "${#assets[@]}" -eq 8
+          test "${#assets[@]}" -eq 10
           find dist -maxdepth 1 -type f -printf '%f\n' | while read -r name; do
             [[ "$name" =~ ^Ekubo\.Wallet\.2_2\.[0-9.]+_aarch64\.(dmg|app\.tar\.gz)(\.sig)?$ \
               || "$name" =~ ^ekubo-wallet-v2_2\.[0-9.]+_x64-setup\.exe(\.sig)?$ \
-              || "$name" =~ ^ekubo-wallet-v2_2\.[0-9.]+_amd64\.deb(\.sig)?$ ]]
+              || "$name" =~ ^ekubo-wallet-v2_2\.[0-9.]+_amd64\.deb(\.sig)?$ \
+              || "$name" =~ ^ekubo-wallet-v2-2\.[0-9.]+-1-x86_64\.pkg\.tar\.zst(\.sig)?$ ]]
           done
           macos_bundles=(dist/*.app.tar.gz)
           windows_bundles=(dist/*setup.exe)
           linux_bundles=(dist/*.deb)
+          arch_bundles=(dist/*.pkg.tar.zst)
           test "${#macos_bundles[@]}" -eq 1
           test "${#windows_bundles[@]}" -eq 1
           test "${#linux_bundles[@]}" -eq 1
+          test "${#arch_bundles[@]}" -eq 1
           macos_bundle="${macos_bundles[0]}"
           windows_bundle="${windows_bundles[0]}"
           linux_bundle="${linux_bundles[0]}"
-          for bundle in "$macos_bundle" "$windows_bundle" "$linux_bundle"; do test -s "$bundle"; test -s "$bundle.sig"; done
+          arch_bundle="${arch_bundles[0]}"
+          for bundle in "$macos_bundle" "$windows_bundle" "$linux_bundle" "$arch_bundle"; do test -s "$bundle"; test -s "$bundle.sig"; done
           url() { printf 'https://github.com/%s/releases/download/%s/%s' "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$(printf '%s' "$(basename "$1")" | jq -sRr @uri)"; }
           jq -n --arg version "${RELEASE_TAG#v}" --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg mu "$(url "$macos_bundle")" --arg ms "$(cat "$macos_bundle.sig")" --arg mh "$(sha256sum "$macos_bundle" | cut -d ' ' -f 1)" \
             --arg wu "$(url "$windows_bundle")" --arg ws "$(cat "$windows_bundle.sig")" --arg wh "$(sha256sum "$windows_bundle" | cut -d ' ' -f 1)" \
             --arg lu "$(url "$linux_bundle")" --arg ls "$(cat "$linux_bundle.sig")" --arg lh "$(sha256sum "$linux_bundle" | cut -d ' ' -f 1)" \
-            '{product:"org.ekubo.wallet.v2",channel:"v2",version:$version,pub_date:$pub_date,platforms:{"macos-aarch64":{url:$mu,signature:$ms,sha256:$mh,format:"app"}},manual_installers:{"windows-x86_64":{url:$wu,signature:$ws,sha256:$wh,format:"nsis"},"linux-x86_64":{url:$lu,signature:$ls,sha256:$lh,format:"deb"}}}' > dist/latest-v2.json
+            --arg au "$(url "$arch_bundle")" --arg as "$(cat "$arch_bundle.sig")" --arg ah "$(sha256sum "$arch_bundle" | cut -d ' ' -f 1)" \
+            '{product:"org.ekubo.wallet.v2",channel:"v2",version:$version,pub_date:$pub_date,platforms:{"macos-aarch64":{url:$mu,signature:$ms,sha256:$mh,format:"app"}},manual_installers:{"windows-x86_64":{url:$wu,signature:$ws,sha256:$wh,format:"nsis"},"linux-x86_64":{url:$lu,signature:$ls,sha256:$lh,format:"deb"},"linux-x86_64-arch":{url:$au,signature:$as,sha256:$ah,format:"pacman"}}}' > dist/latest-v2.json
       - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
         with:
           tool: cargo-packager@0.11.8

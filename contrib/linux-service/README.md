@@ -7,14 +7,19 @@ while building or testing the repository. No command reads or removes 1.x state.
 
 ### Arch Linux / Omarchy
 
-The unsigned CI build's `unsigned-linux-x86_64` artifact contains both the Debian
-package and the native Arch `ekubo-wallet-v2-2.0.0-1-x86_64.pkg.tar.zst` package.
-Extract the downloaded artifact, then install the Arch file from that directory:
+Download the signed `ekubo-wallet-v2-<version>-1-x86_64.pkg.tar.zst` and its
+`.sig` companion from the v2 GitHub release. Verify the `.sig` as described
+in `docs/releasing.md` where documented, then install the signed package from
+that directory:
 
 ```sh
-sudo pacman -U ./ekubo-wallet-v2-*.pkg.tar.zst
+sudo pacman -U ./ekubo-wallet-v2-<version>-1-x86_64.pkg.tar.zst
 ekubo-wallet-v2
 ```
+
+Never install the unsigned CI build artifact on a real machine: the
+`unsigned-linux-x86_64` artifact's Arch package exists only so disposable CI
+can validate the pacman lifecycle, and it carries no release signature.
 
 Run the desktop as your ordinary login user. Its first-run enrollment requests
 Polkit elevation for the protected service. A running Secret Service provider is

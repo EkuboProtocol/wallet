@@ -22,8 +22,32 @@ def check_windows_auth_payload():
         assert "register-windows-v2-auth.ps1" in (ROOT / relative).read_text(encoding="utf-8"), relative
 
 
+def check_arch_release():
+    release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert "input/unsigned-linux-x86_64/*.pkg.tar.zst" in release
+    assert "dist/*.deb dist/*.pkg.tar.zst" in release
+    assert "test \"${#assets[@]}\" -eq 10" in release
+    assert "pkg.tar.zst" in release
+    assert "arch_bundles=(dist/*.pkg.tar.zst)" in release
+    assert '"linux-x86_64-arch"' in release
+    assert 'format:"pacman"' in release
+    builder = (ROOT / "contrib/build-v2-packages.py").read_text(encoding="utf-8")
+    assert "'vulkan-icd-loader'" in builder
+    assert "'libglvnd'" in builder
+    assert 'makensis", "/VERSION"' in builder
+    assert '"3.12"' in builder
+    install = (ROOT / "contrib/arch-v2.install").read_text(encoding="utf-8")
+    assert "pre_upgrade()" in install
+    assert "ekubo-wallet-v2-provision@*.service" in install
+    assert "Complete or recover v2 enrollment before installing this package." in install
+    readme = (ROOT / "contrib/linux-service/README.md").read_text(encoding="utf-8")
+    assert "signed" in readme and "GitHub release" in readme
+    assert "sudo pacman -U ./ekubo-wallet-v2-*.pkg.tar.zst" not in readme
+
+
 def main():
     check_windows_auth_payload()
+    check_arch_release()
     assert (ROOT / 'contrib/arch-v2.install').is_file()
     assert (ROOT / 'contrib/arch-ci/Dockerfile').is_file()
     with (ROOT / "Cargo.toml").open("rb") as source:
