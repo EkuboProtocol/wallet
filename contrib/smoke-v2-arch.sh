@@ -1,6 +1,6 @@
 #!/bin/bash
 # Real pacman lifecycle and ELF loading, confined to the dedicated CI container.
-set -euo pipefail
+set -euxo pipefail
 [[ ${WALLET_ARCH_DISPOSABLE_CI:-} = 1 && $EUID = 0 && -e /.dockerenv ]]
 [[ $(cat /proc/1/comm) = systemd ]]
 [[ ! -e /etc/ekubo-wallet-v2 && ! -e /var/lib/ekubo-wallet-v2 ]]
@@ -21,7 +21,7 @@ done
 status=0
 desktop_output=$(ekubo-wallet-v2 --version 2>&1) || status=$?
 [[ $status = 2 && "$desktop_output" = 'Ekubo Wallet does not accept command-line operations.' ]]
-ekubo-wallet-v2-mcp-bridge --version
+python3 /checks/verify-mcp-bridge.py /usr/bin/ekubo-wallet-v2-mcp-bridge "$BUILD_VERSION"
 systemd-analyze verify /usr/lib/systemd/system/ekubo-wallet-v2@.service \
     /usr/lib/systemd/system/ekubo-wallet-v2-provision@.service
 getent passwd ekubo-wallet-v2

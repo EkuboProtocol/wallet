@@ -24,7 +24,7 @@ docker run --rm --user "$(id -u)" \
 # No host runtime, credentials, bus, home, or cgroup directory is bind-mounted.
 docker run -d --name "$name" --privileged --cgroupns=private \
     --tmpfs /run --tmpfs /run/lock --stop-signal SIGRTMIN+3 \
-    -e container=docker -e WALLET_ARCH_DISPOSABLE_CI=1 \
+    -e container=docker -e WALLET_ARCH_DISPOSABLE_CI=1 -e BUILD_VERSION \
     --mount "type=bind,src=$root/target/release,dst=/packages,readonly" \
     --mount "type=bind,src=$root/contrib,dst=/checks,readonly" \
     "$image" /sbin/init

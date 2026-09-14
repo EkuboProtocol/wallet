@@ -170,6 +170,8 @@ jobs:
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS bash contrib/smoke-v2-deb.sh target/release/*.deb
       - name: Build and test native Arch package for Omarchy
         if: runner.os == 'Linux'
+        env:
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
         run: bash contrib/build-test-arch-ci.sh
       - name: Install and reinstall actual NSIS on disposable runner
         if: runner.os == 'Windows'
