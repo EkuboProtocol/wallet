@@ -74,10 +74,13 @@ async fn native_authorization_lease_rejects_extra_traffic_unbuffered() {
     assert!(authenticate_auth_service(&server, "S-1-5-80-1-2-3-4-5").is_err());
     let retained = retain_auth_connection(&server).unwrap();
     client.write_all(b"x").await.unwrap();
-    // No userspace prefetch this time: the byte stays in the kernel pipe until
-    // the monitor polls the raw transport, which must still reject it. The
-    // completed client write already placed the byte in the pipe, so the first
-    // transport poll deterministically observes it without any timing wait.
+    // The byte is guaranteed to arrive while the client stays connected, but
+    // its IOCP completion is asynchronous: an immediately-ready operation
+    // could win the first poll before the overlapped server read completes,
+    // so awaiting it would be a timing assumption. Instead await the
+    // departure itself with a never-ready operation: the run can only return
+    // when the transport poll fires, and the poll must fire, so rejection is
+    // deterministic with no readiness wait.
     verify_auth_connection(&retained).unwrap();
     let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(server);
     let binding = monitor.binding();
@@ -85,8 +88,9 @@ async fn native_authorization_lease_rejects_extra_traffic_unbuffered() {
     assert!(
         monitor
             .run(async {
+                std::future::pending::<()>().await;
                 ran = true;
-                Ok(())
+                Ok::<(), anyhow::Error>(())
             })
             .await
             .is_err()
@@ -94,11 +98,14 @@ async fn native_authorization_lease_rejects_extra_traffic_unbuffered() {
     assert!(!ran);
     assert!(binding.ensure_live().is_err());
     drop(client);
+    // The broken pipe guarantees end-of-stream; same never-ready shape keeps
+    // this deterministic through the overlapped-completion delay.
     assert!(
         monitor
             .run(async {
+                std::future::pending::<()>().await;
                 ran = true;
-                Ok(())
+                Ok::<(), anyhow::Error>(())
             })
             .await
             .is_err()
