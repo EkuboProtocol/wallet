@@ -6,10 +6,14 @@ root="$(git rev-parse --show-toplevel)"
 name="wallet-arch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 image="$name:local"
 cleanup() {
+    if [[ ${1:-0} != 0 ]]; then
+        docker logs "$name" 2>&1 || true
+        docker exec "$name" journalctl --no-pager -n 80 2>&1 || true
+    fi
     docker rm -f "$name" >/dev/null 2>&1 || true
     docker image rm "$image" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 docker build --build-arg "BUILD_UID=$(id -u)" -t "$image" "$root/contrib/arch-ci"
 docker run --rm --user "$(id -u)" \
     -e "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" \
@@ -24,4 +28,10 @@ docker run -d --name "$name" --privileged --cgroupns=private \
     --mount "type=bind,src=$root/target/release,dst=/packages,readonly" \
     --mount "type=bind,src=$root/contrib,dst=/checks,readonly" \
     "$image" /sbin/init
+# Docker returns once PID 1 starts, before systemd has opened its control socket.
+for attempt in {1..60}; do
+    if docker exec "$name" test -S /run/systemd/private; then break; fi
+    sleep 1
+done
+docker exec "$name" test -S /run/systemd/private
 docker exec "$name" bash /checks/smoke-v2-arch.sh
