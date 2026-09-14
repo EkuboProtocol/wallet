@@ -53,6 +53,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y dbus-broker python3-dbus python3-gi
       - run: cargo fmt --all --check
       - run: pipx run ruff==0.16.4 check --output-format concise .
       - run: python3 contrib/check-v2-packaging.py
@@ -167,6 +168,9 @@ jobs:
           cargo test --locked -p ekubo-wallet-core --all-features --lib credential_store::tests::recovers_after_secret_service_startup_and_restart -- --ignored
           cargo test --locked --workspace --all-features --lib owner_client::tests -- --ignored
           cargo test --locked --workspace --all-features --lib linux_relay_handoff::tests::installer_policy -- --ignored
+          cargo test --locked -p ekubo-wallet-core --all-features --lib service_profile_lock::tests::read_only_profile_lock_excludes_other_handles_and_releases_on_drop -- --ignored
+          cargo test --locked -p ekubo-wallet-service --all-features --lib linux_owner_rpc::tests::desktop_disconnect -- --ignored
+          cargo test --locked -p ekubo-wallet-core --all-features --lib legacy_move::retirement::secret_service_tests::legacy_credentials_from_async_runtimes_on_private_bus -- --ignored
       - name: Installed Linux fresh enrollment, restart and owner denial (disposable runner)
         if: runner.os == 'Linux'
         timeout-minutes: 20

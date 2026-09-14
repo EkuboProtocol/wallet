@@ -237,8 +237,24 @@ def discard_unused(owner):
         subprocess.run(['/usr/bin/systemctl', 'stop', f'ekubo-wallet-v2-provision@{owner}.service'], check=True)
         path = STATE / 'pending' / profile
         protected(path, 0o700, metadata['service_uid'], pwd.getpwnam('ekubo-wallet-v2').pw_gid)
-        if any(p.name.startswith('key-account-') or p.name == 'setup-complete' for p in path.iterdir()):
-            raise RuntimeError('Pending profile has signs of active authority; refusing cleanup')
+        # Closed allowlist mirroring recover-windows-v2.ps1: provisioning
+        # creates an empty database; account custody cannot exist without a
+        # key-account-* record, and active/readiness/move records are not allowed.
+        # Containers, symlinks, special files, key-account-*, setup-complete, or
+        # any other unexpected (possibly nested-state-bearing) entry refuses.
+        allowed = frozenset({'service.lock', 'wallet.db', 'wallet.db-wal',
+                             'wallet.db-shm', 'wrapping.key', 'key-database',
+                             'custody.json', 'fresh-profile-ready'})
+        for child in path.iterdir():
+            if not stat.S_ISREG(child.lstat().st_mode) or child.name not in allowed:
+                raise RuntimeError('Pending profile has signs of active authority; refusing cleanup')
+        ready = path / 'fresh-profile-ready'
+        if os.path.lexists(ready):
+            with os.fdopen(os.open(ready, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as marker:
+                if os.fstat(marker.fileno()).st_size > 4096:
+                    raise RuntimeError('Unsafe pending readiness marker')
+                if marker.read() != profile.encode():
+                    raise RuntimeError('Pending readiness identity mismatch')
         shutil.rmtree(path)
         pending.unlink()
         # Leave any opaque orphan relay in its unique v2 namespace; never read

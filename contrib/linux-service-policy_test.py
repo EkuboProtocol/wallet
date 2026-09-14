@@ -117,10 +117,22 @@ def stop(process):
         process.stdout.close()
 
 
-@unittest.skipUnless(os.geteuid() != 0 and shutil.which("dbus-broker-launch")
-                     and importlib.util.find_spec("dbus") and importlib.util.find_spec("gi"),
+def broker_dependencies_present():
+    return bool(os.geteuid() != 0 and shutil.which("dbus-broker-launch")
+                and importlib.util.find_spec("dbus") and importlib.util.find_spec("gi"))
+
+
+# Local developers without the native broker stack skip quietly; under CI a
+# missing stack must fail rather than silently skip transport-policy coverage.
+@unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true" or broker_dependencies_present(),
                      "non-root user, dbus-broker-launch, dbus-python and GLib required")
 class NativeBrokerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if os.environ.get("GITHUB_ACTIONS") == "true" and not broker_dependencies_present():
+            raise AssertionError("CI requires non-root user, dbus-broker-launch, "
+                                 "dbus-python and GLib; refusing silent skip")
+        super().setUpClass()
     def start_bus(self, privileged=False):
         import dbus
 

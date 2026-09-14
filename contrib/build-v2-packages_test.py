@@ -96,7 +96,7 @@ restore_profile() { record restore "$@"; }
                               capture_output=True, text=True)
 
     def test_install_and_upgrade_restore_then_only_try_restart_v2(self):
-        expected = [
+        install_expected = [
             "sysusers /usr/lib/sysusers.d/ekubo-wallet-v2.conf",
             "tmpfiles --create /usr/lib/tmpfiles.d/ekubo-wallet-v2.conf",
             "systemctl daemon-reload",
@@ -104,7 +104,12 @@ restore_profile() { record restore "$@"; }
             "busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig",
             "systemctl try-restart ekubo-wallet-v2@*.service",
         ]
-        for hook in ("post_install", "post_upgrade"):
+        upgrade_expected = [
+            *install_expected,
+            "systemctl stop ekubo-wallet-v2-provision@*.service",
+        ]
+        for hook, expected in (("post_install", install_expected),
+                               ("post_upgrade", upgrade_expected)):
             result = self.hook(hook)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines(), expected)
@@ -114,6 +119,7 @@ restore_profile() { record restore "$@"; }
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("try-restart", result.stdout)
         self.assertNotIn("busctl", result.stdout)
+        self.assertNotIn("stop", result.stdout)
 
     def test_remove_stops_only_v2_and_retains_profile_metadata(self):
         before = self.hook("pre_remove")
