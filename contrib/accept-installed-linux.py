@@ -203,6 +203,14 @@ polkit.addRule(function(action, subject) {{
         (new RegExp("^{LIB}/install-profile {uid} :[0-9]+\\\\.[0-9]+$").test(action.lookup("command_line")) ||
          action.lookup("command_line") === "{LIB}/install-profile --resume {uid}"))
         return polkit.Result.YES;
+    // The shipped policy pins install-profile to its dedicated action via
+    // exec.path, so pkexec resolves here instead of the generic exec action
+    // above. Grant the exact same command lines under the pinned action id.
+    if (action.id === "org.ekubo.wallet.v2.install-profile" &&
+        action.lookup("program") === "{LIB}/install-profile" &&
+        (new RegExp("^{LIB}/install-profile {uid} :[0-9]+\\\\.[0-9]+$").test(action.lookup("command_line")) ||
+         action.lookup("command_line") === "{LIB}/install-profile --resume {uid}"))
+        return polkit.Result.YES;
     return polkit.Result.NOT_HANDLED;
 }});
 '''
