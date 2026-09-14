@@ -59,7 +59,7 @@ jobs:
       - run: python3 contrib/accept-installed-linux.py --check-guards
       - run: python3 contrib/linux-service/install-profile_test.py
       - run: python3 contrib/build-v2-packages_test.py
-      - run: python3 contrib/linux-service-policy_test.py
+      - run: dbus-run-session -- python3 contrib/linux-service-policy_test.py
       - run: bash -n contrib/arch-v2.install contrib/build-test-arch-ci.sh contrib/smoke-v2-arch.sh
       - run: for file in contrib/deb-v2-* contrib/smoke-v2-*.sh; do bash -n "$file"; done
 

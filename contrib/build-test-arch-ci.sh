@@ -35,4 +35,4 @@ for attempt in {1..60}; do
 done
 docker exec "$name" test -S /run/systemd/private
 docker exec "$name" bash /checks/smoke-v2-arch.sh
-docker exec --user "$(id -u)" "$name" python3 /checks/linux-service-policy_test.py -v
+docker exec --user "$(id -u)" "$name" dbus-run-session -- python3 /checks/linux-service-policy_test.py -v

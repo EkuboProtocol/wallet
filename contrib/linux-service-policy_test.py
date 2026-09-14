@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exact policy assertions and optional unprivileged native D-Bus routing tests.
 
-Run with /usr/bin/python3 contrib/linux-service-policy_test.py -v. Native tests
-need dbus-python, GLib and dbus-broker-launch; no host bus or root access is used.
+Run with dbus-run-session -- /usr/bin/python3 contrib/linux-service-policy_test.py -v.
+Native tests need dbus-python, GLib and dbus-broker-launch. The launcher connects
+to a session bus for activation management; the wrapper isolates that connection
+as well as the private test bus. No root access is used.
 The echo peer tests transport policy, not the wallet's independent core auth.
 """
 
