@@ -156,7 +156,7 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
     let script = folder(FOLDERID_ProgramFiles)?
         .join("Ekubo Wallet 2")
         .join("recover-windows-v2.ps1");
-    let option = match action {
+    let option: String = match action {
         SetupAction::DiscardUnused => " -DiscardUnused".into(),
         SetupAction::ResetConfirmed => " -ResetConfirmed".into(),
         SetupAction::Install | SetupAction::Resume => {
