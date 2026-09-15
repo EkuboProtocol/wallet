@@ -113,7 +113,11 @@ jobs:
         with:
           prefix-key: v2-installed-windows
           cache-on-failure: true
-      - name: Enroll as standard owner with a distinct administrator
+      # Drives the real enroll --launch-install trampoline (verify_installer_process
+      # + run_install_script under AllSigned) with the relay of a distinct standard
+      # owner. Only the OS-mediated UAC credential prompt is unexercised; fixture
+      # publisher trust keeps the production AllSigned invocation prompt-free.
+      - name: Enroll via real launch-install trampoline with a distinct standard owner
         shell: pwsh
         run: contrib/test-windows-installed-acceptance.ps1
 
@@ -158,6 +162,12 @@ jobs:
         run: cargo check --locked --workspace --bins --lib --jobs 1
       - name: Workspace tests
         run: cargo test --locked --workspace --all-features --jobs 1
+      - name: Production-feature owner-presence boundary (no test hooks)
+        # owner_presence_boundary_test is compiled out under --all-features
+        # (test-hooks); this is the only run that executes it. It is a
+        # no-op pass on macOS, where the target is cfg'd out.
+        if: runner.os != 'macOS'
+        run: cargo test --locked -p ekubo-wallet-core --no-default-features --test owner_presence_boundary_test
       - name: Native Windows protected collector boundary (no biometric interaction)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -170,6 +180,7 @@ jobs:
           cargo test --locked --workspace --all-features --lib linux_relay_handoff::tests::installer_policy -- --ignored
           cargo test --locked -p ekubo-wallet-core --all-features --lib service_profile_lock::tests::read_only_profile_lock_excludes_other_handles_and_releases_on_drop
           cargo test --locked -p ekubo-wallet-service --all-features --lib linux_owner_rpc::tests::desktop_disconnect -- --ignored
+          cargo test --locked -p ekubo-wallet-core --all-features --lib service_presence::tests -- --ignored
           cargo test --locked -p ekubo-wallet-core --all-features --lib legacy_move::retirement::secret_service_tests::legacy_credentials_from_async_runtimes_on_private_bus -- --ignored
       - name: Installed Linux fresh enrollment, restart and owner denial (disposable runner)
         if: runner.os == 'Linux'

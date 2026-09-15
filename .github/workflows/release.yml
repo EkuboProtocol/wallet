@@ -54,10 +54,11 @@ jobs:
         run: |
           set -euo pipefail
           # V2-only channel: v1.* tags never match the v2 regex below and are
-          # rejected here. The 1.x update channel (latest.json, frozen at
-          # 1.5.0) is never written by this workflow; see
-          # docs/service-isolation.md for the 1.x coexistence statement and
-          # the "never upload latest.json" guard in the publish job below.
+          # rejected here. The 1.x line is at 1.8.4 and ships from the
+          # release-1.x branch; its update channel (latest.json) is never
+          # written by this workflow. See docs/service-isolation.md for the
+          # 1.x coexistence statement and the "never upload latest.json"
+          # guard in the publish job below.
           [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$RELEASE_TAG" =~ ^v2\.[0-9]+\.[0-9]+$ ]]
           # Windows owner authorization is currently fail closed. A maintainer
@@ -293,7 +294,10 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          choco install nsis --no-progress -y
+          choco install nsis --version=3.12.0 --no-progress -y
+          $nsisVersion = & 'C:/Program Files (x86)/NSIS/makensis.exe' /VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'Could not determine NSIS version.' }
+          if ("$nsisVersion" -notmatch '3\.12') { throw "Pinned NSIS 3.12.0 required, makensis reported: $nsisVersion" }
           $version = $env:RELEASE_TAG.Substring(1)
           & 'C:/Program Files (x86)/NSIS/makensis.exe' "/DVERSION=$version" contrib/windows-v2.nsi
           if ($LASTEXITCODE -ne 0) { throw 'NSIS rebuild failed.' }
@@ -489,3 +493,13 @@ jobs:
           channel_id="$(jq -r .id channel.json)"
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$channel_id" -f make_latest=false -F prerelease=true >/dev/null
           gh release upload v2-channel dist/latest-v2.json dist/latest-v2.json.sig --clobber
+      - name: Assert the new tag is not the repository latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Only make_latest=false keeps the numeric-compare 1.x updater off
+          # v2 tags. Fail closed: any mismatch or lookup failure blocks here.
+          test "$(gh release view "$RELEASE_TAG" --json isLatest --jq .isLatest)" = false
