@@ -17,9 +17,14 @@ fn wallet(id: u128, key: u8) -> WalletMetadata {
 }
 
 fn binding() -> String {
+    // Platform-absolute without touching the filesystem: the recovery path
+    // never opens the source, but binding validation requires absoluteness
+    // and a Unix-style literal is not absolute on Windows.
+    let source = std::env::temp_dir().join("deleted-legacy-source");
+    assert!(source.is_absolute());
     serde_json::to_string(&MoveBinding {
         profile: Uuid::new_v4(),
-        source: PathBuf::from("/deleted/legacy-source"),
+        source,
         preserved_profiles: vec![],
         retained_shared_accounts: vec![],
         retirement: None,
