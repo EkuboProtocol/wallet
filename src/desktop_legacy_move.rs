@@ -251,39 +251,60 @@ impl MoveWindow {
     }
 
     /// Owner-authorized recovery when the 1.x source is gone but a cleanup
-    /// receipt is pending. The window only carries intent: core inspects the
-    /// pending receipt, proves the bound source database is absent, retires
-    /// the bound unshared 1.x credentials with the login-owner authority, and
-    /// only then asks the service to re-verify destination custody and finish
-    /// the receipt. A refusal leaves the receipt pending so recovery retries
-    /// cleanly; retirement itself is idempotent.
+    /// receipt is pending. The window only carries intent. Sequencing, and
+    /// who proves what where:
+    /// 1. The service natively authenticates the owner and binds the pending
+    ///    receipt (destination custody re-verified) — before anything else.
+    /// 2. The desktop, running un-sandboxed as the login owner, proves the
+    ///    bound source database is absent and mints the receipt-bound
+    ///    absence attestation. The sandboxed service never re-stats.
+    /// 3. The desktop retires the bound unshared 1.x credentials, which
+    ///    requires the authorized receipt from step 1 — never a boolean.
+    /// 4. The service re-verifies destination custody, re-validates the
+    ///    attestation against the pending receipt, and finishes it.
+    ///
+    /// Steps 2–3 run synchronously on this blocking worker thread, outside
+    /// async execution: the Secret Service adapter owns its own Tokio
+    /// runtime, so retiring inside `block_on` would nest runtimes and panic.
+    /// A refusal leaves the receipt pending so recovery retries cleanly;
+    /// retirement itself is idempotent.
     fn complete_without_source(&mut self, cx: &mut Context<Self>) {
         if self.busy || self.recovery != Recovery::Confirmed || self.finished() {
             return;
         }
         self.busy = true;
-        self.message = Some("Re-verifying the protected destination, retiring the moved profile's unshared 1.x credentials, and requesting owner authorization to finish the pending cleanup. Keep this window open.".into());
+        self.message = Some("Requesting owner authorization, proving the 1.x source is absent, retiring the moved profile's unshared 1.x credentials, and finishing the pending cleanup. Keep this window open.".into());
         let owner = self.owner.clone();
         let runtime = gpui_tokio::Tokio::handle(cx);
         let worker = runtime.clone();
         let task = runtime.spawn_blocking(
             move || -> anyhow::Result<ekubo_wallet_core::legacy_move::CleanupReport> {
-                worker.block_on(async move {
-                    let inspected =
-                        ekubo_wallet_core::legacy_move::inspect_pending_receipt().await?;
-                    let Some(binding) = inspected.binding().cloned() else {
-                        anyhow::bail!("no pending legacy move cleanup for this destination");
-                    };
-                    ekubo_wallet_core::legacy_move::require_source_absent(&binding.source)?;
-                    let report = ekubo_wallet_core::legacy_move::retire_recovered_credentials(
-                        &binding,
-                        inspected.wallets(),
-                    )?;
-                    owner
-                        .complete_legacy_move_without_source(uuid::Uuid::new_v4())
-                        .await?;
-                    Ok(report)
-                })
+                let crate::desktop_owner::DesktopOwner::Service(client) = owner else {
+                    anyhow::bail!("source-less recovery requires the v2 service");
+                };
+                // Step 1: owner-authorized service step before any mutation.
+                // No 1.x credential is touched before this returns.
+                let recovery =
+                    worker.block_on(client.authorize_legacy_move_recovery(uuid::Uuid::new_v4()))?;
+                // Steps 2–3 are synchronous on this blocking thread, outside
+                // async execution, so the credential-store runtime may start.
+                let Some(binding) = recovery.binding().cloned() else {
+                    anyhow::bail!("no pending legacy move cleanup for this destination");
+                };
+                ekubo_wallet_core::legacy_move::require_source_absent(&binding.source)?;
+                let absence = ekubo_wallet_core::legacy_move::RecoveryAbsence {
+                    digest: recovery.digest(),
+                    source: binding.source.clone(),
+                };
+                let report =
+                    ekubo_wallet_core::legacy_move::retire_recovered_credentials(&recovery)?;
+                // Step 4: finish with the receipt-bound attestation. A
+                // refusal leaves the receipt pending; retirement is
+                // idempotent so recovery retries cleanly.
+                worker.block_on(
+                    client.complete_legacy_move_recovery(uuid::Uuid::new_v4(), absence),
+                )?;
+                Ok(report)
             },
         );
         cx.spawn(async move |view, cx| {

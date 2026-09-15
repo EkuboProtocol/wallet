@@ -75,21 +75,30 @@ fn inventory_discloses_exact_accounts_paths_and_which_credentials_are_retained()
 
 #[test]
 fn recovery_is_offered_only_for_pending_receipts_with_absent_sources() {
-    use std::io::{Error, ErrorKind};
-    let missing_io = anyhow::Error::from(Error::new(ErrorKind::NotFound, "canonicalize failed"));
-    assert!(should_offer_recovery(true, &missing_io));
+    // The narrow bound-source marker offers recovery on a pending receipt.
+    let missing_bound = anyhow::anyhow!(
+        "legacy move source is missing at /owner/legacy; resume the exact source review or use the owner-authorized source-less recovery"
+    );
+    assert!(should_offer_recovery(true, &missing_bound));
     let missing_reported = anyhow::anyhow!(
         "legacy move source is missing; the 1.x profile cannot be read. Nothing was copied or deleted"
     );
     assert!(should_offer_recovery(true, &missing_reported));
+    // A bare not-found — a mistyped preserved-profile path — never offers.
+    let mistyped = anyhow::Error::from(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "canonicalize failed",
+    ));
+    assert!(!should_offer_recovery(true, &mistyped));
     let locked = anyhow::anyhow!("close the 1.x application before moving its profile");
     assert!(!should_offer_recovery(true, &locked));
     let wrong_inventory = anyhow::anyhow!(
         "cannot retire legacy credentials without an explicitly reviewed complete profile inventory"
     );
     assert!(!should_offer_recovery(true, &wrong_inventory));
-    assert!(!should_offer_recovery(false, &missing_io));
+    assert!(!should_offer_recovery(false, &missing_bound));
     assert!(!should_offer_recovery(false, &missing_reported));
+    assert!(!should_offer_recovery(false, &mistyped));
 }
 
 #[test]

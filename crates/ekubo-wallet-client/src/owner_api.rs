@@ -25,11 +25,63 @@ impl<T: OwnerTransport> OwnerConnection<T> {
     pub async fn legacy_move_status(&self) -> Result<ekubo_wallet_core::legacy_move::MoveStatus> {
         self.call(&Request::LegacyMoveStatus).await
     }
-    /// Owner-authorized recovery when the 1.x source was deleted before
-    /// cleanup finished. The service re-verifies destination custody and
-    /// natively authenticates the owner; this call carries no source path.
+    /// Owner-authorized entry into source-less recovery. Natively
+    /// authenticates the owner in the service and binds the pending receipt
+    /// (destination custody re-verified). The returned receipt is what core's
+    /// desktop-side retirement requires before touching a 1.x credential; it
+    /// also carries the digest the owner-side absence attestation binds to.
     /// The returned receipt must echo the sent nonce; anything else fails
     /// closed without touching local state.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn authorize_legacy_move_recovery(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        let receipt: ekubo_wallet_core::legacy_move::Receipt = self
+            .call(&Request::LegacyMove(
+                ekubo_wallet_core::legacy_move::ServiceCommand::AuthorizeRecovery { nonce },
+            ))
+            .await?;
+        anyhow::ensure!(
+            receipt.nonce() == nonce,
+            "legacy move recovery authorization does not match its fresh nonce"
+        );
+        anyhow::ensure!(
+            receipt.binding().is_some(),
+            "no pending legacy move cleanup for this destination"
+        );
+        Ok(receipt)
+    }
+    /// Owner-authorized recovery when the 1.x source was deleted before
+    /// cleanup finished. Carries the owner-side absence attestation the
+    /// service re-validates against the pending receipt instead of
+    /// re-statting the filesystem. The service re-verifies destination
+    /// custody and natively authenticates the owner; this call carries no
+    /// source path. The returned receipt must echo the sent nonce; anything
+    /// else fails closed without touching local state.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn complete_legacy_move_recovery(
+        &self,
+        nonce: uuid::Uuid,
+        absence: ekubo_wallet_core::legacy_move::RecoveryAbsence,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        let receipt: ekubo_wallet_core::legacy_move::Receipt = self
+            .call(&Request::LegacyMove(
+                ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource {
+                    nonce,
+                    absence: Some(absence),
+                },
+            ))
+            .await?;
+        anyhow::ensure!(
+            receipt.nonce() == nonce,
+            "legacy move recovery receipt does not match its fresh nonce"
+        );
+        Ok(receipt)
+    }
+    /// Superseded by [`Self::authorize_legacy_move_recovery`] plus
+    /// [`Self::complete_legacy_move_recovery`]: a completion without the
+    /// receipt-bound absence attestation fails closed service-side.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub async fn complete_legacy_move_without_source(
         &self,
@@ -37,7 +89,10 @@ impl<T: OwnerTransport> OwnerConnection<T> {
     ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
         let receipt: ekubo_wallet_core::legacy_move::Receipt = self
             .call(&Request::LegacyMove(
-                ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource { nonce },
+                ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource {
+                    nonce,
+                    absence: None,
+                },
             ))
             .await?;
         anyhow::ensure!(
