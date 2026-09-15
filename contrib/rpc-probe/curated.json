@@ -129,7 +129,7 @@
       ],
       "documentation_url": "https://docs.robinhood.com/chain/connecting/",
       "rpc_first": "https://rpc.mainnet.chain.robinhood.com",
-      "block_explorer_url": "https://robinscan.io"
+      "block_explorer_url": "https://robin.etherscan.io"
     },
     "46630": {
       "name": "robinhood-testnet",

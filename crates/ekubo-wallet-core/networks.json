@@ -7549,7 +7549,7 @@
     "symbol": "ETH",
     "decimals": 18
    },
-   "block_explorer_url": "https://robinscan.io",
+   "block_explorer_url": "https://robin.etherscan.io",
    "documentation_url": "https://docs.robinhood.com/chain/connecting/",
    "simulate_endpoints": 5,
    "fork_endpoints": 5,
