@@ -159,9 +159,10 @@ class ActivationTests(unittest.TestCase):
 
 
 class UmaskTests(unittest.TestCase):
-    """Static guard: pkexec preserves the caller umask (and Arch polkit PAM
-    has no pam_umask), so main() must reset it; every protected creation uses
-    an explicit mode, so nothing depends on a stricter inherited umask."""
+    """Behavioral guard: pkexec preserves the caller umask (and Arch polkit
+    PAM has no pam_umask), so main() must reset it through _ensure_umask();
+    every protected creation uses an explicit mode, so nothing depends on a
+    stricter inherited umask."""
 
     @classmethod
     def setUpClass(cls):
@@ -171,7 +172,18 @@ class UmaskTests(unittest.TestCase):
         main = self.source.split('def main():', 1)[1].split('\ndef ', 1)[0]
         first = next(line.strip() for line in main.splitlines()
                      if line.strip() and not line.strip().startswith('#'))
-        self.assertEqual(first, 'os.umask(0o022)')
+        self.assertEqual(first, '_ensure_umask()')
+
+    def test_ensure_umask_restores_secure_default(self):
+        # Pure in-process: impose a hostile umask, call the helper, and read
+        # back the live mask. No root, no filesystem.
+        hostile = os.umask(0o077)
+        try:
+            returned = installer._ensure_umask()
+            self.assertEqual(returned, 0o077)
+            self.assertEqual(os.umask(0o022), 0o022)
+        finally:
+            os.umask(hostile)
 
     def test_all_protected_creations_use_explicit_modes(self):
         for marker in ['path.mkdir(mode=mode)',

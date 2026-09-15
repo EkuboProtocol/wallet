@@ -11,5 +11,5 @@ Target = ekubo-wallet-v2
 [Action]
 Description = Refuse ekubo-wallet-v2 upgrade while v2 enrollment is active
 When = PreTransaction
-Exec = /bin/sh -c 'units="$(systemctl list-units --state=active,activating --no-legend "ekubo-wallet-v2-provision@*.service")"; if [ -n "$units" ]; then printf "%s\n" "Complete or recover v2 enrollment before installing this package." >&2; exit 1; fi'
+Exec = /bin/sh -c 'units="$(/usr/bin/systemctl list-units --state=active,activating --no-legend "ekubo-wallet-v2-provision@*.service")"; if [ -n "$units" ]; then printf "%s\n" "Complete or recover v2 enrollment before installing this package." >&2; exit 1; fi'
 AbortOnFail

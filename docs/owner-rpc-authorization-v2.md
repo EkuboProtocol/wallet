@@ -93,3 +93,14 @@ receipts; caches, watches and read leases do not confer mutation authority.
   No service or desktop Hello boolean is accepted, even before custody activation.
 - Actual packaged cross-identity polkit/PAM and Windows interactive acceptance
   remain required. Private-bus doubles and test-hook success are not that evidence.
+
+## Legacy move and desktop session
+
+| RPC | Enforcement / exact state |
+| --- | --- |
+| `LegacyMove` (`AuthorizeSource`, `Import`, `Verify`, `Complete`, `CompleteWithoutSource`) | Core native owner authorization per phase inside the authenticated owner call; phase-specific receipts bound to the exact source selection, destination profile, and fresh nonce. `Verify`/`Complete` re-check destination state and every destination key under the lifecycle lock before source cleanup or receipt completion. `CompleteWithoutSource` additionally refuses while the bound source database is present and re-verifies destination custody. Presentation-supplied successful receipts are never accepted; transport validation rejects nonce/phase/binding mismatches. |
+| `HoldDesktopSession` / `DesktopSessionReady` | Admission plus a pinned live system-bus sender; the service holds the desktop session only while that sender stays on the bus. Emitting readiness grants no custody or mutation authority; every protected operation still requires its own core authorization. |
+
+| RPC | Constraint |
+| --- | --- |
+| `LegacyMoveStatus` | Untrusted read: pending-receipt digest and bound source metadata only, no secrets or authorization. Same-user peers may observe it; execution stays blocked while cleanup is pending regardless of what any peer claims. |

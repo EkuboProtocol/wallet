@@ -39,13 +39,19 @@ checks out only its trusted workflow revision; no trusted job checks out or
 executes build-run source.
 
 Before dispatching the release, a maintainer with repository-variable access
-sets the `V2_RELEASE_ACCEPTANCE` repository variable to the head SHA of the
-green unsigned-build run (the `head_sha` of the `build_run_id` run). Set it
-only after the unsigned build succeeds and its artifacts pass acceptance
-review, and before running **Sign and publish release**. The verifier compares
-the variable byte-for-byte against the manifest `commit_sha` and fails closed
-on any mismatch, so a stale or missing value blocks the release instead of
-signing the wrong commit.
+sets the `V2_RELEASE_ACCEPTANCE` repository variable to the unsigned build's
+manifest `commit_sha`. It must be a repository variable: the `verify-build`
+job sets no `environment`, so an environment-scoped variable would not
+resolve, and the verifier reads it through `${{ vars.V2_RELEASE_ACCEPTANCE }}`
+(release.yml:53). Set it only after the unsigned build succeeds and its
+artifacts pass acceptance review, and before running **Sign and publish
+release**. The verifier compares the variable byte-for-byte against the
+manifest `commit_sha` (release.yml:91-92) and fails closed on any mismatch,
+so a stale or missing value blocks the release instead of signing the wrong
+commit. The manifest `commit_sha` is `git rev-parse HEAD` of the resolved
+build reference, which equals the build run's head SHA when the build was run
+from the tag commit; otherwise the two differ, so copy the manifest value,
+not the run's head SHA.
 
 Windows signing is mandatory and fails closed: the signing job throws unless
 the protected `AZURE_TRUSTED_SIGNING_ENABLED` environment variable is `true`,

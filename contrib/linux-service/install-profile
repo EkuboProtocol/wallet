@@ -30,6 +30,17 @@ SystemdService=ekubo-wallet-v2@@OWNER_UID@.service
 '''.encode()
 
 
+def _ensure_umask():
+    """Reset the inherited umask to 022; return the previous mask.
+
+    pkexec preserves the caller's umask and Arch's polkit PAM stack has no
+    pam_umask, so an inherited restrictive umask (e.g. 077) would otherwise
+    make fresh directories fail the exact-mode checks below. Every protected
+    path is created with an explicit mode, so resetting to 022 is safe.
+    """
+    return os.umask(0o022)
+
+
 def owner_uid(value):
     if not re.fullmatch(r'[1-9][0-9]{0,9}', str(value)) or int(value) >= 2**32 - 1:
         raise RuntimeError('A canonical non-root owner UID is required')
@@ -169,11 +180,8 @@ def publish(path, payload):
 
 
 def main():
-    # pkexec preserves the caller's umask and Arch's polkit PAM stack has no
-    # pam_umask, so an inherited restrictive umask (e.g. 077) would otherwise
-    # make fresh directories fail the exact-mode checks below. Every protected
-    # path is created with an explicit mode, so resetting to 022 is safe.
-    os.umask(0o022)
+    # Reset through the helper so the umask contract stays unit-tested below.
+    _ensure_umask()
     if os.getuid() != 0 or os.geteuid() != 0:
         raise RuntimeError('Root is required')
     if sys.argv[1:] == ['--restore-activations']:

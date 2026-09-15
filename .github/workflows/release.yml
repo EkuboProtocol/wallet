@@ -54,8 +54,10 @@ jobs:
         run: |
           set -euo pipefail
           # V2-only channel: v1.* tags never match the v2 regex below and are
-          # rejected here. The 1.x line is at 1.8.4 and ships from the
-          # release-1.x branch; its update channel (latest.json) is never
+          # rejected here. The 1.x line is at 1.8.4 and is preserved on the
+          # release-1.x branch, but that branch's workflows still require
+          # builds from main and need a rewrite before a 1.x hotfix can ship.
+          # Its update channel (latest.json) is never
           # written by this workflow. See docs/service-isolation.md for the
           # 1.x coexistence statement and the "never upload latest.json"
           # guard in the publish job below.
@@ -472,7 +474,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          release_body='Ekubo Wallet 2 is a separate fresh-install product. Linux and Windows require protected service enrollment and signed installer updates. Existing 1.x wallets are not migrated. See the v2 installation and acceptance documentation.'
+          release_body='Ekubo Wallet 2 is a separate fresh-install product. Linux and Windows require protected service enrollment and signed installer updates. 1.x wallets are never migrated automatically; the only supported path is the explicit first-run move from 1.x documented in docs/service-isolation.md.'
           gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TAG" \
             -f body="$release_body" \

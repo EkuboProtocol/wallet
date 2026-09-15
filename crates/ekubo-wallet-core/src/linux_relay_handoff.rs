@@ -84,7 +84,9 @@ impl OwnerInterface {
         })
         .await
         .map_err(|_| zbus::fdo::Error::Failed("relay worker failed".into()))?
-        .map_err(|_| zbus::fdo::Error::Failed("relay persistence failed".into()))?;
+        .map_err(|error| {
+            zbus::fdo::Error::Failed(format!("relay persistence failed: {error:#}"))
+        })?;
         ensure_uid(&registry, &sender, 0)
             .await
             .map_err(|_| zbus::fdo::Error::AccessDenied("installer connection was lost".into()))?;

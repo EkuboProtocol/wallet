@@ -38,6 +38,27 @@ activation=/usr/share/dbus-1/system-services/org.ekubo.Wallet2.Owner.u1000.servi
 [[ $(stat -c '%u:%g:%a' "$activation") = 0:0:644 ]]
 grep -Fx 'SystemdService=ekubo-wallet-v2@1000.service' "$activation"
 ! systemctl is-active --quiet ekubo-wallet-v2@1000.service
+# PreTransaction hook aborts upgrades while enrollment custody work is active
+# (libalpm discards install-scriptlet status, so the hook is the guard).
+hook=/usr/share/libalpm/hooks/ekubo-wallet-v2-pretransaction.hook
+[[ -f $hook ]]
+grep -Fx 'AbortOnFail' "$hook"
+grep -F -e '--state=active,activating' "$hook"
+grep -F 'ekubo-wallet-v2-provision@*.service' "$hook"
+grep -Fx 'Target = ekubo-wallet-v2' "$hook"
+grep -F '/usr/bin/systemctl' "$hook"
+# Never fabricate provision units: exercise the live guard only against
+# genuine state. With no genuine provision unit active the guard passes; a
+# real abort runs only if one is genuinely active.
+hook_exec=$(sed -n 's/^Exec = //p' "$hook")
+[[ -n $hook_exec ]]
+if [[ -n $(systemctl list-units --state=active,activating --no-legend 'ekubo-wallet-v2-provision@*.service') ]]; then
+  ! bash -c "$hook_exec"
+  printf '%s\n' 'Hook aborted against a genuine active provision unit.'
+else
+  bash -c "$hook_exec"
+  printf '%s\n' 'No genuine provision unit active; live abort path skipped.'
+fi
 pacman -R --noconfirm ekubo-wallet-v2
 [[ ! -e /usr/bin/ekubo-wallet-v2 ]]
 [[ -f /etc/ekubo-wallet-v2/owners/1000.json && -f "$activation" ]]
