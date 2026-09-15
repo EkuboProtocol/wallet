@@ -342,12 +342,21 @@ function Remove-FixtureStorageAsSystem($path) {
         $started = [DateTime]::Now.AddSeconds(-2)
         Start-ScheduledTask -TaskName $name
         $deadline = [DateTime]::Now.AddSeconds(30)
+        $completedRun = $null
+        # State and last-result are separate scheduler reads that converge
+        # with a delay: require the same terminal run/result twice rather
+        # than accepting a transition snapshot (e.g. a stale 0x41301
+        # never-ran code after the state already reads Ready).
         do {
             Start-Sleep -Milliseconds 200
             $info = Get-ScheduledTaskInfo -TaskName $name
             $task = Get-ScheduledTask -TaskName $name
             if ([DateTime]::Now -gt $deadline) { throw 'SYSTEM fixture storage cleanup timed out.' }
-        } until ($info.LastRunTime -gt $started -and $task.State -ne 'Running' -and $task.State -ne 'Queued')
+            $terminal = $info.LastRunTime -gt $started -and $task.State -ne 'Running' -and $task.State -ne 'Queued' -and $info.LastTaskResult -ne 0x41301
+            $run = if ($terminal) { "$($info.LastRunTime.Ticks):$($info.LastTaskResult)" } else { $null }
+            $finished = $terminal -and $run -eq $completedRun
+            $completedRun = $run
+        } until ($finished)
         if ($info.LastTaskResult -ne 0 -or (Test-Path -LiteralPath $path)) { throw "SYSTEM fixture cleanup failed: $($info.LastTaskResult)" }
     } finally {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
