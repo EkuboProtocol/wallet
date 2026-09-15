@@ -312,8 +312,9 @@ fn removing_an_automation_reports_whether_there_was_one() {
         .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
         .unwrap()
         .automation;
-    assert!(store.remove(installed.id).unwrap());
-    assert!(!store.remove(installed.id).unwrap());
+    store.disable(installed.id, "owner stopped").unwrap();
+    assert!(store.remove_stopped(installed.id).unwrap());
+    assert!(!store.remove_stopped(installed.id).unwrap());
     assert!(store.get(installed.id).unwrap().is_none());
 }
 
@@ -522,6 +523,48 @@ fn removing_an_automation_takes_its_runs_with_it() {
             at(12, 0),
         )
         .unwrap();
-    assert!(store.remove(installed.id).unwrap());
+    store.disable(installed.id, "owner stopped").unwrap();
+    assert!(store.remove_stopped(installed.id).unwrap());
     assert!(store.runs(installed.id, 10).unwrap().is_empty());
+}
+
+#[test]
+fn stopped_only_removal_cannot_delete_an_automation_restarted_after_review() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, "job", &definition("claim", "0 0 * * * *"), 1)
+        .unwrap()
+        .automation;
+    assert!(!store.remove_stopped(installed.id).unwrap());
+    store.disable(installed.id, "owner stopped").unwrap();
+    // A second caller restarts after the UI read but before deletion.
+    store.relink(installed.id, 1).unwrap();
+    assert!(!store.remove_stopped(installed.id).unwrap());
+    assert_eq!(
+        store.get(installed.id).unwrap().unwrap().state,
+        AutomationState::Enabled
+    );
+    store.disable(installed.id, "owner stopped again").unwrap();
+    assert!(store.remove_stopped(installed.id).unwrap());
+    assert!(!store.remove_stopped(installed.id).unwrap());
+}
+
+#[test]
+fn automation_wire_round_trip_preserves_schedule_and_stored_identity() {
+    let wallet = wallet();
+    let (_directory, mut store) = store_with(&wallet);
+    let installed = store
+        .install(&wallet, "job", &definition("claim", "0  0 * * * *"), 1)
+        .unwrap()
+        .automation;
+    let wire = serde_json::to_value(&installed).unwrap();
+    assert_eq!(wire["schedule"], "0  0 * * * *");
+    let restored: Automation = serde_json::from_value(wire).unwrap();
+    assert_eq!(restored, installed);
+    assert_eq!(
+        restored.schedule.next_after(at(12, 0)),
+        installed.schedule.next_after(at(12, 0))
+    );
+    assert!(serde_json::from_str::<CronSchedule>(r#""* * * * *""#).is_err());
 }

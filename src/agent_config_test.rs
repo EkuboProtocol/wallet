@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 
-const HELPER: &str = "/private/ekubo-wallet-mcp-bridge";
+const HELPER: &str = "/private/v2/helpers/ekubo-wallet-v2-mcp-bridge";
 
 #[test]
 fn bridge_helper_path_is_fixed_outside_the_application_bundle() {
@@ -10,6 +10,15 @@ fn bridge_helper_path_is_fixed_outside_the_application_bundle() {
     assert_eq!(helper.parent(), Some(data_dir.join("helpers").as_path()));
     let filename = helper.file_name().unwrap().to_string_lossy();
     assert_eq!(filename, BRIDGE_FILE_NAME);
+    assert_eq!(BRIDGE_NAME_PREFIX, "ekubo-wallet-v2-mcp-bridge");
+    assert_eq!(
+        filename,
+        if cfg!(windows) {
+            "ekubo-wallet-v2-mcp-bridge.exe"
+        } else {
+            "ekubo-wallet-v2-mcp-bridge"
+        }
+    );
     // A version in the name is what forced every managed agent config to be
     // rewritten on update, so the path must never carry one again.
     assert!(!filename.contains(env!("CARGO_PKG_VERSION")));
@@ -152,7 +161,7 @@ fn codex_uses_exact_stdio_shape_and_removes_http_oauth_credentials() {
     let before = r#"
 [unrelated]
 keep = true
-[mcp_servers.ekubo_wallet]
+[mcp_servers.ekubo_wallet_v2]
 url = "http://127.0.0.1:61744/mcp"
 auth = "oauth"
 bearer_token_env_var = "SECRET"
@@ -179,7 +188,7 @@ fn grok_build_uses_its_native_toml_shape_and_exact_bridge_identity() {
     let before = r#"
 [models]
 default = "grok-4.5"
-[mcp_servers.ekubo_wallet]
+[mcp_servers.ekubo_wallet_v2]
 url = "http://127.0.0.1:61744/mcp"
 headers = { Authorization = "secret" }
 "#;
@@ -236,7 +245,7 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
     for (_kind, root, shape, client, include_companion) in cases {
         let companions = include_companion.then(CompanionSelection::all);
         let before = format!(
-            r#"{{"keep":7,"{root}":{{"ekubo_wallet":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
+            r#"{{"keep":7,"{root}":{{"ekubo_wallet_v2":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
         );
         let output = merge_json(&before, root, shape, HELPER, client, companions.as_ref()).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -273,7 +282,7 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
 
 #[test]
 fn claude_desktop_keeps_only_local_stdio_in_its_config() {
-    let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
+    let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo_v2":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
     let output = merge_json(
         before,
         "mcpServers",
@@ -399,16 +408,14 @@ fn managed_diff_never_discloses_unrelated_credentials() {
     .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
     assert!(!diff.contains("do-not-print"));
-    assert!(diff.contains("mcpServers.ekubo_wallet"));
+    assert!(diff.contains("mcpServers.ekubo_wallet_v2"));
 }
 
 #[test]
 fn local_and_companion_names_are_stable() {
-    assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet");
-    // Ekubo's own server keeps the pre-split key, which is what retargets an
-    // existing entry at the per-protocol endpoint instead of leaving it
-    // beside a differently named one.
-    assert_eq!(
+    assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet_v2");
+    // v2 never takes ownership of a 1.x companion, including the pre-split key.
+    assert_ne!(
         COMPANION_SERVERS[0].config_key,
         ekubo_wallet_core::mcp_companions::LEGACY_COMPANION_KEY
     );
@@ -416,14 +423,14 @@ fn local_and_companion_names_are_stable() {
     assert_eq!(
         managed_keys().collect::<Vec<_>>(),
         [
-            "ekubo_wallet",
-            "ekubo",
-            "ekubo_aave",
-            "ekubo_aerodrome",
-            "ekubo_lido",
-            "ekubo_merkl",
-            "ekubo_morpho",
-            "ekubo_sky",
+            "ekubo_wallet_v2",
+            "ekubo_v2",
+            "ekubo_v2_aave",
+            "ekubo_v2_aerodrome",
+            "ekubo_v2_lido",
+            "ekubo_v2_merkl",
+            "ekubo_v2_morpho",
+            "ekubo_v2_sky",
         ]
     );
     assert_eq!(
@@ -440,9 +447,9 @@ fn removal_deletes_only_wallet_managed_entries_for_every_shape() {
     let codex = r#"
 [mcp_servers.keep]
 command = "keep"
-[mcp_servers.ekubo_wallet]
+[mcp_servers.ekubo_wallet_v2]
 command = "bridge"
-[mcp_servers.ekubo]
+[mcp_servers.ekubo_v2]
 url = "https://mcp.ekubo.org/mcp"
 "#;
     let removed = remove_codex(codex).unwrap();
@@ -455,7 +462,7 @@ url = "https://mcp.ekubo.org/mcp"
 
     for root in ["mcpServers", "mcp"] {
         let before = format!(
-            r#"{{"keep":7,"{root}":{{"keep":{{"command":"keep"}},"ekubo_wallet":{{"command":"bridge"}},"ekubo":{{"url":"https://mcp.ekubo.org/mcp"}}}}}}"#
+            r#"{{"keep":7,"{root}":{{"keep":{{"command":"keep"}},"ekubo_wallet_v2":{{"command":"bridge"}},"ekubo_v2":{{"url":"https://mcp.ekubo.org/mcp"}}}}}}"#
         );
         let removed = remove_json(&before, root).unwrap();
         let parsed: Value = serde_json::from_str(&removed).unwrap();
@@ -473,7 +480,7 @@ fn install_rejects_a_config_changed_after_its_preview() {
     let path = directory.path().join("mcp.json");
     std::fs::write(
         &path,
-        r#"{"mcpServers":{"ekubo_wallet":{"command":"old"}}}"#,
+        r#"{"mcpServers":{"ekubo_wallet_v2":{"command":"old"}}}"#,
     )
     .unwrap();
     let adapter = AgentAdapter {
@@ -494,7 +501,7 @@ fn batch_rollback_does_not_overwrite_a_later_external_edit() {
     let path = directory.path().join("mcp.json");
     std::fs::write(
         &path,
-        r#"{"mcpServers":{"ekubo_wallet":{"command":"old"}}}"#,
+        r#"{"mcpServers":{"ekubo_wallet_v2":{"command":"old"}}}"#,
     )
     .unwrap();
     let adapter = AgentAdapter {
@@ -596,10 +603,10 @@ fn deselecting_a_server_removes_it_from_an_existing_config() {
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&after).unwrap();
-    assert!(parsed["mcpServers"].get("ekubo_aave").is_none());
-    assert!(parsed["mcpServers"].get("ekubo_sky").is_none());
+    assert!(parsed["mcpServers"].get("ekubo_v2_aave").is_none());
+    assert!(parsed["mcpServers"].get("ekubo_v2_sky").is_none());
     assert_eq!(
-        parsed["mcpServers"]["ekubo_morpho"],
+        parsed["mcpServers"]["ekubo_v2_morpho"],
         json!({"type": "http", "url": "https://mcp.ekubo.org/mcp/morpho"})
     );
     assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
@@ -659,12 +666,9 @@ fn validation_rejects_a_config_that_disagrees_with_the_selection() {
     assert!(validate_json_shape(&smuggled, AgentKind::Cursor, &without_aave).is_err());
 }
 
-/// The upgrade case. Every configuration written before the split names the
-/// single `ekubo` server at `/mcp`; installing over it must retarget that same
-/// key at `/mcp/ekubo` and add the rest, leaving the harness's own entries
-/// alone.
+/// Adding v2 to a pre-split 1.x config preserves the existing integration.
 #[test]
-fn a_pre_split_config_is_retargeted_rather_than_duplicated() {
+fn a_pre_split_v1_config_is_preserved_when_v2_is_added() {
     let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo_wallet":{"command":"bridge"},"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
     let selection = CompanionSelection::all();
     let after = merge_json(
@@ -680,20 +684,19 @@ fn a_pre_split_config_is_retargeted_rather_than_duplicated() {
     assert_eq!(parsed["mcpServers"]["keep"]["command"], "keep");
     assert_eq!(
         parsed["mcpServers"]["ekubo"]["url"],
+        "https://mcp.ekubo.org/mcp"
+    );
+    assert_eq!(parsed["mcpServers"]["ekubo_wallet"]["command"], "bridge");
+    assert_eq!(
+        parsed["mcpServers"]["ekubo_v2"]["url"],
         "https://mcp.ekubo.org/mcp/ekubo"
     );
-    // The all-protocol endpoint is nowhere in the result: an agent given it
-    // alongside the per-protocol servers would carry every tool twice.
-    assert!(!after.contains(r#""https://mcp.ekubo.org/mcp""#));
     assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
 }
 
-/// A pre-split config is a wallet the owner installed, so it reads as
-/// present-but-stale rather than as absent. That distinction is what lets the
-/// wallet bring it up to date on its own instead of showing the owner a button
-/// they should never have needed.
+/// A 1.x-only config must not trigger v2's automatic launch repair or sync.
 #[test]
-fn a_pre_split_config_reads_as_present_but_out_of_sync() {
+fn a_v1_only_config_requires_explicit_v2_installation() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("mcp.json");
     let helper = installed_bridge_path().unwrap();
@@ -720,7 +723,7 @@ fn a_pre_split_config_reads_as_present_but_out_of_sync() {
     })
     .to_string();
     fs::write(&config, &legacy).unwrap();
-    assert!(adapter.has_wallet_entry().unwrap());
+    assert!(!adapter.has_wallet_entry().unwrap());
     assert!(!adapter.in_sync(&selection).unwrap());
 
     let preview = adapter.preview_install(&selection).unwrap();
@@ -728,6 +731,11 @@ fn a_pre_split_config_reads_as_present_but_out_of_sync() {
     ConfigBatchInstall::install(vec![preview]).unwrap().commit();
     assert!(adapter.has_wallet_entry().unwrap());
     assert!(adapter.in_sync(&selection).unwrap());
+    let installed = parse_json_document(&fs::read_to_string(&config).unwrap()).unwrap();
+    let legacy = parse_json_document(&legacy).unwrap();
+    for key in ["ekubo_wallet", "ekubo"] {
+        assert_eq!(installed["mcpServers"][key], legacy["mcpServers"][key]);
+    }
 }
 
 /// An agent the owner never connected is left alone. Propagating a selection
@@ -812,8 +820,8 @@ fn the_managed_diff_names_a_server_being_removed() {
     )
     .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, &before, &after).unwrap();
-    assert!(diff.contains("mcpServers.ekubo_merkl"));
+    assert!(diff.contains("mcpServers.ekubo_v2_merkl"));
     assert!(diff.contains("<not configured>"));
     // Nothing else moved.
-    assert!(!diff.contains("mcpServers.ekubo_morpho"));
+    assert!(!diff.contains("mcpServers.ekubo_v2_morpho"));
 }

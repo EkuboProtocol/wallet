@@ -1,0 +1,182 @@
+//! Linux D-Bus adapter for the shared owner dispatcher.
+
+use crate::runtime::ServiceRuntime;
+use ekubo_wallet_client::owner_protocol::Request;
+use futures::StreamExt as _;
+use std::sync::Arc;
+
+/// Serialize as the same D-Bus string while erasing our owned reply on drop.
+/// zbus owns separate encoded buffers; this does not erase those copies.
+#[derive(zbus::zvariant::Type)]
+#[zvariant(signature = "s")]
+pub(crate) struct OwnerResponse(zeroize::Zeroizing<String>);
+
+impl serde::Serialize for OwnerResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+pub(crate) struct LinuxOwnerInterface {
+    runtime: Arc<ServiceRuntime>,
+}
+
+impl LinuxOwnerInterface {
+    pub(crate) fn new(runtime: Arc<ServiceRuntime>) -> Self {
+        Self { runtime }
+    }
+}
+
+/// Called within core's authenticated owner context. `sender` is taken from
+/// the message header. The session guard never crosses IPC to the desktop.
+async fn hold_desktop(
+    reservation: crate::runtime::ReservedDesktopSession,
+    bus: &zbus::Connection,
+    sender: &zbus::names::OwnedUniqueName,
+    nonce: &str,
+) -> anyhow::Result<()> {
+    let registry = zbus::fdo::DBusProxy::new(bus).await?;
+    // Subscribe before checking liveness so a departure cannot be missed.
+    let mut departed = registry
+        .receive_name_owner_changed_with_args(&[(0, sender.as_str())])
+        .await?;
+    registry
+        .get_connection_unix_user(sender.clone().into())
+        .await?;
+    let _session = reservation.activate();
+    bus.emit_signal(
+        Some(sender.as_str()),
+        ekubo_wallet_client::owner_protocol::OBJECT_PATH,
+        "org.ekubo.Wallet2.Owner1",
+        "DesktopSessionReady",
+        &(nonce,),
+    )
+    .await?;
+    while let Some(signal) = departed.next().await {
+        let args = signal.args()?;
+        if args.name().as_str() == sender.as_str() && args.new_owner().as_ref().is_none() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("desktop session lost its system bus connection")
+}
+
+#[zbus::interface(name = "org.ekubo.Wallet2.Owner1")]
+impl LinuxOwnerInterface {
+    async fn legacy_move(
+        &self,
+        command: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<String> {
+        if command.len() > 12 * 1024 * 1024 {
+            return Err(zbus::fdo::Error::LimitsExceeded(
+                "legacy move is oversized".into(),
+            ));
+        }
+        ekubo_wallet_core::service_presence::with_owner_call(
+            connection,
+            &header,
+            Box::pin(async {
+                let command = serde_json::from_str(command)?;
+                let receipt = ekubo_wallet_core::legacy_move::service_command(command).await?;
+                Ok::<_, anyhow::Error>(serde_json::to_string(&receipt)?)
+            }),
+        )
+        .await
+        .map_err(|_| {
+            zbus::fdo::Error::AccessDenied("legacy move owner authentication failed".into())
+        })?
+        .map_err(|error| {
+            // Fail closed with distinct hints: a 1.x source below 1.8.2 is
+            // refused by the schema gate, and a missing 1.x source means the
+            // move cannot resume its files and must use source-less recovery.
+            // Retrying either without fixing the cause cannot succeed. Every
+            // other failure keeps the generic message and leaves cleanup pending.
+            if ekubo_wallet_core::legacy_move::is_source_missing(&error) {
+                zbus::fdo::Error::Failed(
+                    "legacy move source is missing; the 1.x profile cannot be read. If a cleanup receipt is pending and the source is unrecoverable, use the owner-authorized source-less recovery. Nothing was copied or deleted".into(),
+                )
+            } else if ekubo_wallet_core::legacy_move::is_predates_supported_schema(&error) {
+                zbus::fdo::Error::Failed(
+                    "legacy move refused: the selected 1.x source predates the supported schema; upgrade the 1.x application to 1.8.2 or newer first, then retry. Nothing was copied or deleted".into(),
+                )
+            } else {
+                zbus::fdo::Error::Failed(
+                    "legacy move failed; inspect pending cleanup before retrying".into(),
+                )
+            }
+        })
+    }
+
+    async fn hold_desktop_session(
+        &self,
+        nonce: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        if nonce.len() != 36 || nonce.parse::<uuid::Uuid>().is_err() {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "invalid desktop session nonce".into(),
+            ));
+        }
+        let sender = header
+            .sender()
+            .ok_or_else(|| zbus::fdo::Error::AccessDenied("missing caller identity".into()))?
+            .to_owned()
+            .into();
+        ekubo_wallet_core::service_presence::with_owner_call(
+            connection,
+            &header,
+            Box::pin(async {
+                hold_desktop(self.runtime.reserve_desktop()?, connection, &sender, nonce).await
+            }),
+        )
+        .await
+        .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?
+        .map_err(|error| {
+            zbus::fdo::Error::Failed(ekubo_wallet_core::sanitize::stripped_capped(
+                &error.to_string(),
+                2048,
+            ))
+        })
+    }
+
+    async fn call(
+        &self,
+        request: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<OwnerResponse> {
+        if request.len() > crate::framing::MAX_FRAME_BYTES {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "owner request exceeds its size limit".into(),
+            ));
+        }
+        let request: Request = serde_json::from_str(request)
+            .map_err(|_| zbus::fdo::Error::InvalidArgs("invalid owner operation".into()))?;
+        let result = ekubo_wallet_core::service_presence::with_owner_call(
+            connection,
+            &header,
+            Box::pin(self.runtime.owner.encode(request)),
+        )
+        .await
+        .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?
+        .map_err(|error| {
+            zbus::fdo::Error::Failed(ekubo_wallet_core::sanitize::stripped_capped(
+                &format!("{error:#}"),
+                2048,
+            ))
+        })?;
+        if result.len() > crate::framing::MAX_FRAME_BYTES {
+            return Err(zbus::fdo::Error::Failed(
+                "owner response exceeds its size limit".into(),
+            ));
+        }
+        Ok(OwnerResponse(result))
+    }
+}
+
+#[cfg(test)]
+#[path = "linux_owner_rpc_test.rs"]
+mod tests;

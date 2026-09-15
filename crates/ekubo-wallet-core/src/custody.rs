@@ -1,4 +1,5 @@
 use crate::core::policy::WalletPolicy;
+use crate::credential_store::Entry;
 use crate::{
     config::{ConfigStore, WalletMetadata, WalletSource, validate_wallet_id},
     human_presence::{HumanPresence, PresenceRequest},
@@ -6,13 +7,13 @@ use crate::{
 use alloy::{primitives::Address, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use keyring::{Entry, Error as KeyringError};
+use keyring::Error as KeyringError;
 use rand::TryRng as _;
 use std::{fmt, sync::Arc};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.instance";
+pub(crate) const KEYRING_SERVICE: &str = "org.ekubo.wallet.v2.private-key.instance";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyMaterial([u8; 32]);
@@ -210,6 +211,16 @@ impl crate::sealed::SealedKeyStore for OsKeyStore {}
 
 impl OsKeyStore {
     fn entry(instance_id: Uuid) -> Result<Entry> {
+        #[cfg(target_os = "linux")]
+        ensure!(
+            crate::service_storage::data_dir().is_some(),
+            "v2 custody requires the installed protected service"
+        );
+        #[cfg(target_os = "windows")]
+        ensure!(
+            crate::windows_service_custody::data_dir().is_some(),
+            "v2 custody requires the installed protected service"
+        );
         // The credential store is machine-wide, so an account created in a
         // scratch directory would outlive the `rm -rf` that discards it — a
         // private key with no wallet left to name it. Refusing is honest about

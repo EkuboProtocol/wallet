@@ -657,7 +657,15 @@ impl PendingStore {
     /// someone auditing what their wallet did unattended has to be able to open
     /// any of them — including ones from before they last tidied up. A hidden
     /// row is absent from every list and still resolves by id.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn clear_terminal_history(&mut self, wallet_id: Option<&str>) -> Result<usize> {
+        self.clear_terminal_history_authenticated(wallet_id)
+    }
+
+    pub(crate) fn clear_terminal_history_authenticated(
+        &mut self,
+        wallet_id: Option<&str>,
+    ) -> Result<usize> {
         if let Some(wallet_id) = wallet_id {
             validate_wallet_id(wallet_id)?;
         }

@@ -7,6 +7,10 @@ advisory exceptions live in `osv-scanner.toml` with reasons and expiry dates.
 Release packaging is a deliberate two-stage process; neither stage executes
 code with signing credentials.
 
+The `windows_primitives_only` workflow input is for native service diagnostics.
+Leave it false for full CI; a diagnostic run's result does not cover the
+workspace, other platforms, or the dependency-policy gates.
+
 First, manually run **Build unsigned release artifacts** with any branch, tag,
 or exact commit SHA. The workflow resolves that reference and computes the
 build identity itself: an exact `v<package-version>` tag produces that package
@@ -30,17 +34,36 @@ bytes still hash exactly, and the tag resolves to the manifested commit. That
 manifested commit must be on protected `main` history. CI results are not a
 release prerequisite. Only then do isolated trusted jobs receive Apple, Azure,
 or Minisign credentials. The publishing job creates the release at the verified
-commit SHA and uploads only the strict native-asset allowlist. The verifier
+commit SHA and uploads only the strict native-asset allowlist. The publish step
+is rerun-safe: if the tag release already exists from a partial attempt, the
+rerun verifies the tag still resolves to the verified commit, reuses the
+release, and replaces same-name assets before re-uploading. Repo resolution
+for `gh release` subcommands uses `GH_REPO`, so no checkout is required. The verifier
 checks out only its trusted workflow revision; no trusted job checks out or
 executes build-run source.
 
-When the protected `AZURE_TRUSTED_SIGNING_ENABLED` environment variable is
-`true`, Windows signing exchanges GitHub's short-lived OIDC token with Azure
-through the pinned Azure Login action. Trusted Signing is restricted to that
-Azure CLI credential; interactive, cached, developer-tool, workload,
-environment, and managed-identity fallbacks are disabled. When it is `false`,
-the workflow skips Azure, proves the installer remains Authenticode-unsigned,
-and still applies the mandatory detached updater signature before publication.
+Before dispatching the release, a maintainer with repository-variable access
+sets the `V2_RELEASE_ACCEPTANCE` repository variable to the unsigned build's
+manifest `commit_sha`. It must be a repository variable: the `verify-build`
+job sets no `environment`, so an environment-scoped variable would not
+resolve, and the verifier reads it through `${{ vars.V2_RELEASE_ACCEPTANCE }}`
+(release.yml:53). Set it only after the unsigned build succeeds and its
+artifacts pass acceptance review, and before running **Sign and publish
+release**. The verifier compares the variable byte-for-byte against the
+manifest `commit_sha` (release.yml:91-92) and fails closed on any mismatch,
+so a stale or missing value blocks the release instead of signing the wrong
+commit. The manifest `commit_sha` is `git rev-parse HEAD` of the resolved
+build reference, which equals the build run's head SHA when the build was run
+from the tag commit; otherwise the two differ, so copy the manifest value,
+not the run's head SHA.
+
+Windows signing is mandatory and fails closed: the signing job throws unless
+the protected `AZURE_TRUSTED_SIGNING_ENABLED` environment variable is `true`,
+so an Authenticode-unsigned service payload is rejected before any Azure step
+runs. When it is `true`, Windows signing exchanges GitHub's short-lived OIDC
+token with Azure through the pinned Azure Login action. Trusted Signing is
+restricted to that Azure CLI credential; interactive, cached, developer-tool,
+workload, environment, and managed-identity fallbacks are disabled.
 
 The Azure app registration must trust exactly the immutable GitHub subject
 `repo:EkuboProtocol@135474885/wallet@1322111549:environment:release` with issuer
@@ -64,17 +87,17 @@ az artifact-signing certificate-profile create \
 ```
 
 Until that profile exists, keep `AZURE_TRUSTED_SIGNING_ENABLED` set to `false`.
-Releases then carry an intentionally Authenticode-unsigned Windows installer,
-which can display an Unknown publisher or SmartScreen warning, while retaining
-the same signed updater metadata, artifact digest, and detached updater
-signature checks. Set the variable to `true` only after the profile exists; a
+No v2 release can ship while it is `false`: the signing job fails before any
+signing step runs. Set the variable to `true` only after the profile exists; a
 missing or unusable profile then fails closed. No client secret is required or
 permitted for the GitHub release identity.
 
-`cargo-packager` produces the unsigned macOS app, per-user NSIS installer,
-AppImage, and DEB on native runners. The trusted stage signs the macOS app,
-creates the distributed DMG and updater tar, applies Authenticode to Windows
-when enabled, and Minisign-signs final updater artifacts and `latest.json`.
+`cargo-packager` produces the unsigned macOS app and machine-wide NSIS installer
+on native runners, alongside the DEB and Arch pacman packages built by
+`contrib/build-v2-packages.py` (`deb`, `arch`, `nsis`; there is no AppImage).
+The trusted stage signs the macOS app, creates the distributed DMG and updater
+tar, applies Authenticode to the Windows payload and the rebuilt installer,
+and Minisign-signs the final updater artifacts and `latest-v2.json`.
 The macOS job waits for notarization acceptance and staples the distributed
 DMG before its final updater signature is created. Missing Apple or updater
 signing configuration fails the protected stage; missing Azure configuration
@@ -107,13 +130,16 @@ built before the constant, and must still be held to exact build agreement.
 
 Native update artifacts are signed by a dedicated Minisign key held only in the
 protected release environment. The trusted workflow publishes a signed
-`latest.json` binding version, target, format, canonical artifact URL, SHA-256
-digest, and detached artifact signature. The updater also reads the package
+`latest-v2.json` binding product (`org.ekubo.wallet.v2`), channel (`v2`),
+version, and publication date, with a `platforms` entry for macOS and
+`manual_installers` entries for Windows NSIS, Linux DEB, and Arch pacman, each
+carrying its canonical artifact URL, SHA-256 digest, detached artifact
+signature, and format. The updater also reads the package
 version back from the bundled application binary (or NSIS ProductVersion) and
 requires it to equal the authenticated manifest version before installation.
 
 Updates require explicit confirmation after the stable version is shown.
-Download completes and verifies before shutdown. The packaged macOS app,
-Windows installer, and Linux AppImage update in place; DEB installations use
-the release-page fallback. MCP and WalletConnect shut down gracefully
+Download completes and verifies before shutdown. The packaged macOS app
+updates in place; the Windows NSIS, Linux DEB, and Arch pacman packages are
+manual installers served from the release page. MCP and WalletConnect shut down gracefully
 immediately before installation and relaunch.

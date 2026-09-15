@@ -1,0 +1,413 @@
+use super::*;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+#[tokio::test]
+async fn native_authorization_lease_rejects_extra_traffic_and_disconnect() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let mut server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let mut client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    client.write_all(b"request").await.unwrap();
+    let mut request = [0; 7];
+    server.read_exact(&mut request).await.unwrap();
+    authenticate_auth_service(&server, &sid).unwrap();
+    assert!(authenticate_auth_service(&server, "S-1-5-80-1-2-3-4-5").is_err());
+    let retained = retain_auth_connection(&server).unwrap();
+    client.write_all(b"x").await.unwrap();
+    // Deterministically prefetch through the real native transport. The byte is
+    // now in userspace, not the kernel pipe; no timing/readiness assumption is
+    // needed to reproduce the distinction that Mio/IOCP exposed in CI.
+    let mut buffered = tokio::io::BufReader::new(&mut server);
+    assert_eq!(
+        tokio::io::AsyncBufReadExt::fill_buf(&mut buffered)
+            .await
+            .unwrap(),
+        b"x"
+    );
+    verify_auth_connection(&retained).unwrap();
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(buffered);
+    let binding = monitor.binding();
+    let mut ran = false;
+    assert!(
+        monitor
+            .run(async {
+                ran = true;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    assert!(binding.ensure_live().is_err());
+    drop(client);
+    assert!(
+        monitor
+            .run(async {
+                ran = true;
+                Ok(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    drop(monitor);
+}
+
+#[tokio::test]
+async fn native_authorization_lease_rejects_extra_traffic_unbuffered() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let mut server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let mut client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    client.write_all(b"request").await.unwrap();
+    let mut request = [0; 7];
+    server.read_exact(&mut request).await.unwrap();
+    authenticate_auth_service(&server, &sid).unwrap();
+    assert!(authenticate_auth_service(&server, "S-1-5-80-1-2-3-4-5").is_err());
+    let retained = retain_auth_connection(&server).unwrap();
+    client.write_all(b"x").await.unwrap();
+    // The byte is guaranteed to arrive while the client stays connected, but
+    // its IOCP completion is asynchronous: an immediately-ready operation
+    // could win the first poll before the overlapped server read completes,
+    // so awaiting it would be a timing assumption. Instead await the
+    // departure itself with a never-ready operation: the run can only return
+    // when the transport poll fires, and the poll must fire, so rejection is
+    // deterministic with no readiness wait.
+    verify_auth_connection(&retained).unwrap();
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(server);
+    let binding = monitor.binding();
+    let mut ran = false;
+    assert!(
+        monitor
+            .run(async {
+                std::future::pending::<()>().await;
+                ran = true;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    assert!(binding.ensure_live().is_err());
+    drop(client);
+    // The broken pipe guarantees end-of-stream; same never-ready shape keeps
+    // this deterministic through the overlapped-completion delay.
+    assert!(
+        monitor
+            .run(async {
+                std::future::pending::<()>().await;
+                ran = true;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .is_err()
+    );
+    assert!(!ran);
+    drop(monitor);
+}
+
+#[tokio::test]
+async fn native_transport_monitor_revokes_a_pending_call_on_disconnect() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    let mut monitor = crate::owner_call_monitor::OwnerCallMonitor::new(server);
+    let binding = monitor.binding();
+    let mut operation = Box::pin(monitor.run(std::future::pending::<Result<()>>()));
+    assert!(futures::poll!(&mut operation).is_pending());
+    drop(client);
+    assert!(operation.await.is_err());
+    assert!(binding.ensure_live().is_err());
+}
+
+#[tokio::test]
+async fn native_pipe_authenticates_its_object_and_client_without_retaining_impersonation() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let mut server = create(&pipe_name, &sid, &sid, true).unwrap();
+    let mut client = open(&pipe_name, &sid, &sid).unwrap();
+    server.connect().await.unwrap();
+    client.write_all(b"hello").await.unwrap();
+    let mut bytes = [0u8; 5];
+    server.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(bytes, *b"hello");
+    assert_eq!(client_sid(HANDLE(server.as_raw_handle())).unwrap(), sid);
+    assert_eq!(
+        crate::windows_service_identity::current_process_identity()
+            .unwrap()
+            .user_sid(),
+        sid
+    );
+    server.write_all(b"reply").await.unwrap();
+    client.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(bytes, *b"reply");
+}
+
+#[tokio::test]
+async fn native_pipe_refuses_name_squatting_and_wrong_service_ownership() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let _server = create(&pipe_name, &sid, &sid, true).unwrap();
+    assert!(create(&pipe_name, &sid, &sid, true).is_err());
+    assert!(open(&pipe_name, "S-1-5-80-1-2-3-4-5", &sid).is_err());
+}
+
+#[test]
+fn native_descriptor_keeps_desktop_data_access_separate_from_server_creation() {
+    let service = "S-1-5-80-1-2-3-4-5";
+    let desktop = "S-1-5-21-1-2-3-1001";
+    let descriptor = descriptor(service, desktop).unwrap();
+    // SAFETY: the descriptor guard retains the complete OS-allocated buffer.
+    let (owner, entries) =
+        unsafe { crate::windows_security::read_descriptor(descriptor.0) }.unwrap();
+    validate_security(&owner, &entries, service, desktop).unwrap();
+    let grants: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::windows_security::AccessEntry::Allow { sid, mask, .. } if sid == desktop => {
+                Some(*mask)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(
+        grants[0] & windows::Win32::Storage::FileSystem::FILE_CREATE_PIPE_INSTANCE.0,
+        0
+    );
+    assert_eq!(grants[0] & 3, 3);
+}
+
+#[tokio::test]
+async fn native_client_waits_for_a_free_instance_before_any_request_is_sent() {
+    let sid = crate::windows_service_identity::current_process_identity()
+        .unwrap()
+        .user_sid()
+        .to_owned();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let first = create(&pipe_name, &sid, &sid, true).unwrap();
+    let _occupied = open(&pipe_name, &sid, &sid).unwrap();
+    first.connect().await.unwrap();
+    let mut waiting = Box::pin(open_available(&pipe_name, &sid, &sid));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(30), waiting.as_mut())
+            .await
+            .is_err()
+    );
+    let next = create(&pipe_name, &sid, &sid, false).unwrap();
+    let _client = waiting.await.unwrap();
+    next.connect().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_installer_pipe_checks_privilege_and_runs_the_shared_io_bridge() {
+    use std::io::{Read as _, Write as _};
+    let allowed = crate::windows_service_identity::verify_installer_process().is_ok();
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        assert!(
+            allowed,
+            "GitHub Windows runner must exercise the privileged success path"
+        );
+    }
+    let identity = crate::windows_service_identity::current_process_identity().unwrap();
+    let service = identity.user_sid();
+    let pipe_name = format!(
+        r"\\.\pipe\EkuboWallet.Provision.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let mut server = create(&pipe_name, service, "S-1-5-32-544", true).unwrap();
+    let mut client = open(&pipe_name, service, "S-1-5-32-544").unwrap();
+    server.connect().await.unwrap();
+    client
+        .write_all(crate::windows_provisioning_pipe::PREFACE)
+        .await
+        .unwrap();
+    let mut preface = [0; 8];
+    server.read_exact(&mut preface).await.unwrap();
+    assert_eq!(&preface, crate::windows_provisioning_pipe::PREFACE);
+    assert_eq!(authenticate_installer_client(&server).is_ok(), allowed);
+    assert_eq!(
+        crate::windows_service_identity::current_process_identity()
+            .unwrap()
+            .user_sid(),
+        service
+    );
+    if !allowed {
+        return;
+    }
+    let (mut stream, _cancel) =
+        crate::provisioning_io::bridge(server, std::time::Duration::from_secs(10));
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut bytes = [0; 3];
+        stream.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"dbx");
+        stream.write_all(b"ack").unwrap();
+    });
+    client.write_all(b"dbx").await.unwrap();
+    let mut reply = [0; 3];
+    client.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"ack");
+    worker.await.unwrap();
+}
+
+#[test]
+fn native_installer_descriptor_does_not_grant_admin_server_creation() {
+    assert_eq!(
+        CLIENT_ACCESS,
+        windows::Win32::Storage::FileSystem::FILE_GENERIC_READ.0
+            | windows::Win32::Storage::FileSystem::FILE_WRITE_DATA.0
+    );
+    let descriptor = descriptor("S-1-5-80-1-2-3-4-5", "S-1-5-32-544").unwrap();
+    // SAFETY: the guard retains the complete native descriptor allocation.
+    let (owner, entries) =
+        unsafe { crate::windows_security::read_descriptor(descriptor.0) }.unwrap();
+    validate_security(&owner, &entries, "S-1-5-80-1-2-3-4-5", "S-1-5-32-544").unwrap();
+    let allowed: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::windows_security::AccessEntry::Allow { sid, mask, .. }
+                if sid == "S-1-5-32-544" =>
+            {
+                Some(*mask)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(allowed, vec![CLIENT_ACCESS]);
+    assert_eq!(
+        allowed[0] & windows::Win32::Storage::FileSystem::FILE_CREATE_PIPE_INSTANCE.0,
+        0
+    );
+}
+
+#[tokio::test]
+async fn cancellation_wakes_a_blocking_read_on_a_native_windows_pipe() {
+    use std::io::Read as _;
+    let identity = crate::windows_service_identity::current_process_identity().unwrap();
+    let sid = identity.user_sid();
+    let pipe_name = name(uuid::Uuid::new_v4()).unwrap();
+    let server = create(&pipe_name, sid, sid, true).unwrap();
+    let _client = open(&pipe_name, sid, sid).unwrap();
+    server.connect().await.unwrap();
+    let (mut stream, cancel) =
+        crate::provisioning_io::bridge(server, std::time::Duration::from_secs(60));
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        stream.read_exact(&mut [0; 1]).unwrap_err().kind()
+    });
+    ready.await.unwrap();
+    drop(cancel);
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap(),
+        std::io::ErrorKind::ConnectionAborted
+    );
+}
+
+#[tokio::test]
+async fn provisioning_client_rejects_a_squatted_pipe_without_sending_a_preface() {
+    let identity = crate::windows_service_identity::current_process_identity().unwrap();
+    let pipe_name = format!(
+        r"\\.\pipe\EkuboWallet.Provision.{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    let mut server = create(&pipe_name, identity.user_sid(), "S-1-5-32-544", true).unwrap();
+    let (accepted, rejected) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            server.connect(),
+            open_available(&pipe_name, "S-1-5-80-1-2-3-4-5", "S-1-5-32-544"),
+        )
+    })
+    .await
+    .unwrap();
+    accepted.unwrap();
+    assert!(rejected.is_err());
+    // The client opened this actual instance, inspected its owner, and closed
+    // it. The attacker gets neither a preface nor custody bytes.
+    let mut byte = [0; 1];
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), server.read(&mut byte))
+        .await
+        .unwrap();
+    assert!(matches!(result, Ok(0)) || result.is_err());
+}
+
+#[tokio::test]
+async fn native_pipe_has_medium_integrity_and_no_write_up_policy() {
+    use windows::Win32::Security::{
+        GetAce, GetSecurityDescriptorSacl, LABEL_SECURITY_INFORMATION, PSID,
+        SYSTEM_MANDATORY_LABEL_ACE,
+    };
+    let identity = crate::windows_service_identity::current_process_identity().unwrap();
+    let server = create(
+        &name(uuid::Uuid::new_v4()).unwrap(),
+        identity.user_sid(),
+        identity.user_sid(),
+        true,
+    )
+    .unwrap();
+    let mut security = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        GetSecurityInfo(
+            HANDLE(server.as_raw_handle()),
+            SE_KERNEL_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            Some(&raw mut security),
+        )
+    }
+    .ok()
+    .unwrap();
+    let security = Descriptor(security);
+    let mut present = windows::core::BOOL::default();
+    let mut defaulted = windows::core::BOOL::default();
+    let mut sacl = std::ptr::null_mut();
+    unsafe {
+        GetSecurityDescriptorSacl(
+            security.0,
+            &raw mut present,
+            &raw mut sacl,
+            &raw mut defaulted,
+        )
+    }
+    .unwrap();
+    assert!(present.as_bool() && !sacl.is_null());
+    // GetSecurityInfo returned the actual kernel object's label descriptor.
+    assert_eq!(unsafe { (*sacl).AceCount }, 1);
+    let mut ace = std::ptr::null_mut();
+    unsafe { GetAce(sacl, 0, &raw mut ace) }.unwrap();
+    let label = unsafe { &*ace.cast::<SYSTEM_MANDATORY_LABEL_ACE>() };
+    assert_eq!(label.Header.AceType, 0x11);
+    assert_eq!(label.Mask, 1); // SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
+    let sid = unsafe {
+        crate::windows_service_identity::sid_string(PSID(
+            (&raw const label.SidStart).cast_mut().cast(),
+        ))
+    }
+    .unwrap();
+    assert_eq!(sid, "S-1-16-8192");
+}

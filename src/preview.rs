@@ -67,6 +67,69 @@ pub fn call_summary(
     }
 }
 
+/// Inference runs only in the desktop process. Service-provided evidence is
+/// converted to model inputs; output remains untrusted advisory display text.
+#[must_use]
+pub fn generate_summaries(
+    inputs: Vec<ekubo_wallet_core::preview_evidence::PreviewInput>,
+) -> Vec<ekubo_wallet_core::preview_evidence::AdvisorySummary> {
+    let plans = inputs
+        .iter()
+        .map(|input| {
+            (
+                input.request_id,
+                PlanDocument {
+                    simulation: None,
+                    calls: input
+                        .calls
+                        .iter()
+                        .map(|call| CallSummary {
+                            description: call.description.clone(),
+                            details: call.details.clone(),
+                            warnings: call.warnings.clone(),
+                            target: call.target.clone(),
+                            native_value: call.native_value.clone(),
+                            evidence: Some(ekubo_wallet_preview::slots::CallEvidence {
+                                chain_id: call.evidence.chain_id.clone(),
+                                from: call.evidence.from.clone(),
+                                to: call.evidence.to.clone(),
+                                calldata: call.evidence.calldata.clone(),
+                                tokens: call.evidence.tokens.clone(),
+                                abi: call
+                                    .evidence
+                                    .abi
+                                    .iter()
+                                    .map(|candidate| ekubo_wallet_preview::slots::AbiCandidate {
+                                        signature: candidate.signature.clone(),
+                                        contract_match: candidate.contract_match,
+                                        arguments: candidate.arguments.clone(),
+                                    })
+                                    .collect(),
+                            }),
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    let mut generated = previews(plans);
+    inputs
+        .into_iter()
+        .filter_map(|input| {
+            let preview = generated.remove(&input.request_id)?;
+            if preview.summary.trim().is_empty() {
+                return None;
+            }
+            Some(ekubo_wallet_core::preview_evidence::AdvisorySummary {
+                request_id: input.request_id,
+                wallet_instance_id: input.wallet_instance_id,
+                plan_digest: input.plan_digest,
+                summary: preview.summary,
+            })
+        })
+        .collect()
+}
+
 /// Previews for a batch of waiting requests.
 ///
 /// The review list submits waiting requests together so identical call readings

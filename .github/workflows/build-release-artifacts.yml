@@ -7,17 +7,24 @@ on:
         description: Branch, tag, or exact commit SHA to build
         required: true
         type: string
+      platform:
+        description: Linux includes both Debian and Arch/Omarchy packages
+        type: choice
+        default: all
+        options: [all, linux, windows, macos]
 
 permissions:
   contents: read
 
 concurrency:
-  group: unsigned-release-${{ inputs.ref }}
+  group: unsigned-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    outputs:
+      platforms: ${{ steps.matrix.outputs.platforms }}
     steps:
       - name: Validate requested source reference
         shell: bash
@@ -26,22 +33,30 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$SOURCE_REF" =~ ^[0-9A-Za-z][0-9A-Za-z._/+@-]{0,254}$ ]]
+      - id: matrix
+        name: Select requested package targets
+        env:
+          SELECTED_PLATFORM: ${{ inputs.platform || 'all' }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          targets = {
+              'macos': {'os': 'macos-15', 'platform': 'macos-aarch64', 'formats': 'app'},
+              'windows': {'os': 'windows-2025', 'platform': 'windows-x86_64', 'formats': 'nsis'},
+              'linux': {'os': 'ubuntu-24.04', 'platform': 'linux-x86_64', 'formats': 'deb'},
+          }
+          selected = os.environ['SELECTED_PLATFORM']
+          rows = list(targets.values()) if selected == 'all' else [targets[selected]]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('platforms=' + json.dumps(rows) + '\n')
+          PY
 
   package:
     needs: validate
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            platform: macos-aarch64
-            formats: app
-          - os: windows-2025
-            platform: windows-x86_64
-            formats: nsis
-          - os: ubuntu-24.04
-            platform: linux-x86_64
-            formats: appimage,deb
+        include: ${{ fromJSON(needs.validate.outputs.platforms) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out and resolve the requested reference
@@ -81,10 +96,13 @@ jobs:
         with:
           prefix-key: v2-release
           shared-key: ${{ matrix.platform }}
-          cache-on-failure: false
+          cache-on-failure: true
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev libfuse2
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dpkg-dev
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis --version=3.12.0 --no-progress -y
       - name: Install cargo-packager
         uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
@@ -100,15 +118,22 @@ jobs:
         run: |
           set -euo pipefail
           host="$(rustc -vV | sed -n 's/^host: //p')"
-          source=target/release/ekubo-wallet-mcp-bridge
+          source=target/release/ekubo-wallet-v2-mcp-bridge
           suffix=
           if [ "$RUNNER_OS" = Windows ]; then source="$source.exe"; suffix=.exe; fi
-          cp "$source" "target/release/ekubo-wallet-mcp-bridge-${host}${suffix}"
+          cp "$source" "target/release/ekubo-wallet-v2-mcp-bridge-${host}${suffix}"
       - name: Build unsigned native packages
         shell: bash
         env:
           EKUBO_UPDATER_PUBLIC_KEY: ${{ vars.EKUBO_UPDATER_PUBLIC_KEY }}
-        run: cargo packager --release --formats '${{ matrix.formats }}'
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = macOS ]; then
+            cargo packager --release --formats app
+          else
+            export PATH="$PATH:/c/Program Files (x86)/NSIS"
+            python contrib/build-v2-packages.py '${{ matrix.formats }}'
+          fi
       - name: Verify packaged MCP bridge
         shell: bash
         env:
@@ -117,7 +142,7 @@ jobs:
           set -euo pipefail
           case "$RUNNER_OS" in
             macOS)
-              bridge='target/release/Ekubo Wallet.app/Contents/MacOS/ekubo-wallet-mcp-bridge'
+              bridge='target/release/Ekubo Wallet 2.app/Contents/MacOS/ekubo-wallet-v2-mcp-bridge'
               test -x "$bridge"
               python3 contrib/verify-mcp-bridge.py "$bridge" "$BUILD_VERSION"
               ;;
@@ -126,24 +151,31 @@ jobs:
               test "${#installers[@]}" -eq 1
               mkdir "$RUNNER_TEMP/nsis"
               7z x "-o$RUNNER_TEMP/nsis" "${installers[0]}" >/dev/null
-              bridge="$(find "$RUNNER_TEMP/nsis" -name ekubo-wallet-mcp-bridge.exe -print -quit)"
+              bridge="$(find "$RUNNER_TEMP/nsis" -name ekubo-wallet-v2-mcp-bridge.exe -print -quit)"
               test -n "$bridge"
               python contrib/verify-mcp-bridge.py "$bridge" "$BUILD_VERSION"
               ;;
             Linux)
-              debs=(target/release/*.deb); appimages=(target/release/*.AppImage)
-              test "${#debs[@]}" -eq 1; test "${#appimages[@]}" -eq 1
-              mkdir "$RUNNER_TEMP/deb" "$RUNNER_TEMP/appimage"
+              debs=(target/release/*.deb)
+              test "${#debs[@]}" -eq 1
+              mkdir "$RUNNER_TEMP/deb"
               dpkg-deb -x "${debs[0]}" "$RUNNER_TEMP/deb"
-              bridge="$(find "$RUNNER_TEMP/deb" -name ekubo-wallet-mcp-bridge -print -quit)"
-              test -x "$bridge"
-              python3 contrib/verify-mcp-bridge.py "$bridge" "$BUILD_VERSION"
-              (cd "$RUNNER_TEMP/appimage" && "$GITHUB_WORKSPACE/${appimages[0]}" --appimage-extract >/dev/null)
-              bridge="$(find "$RUNNER_TEMP/appimage/squashfs-root" -name ekubo-wallet-mcp-bridge -print -quit)"
+              bridge="$(find "$RUNNER_TEMP/deb" -name ekubo-wallet-v2-mcp-bridge -print -quit)"
               test -x "$bridge"
               python3 contrib/verify-mcp-bridge.py "$bridge" "$BUILD_VERSION"
               ;;
           esac
+      - name: Install and reinstall actual DEB on disposable runner
+        if: runner.os == 'Linux'
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_OS bash contrib/smoke-v2-deb.sh target/release/*.deb
+      - name: Build and test native Arch package for Omarchy
+        if: runner.os == 'Linux'
+        env:
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        run: bash contrib/build-test-arch-ci.sh
+      - name: Install and reinstall actual NSIS on disposable runner
+        if: runner.os == 'Windows'
+        run: pwsh -NoProfile -File contrib/smoke-v2-nsis.ps1 -Installer (Get-ChildItem target/release/*setup.exe).FullName
       - name: Stage strict artifact allowlist and manifest
         shell: bash
         env:
@@ -156,20 +188,22 @@ jobs:
           mkdir dist
           case "$RUNNER_OS" in
             macOS)
-              test -d 'target/release/Ekubo Wallet.app'
-              tar -C target/release -czf dist/unsigned-macos-app.tar.gz 'Ekubo Wallet.app'
+              test -d 'target/release/Ekubo Wallet 2.app'
+              tar -C target/release -czf dist/unsigned-macos-app.tar.gz 'Ekubo Wallet 2.app'
               ;;
             Windows)
               installers=(target/release/*setup.exe)
               test "${#installers[@]}" -eq 1
               cp "${installers[0]}" dist/
+              7z a dist/windows-payload.zip ./target/release/ekubo-wallet-v2.exe ./target/release/ekubo-wallet-v2-mcp-bridge.exe ./target/release/ekubo-wallet-service.exe ./target/release/ekubo-wallet-v2-enroll.exe ./target/release/ekubo-wallet-v2-owner-auth.exe
               ;;
             Linux)
-              appimages=(target/release/*.AppImage)
               debs=(target/release/*.deb)
-              test "${#appimages[@]}" -eq 1
               test "${#debs[@]}" -eq 1
-              cp "${appimages[0]}" "${debs[0]}" dist/
+              cp "${debs[0]}" dist/
+              arch_packages=(target/release/*.pkg.tar.zst)
+              test "${#arch_packages[@]}" -eq 1
+              cp "${arch_packages[0]}" dist/
               ;;
           esac
           node <<'NODE'

@@ -80,3 +80,40 @@ fn unchanged_interpretations_reuse_previews_but_changed_warnings_do_not() {
     cached_previews(vec![], &mut cache, |_| panic!("empty queue inferred")).unwrap();
     assert!(cache.is_empty(), "settled requests must leave the cache");
 }
+
+#[test]
+fn desktop_inference_preserves_transaction_identity_and_native_transfer_summary() {
+    use ekubo_wallet_core::preview_evidence::{CallEvidence, PreviewCall, PreviewInput};
+    let request_id = Uuid::new_v4();
+    let wallet_instance_id = Uuid::new_v4();
+    let input = PreviewInput {
+        request_id,
+        wallet_instance_id,
+        plan_digest: "immutable-plan".into(),
+        calls: vec![PreviewCall {
+            description: None,
+            details: vec![],
+            warnings: vec![],
+            target: "0x2222222222222222222222222222222222222222".into(),
+            native_value: "1 ETH".into(),
+            evidence: CallEvidence {
+                chain_id: "1".into(),
+                from: "0x1111111111111111111111111111111111111111".into(),
+                to: "0x2222222222222222222222222222222222222222".into(),
+                calldata: "0x".into(),
+                abi: vec![],
+                tokens: vec![],
+            },
+        }],
+    };
+    let summaries = generate_summaries(vec![input]);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].request_id, request_id);
+    assert_eq!(summaries[0].wallet_instance_id, wallet_instance_id);
+    assert_eq!(summaries[0].plan_digest, "immutable-plan");
+    assert!(
+        summaries[0].summary.contains("1 ETH"),
+        "{}",
+        summaries[0].summary
+    );
+}

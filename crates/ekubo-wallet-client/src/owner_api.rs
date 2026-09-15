@@ -1,0 +1,888 @@
+//! Typed desktop operations over authenticated transport. All validation and
+//! mutations execute in the service; this layer only carries intent and results.
+
+use crate::{
+    owner_connection::{OwnerConnection, OwnerTransport},
+    owner_protocol::Request,
+};
+use anyhow::{Context as _, Result};
+use ekubo_wallet_core::{
+    config::{NetworkConfig, WalletConfig, WalletMetadata},
+    core::policy::WalletPolicy,
+    desktop_store::{AppearancePreference, GuidedSetupState},
+    legal::{LegalDocument, LegalStatus},
+    mcp_companions::CompanionSelection,
+    policy_store::{PolicyProposal, StoredPolicy},
+    token_store::{ListedToken, StoredToken, TokenProposal},
+};
+
+#[cfg(test)]
+#[path = "activity_read_test.rs"]
+mod activity_read_tests;
+
+impl<T: OwnerTransport> OwnerConnection<T> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn legacy_move_status(&self) -> Result<ekubo_wallet_core::legacy_move::MoveStatus> {
+        self.call(&Request::LegacyMoveStatus).await
+    }
+    /// Owner-authorized entry into source-less recovery. Natively
+    /// authenticates the owner in the service and binds the pending receipt
+    /// (destination custody re-verified). The returned receipt is what core's
+    /// desktop-side retirement requires before touching a 1.x credential; it
+    /// also carries the digest the owner-side absence attestation binds to.
+    /// The returned receipt must echo the sent nonce; anything else fails
+    /// closed without touching local state.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn authorize_legacy_move_recovery(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        let receipt: ekubo_wallet_core::legacy_move::Receipt = self
+            .call(&Request::LegacyMove(
+                ekubo_wallet_core::legacy_move::ServiceCommand::AuthorizeRecovery { nonce },
+            ))
+            .await?;
+        anyhow::ensure!(
+            receipt.nonce() == nonce,
+            "legacy move recovery authorization does not match its fresh nonce"
+        );
+        anyhow::ensure!(
+            receipt.binding().is_some(),
+            "no pending legacy move cleanup for this destination"
+        );
+        Ok(receipt)
+    }
+    /// Owner-authorized recovery when the 1.x source was deleted before
+    /// cleanup finished. Carries the owner-side absence attestation the
+    /// service re-validates against the pending receipt instead of
+    /// re-statting the filesystem. The service re-verifies destination
+    /// custody and natively authenticates the owner; this call carries no
+    /// source path. The returned receipt must echo the sent nonce; anything
+    /// else fails closed without touching local state.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn complete_legacy_move_recovery(
+        &self,
+        nonce: uuid::Uuid,
+        absence: ekubo_wallet_core::legacy_move::RecoveryAbsence,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        let receipt: ekubo_wallet_core::legacy_move::Receipt = self
+            .call(&Request::LegacyMove(
+                ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource {
+                    nonce,
+                    absence: Some(absence),
+                },
+            ))
+            .await?;
+        anyhow::ensure!(
+            receipt.nonce() == nonce,
+            "legacy move recovery receipt does not match its fresh nonce"
+        );
+        Ok(receipt)
+    }
+    /// Superseded by [`Self::authorize_legacy_move_recovery`] plus
+    /// [`Self::complete_legacy_move_recovery`]: a completion without the
+    /// receipt-bound absence attestation fails closed service-side.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn complete_legacy_move_without_source(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        let receipt: ekubo_wallet_core::legacy_move::Receipt = self
+            .call(&Request::LegacyMove(
+                ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource {
+                    nonce,
+                    absence: None,
+                },
+            ))
+            .await?;
+        anyhow::ensure!(
+            receipt.nonce() == nonce,
+            "legacy move recovery receipt does not match its fresh nonce"
+        );
+        Ok(receipt)
+    }
+    pub async fn portfolio(
+        &self,
+        wallet_id: Option<&str>,
+    ) -> Result<crate::portfolio::OwnerPortfolioSnapshot> {
+        self.call(&Request::Portfolio {
+            wallet_id: wallet_id.map(str::to_owned),
+        })
+        .await
+    }
+
+    /// Each call requires fresh service-side native authentication. The returned
+    /// lease only controls the UI reveal interval; it grants no further access.
+    pub async fn begin_private_key_export(
+        &self,
+        wallet_id: &str,
+    ) -> Result<crate::export_lease::ExportLease> {
+        self.call(&Request::BeginPrivateKeyExport {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn import_account(
+        &self,
+        wallet_id: &str,
+        key: crate::import_key::ImportKey,
+    ) -> Result<WalletMetadata> {
+        self.call(&Request::ImportAccount {
+            wallet_id: wallet_id.into(),
+            key,
+        })
+        .await
+    }
+
+    pub async fn create_account(&self, wallet_id: &str) -> Result<WalletMetadata> {
+        self.call(&Request::CreateAccount {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn account_removal_document(
+        &self,
+        wallet_id: &str,
+    ) -> Result<crate::account::OwnerAccountRemovalReview> {
+        self.call(&Request::AccountRemovalDocument {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn remove_account(
+        &self,
+        reviewed: &crate::account::OwnerAccountRemovalReview,
+    ) -> Result<WalletMetadata> {
+        self.call(&Request::RemoveAccount {
+            reviewed: reviewed.wallet.clone(),
+            reviewed_identity: reviewed.document.identity.clone(),
+        })
+        .await
+    }
+
+    /// Long-running review on this authenticated connection. Read display frames
+    /// and submit choices concurrently; closing the connection cancels review.
+    pub async fn review_transaction(
+        &self,
+        request_id: uuid::Uuid,
+        review_id: uuid::Uuid,
+    ) -> Result<crate::transaction_review::ReviewedTransaction> {
+        self.call(&Request::ReviewTransaction {
+            request_id,
+            review_id,
+        })
+        .await
+    }
+
+    pub async fn transaction_review_frame(
+        &self,
+        request_id: uuid::Uuid,
+        review_id: uuid::Uuid,
+    ) -> Result<Option<crate::transaction_review::TransactionReviewFrame>> {
+        self.read(&Request::TransactionReviewFrame {
+            request_id,
+            review_id,
+        })
+        .await
+    }
+
+    pub async fn decide_transaction_review(
+        &self,
+        frame: &crate::transaction_review::TransactionReviewFrame,
+        choice: crate::transaction_review::TransactionReviewChoice,
+    ) -> Result<()> {
+        self.call(&Request::DecideTransactionReview {
+            request_id: frame.request_id,
+            review_id: frame.review_id,
+            frame_id: frame.frame_id,
+            reviewed_identity: frame.document.identity.clone(),
+            choice,
+        })
+        .await
+    }
+
+    /// Request native owner authentication for the exact stored message. The
+    /// digest names what was reviewed; it is not an authorization proof.
+    pub async fn sign_message(
+        &self,
+        request_id: uuid::Uuid,
+        reviewed_digest: &str,
+    ) -> Result<ekubo_wallet_core::message::PendingMessage> {
+        self.call(&Request::SignMessage {
+            request_id,
+            reviewed_digest: reviewed_digest.into(),
+        })
+        .await
+    }
+    pub async fn reject_message(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::message::PendingMessage> {
+        self.call(&Request::RejectMessage { request_id }).await
+    }
+    /// Request native owner authentication for the exact stored typed data.
+    pub async fn sign_typed_data(
+        &self,
+        request_id: uuid::Uuid,
+        reviewed_digest: &str,
+    ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
+        self.call(&Request::SignTypedData {
+            request_id,
+            reviewed_digest: reviewed_digest.into(),
+        })
+        .await
+    }
+    pub async fn reject_typed_data(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
+        self.call(&Request::RejectTypedData { request_id }).await
+    }
+    pub async fn discard_unsent_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
+        self.call(&Request::DiscardUnsentTransaction { request_id })
+            .await
+    }
+
+    pub async fn transaction_inspection(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerTransactionInspection> {
+        self.call(&Request::TransactionInspection { request_id })
+            .await
+    }
+    pub async fn rebroadcast_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerTransactionAction> {
+        self.call(&Request::RebroadcastTransaction { request_id })
+            .await
+    }
+    pub async fn attempt_transaction_cancellation(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerTransactionAction> {
+        self.call(&Request::AttemptTransactionCancellation { request_id })
+            .await
+    }
+    pub async fn refresh_transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
+        self.call(&Request::RefreshTransaction { request_id }).await
+    }
+
+    pub async fn transactions(
+        &self,
+        wallet_id: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<ekubo_wallet_core::pending::PendingTransaction>> {
+        self.call(&Request::Transactions {
+            wallet_id: wallet_id.map(str::to_owned),
+            limit,
+        })
+        .await
+    }
+    /// Clear decided history through the service. Refresh activity afterwards,
+    /// including after an ambiguous transport failure; never replay implicitly.
+    pub async fn clear_activity_history(&self) -> Result<usize> {
+        self.call(&Request::ClearActivityHistory).await
+    }
+
+    pub async fn activity(
+        &self,
+        wallet_id: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<crate::activity::OwnerActivityRecord>> {
+        use crate::activity::{OwnerActivityRecord, OwnerActivityReference};
+        anyhow::ensure!(
+            (1..=1000).contains(&limit),
+            "limit must be between 1 and 1000"
+        );
+        let references: Vec<OwnerActivityReference> = self
+            .call(&Request::ActivityIndex {
+                wallet_id: wallet_id.map(str::to_owned),
+                limit,
+            })
+            .await?;
+        anyhow::ensure!(
+            references.len() <= usize::from(limit),
+            "oversized activity index"
+        );
+        anyhow::ensure!(
+            references
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == references.len(),
+            "duplicate activity index entries"
+        );
+        let mut records = Vec::with_capacity(references.len());
+        while records.len() < references.len() {
+            let remaining = &references[records.len()..];
+            let mut batch: Vec<OwnerActivityRecord> = self
+                .call(&Request::ActivityRecords {
+                    references: remaining.to_vec(),
+                })
+                .await?;
+            if batch.is_empty() {
+                let id = match remaining[0] {
+                    OwnerActivityReference::Transaction(id)
+                    | OwnerActivityReference::Message(id)
+                    | OwnerActivityReference::TypedData(id) => id,
+                };
+                batch.push(self.activity_record(id).await?);
+            }
+            anyhow::ensure!(
+                !batch.is_empty()
+                    && batch.len() <= remaining.len()
+                    && batch
+                        .iter()
+                        .zip(remaining)
+                        .all(|(record, expected)| record.reference() == *expected),
+                "activity batch does not match its ordered index"
+            );
+            records.extend(batch);
+        }
+        Ok(records)
+    }
+    pub async fn activity_record(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<crate::activity::OwnerActivityRecord> {
+        self.read(&Request::ActivityRecord { request_id }).await
+    }
+    pub async fn activity_sources(&self) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::ActivitySources).await
+    }
+    pub async fn transaction(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::pending::PendingTransaction> {
+        self.read(&Request::Transaction { request_id }).await
+    }
+    pub async fn message(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::message::PendingMessage> {
+        self.read(&Request::Message { request_id }).await
+    }
+    pub async fn typed_data(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::typed_data::PendingTypedData> {
+        self.read(&Request::TypedData { request_id }).await
+    }
+    pub async fn reviews(
+        &self,
+        wallet_id: Option<&str>,
+    ) -> Result<crate::activity::OwnerReviewQueues> {
+        use crate::activity::{OwnerReviewQueues, OwnerReviewRecord, OwnerReviewReference};
+        let index: Vec<OwnerReviewReference> = self
+            .read(&Request::Reviews {
+                wallet_id: wallet_id.map(str::to_owned),
+            })
+            .await?;
+        anyhow::ensure!(
+            index
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == index.len(),
+            "duplicate review index entries"
+        );
+        let mut queues = OwnerReviewQueues::default();
+        let mut offset = 0;
+        while offset < index.len() {
+            let remaining = &index[offset..index.len().min(offset + 64)];
+            let mut records: Vec<OwnerReviewRecord> = self
+                .call(&Request::ReviewRecords {
+                    references: remaining.to_vec(),
+                })
+                .await?;
+            if records.is_empty() {
+                records.push(
+                    self.read(&Request::ReviewRecord {
+                        reference: remaining[0].clone(),
+                    })
+                    .await?,
+                );
+            }
+            anyhow::ensure!(
+                records.len() <= remaining.len()
+                    && records
+                        .iter()
+                        .zip(remaining)
+                        .all(|(record, reference)| record.reference() == *reference),
+                "review batch does not match its ordered index"
+            );
+            offset += records.len();
+            for record in records {
+                queues.push(record);
+            }
+        }
+        Ok(queues)
+    }
+    pub async fn message_review_document(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::approval::ReviewDocument> {
+        self.read(&Request::MessageReviewDocument { request_id })
+            .await
+    }
+    pub async fn typed_data_review_document(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::approval::ReviewDocument> {
+        self.read(&Request::TypedDataReviewDocument { request_id })
+            .await
+    }
+    pub async fn transaction_headlines(
+        &self,
+        request_ids: &[uuid::Uuid],
+    ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::TransactionHeadlines {
+            request_ids: request_ids.to_vec(),
+        })
+        .await
+    }
+    /// Read at most eight stored transactions' advisory inference inputs.
+    pub async fn transaction_preview_inputs(
+        &self,
+        request_ids: &[uuid::Uuid],
+    ) -> Result<Vec<ekubo_wallet_core::preview_evidence::PreviewInput>> {
+        use crate::preview_page::{MAX_EVIDENCE_BYTES, PAGE_BYTES, PreviewPage};
+        anyhow::ensure!(
+            request_ids.len() <= 8,
+            "at most 8 transaction preview inputs"
+        );
+        let first: PreviewPage = self
+            .call(&Request::TransactionPreviewInputs {
+                request_ids: request_ids.to_vec(),
+            })
+            .await?;
+        let identity = first.transfer_id;
+        let total = first.total_bytes;
+        anyhow::ensure!(
+            !identity.is_nil() && total > 0 && total <= MAX_EVIDENCE_BYTES,
+            "invalid preview transfer size or identity"
+        );
+        let mut text = String::new();
+        let mut page = first;
+        loop {
+            anyhow::ensure!(
+                page.transfer_id == identity
+                    && page.total_bytes == total
+                    && page.offset == text.len()
+                    && !page.text.is_empty()
+                    && page.text.len() <= PAGE_BYTES
+                    && page.text.len() <= total.saturating_sub(text.len()),
+                "invalid preview transfer page"
+            );
+            text.push_str(&page.text);
+            if text.len() == total {
+                break;
+            }
+            page = self
+                .call(&Request::TransactionPreviewPage {
+                    transfer_id: identity,
+                    offset: text.len(),
+                })
+                .await?;
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    pub async fn save_advisory_summary(
+        &self,
+        summary: ekubo_wallet_core::preview_evidence::AdvisorySummary,
+    ) -> Result<String> {
+        self.call(&Request::SaveAdvisorySummary { summary }).await
+    }
+
+    pub async fn saved_transaction_summaries(
+        &self,
+        request_ids: &[uuid::Uuid],
+    ) -> Result<std::collections::BTreeMap<uuid::Uuid, String>> {
+        self.call(&Request::SavedTransactionSummaries {
+            request_ids: request_ids.to_vec(),
+        })
+        .await
+    }
+
+    /// Poll once. On initial connection or a history gap, refresh authoritative
+    /// state before polling again from the returned cursor. Never use events as
+    /// authorization or replay an ambiguous mutation when reconnecting.
+    pub async fn wait_for_events(
+        &self,
+        after: Option<crate::events::EventCursor>,
+    ) -> Result<crate::events::EventBatch> {
+        self.call(&Request::WaitForEvents { after }).await
+    }
+
+    pub async fn automations(&self) -> Result<Vec<ekubo_wallet_core::automation::Automation>> {
+        self.call(&Request::Automations).await
+    }
+    pub async fn automation_runs(
+        &self,
+        automation_id: uuid::Uuid,
+        limit: usize,
+    ) -> Result<Vec<ekubo_wallet_core::automation_store::AutomationRun>> {
+        self.call(&Request::AutomationRuns {
+            automation_id,
+            limit,
+        })
+        .await
+    }
+    pub async fn disable_automation(
+        &self,
+        automation_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::automation::Automation> {
+        self.call(&Request::DisableAutomation { automation_id })
+            .await
+    }
+    pub async fn relink_automation(
+        &self,
+        automation_id: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::automation::Automation> {
+        self.call(&Request::RelinkAutomation { automation_id })
+            .await
+    }
+    pub async fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
+        self.call(&Request::DeleteAutomation { automation_id })
+            .await
+    }
+    pub async fn dry_run_automation(
+        &self,
+        automation_id: uuid::Uuid,
+    ) -> Result<crate::automation_report::AutomationDryRun> {
+        self.call(&Request::DryRunAutomation { automation_id })
+            .await
+    }
+
+    pub async fn tokens(
+        &self,
+        chain_id: Option<u64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<StoredToken>> {
+        self.call(&Request::Tokens {
+            chain_id,
+            limit,
+            offset,
+        })
+        .await
+    }
+    pub async fn add_token(
+        &self,
+        token: ListedToken,
+        approximate_usd_price: Option<f64>,
+    ) -> Result<StoredToken> {
+        self.call(&Request::AddToken {
+            token,
+            approximate_usd_price,
+        })
+        .await
+    }
+    pub async fn native_token_prices(&self) -> Result<std::collections::BTreeMap<u64, f64>> {
+        self.call(&Request::NativeTokenPrices).await
+    }
+    pub async fn set_native_token_price(&self, chain_id: u64, price: Option<f64>) -> Result<()> {
+        self.call(&Request::SetNativeTokenPrice { chain_id, price })
+            .await
+    }
+    pub async fn set_token_price(&self, reviewed: &StoredToken, price: Option<f64>) -> Result<()> {
+        self.call(&Request::SetTokenPrice {
+            reviewed: reviewed.clone(),
+            price,
+        })
+        .await
+    }
+    pub async fn remove_token(&self, reviewed: &StoredToken) -> Result<()> {
+        self.call(&Request::RemoveToken {
+            reviewed: reviewed.clone(),
+        })
+        .await
+    }
+    pub async fn import_token_list_for_review(
+        &self,
+        url: &str,
+        requested_chain_ids: &[u64],
+    ) -> Result<crate::token_import::OwnerTokenListImport> {
+        self.call(&Request::ImportTokenListForReview {
+            url: url.into(),
+            requested_chain_ids: requested_chain_ids.to_vec(),
+        })
+        .await
+    }
+    pub async fn token_proposals(&self) -> Result<Vec<TokenProposal>> {
+        self.call(&Request::TokenProposals).await
+    }
+    pub async fn accept_token_proposals(&self, proposals: &[TokenProposal]) -> Result<u64> {
+        self.call(&Request::AcceptTokenProposals {
+            proposals: proposals.to_vec(),
+        })
+        .await
+    }
+    pub async fn reject_token_proposals(&self, proposals: &[TokenProposal]) -> Result<u64> {
+        self.call(&Request::RejectTokenProposals {
+            proposals: proposals.to_vec(),
+        })
+        .await
+    }
+
+    pub async fn begin_dapp_session(
+        &self,
+        uri: &str,
+    ) -> Result<crate::dapp_session::SessionSummary> {
+        self.call(&Request::BeginDappSession { uri: uri.into() })
+            .await
+    }
+
+    pub async fn dapp_sessions(&self) -> Result<Vec<crate::dapp_session::SessionSummary>> {
+        self.call(&Request::DappSessions).await
+    }
+
+    pub async fn wait_dapp_session(&self, session_id: uuid::Uuid) -> Result<()> {
+        self.call(&Request::WaitDappSession { session_id }).await
+    }
+
+    pub async fn disconnect_dapp_session(
+        &self,
+        session_id: uuid::Uuid,
+    ) -> Result<crate::dapp_session::SessionSummary> {
+        self.call(&Request::DisconnectDappSession { session_id })
+            .await
+    }
+
+    pub async fn dapp_reviews(&self) -> Result<Vec<crate::dapp_review::DappReview>> {
+        self.call(&Request::DappReviews).await
+    }
+
+    pub async fn approve_dapp_review(
+        &self,
+        review: &crate::dapp_review::DappReview,
+        index: usize,
+    ) -> Result<()> {
+        let choice = review
+            .choices
+            .get(index)
+            .context("invalid dapp account choice")?;
+        self.call(&Request::ApproveDappReview {
+            session_id: review.session_id,
+            index,
+            reviewed_identity: choice.document.identity.clone(),
+        })
+        .await
+    }
+
+    pub async fn reject_dapp_review(&self, review: &crate::dapp_review::DappReview) -> Result<()> {
+        self.call(&Request::RejectDappReview {
+            session_id: review.session_id,
+            reviewed_identity: review.unselected_document.identity.clone(),
+        })
+        .await
+    }
+
+    pub async fn close_dapp_review(&self, review: &crate::dapp_review::DappReview) -> Result<()> {
+        self.call(&Request::CloseDappReview {
+            session_id: review.session_id,
+            reviewed_identity: review.unselected_document.identity.clone(),
+        })
+        .await
+    }
+
+    pub async fn snapshot(&self) -> Result<WalletConfig> {
+        self.call(&Request::Snapshot).await
+    }
+
+    pub async fn accounts(&self) -> Result<Vec<WalletMetadata>> {
+        self.call(&Request::Accounts).await
+    }
+
+    pub async fn account(&self, wallet_id: &str) -> Result<WalletMetadata> {
+        self.call(&Request::Account {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn policy(&self, wallet_id: &str) -> Result<Option<StoredPolicy>> {
+        self.call(&Request::Policy {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn policy_history(&self, wallet_id: &str) -> Result<Vec<StoredPolicy>> {
+        self.call(&Request::PolicyHistory {
+            wallet_id: wallet_id.into(),
+        })
+        .await
+    }
+
+    pub async fn install_policy(
+        &self,
+        wallet_id: &str,
+        policy: &WalletPolicy,
+        reviewed_revision: Option<u64>,
+    ) -> Result<StoredPolicy> {
+        self.call(&Request::InstallPolicy {
+            wallet_id: wallet_id.into(),
+            policy: policy.clone(),
+            reviewed_revision,
+        })
+        .await
+    }
+
+    pub async fn networks(&self) -> Result<Vec<NetworkConfig>> {
+        self.call(&Request::Networks).await
+    }
+
+    pub async fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
+        self.call(&Request::NetworkByChainId { chain_id }).await
+    }
+
+    pub async fn reset_networks_to_defaults(
+        &self,
+        reviewed: &[NetworkConfig],
+    ) -> Result<Vec<NetworkConfig>> {
+        self.call(&Request::ResetNetworksToDefaults {
+            reviewed: reviewed.to_vec(),
+        })
+        .await
+    }
+
+    pub async fn network_proposals(&self) -> Result<Vec<NetworkConfig>> {
+        self.call(&Request::NetworkProposals).await
+    }
+
+    pub async fn accept_network_proposal(&self, proposal: &NetworkConfig) -> Result<()> {
+        self.call(&Request::AcceptNetworkProposal {
+            proposal: proposal.clone(),
+        })
+        .await
+    }
+
+    pub async fn reject_network_proposal(&self, proposal: &NetworkConfig) -> Result<bool> {
+        self.call(&Request::RejectNetworkProposal {
+            proposal: proposal.clone(),
+        })
+        .await
+    }
+
+    pub async fn policy_proposals(&self) -> Result<Vec<PolicyProposal>> {
+        self.call(&Request::PolicyProposals).await
+    }
+
+    pub async fn apply_policy_proposal(&self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
+        self.call(&Request::ApplyPolicyProposal {
+            proposal: Box::new(proposal.clone()),
+        })
+        .await
+    }
+
+    pub async fn reject_policy_proposal(&self, proposal: &PolicyProposal) -> Result<bool> {
+        self.call(&Request::RejectPolicyProposal {
+            proposal: Box::new(proposal.clone()),
+        })
+        .await
+    }
+
+    pub async fn add_network(&self, network: NetworkConfig) -> Result<()> {
+        self.call(&Request::AddNetwork { network }).await
+    }
+
+    pub async fn replace_network(
+        &self,
+        reviewed: &NetworkConfig,
+        replacement: NetworkConfig,
+    ) -> Result<()> {
+        self.call(&Request::ReplaceNetwork {
+            reviewed: reviewed.clone(),
+            replacement: Box::new(replacement),
+        })
+        .await
+    }
+
+    pub async fn set_network_disabled(
+        &self,
+        reviewed: &NetworkConfig,
+        disabled: bool,
+    ) -> Result<NetworkConfig> {
+        self.call(&Request::SetNetworkDisabled {
+            reviewed: reviewed.clone(),
+            disabled,
+        })
+        .await
+    }
+
+    pub async fn detailed_notification_previews(&self) -> Result<bool> {
+        self.call(&Request::DetailedNotificationPreviews).await
+    }
+
+    pub async fn set_detailed_notification_previews(&self, enabled: bool) -> Result<()> {
+        self.call(&Request::SetDetailedNotificationPreviews { enabled })
+            .await
+    }
+
+    pub async fn legal_status(&self) -> Result<LegalStatus> {
+        self.call(&Request::LegalStatus).await
+    }
+
+    pub async fn appearance_preference(&self) -> Result<AppearancePreference> {
+        self.call(&Request::AppearancePreference).await
+    }
+
+    pub async fn set_appearance_preference(&self, preference: AppearancePreference) -> Result<()> {
+        self.call(&Request::SetAppearancePreference { preference })
+            .await
+    }
+
+    pub async fn companion_servers(&self) -> Result<CompanionSelection> {
+        self.call(&Request::CompanionServers).await
+    }
+
+    pub async fn set_companion_servers(&self, selection: &CompanionSelection) -> Result<()> {
+        self.call(&Request::SetCompanionServers {
+            selection: selection.clone(),
+        })
+        .await
+    }
+
+    pub async fn guided_setup(&self) -> Result<GuidedSetupState> {
+        self.call(&Request::GuidedSetup).await
+    }
+
+    pub async fn set_guided_setup(&self, state: &GuidedSetupState) -> Result<()> {
+        self.call(&Request::SetGuidedSetup {
+            state: state.clone(),
+        })
+        .await
+    }
+
+    pub async fn testnet_mode(&self) -> Result<bool> {
+        self.call(&Request::TestnetMode).await
+    }
+
+    pub async fn set_testnet_mode(&self, enabled: bool) -> Result<()> {
+        self.call(&Request::SetTestnetMode { enabled }).await
+    }
+
+    pub async fn legal_document(&self, document: LegalDocument) -> Result<(String, String)> {
+        self.call(&Request::LegalDocument { document }).await
+    }
+
+    pub async fn accept_legal(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
+        self.call(&Request::AcceptLegal {
+            document,
+            reviewed_digest: reviewed_digest.into(),
+        })
+        .await
+    }
+}

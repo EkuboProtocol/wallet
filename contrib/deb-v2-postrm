@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    remove|purge)
+        systemctl daemon-reload
+        systemctl reload dbus
+        # Deliberately retain protected profiles, service account and owner relay.
+        ;;
+esac

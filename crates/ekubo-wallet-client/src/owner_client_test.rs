@@ -1,0 +1,595 @@
+struct Bus(std::process::Child);
+
+#[path = "owner_activation_test.rs"]
+mod activation;
+impl Drop for Bus {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn private_bus() -> (Bus, String) {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::{Command, Stdio};
+
+    let mut daemon = Bus(Command::new("dbus-daemon")
+        .args(["--session", "--nofork", "--print-address=1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap());
+    let mut address = String::new();
+    BufReader::new(daemon.0.stdout.take().unwrap())
+        .read_line(&mut address)
+        .unwrap();
+    (daemon, address)
+}
+
+use super::*;
+use crate::owner_protocol::Request;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+struct Endpoint {
+    calls: Arc<AtomicUsize>,
+}
+
+#[zbus::interface(name = "org.ekubo.Wallet2.Owner1")]
+impl Endpoint {
+    fn call(&self, request: &str) -> String {
+        assert!(matches!(
+            serde_json::from_str::<Request>(request).unwrap(),
+            Request::Accounts
+        ));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "[]".into()
+    }
+}
+
+struct CustodyEndpoint {
+    expected: Vec<u8>,
+    entered: tokio::sync::watch::Sender<usize>,
+    ready: tokio::sync::watch::Receiver<bool>,
+}
+
+#[zbus::interface(name = "org.ekubo.Wallet2.Custody1")]
+impl CustodyEndpoint {
+    async fn unlock(&self, ciphertext: &[u8]) -> zbus::fdo::Result<()> {
+        assert_eq!(ciphertext, self.expected);
+        self.entered.send_modify(|count| *count += 1);
+        self.ready
+            .clone()
+            .wait_for(|ready| *ready)
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("startup failed".into()))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn custody_relay_waits_for_readiness_and_stays_on_the_authenticated_service() {
+    use ekubo_wallet_core::custody_envelope::{CustodyBinding, WrappingKey};
+    use uuid::Uuid;
+
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet2.Owner.CustodyTest";
+    let binding =
+        CustodyBinding::new("owner", "service", Uuid::from_u128(1), Uuid::from_u128(2)).unwrap();
+    let (_, wrapped) = WrappingKey::from_material(zeroize::Zeroizing::new([0x11; 32]))
+        .enroll(binding)
+        .unwrap();
+    let (entered, mut received) = tokio::sync::watch::channel(0);
+    let (ready, waiting) = tokio::sync::watch::channel(false);
+    let original = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            crate::owner_protocol::CUSTODY_OBJECT_PATH,
+            CustodyEndpoint {
+                expected: wrapped.as_bytes().to_vec(),
+                entered,
+                ready: waiting,
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(
+        LinuxOwnerTransport::authenticate(desktop.clone(), name, uid.wrapping_add(1))
+            .await
+            .is_err()
+    );
+    assert_eq!(*received.borrow(), 0);
+    let transport = LinuxOwnerTransport::authenticate(desktop, name, uid)
+        .await
+        .unwrap();
+    assert_eq!(transport.process, std::process::id());
+    original.release_name(name).await.unwrap();
+    let (replaced, replacement_calls) = tokio::sync::watch::channel(0);
+    let replacement = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            crate::owner_protocol::CUSTODY_OBJECT_PATH,
+            CustodyEndpoint {
+                expected: wrapped.as_bytes().to_vec(),
+                entered: replaced,
+                ready: ready.subscribe(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let mut relay = Box::pin(transport.unlock(&wrapped));
+    tokio::select! {
+        result = relay.as_mut() => panic!("reply preceded readiness: {result:?}"),
+        result = received.wait_for(|count| *count == 1) => { result.unwrap(); },
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!("relay never reached pinned service"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), relay.as_mut())
+            .await
+            .is_err()
+    );
+    ready.send_replace(true);
+    relay.await.unwrap();
+    assert_eq!(*replacement_calls.borrow(), 0);
+    original.close().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), transport.unlock(&wrapped))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(*replacement_calls.borrow(), 0);
+    replacement.close().await.unwrap();
+}
+
+/// No real service, keys, or system-bus configuration are involved. The UID
+/// mismatch and name replacement exercise actual private-bus peer lookups.
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn client_checks_uid_pins_service_and_does_not_replay_after_disconnect() {
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet2.Owner.Test";
+    let original_calls = Arc::new(AtomicUsize::new(0));
+    let original = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            Endpoint {
+                calls: original_calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    assert!(
+        OwnerClient::on_bus(desktop.clone(), name, uid.wrapping_add(1))
+            .await
+            .is_err()
+    );
+    assert_eq!(original_calls.load(Ordering::SeqCst), 0);
+    let client = OwnerClient::on_bus(desktop, name, uid).await.unwrap();
+    assert!(client.accounts().await.unwrap().is_empty());
+    original.release_name(name).await.unwrap();
+    let replacement_calls = Arc::new(AtomicUsize::new(0));
+    let replacement = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            Endpoint {
+                calls: replacement_calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    client.accounts().await.unwrap();
+    assert_eq!(original_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
+    original.close().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), client.accounts())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
+    replacement.close().await.unwrap();
+}
+
+struct SessionEndpoint {
+    calls: Arc<AtomicUsize>,
+    started: tokio::sync::watch::Sender<Option<String>>,
+    acknowledge: tokio::sync::watch::Receiver<bool>,
+}
+
+#[zbus::interface(name = "org.ekubo.Wallet2.Owner1")]
+impl SessionEndpoint {
+    fn call(&self, request: &str) -> String {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(matches!(
+            serde_json::from_str::<Request>(request).unwrap(),
+            Request::Accounts
+        ));
+        "[]".into()
+    }
+    async fn hold_desktop_session(
+        &self,
+        nonce: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        self.started.send_replace(Some(nonce.to_owned()));
+        // An authenticated but unrelated/stale acknowledgement is not this lease.
+        connection
+            .emit_signal(
+                header.sender().map(zbus::names::UniqueName::as_str),
+                OBJECT_PATH,
+                "org.ekubo.Wallet2.Owner1",
+                "DesktopSessionReady",
+                &(uuid::Uuid::nil().to_string(),),
+            )
+            .await?;
+        self.acknowledge
+            .clone()
+            .wait_for(|ready| *ready)
+            .await
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
+        connection
+            .emit_signal(
+                header.sender().map(zbus::names::UniqueName::as_str),
+                OBJECT_PATH,
+                "org.ekubo.Wallet2.Owner1",
+                "DesktopSessionReady",
+                &(nonce,),
+            )
+            .await?;
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn session_shutdown_closes_retained_owner_client_clones() {
+    use crate::desktop_session::SessionState;
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet2.Owner.SessionTest";
+    let (started, mut entered) = tokio::sync::watch::channel(None);
+    let (_acknowledge, acknowledge) = tokio::sync::watch::channel(true);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            SessionEndpoint {
+                started,
+                acknowledge,
+                calls: calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let sender = desktop.unique_name().unwrap().clone();
+    let client = OwnerClient::on_bus(desktop, name, rustix::process::geteuid().as_raw())
+        .await
+        .unwrap();
+    assert!(client.accounts().await.unwrap().is_empty());
+    let retained = client.clone();
+    let session = client.start_desktop_session();
+    let state = session.state();
+    tokio::time::timeout(Duration::from_secs(5), session.ready())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*state.borrow(), SessionState::Connected);
+    tokio::time::timeout(Duration::from_secs(5), entered.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    session.close().await.unwrap();
+    assert_eq!(*state.borrow(), SessionState::Closed);
+    assert!(retained.accounts().await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let registry = DBusProxy::new(&service).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while registry
+            .name_has_owner(sender.clone().into())
+            .await
+            .unwrap()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn independent_owner_connections_close_without_closing_the_main_peer() {
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet2.Owner.IndependentTest";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            Endpoint {
+                calls: calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let client = OwnerClient::on_bus(desktop, name, rustix::process::geteuid().as_raw())
+        .await
+        .unwrap();
+    let peer = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let unique = peer.unique_name().unwrap().to_owned();
+    let isolated = client.independent_on_bus(peer).await.unwrap();
+    isolated.accounts().await.unwrap();
+    isolated.close().await.unwrap();
+    let registry = DBusProxy::new(client.transport.proxy.connection())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while registry
+            .name_has_owner(unique.clone().into())
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    client.accounts().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let service_name = service.unique_name().unwrap().to_owned();
+    service.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while registry
+            .name_has_owner(service_name.clone().into())
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    // No activation or reconnect to a replacement well-known name.
+    let peer = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    assert!(client.independent_on_bus(peer).await.is_err());
+    client.close().await.unwrap();
+    replacement.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn root_shutdown_drains_review_peers_and_permanently_closes_admission() {
+    let (_daemon, address) = private_bus();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let name = "org.ekubo.Wallet2.Owner.RootLifetimeTest";
+    let service = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            Endpoint {
+                calls: calls.clone(),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let bus = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let root = OwnerClient::on_bus(bus, name, rustix::process::geteuid().as_raw())
+        .await
+        .unwrap();
+    let mut children = Vec::new();
+    let mut names = Vec::new();
+    for _ in 0..3 {
+        let bus = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        names.push(bus.unique_name().unwrap().to_owned());
+        children.push(root.independent_on_bus(bus).await.unwrap());
+    }
+    children[0].close().await.unwrap();
+    children[1].accounts().await.unwrap();
+    root.accounts().await.unwrap();
+    root.close().await.unwrap();
+    for child in &children {
+        assert!(child.accounts().await.is_err());
+    }
+    let bus = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    assert!(root.independent_on_bus(bus).await.is_err());
+    let registry = DBusProxy::new(&service).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for name in names {
+            while registry.name_has_owner(name.clone().into()).await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    root.close().await.unwrap();
+    // Reopening creates a new lifetime. Dropping it from a non-Tokio desktop
+    // thread must still close its children through the captured runtime.
+    let bus = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let reopened = OwnerClient::on_bus(bus, name, rustix::process::geteuid().as_raw())
+        .await
+        .unwrap();
+    let bus = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let child_name = bus.unique_name().unwrap().to_owned();
+    let child = reopened.independent_on_bus(bus).await.unwrap();
+    std::thread::spawn(move || drop(reopened)).join().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while registry
+            .name_has_owner(child_name.clone().into())
+            .await
+            .unwrap()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(child.accounts().await.is_err());
+    service.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires dbus-daemon; launches an isolated test bus"]
+async fn readiness_requires_the_pinned_service_and_this_hold_nonce() {
+    use crate::desktop_session::SessionState;
+    let (_daemon, address) = private_bus();
+    let name = "org.ekubo.Wallet2.Owner.ReadinessTest";
+    let (started, mut entered) = tokio::sync::watch::channel(None);
+    let (allow, acknowledge) = tokio::sync::watch::channel(false);
+    let service = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .name(name)
+        .unwrap()
+        .serve_at(
+            OBJECT_PATH,
+            SessionEndpoint {
+                started,
+                acknowledge,
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let desktop = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let destination = desktop.unique_name().unwrap().clone();
+    let client = OwnerClient::on_bus(desktop, name, rustix::process::geteuid().as_raw())
+        .await
+        .unwrap();
+    let session = client.start_desktop_session();
+    tokio::time::timeout(Duration::from_secs(5), entered.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    let nonce = entered.borrow().clone().unwrap();
+    let stranger = zbus::connection::Builder::address(address.trim())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    stranger
+        .emit_signal(
+            Some(destination.as_str()),
+            OBJECT_PATH,
+            "org.ekubo.Wallet2.Owner1",
+            "DesktopSessionReady",
+            &(nonce,),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), session.ready())
+            .await
+            .is_err()
+    );
+    assert_eq!(*session.state().borrow(), SessionState::Starting);
+    allow.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(5), session.ready())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(*session.state().borrow(), SessionState::Connected);
+    session.close().await.unwrap();
+    stranger.close().await.unwrap();
+    service.close().await.unwrap();
+}

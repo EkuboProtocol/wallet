@@ -161,7 +161,7 @@ sol! {
 }
 
 /// One stored token, addresses rendered checksummed.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq)]
 pub struct StoredToken {
     pub chain_id: String,
     pub address: String,
@@ -196,7 +196,7 @@ pub struct StoredToken {
 /// whoever curated it, and the owner decides whether to trust that curator; a
 /// contract's own answer is a claim by the counterparty, which is exactly the
 /// party a reviewer is being protected from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ListedToken {
     pub chain_id: u64,
     pub address: Address,
@@ -206,7 +206,7 @@ pub struct ListedToken {
 }
 
 /// One token an agent has suggested, waiting for the owner to decide.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct TokenProposal {
     pub token: ListedToken,
     /// The list the suggestion came from, used to group the review screen.
@@ -215,7 +215,7 @@ pub struct TokenProposal {
 }
 
 /// What one call to [`TokenStore::propose`] did.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ProposalSummary {
     /// Now awaiting the owner's review.
     pub pending: u64,
@@ -1184,7 +1184,7 @@ fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredToken> {
 }
 
 /// One token balance line in a portfolio.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct PortfolioToken {
     pub address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1203,7 +1203,7 @@ pub struct PortfolioToken {
 }
 
 /// Balances for one address across the tokens known to the database.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct Portfolio {
     pub address: String,
     pub chain_id: String,

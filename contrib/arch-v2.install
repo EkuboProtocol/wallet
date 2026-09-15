@@ -1,0 +1,31 @@
+# Pacman runs these functions as root. Never enroll an owner during installation.
+# Upgrade guard lives in contrib/arch-v2-pretransaction.hook: libalpm
+# discards install-scriptlet exit status, so a pre_upgrade() refusal is dead
+# code. The PreTransaction hook aborts while provision@*.service is active.
+post_install() {
+    # Pacman's global sysusers/tmpfiles hooks run after package install scripts.
+    systemd-sysusers /usr/lib/sysusers.d/ekubo-wallet-v2.conf || return
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/ekubo-wallet-v2.conf || return
+    systemctl daemon-reload || return
+    /usr/lib/ekubo-wallet-v2/install-profile --restore-activations || return
+    # Ask the bus itself to reload: works with dbus-daemon and dbus-broker.
+    busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig || return
+    systemctl try-restart 'ekubo-wallet-v2@*.service'
+}
+
+post_upgrade() {
+    # Active enrollment never reaches here: the PreTransaction hook above
+    # aborts the transaction first, so stopping provisioning mid-enrollment
+    # would be the bug this used to be.
+    post_install "$@" || return
+}
+
+pre_remove() {
+    systemctl stop 'ekubo-wallet-v2@*.service' 'ekubo-wallet-v2-provision@*.service'
+}
+
+post_remove() {
+    systemctl daemon-reload || return
+    busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig || return
+    printf '%s\n' 'Ekubo Wallet 2 protected profiles, service account and owner activation metadata retained.'
+}

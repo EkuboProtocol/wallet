@@ -1,0 +1,15 @@
+# libalpm PreTransaction guard: libalpm discards install-scriptlet exit
+# status, so a pre_upgrade() refusal in arch-v2.install is dead code and
+# cannot abort an upgrade. This hook aborts the transaction instead while
+# any ekubo-wallet-v2-provision@*.service unit is active or activating,
+# so an upgrade can never coincide with active enrollment custody work.
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = ekubo-wallet-v2
+
+[Action]
+Description = Refuse ekubo-wallet-v2 upgrade while v2 enrollment is active
+When = PreTransaction
+Exec = /bin/sh -c 'units="$(/usr/bin/systemctl list-units --state=active,activating --no-legend "ekubo-wallet-v2-provision@*.service")"; if [ -n "$units" ]; then printf "%s\n" "Complete or recover v2 enrollment before installing this package." >&2; exit 1; fi'
+AbortOnFail

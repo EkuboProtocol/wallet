@@ -1,221 +1,244 @@
 name: Tests
+run-name: ${{ github.event_name == 'pull_request' && 'Scoped PR checks (no Rust compilation)' || inputs.linux_acceptance_only && 'Installed Linux acceptance (no desktop rebuild)' || inputs.windows_installed_only && 'Installed Windows acceptance (headless)' || inputs.windows_auth_only && 'Windows collector acceptance (helper only)' || inputs.windows_primitives_only && 'Windows native diagnostics (not full CI)' || 'Full wallet milestone CI' }}
 
 on:
-  # pull_request:
-  #   # These paths are not consumed or validated by any job below. Embedded
-  #   # MCP/legal Markdown is intentionally absent: changing it rebuilds and
-  #   # tests the application.
-  #   paths-ignore:
-  #     - ".agents/**"
-  #     - ".gitattributes"
-  #     - ".github/apple/**"
-  #     - ".github/dependabot.yml"
-  #     - ".github/workflows/release.yml"
-  #     - ".github/workflows/build-release-artifacts.yml"
-  #     - ".gitignore"
-  #     - "AGENTS.md"
-  #     - "README.md"
-  #     - "contrib/polkit/**"
-  #     - "contrib/rehearse-macos-signing.sh"
-  #     - "contrib/rpc-probe/**"
-  #     - "contrib/vendor-default-tokens.py"
-  #     - "crates/ekubo-wallet-core/clearsign/README.md"
-  #     - "docs/approval-ux.md"
-  #     - "docs/architecture.md"
-  #     - "docs/releasing.md"
-  #     - "docs/security-boundary.md"
-  #     - "docs/storage.md"
-  #     - "examples/abi-decoding.json"
-  #     - "examples/policy.json"
-  #     - "schemas/**"
-  # push:
-  #   branches: [main]
-  #   paths-ignore:
-  #     - ".agents/**"
-  #     - ".gitattributes"
-  #     - ".github/apple/**"
-  #     - ".github/dependabot.yml"
-  #     - ".github/workflows/release.yml"
-  #     - ".github/workflows/build-release-artifacts.yml"
-  #     - ".gitignore"
-  #     - "AGENTS.md"
-  #     - "README.md"
-  #     - "contrib/polkit/**"
-  #     - "contrib/rehearse-macos-signing.sh"
-  #     - "contrib/rpc-probe/**"
-  #     - "contrib/vendor-default-tokens.py"
-  #     - "crates/ekubo-wallet-core/clearsign/README.md"
-  #     - "docs/approval-ux.md"
-  #     - "docs/architecture.md"
-  #     - "docs/releasing.md"
-  #     - "docs/security-boundary.md"
-  #     - "docs/storage.md"
-  #     - "examples/abi-decoding.json"
-  #     - "examples/policy.json"
-  #     - "schemas/**"
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - Cargo.lock
+      - '**/clippy.toml'
+      - rust-toolchain.toml
+      - ruff.toml
+      - '.github/workflows/**'
+      - 'contrib/**'
+      - 'scripts/**'
+      - 'schemas/**'
+      - 'assets/**'
   workflow_dispatch:
+    inputs:
+      windows_primitives_only:
+        description: Real core/client/service diagnostics only; full matrix is the default milestone
+        type: boolean
+        default: false
+      linux_acceptance_only:
+        description: Run installed Linux acceptance without rebuilding the desktop test suite
+        type: boolean
+        default: false
+      windows_auth_only:
+        description: Test the protected Windows collector without rebuilding the wallet
+        type: boolean
+        default: false
+      windows_installed_only:
+        description: Enroll and restart the real Windows service with a distinct standard owner
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Cheap PR checks must not cancel a manually dispatched native milestone.
+  # Repeated runs of the same class still supersede one another on this branch.
+  group: wallet-ci-${{ github.event_name == 'pull_request' && 'source' || inputs.linux_acceptance_only && 'installed-linux' || inputs.windows_installed_only && 'windows-installed' || inputs.windows_auth_only && 'windows-auth' || inputs.windows_primitives_only && 'windows-diagnostics' || 'native' }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
-  # Debug info for the GPUI, alloy, and schemars graph takes longer to emit and
-  # link than the code takes to compile, and it is the bulk of what the build
-  # cache stores, restores, and uploads. This governs the dependencies; the test
-  # job sets `CARGO_PROFILE_TEST_DEBUG` per runner, so the test binaries keep
-  # whatever the linker there can survive. Line tables still point panic
-  # backtraces at real source lines, and frame sizes come from `opt-level`, so
-  # the Windows stack story is unchanged.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_MIN_STACK: 67108864
 
 jobs:
-  execution-plan:
-    name: Execution plan (no_std and JavaScript)
+  scoped:
+    name: Source and packaging checks
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Rust targets
-        run: |
-          rustup update stable --no-self-update
-          rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
-      - name: Test execution plans with both JSON map implementations
-        run: |
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y dbus-broker python3-dbus python3-gi
+      - run: cargo fmt --all --check
+      - run: pipx run ruff==0.16.4 check --output-format concise .
+      - run: python3 contrib/check-v2-packaging.py
+      - run: python3 contrib/accept-installed-linux.py --check-guards
+      - run: python3 contrib/linux-service/install-profile_test.py
+      - run: python3 contrib/build-v2-packages_test.py
+      - run: dbus-run-session -- python3 contrib/linux-service-policy_test.py
+      - run: bash -n contrib/arch-v2.install contrib/build-test-arch-ci.sh contrib/smoke-v2-arch.sh
+      - run: for file in contrib/deb-v2-* contrib/smoke-v2-*.sh; do bash -n "$file"; done
+
+  windows-service:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_primitives_only
+    name: Real Windows native diagnostics
+    runs-on: windows-2025
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup update stable --no-self-update
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: false
+      - run: python contrib/check-windows-service.py
+      - name: Protected collector boundary and availability (no consent)
+        shell: pwsh
+        run: contrib/test-windows-auth-boundary.ps1
+
+  windows-auth:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_auth_only
+    runs-on: windows-2025
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v2-collector-acceptance
+          cache-on-failure: true
+      - run: cargo build --locked -p ekubo-wallet-windows-owner-auth --bin ekubo-wallet-v2-owner-auth
+      - name: Ordinary read-only availability control
+        run: cargo test --locked -p ekubo-wallet-windows-owner-auth --lib ordinary_process_completes_read_only_availability_query -- --nocapture
+      - name: Protected process boundary and availability
+        shell: pwsh
+        run: contrib/test-windows-auth-boundary.ps1
+
+  windows-installed:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_installed_only
+    runs-on: windows-2025
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v2-installed-windows
+          cache-on-failure: true
+      # Drives the real enroll --launch-install trampoline (verify_installer_process
+      # + run_install_script under AllSigned) with the relay of a distinct standard
+      # owner. Only the OS-mediated UAC credential prompt is unexercised; fixture
+      # publisher trust keeps the production AllSigned invocation prompt-free.
+      - name: Enroll via real launch-install trampoline with a distinct standard owner
+        shell: pwsh
+        run: contrib/test-windows-installed-acceptance.ps1
+
+  execution-plan:
+    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only && !inputs.windows_installed_only
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
+      - run: |
           cargo test --locked -p erc8410 --no-default-features
           cargo test --locked -p erc8410 --features schema,serde_json/preserve_order
-      - name: Check without a standard library
-        run: cargo check --locked -p erc8410 --no-default-features --target thumbv7em-none-eabi
-      - name: Build Wasm
-        run: cargo build --locked -p erc8410-wasm --target wasm32-unknown-unknown --release
-      - name: Check browser transaction-preview backend
-        run: cargo check --locked -p ekubo-wallet-preview-wasm --target wasm32-unknown-unknown
-      - name: Generate and test JavaScript bindings
-        run: |
+          cargo check --locked -p erc8410 --no-default-features --target thumbv7em-none-eabi
+          cargo build --locked -p erc8410-wasm --target wasm32-unknown-unknown --release
+          cargo check --locked -p ekubo-wallet-preview-wasm --target wasm32-unknown-unknown
+      - run: |
           version=$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')
           cargo install wasm-bindgen-cli --version "$version" --locked
           wasm-bindgen target/wasm32-unknown-unknown/release/erc8410_wasm.wasm --target nodejs --out-dir crates/erc8410-wasm/pkg-node
           node crates/erc8410-wasm/smoke-test.cjs
+
   test:
-    name: Test (${{ matrix.runner }})
+    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only && !inputs.windows_installed_only
+    name: Native milestone (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # GPUI makes each desktop test binary large. Linking several of them
-          # concurrently can exhaust the Linux hosted runner and crash
-          # rust-lld with SIGBUS, so keep link concurrency deliberately low.
-          - runner: ubuntu-24.04
-            test_jobs: 1
-            test_debug: 0
-          - runner: macos-15
-            test_jobs: 4
-            test_debug: 2
-          - runner: windows-2025
-            test_jobs: 1
-            test_debug: 0
-    runs-on: ${{ matrix.runner }}
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install latest stable Rust
-        run: rustup update stable --no-self-update
-
-      - name: Install GPUI and tray dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus gnome-keyring
-
-      - name: Refuse GTK tray dependencies on Linux
-        if: runner.os == 'Linux'
-        run: test -z "$(cargo tree --locked --target x86_64-unknown-linux-gnu -i glib 2>/dev/null)"
-
-      # The Windows job spends most of its time compiling vendored SQLCipher
-      # and OpenSSL; caching cuts that to minutes on unchanged dependencies.
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup update stable --no-self-update
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev dbus dbus-tests gnome-keyring libsecret-tools policykit-1 libglib2.0-bin python3-dbus python3-gi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # GitHub cache entries are immutable. The previous generation saved
-          # canceled jobs and could permanently capture a partial target tree,
-          # forcing every later run to rebuild its missing dependencies.
           prefix-key: v2-rust
           cache-on-failure: false
-
-      # Link and run every integration test once on Linux. macOS and Windows
-      # still compile those platform-specific targets below, but do not spend
-      # most of their job relinking the same large GPUI test executables.
-      - name: Run complete test suite
+      - name: Check production workspace without test hooks
+        run: cargo check --locked --workspace --bins --lib --jobs 1
+      - name: Workspace tests
+        run: cargo test --locked --workspace --all-features --jobs 1
+      - name: Production-feature owner-presence boundary (no test hooks)
+        # owner_presence_boundary_test is compiled out under --all-features
+        # (test-hooks); this is the only run that executes it. It is a
+        # no-op pass on macOS, where the target is cfg'd out.
+        if: runner.os != 'macOS'
+        run: cargo test --locked -p ekubo-wallet-core --no-default-features --test owner_presence_boundary_test
+      - name: Native Windows protected collector boundary (no biometric interaction)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: contrib/test-windows-auth-boundary.ps1
+      - name: Native Linux owner transport and keyring recovery
         if: runner.os == 'Linux'
-        env:
-          RUST_MIN_STACK: 67108864
-          # Linux's hosted linker has repeatedly crashed with SIGBUS while
-          # mapping GPUI's full debug symbols. This changes diagnostics only,
-          # not test behavior or optimization.
-          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
-        run: cargo test --locked --workspace --all-features --jobs ${{ matrix.test_jobs }}
-
-      - name: Test Secret Service startup and restart recovery
+        run: |
+          cargo test --locked -p ekubo-wallet-core --all-features --lib credential_store::tests::recovers_after_secret_service_startup_and_restart -- --ignored
+          cargo test --locked --workspace --all-features --lib owner_client::tests -- --ignored
+          cargo test --locked --workspace --all-features --lib linux_relay_handoff::tests::installer_policy -- --ignored
+          cargo test --locked -p ekubo-wallet-core --all-features --lib service_profile_lock::tests::read_only_profile_lock_excludes_other_handles_and_releases_on_drop
+          cargo test --locked -p ekubo-wallet-service --all-features --lib linux_owner_rpc::tests::desktop_disconnect -- --ignored
+          cargo test --locked -p ekubo-wallet-core --all-features --lib service_presence::tests -- --ignored
+          cargo test --locked -p ekubo-wallet-core --all-features --lib legacy_move::retirement::secret_service_tests::legacy_credentials_from_async_runtimes_on_private_bus -- --ignored
+      - name: Installed Linux fresh enrollment, restart and owner denial (disposable runner)
         if: runner.os == 'Linux'
-        env:
-          RUST_MIN_STACK: 67108864
-          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
-        run: cargo test --locked -p ekubo-wallet-core --all-features --lib credential_store::tests::recovers_after_secret_service_startup_and_restart -- --ignored
+        timeout-minutes: 20
+        run: |
+          # Build production artifacts explicitly after the all-features tests;
+          # dev-dependency test-hooks must not enter the installed service.
+          cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 1
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" \
+            python3 contrib/accept-installed-linux.py --run-disposable "$PWD/target/debug"
+      - name: Installed Linux first-run move and interrupted retirement resume
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: |
+          # Hooks construct ONLY the synthetic released-schema source. The move
+          # client refuses to run with hooks, and the service stays production.
+          cargo build --locked -p ekubo-wallet-core --example linux-move-fixture --features test-hooks --jobs 1
+          cargo build --locked -p ekubo-wallet-core --example linux-move-client --no-default-features --jobs 1
+          cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 1
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" \
+            python3 contrib/accept-installed-linux.py --run-migration-disposable "$PWD/target/debug"
 
-      - name: Compile application and integration tests
-        if: runner.os != 'Linux'
-        env:
-          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
-        run: cargo test --locked --workspace --all-features --no-run --jobs ${{ matrix.test_jobs }}
-
-      - name: Run workspace unit tests
-        if: runner.os != 'Linux'
-        env:
-          RUST_MIN_STACK: 67108864
-          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
-        run: cargo test --locked --workspace --all-features --lib --jobs ${{ matrix.test_jobs }}
+  linux-acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.linux_acceptance_only
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y dbus dbus-tests gnome-keyring libsecret-tools policykit-1 libglib2.0-bin python3-dbus python3-gi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v2-installed-acceptance
+          # Preserve compiled dependencies when an installed acceptance assertion
+          # fails; Cargo still recompiles changed workspace code on the next run.
+          cache-on-failure: true
+      - run: |
+          cargo build --locked -p ekubo-wallet-core --example linux-move-fixture --features test-hooks --jobs 2
+          cargo build --locked -p ekubo-wallet-core --example linux-move-client --no-default-features --jobs 2
+          cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 2
+      - name: Installed fresh enrollment and restart
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" python3 contrib/accept-installed-linux.py --run-disposable "$PWD/target/debug"
+      - name: Installed move and keyless recovery
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" python3 contrib/accept-installed-linux.py --run-migration-disposable "$PWD/target/debug"
 
   lint:
-    name: Formatting and lints
+    if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only && !inputs.windows_installed_only
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install latest stable Rust
-        run: rustup update stable --no-self-update
-
-      - name: Install GPUI and tray dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev
-
-      # Clippy compiles the entire dependency graph before it lints a line of
-      # this workspace, which was nine of this job's fifteen minutes on every
-      # run. The cache key carries the job name, so these lint artifacts stay
-      # separate from the test job's rather than displacing them.
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libxdo-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: v2-rust
           cache-on-failure: false
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Run Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: Check Python complexity
-        run: pipx run ruff==0.16.4 check --output-format concise .
-
-      - name: Verify bundled third-party notices are current
-        run: contrib/generate-third-party-licenses.py --check
-
-      - name: Generate release-target dependency inputs
-        run: python3 scripts/generate-osv-lockfiles.py .osv-lockfiles
-
-      - name: Scan dependencies for vulnerabilities with OSV-Scanner
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: python3 contrib/generate-third-party-licenses.py --check
+      - run: python3 scripts/generate-osv-lockfiles.py .osv-lockfiles
+      - name: Vulnerability scan
         uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
         with:
           scan-args: |-
@@ -223,13 +246,12 @@ jobs:
             --lockfile=Cargo.lock:.osv-lockfiles/Cargo.aarch64-apple-darwin.lock
             --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-pc-windows-msvc.lock
             --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-unknown-linux-gnu.lock
-
-      - name: Enforce dependency licenses with OSV-Scanner
+      - name: License scan
         uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
         with:
           scan-args: |-
             --config=osv-scanner.toml
-            --licenses=0BSD,Apache-2.0,BSD-1-Clause,BSD-2-Clause,BSD-3-Clause,BSL-1.0,CC0-1.0,CDLA-Permissive-2.0,ISC,MIT,MIT-0,MPL-2.0,NCSA,Unicode-3.0,Unlicense,Zlib,bzip2-1.0.6
+            --licenses=0BSD,Apache-2.0,BSD-2-Clause,BSD-3-Clause,BSL-1.0,CC0-1.0,CDLA-Permissive-2.0,ISC,MIT,MIT-0,MPL-2.0,NCSA,Unicode-3.0,Unlicense,Zlib,bzip2-1.0.6
             --lockfile=Cargo.lock:.osv-lockfiles/Cargo.aarch64-apple-darwin.lock
             --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-pc-windows-msvc.lock
             --lockfile=Cargo.lock:.osv-lockfiles/Cargo.x86_64-unknown-linux-gnu.lock

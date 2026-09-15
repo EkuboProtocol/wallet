@@ -52,19 +52,25 @@ fn config_keys_are_unique_and_underscore_only() {
     }
 }
 
-/// The pre-split entry keeps its key, so an owner's existing `ekubo` entry is
-/// retargeted at `/mcp/ekubo` rather than left beside a differently named one.
+/// Legacy endpoint recognition does not transfer ownership of 1.x's key.
 #[test]
-fn the_legacy_key_belongs_to_ekubos_own_server() {
+fn the_legacy_key_is_not_managed_by_v2() {
     assert_eq!(LEGACY_COMPANION_KEY, "ekubo");
     assert_eq!(
         companion_by_slug("ekubo").map(|server| server.config_key),
-        Some(LEGACY_COMPANION_KEY)
+        Some("ekubo_v2")
     );
     assert!(is_legacy_companion("https://mcp.ekubo.org/mcp"));
     assert!(!is_legacy_companion("https://mcp.ekubo.org/mcp/ekubo"));
     for server in COMPANION_SERVERS {
         assert!(!is_legacy_companion(server.url));
+        assert_ne!(server.config_key, LEGACY_COMPANION_KEY);
+        let legacy_key = if server.slug == "ekubo" {
+            "ekubo".to_owned()
+        } else {
+            format!("ekubo_{}", server.slug)
+        };
+        assert_ne!(server.config_key, legacy_key);
     }
 }
 

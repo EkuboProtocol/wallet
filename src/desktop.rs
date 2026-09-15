@@ -3,12 +3,14 @@ use crate::{
     agent_config::AgentAdapter,
     assets::{PENCIL_ICON, REFRESH_ICON, WalletAssets},
     authority::{
-        ApplicationAuthority, AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerApi,
-        OwnerPortfolioAccount, OwnerPortfolioSnapshot, OwnerReviewQueues,
-        OwnerTransactionInspection, PRIVATE_KEY_REVEAL_DURATION,
+        AutomationDryRun, ExportLease, OwnerActivityRecord, OwnerPortfolioAccount,
+        OwnerPortfolioSnapshot, OwnerReviewQueues, OwnerTransactionInspection,
+        PRIVATE_KEY_REVEAL_DURATION,
     },
     automation::{Automation, AutomationState, PolledCall},
     automation_store::{AutomationRun, RunOutcome},
+    desktop_dapp_review::{DappDecision, DappReviewResponse, DesktopDappPrompt},
+    desktop_dapps::{DappProposalUpdate, DesktopDapps, StartedDappSession},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     ipc_server::McpIpcServer,
     notifications::{
@@ -20,10 +22,7 @@ use crate::{
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
-    walletconnect::{
-        ProposalCommand, ProposalPresenter, ProposalPrompt, SessionSummary, WalletConnectManager,
-        run_session,
-    },
+    walletconnect::{ProposalPresenter, SessionSummary},
 };
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::{
@@ -154,7 +153,7 @@ const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
 const POLICY_EDITOR_DESCRIPTION: &str =
     "Requests are automatically signed, refused or require review according to the account policy";
-const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases";
 
 fn app_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
@@ -1299,7 +1298,8 @@ struct RemoveAccount {
 struct DesktopRuntime {
     _instance: Arc<Mutex<Option<SingleInstance>>>,
     _server: Arc<Mutex<Option<McpIpcServer>>>,
-    _walletconnect: Arc<Mutex<crate::walletconnect::WalletConnectManager>>,
+    _service_session: Arc<Mutex<Option<ekubo_wallet_client::desktop_session::DesktopSession>>>,
+    _walletconnect: DesktopDapps,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
     _pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
 }
@@ -1431,6 +1431,14 @@ fn account_required_panel(
                 })),
         )
 }
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "desktop_setup.rs"]
+mod service_setup;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[path = "desktop_legacy_move.rs"]
+mod legacy_move;
 
 /// One row of the About panel: a name, an optional status line beneath it, and
 /// a single action on the right. Each row used to assemble its own container,
@@ -2782,7 +2790,9 @@ fn reset_route_scroll_if_changed(current: Route, next: Route, scroll: &ScrollHan
 // the state safer.
 #[allow(clippy::struct_excessive_bools)]
 pub struct WalletWindow {
-    owner: OwnerApi,
+    owner: crate::desktop_owner::DesktopOwner,
+    service_disconnected: Option<SharedString>,
+    service_recovery_pending: bool,
     desktop_snapshot: Option<Arc<DesktopSnapshot>>,
     desktop_snapshot_generation: u64,
     /// How many snapshots have actually been published, as opposed to
@@ -2894,9 +2904,15 @@ pub struct WalletWindow {
     export_clipboard: Arc<Mutex<Option<Zeroizing<String>>>>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
+    legal_load_generation: u64,
+    legal_accepting: bool,
     guided_setup: GuidedSetup,
+    guided_setup_loading: bool,
+    guided_setup_saves: SettingQueue<GuidedSetupState>,
     route_errors: BTreeMap<Route, SharedString>,
     appearance_preference: AppearancePreference,
+    appearance_saves: SettingQueue<AppearancePreference>,
+    testnet_saves: SettingQueue<bool>,
     testnet_mode: bool,
     portfolio: PortfolioState,
     portfolio_generation: u64,
@@ -2959,8 +2975,11 @@ pub struct WalletWindow {
     /// redraw it without changing them.
     portfolio_row_cache: RefCell<Option<PortfolioRowCache>>,
     modal_focus: FocusHandle,
-    walletconnect: Arc<Mutex<WalletConnectManager>>,
+    walletconnect: DesktopDapps,
     walletconnect_sessions: Vec<SessionSummary>,
+    walletconnect_sessions_error: Option<SharedString>,
+    walletconnect_reviews_error: Option<SharedString>,
+    walletconnect_sessions_generation: u64,
     /// The pairing started by the last press of Connect, until it produces a
     /// proposal, settles, or ends.
     ///
@@ -2970,7 +2989,8 @@ pub struct WalletWindow {
     /// idle and burned the URI on a second pairing that could never settle.
     /// While this is set the button is busy and the press is refused.
     walletconnect_connecting: Option<uuid::Uuid>,
-    walletconnect_presenter: ProposalPresenter,
+    walletconnect_starting: Option<tokio_util::sync::CancellationToken>,
+    walletconnect_disconnecting: BTreeSet<uuid::Uuid>,
     network_editor_open: bool,
     network_editor_scroll_handle: ScrollHandle,
     network_editor_overflow_indicator: ScrollOverflowIndicator,
@@ -3005,6 +3025,8 @@ pub struct WalletWindow {
     activity_detail_record: Cell<Option<uuid::Uuid>>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
+    policy_load_generation: u64,
+    policy_loading: Option<u64>,
     policy_account_id: Option<String>,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
@@ -3057,13 +3079,6 @@ pub struct WalletWindow {
     pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
     update_data_dir: PathBuf,
 }
-
-/// How many of an automation's runs the tab shows.
-///
-/// The store keeps thousands; this screen answers "what has it been doing
-/// lately", and a page rendering a per-second automation's whole history is a
-/// page nobody scrolls to the end of.
-const AUTOMATION_RUNS_SHOWN: usize = 20;
 
 /// Runs read as a table only when their columns line up, and a fixed width is
 /// what lines them up when every cell holds a different length of text.
@@ -3123,105 +3138,45 @@ struct DesktopSnapshot {
 }
 
 impl DesktopSnapshot {
-    fn capture(owner: &OwnerApi) -> Self {
-        let reviews = cache_result(owner.reviews(None));
-        let automations = cache_result(owner.automations());
-        let automation_runs = automations.as_ref().map_or_else(
-            |_| BTreeMap::new(),
-            |automations| {
-                automations
-                    .iter()
-                    .filter_map(|automation| {
-                        owner
-                            .automation_runs(automation.id, AUTOMATION_RUNS_SHOWN)
-                            .ok()
-                            .map(|runs| (automation.id, runs))
-                    })
-                    .collect()
-            },
-        );
-        let activity =
-            cache_result(owner.activity(None, 200)).map(Arc::<[OwnerActivityRecord]>::from);
-        let activity_sources = owner
-            .activity_sources()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(request_id, name)| {
-                // The name an agent chose for itself. Registration already
-                // holds it to a terminal-safe line, and this holds it again at
-                // the surface that draws it, where the bound on its width is
-                // also a bound on how much of the row it can take over.
-                (
-                    request_id,
-                    SharedString::from(ekubo_wallet_core::sanitize::stripped_capped(&name, 64)),
-                )
-            })
-            .collect();
-        let accounts = cache_result(owner.accounts());
-        let legal_status = cache_result(owner.legal_status());
-        let networks = cache_result(owner.networks());
-        let mut policies = BTreeMap::new();
-        if let Ok(accounts) = &accounts {
-            for account in accounts {
-                policies.insert(account.id.clone(), cache_result(owner.policy(&account.id)));
-            }
-        }
-        let mut message_documents = BTreeMap::new();
-        let mut typed_data_documents = BTreeMap::new();
-        if let Ok(activity) = &activity {
-            for record in activity.iter() {
-                match record {
-                    OwnerActivityRecord::Message(record) => {
-                        message_documents.insert(
-                            record.request_id,
-                            cache_result(owner.message_review_document(record.request_id)),
-                        );
-                    }
-                    OwnerActivityRecord::TypedData(record) => {
-                        typed_data_documents.insert(
-                            record.request_id,
-                            cache_result(owner.typed_data_review_document(record.request_id)),
-                        );
-                    }
-                    OwnerActivityRecord::Transaction(_) => {}
-                }
-            }
-        }
-        let records = transaction_records(&reviews, &activity);
-        let transaction_previews = owner
-            .saved_transaction_summaries(&records)
-            .unwrap_or_default();
-        let missing = records
-            .into_iter()
-            .filter(|record| !transaction_previews.contains_key(&record.request_id))
-            .collect::<Vec<_>>();
-        let transaction_headlines = owner
-            .transaction_headlines(&missing)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(id, text)| (id, SharedString::from(text)))
-            .collect();
+    async fn capture(owner: &impl ekubo_wallet_client::desktop_snapshot::SnapshotReader) -> Self {
+        let snapshot = ekubo_wallet_client::desktop_snapshot::DesktopSnapshot::capture(owner).await;
         Self {
-            reviews,
-            activity,
-            activity_sources,
-            transaction_headlines,
-            transaction_previews,
-            accounts,
-            policies,
-            legal_status,
-            networks,
-            automations,
-            automation_runs,
-            message_documents,
-            typed_data_documents,
-            native_token_prices: owner.native_token_prices().unwrap_or_default(),
+            reviews: snapshot.reviews.map_err(SharedString::from),
+            activity: snapshot.activity.map_err(SharedString::from),
+            activity_sources: snapshot
+                .activity_sources
+                .into_iter()
+                .map(|(key, text)| (key, SharedString::from(text)))
+                .collect(),
+            transaction_headlines: snapshot
+                .transaction_headlines
+                .into_iter()
+                .map(|(key, text)| (key, SharedString::from(text)))
+                .collect(),
+            transaction_previews: snapshot.transaction_previews,
+            accounts: snapshot.accounts.map_err(SharedString::from),
+            policies: snapshot
+                .policies
+                .into_iter()
+                .map(|(key, result)| (key, result.map_err(SharedString::from)))
+                .collect(),
+            legal_status: snapshot.legal_status.map_err(SharedString::from),
+            networks: snapshot.networks.map_err(SharedString::from),
+            automations: snapshot.automations.map_err(SharedString::from),
+            automation_runs: snapshot.automation_runs,
+            message_documents: snapshot
+                .message_documents
+                .into_iter()
+                .map(|(key, result)| (key, result.map_err(SharedString::from)))
+                .collect(),
+            typed_data_documents: snapshot
+                .typed_data_documents
+                .into_iter()
+                .map(|(key, result)| (key, result.map_err(SharedString::from)))
+                .collect(),
+            native_token_prices: snapshot.native_token_prices,
         }
     }
-}
-
-fn cache_result<T>(result: Result<T>) -> std::result::Result<T, SharedString> {
-    result.map_err(|error| format!("{error:#}").into())
 }
 
 /// Pending requests first; history follows without duplicating an inbox row.
@@ -3582,7 +3537,7 @@ struct PolicyEditor {
 #[allow(clippy::struct_excessive_bools)]
 struct ActiveReview {
     state: ReviewState,
-    simulation: Option<Arc<ekubo_wallet_core::simulation::SimulationResult>>,
+    simulation: Option<Arc<ekubo_wallet_client::simulation_display::SimulationDisplay>>,
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
     detail_rows: Arc<[SecurityReviewDetailRow]>,
@@ -3599,7 +3554,7 @@ struct ActiveReview {
 impl ActiveReview {
     fn new(
         document: ReviewDocument,
-        simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
+        simulation: Option<ekubo_wallet_client::simulation_display::SimulationDisplay>,
         completion: Option<ActiveReviewCompletion>,
     ) -> Self {
         let state = ReviewState::new(document);
@@ -3851,7 +3806,7 @@ enum ActiveReviewCompletion {
         digest: String,
     },
     WalletConnect {
-        choices: Vec<crate::walletconnect::ProposalChoice>,
+        choices: Vec<ekubo_wallet_client::dapp_review::DappChoice>,
         /// Which account the owner chose to expose, once they have chosen.
         ///
         /// It used to start at the first account, which meant the default
@@ -3860,10 +3815,10 @@ enum ActiveReviewCompletion {
         /// transactions that a policy signs without a second review. Nothing
         /// is exposed until this is `Some`.
         selected_account: Option<usize>,
-        response: oneshot::Sender<ProposalCommand>,
+        response: DappReviewResponse,
     },
     AccountRemoval {
-        wallet: WalletMetadata,
+        reviewed: Box<crate::authority::OwnerAccountRemovalReview>,
     },
 }
 
@@ -3965,7 +3920,7 @@ const fn review_decision_labels(
 
 enum QueuedReview {
     Transaction(Box<GuiReviewPrompt>),
-    WalletConnect(Box<ProposalPrompt>),
+    WalletConnect(Box<DesktopDappPrompt>),
 }
 
 struct SerialQueue<T> {
@@ -4039,7 +3994,7 @@ struct RouteListDelegate {
 }
 
 struct TokenListDelegate {
-    owner: OwnerApi,
+    owner: crate::desktop_owner::DesktopOwner,
     /// The window, so a row can open the small dialog that records what a
     /// token is roughly worth. Rows live in a virtualized list and cannot
     /// hold an input of their own.
@@ -4198,7 +4153,7 @@ impl ActivityFeedback {
 }
 
 enum ActivityInspectionState {
-    Loading,
+    Loading(uuid::Uuid),
     Ready(Rc<ReadyActivityInspection>),
     Failed(SharedString),
 }
@@ -4401,15 +4356,15 @@ fn review_document_is_visible(
 /// owner has chosen to see, and it is also where the account and network names
 /// live. A pairing proposal has no row and no chain yet — nothing has been
 /// approved — so it is admitted on the strength of the event alone.
-fn notification_context(
-    owner: &OwnerApi,
+async fn notification_context(
+    owner: &crate::desktop_owner::DesktopOwner,
     event: &crate::events::DomainEvent,
 ) -> Option<NotificationContext> {
     use crate::events::{DomainEventKind, SignatureKind};
 
     let (account, chain_id) = match &event.kind {
         DomainEventKind::Transaction { request_id, .. } => {
-            let record = owner.transaction(*request_id).ok()?;
+            let record = owner.transaction(*request_id).await.ok()?;
             let chain_id = record.chain_id.parse().ok();
             (record.wallet_id, chain_id)
         }
@@ -4418,7 +4373,7 @@ fn notification_context(
             kind: SignatureKind::Message,
             ..
         } => {
-            let record = owner.message(*request_id).ok()?;
+            let record = owner.message(*request_id).await.ok()?;
             // An EIP-191 message binds no chain, so a request that declared
             // none is not hidden by a network filter: there is no network to
             // filter on, and the signature is just as usable either way.
@@ -4430,7 +4385,7 @@ fn notification_context(
             kind: SignatureKind::TypedData,
             ..
         } => {
-            let record = owner.typed_data(*request_id).ok()?;
+            let record = owner.typed_data(*request_id).await.ok()?;
             let chain_id = record.chain_id.parse().ok();
             (record.wallet_id, chain_id)
         }
@@ -4448,8 +4403,8 @@ fn notification_context(
         }
         _ => return None,
     };
-    let networks = owner.networks().ok()?;
-    let testnet_mode = owner.testnet_mode().ok()?;
+    let networks = owner.networks().await.ok()?;
+    let testnet_mode = owner.testnet_mode().await.ok()?;
     let visible_chain_ids = visible_network_chain_ids(&networks, testnet_mode);
     let configured_chain_ids = networks
         .iter()
@@ -5487,9 +5442,12 @@ impl TokenProposalListDelegate {
 }
 
 impl TokenListDelegate {
-    fn new(owner: OwnerApi, wallet: WeakEntity<WalletWindow>) -> Self {
+    fn new(
+        owner: impl Into<crate::desktop_owner::DesktopOwner>,
+        wallet: WeakEntity<WalletWindow>,
+    ) -> Self {
         Self {
-            owner,
+            owner: owner.into(),
             wallet,
             all_tokens: Vec::new(),
             visible_tokens: Vec::new(),
@@ -6164,12 +6122,12 @@ const RPC_URLS_PLACEHOLDER: &str =
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
 const MAX_DESKTOP_TOKEN_INVENTORY: usize = 100_000;
 
-fn collect_token_inventory(
-    mut fetch: impl FnMut(usize, usize) -> Result<Vec<StoredToken>>,
+async fn collect_token_inventory<F: std::future::Future<Output = Result<Vec<StoredToken>>>>(
+    mut fetch: impl FnMut(usize, usize) -> F,
 ) -> Result<Vec<StoredToken>> {
     let mut tokens = Vec::new();
     loop {
-        let page = fetch(TOKEN_INVENTORY_PAGE_SIZE, tokens.len())?;
+        let page = fetch(TOKEN_INVENTORY_PAGE_SIZE, tokens.len()).await?;
         ensure!(
             tokens.len().saturating_add(page.len()) <= MAX_DESKTOP_TOKEN_INVENTORY,
             "token inventory exceeds the desktop limit of {MAX_DESKTOP_TOKEN_INVENTORY} rows"
@@ -6444,7 +6402,7 @@ impl ListDelegate for TokenListDelegate {
                 let state = state.clone();
                 let removal_token = removal_token.clone();
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.remove_token(&removal_token)
+                    owner.remove_token(&removal_token).await
                 });
                 cx.spawn(async move |cx| {
                     let result = task.await;
@@ -6804,26 +6762,121 @@ fn disable_signing_policy_document() -> Result<String> {
     Ok(serde_json::to_string_pretty(&WalletPolicy::deny_all())?)
 }
 
+struct InitialLegalReview {
+    document: LegalDocument,
+    text: String,
+    digest: String,
+    acceptance_required: bool,
+}
+
+async fn load_legal_review(
+    owner: &crate::desktop_owner::DesktopOwner,
+    requested: Option<LegalDocument>,
+) -> Result<Option<InitialLegalReview>> {
+    let status = owner.legal_status().await.ok();
+    let document = requested.or_else(|| {
+        status
+            .as_ref()
+            .map_or(Some(LegalDocument::TermsOfService), next_required_legal)
+    });
+    let Some(document) = document else {
+        return Ok(None);
+    };
+    let (text, digest) = owner.legal_document(document).await?;
+    Ok(Some(InitialLegalReview {
+        document,
+        text,
+        digest,
+        acceptance_required: legal_review_requires_acceptance(document, status.as_ref()),
+    }))
+}
+
+/// Settings writes are serialized, with the latest pending choice retained.
+/// This carries UI intent only; every write still goes through the owner API.
+struct SettingQueue<T> {
+    in_flight: bool,
+    next: Option<T>,
+}
+
+impl<T> Default for SettingQueue<T> {
+    fn default() -> Self {
+        Self {
+            in_flight: false,
+            next: None,
+        }
+    }
+}
+
+impl<T> SettingQueue<T> {
+    fn submit(&mut self, value: T) -> Option<T> {
+        if self.in_flight {
+            self.next = Some(value);
+            None
+        } else {
+            self.in_flight = true;
+            Some(value)
+        }
+    }
+
+    fn finish(&mut self) -> Option<T> {
+        let next = self.next.take();
+        self.in_flight = next.is_some();
+        next
+    }
+}
+
+struct InitialDesktopState {
+    appearance: Result<AppearancePreference>,
+    testnet_mode: Result<bool>,
+    guided_setup: Result<ekubo_wallet_core::desktop_store::GuidedSetupState>,
+    companions: Result<CompanionSelection>,
+    legal: Option<InitialLegalReview>,
+    pending_reviews: usize,
+}
+
+impl InitialDesktopState {
+    async fn capture(owner: &crate::desktop_owner::DesktopOwner) -> Result<Self> {
+        let testnet_mode = owner.testnet_mode().await;
+        let networks = owner.networks().await.unwrap_or_default();
+        let pending_reviews = owner.reviews(None).await.map_or(0, |queues| {
+            review_queue_decision_count(
+                &queues,
+                &networks,
+                testnet_mode.as_ref().copied().unwrap_or(false),
+            )
+        });
+        Ok(Self {
+            appearance: owner.appearance_preference().await,
+            testnet_mode,
+            pending_reviews,
+            guided_setup: owner.guided_setup().await,
+            companions: owner.companion_servers().await,
+            legal: load_legal_review(owner, None).await?,
+        })
+    }
+}
+
 impl WalletWindow {
     fn new(
-        owner: OwnerApi,
+        owner: impl Into<crate::desktop_owner::DesktopOwner>,
+        initial: InitialDesktopState,
         review_presenter: GuiReviewPresenter,
-        walletconnect: Arc<Mutex<WalletConnectManager>>,
-        walletconnect_presenter: ProposalPresenter,
+        walletconnect: DesktopDapps,
         tray: Rc<RefCell<Option<PlatformTray>>>,
         pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
         data_dir: &Path,
         cx: &mut Context<Self>,
     ) -> Self {
-        let appearance_preference = owner.appearance_preference().unwrap_or_default();
-        let testnet_mode = owner.testnet_mode().unwrap_or(false);
+        let owner = owner.into();
+        let appearance_preference = initial.appearance.unwrap_or_default();
+        let testnet_mode = initial.testnet_mode.unwrap_or(false);
         // A store that cannot be read yields nothing rather than a default,
         // and the card stays off screen until the read lands — `render`
         // retries it. Defaulting would show an empty checklist to somebody
         // who has finished it, and since dismissing now only lasts the run,
         // it would do that at every launch instead of once.
-        let guided_setup = owner
-            .guided_setup()
+        let guided_setup = initial
+            .guided_setup
             .map_or_else(|_| GuidedSetup::unloaded(), GuidedSetup::loaded);
         let route_scroll_handle = ScrollHandle::new();
         let route_overflow_indicator =
@@ -6848,7 +6901,7 @@ impl WalletWindow {
             render_embedded_png(include_bytes!("../assets/tray/dark_mode_tray_icon.png"))
                 .expect("embedded dark tray icon must be valid");
         // Read before `owner` moves into the struct.
-        let (companion_servers, companion_servers_error) = match owner.companion_servers() {
+        let (companion_servers, companion_servers_error) = match initial.companions {
             Ok(selection) => (selection, None),
             Err(error) => (
                 CompanionSelection::all(),
@@ -6861,6 +6914,8 @@ impl WalletWindow {
             owner,
             desktop_snapshot: None,
             desktop_snapshot_generation: 0,
+            service_disconnected: None,
+            service_recovery_pending: false,
             desktop_snapshot_revision: 0,
             desktop_snapshot_loading: false,
             desktop_snapshot_invalidated: false,
@@ -6940,11 +6995,25 @@ impl WalletWindow {
             account_action_errors: BTreeMap::new(),
             account_export: None,
             export_clipboard: Arc::new(Mutex::new(None)),
-            legal_review: None,
-            legal_gate: false,
+            legal_gate: initial.legal.is_some(),
+            legal_review: initial.legal.map(|review| {
+                Self::new_legal_review(
+                    review.document,
+                    &review.text,
+                    review.digest,
+                    review.acceptance_required,
+                    cx,
+                )
+            }),
+            legal_load_generation: 0,
+            legal_accepting: false,
             guided_setup,
+            guided_setup_loading: false,
+            guided_setup_saves: SettingQueue::default(),
             route_errors: BTreeMap::new(),
             appearance_preference,
+            appearance_saves: SettingQueue::default(),
+            testnet_saves: SettingQueue::default(),
             testnet_mode,
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
@@ -6971,8 +7040,12 @@ impl WalletWindow {
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_sessions: Vec::new(),
+            walletconnect_sessions_error: None,
+            walletconnect_reviews_error: None,
+            walletconnect_sessions_generation: 0,
             walletconnect_connecting: None,
-            walletconnect_presenter,
+            walletconnect_starting: None,
+            walletconnect_disconnecting: BTreeSet::new(),
             network_editor_open: false,
             network_editor_scroll_handle,
             network_editor_overflow_indicator,
@@ -7004,6 +7077,8 @@ impl WalletWindow {
             activity_detail_record: Cell::new(None),
             policy_json_input: None,
             policy_editor: None,
+            policy_load_generation: 0,
+            policy_loading: None,
             policy_account_id: None,
             policy_installing: false,
             policy_review_open: false,
@@ -7023,7 +7098,6 @@ impl WalletWindow {
             pending_update,
             update_data_dir: data_dir.to_path_buf(),
         };
-        window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
         window.reload_desktop_snapshot(cx);
         window
@@ -7424,10 +7498,9 @@ impl WalletWindow {
         self.network_editor_open = false;
         self.network_editor_original = None;
         self.policy_json_input = None;
+        self.policy_loading = None;
         self.policy_editor = None;
-        self.policy_installing = false;
         self.token_proposal_busy = false;
-        self.network_proposal_busy = false;
         cx.notify();
     }
 
@@ -7641,7 +7714,49 @@ impl WalletWindow {
         None
     }
 
+    fn update_mcp_listener_status(&mut self, online: bool, cx: &mut Context<Self>) {
+        self.mcp_status = if online {
+            McpGatewayStatus::Online
+        } else {
+            McpGatewayStatus::Offline("MCP server is offline.".into())
+        };
+        cx.notify();
+    }
+
+    fn service_lost(&mut self, error: &str, cx: &mut Context<Self>) {
+        if !self.owner.uses_service() || self.service_disconnected.is_some() {
+            return;
+        }
+        self.service_disconnected = Some(error.to_owned().into());
+        self.service_recovery_pending = true;
+        self.desktop_snapshot_generation = self.desktop_snapshot_generation.wrapping_add(1);
+        self.notification_load_generation = self.notification_load_generation.wrapping_add(1);
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        self.walletconnect_sessions_generation =
+            self.walletconnect_sessions_generation.wrapping_add(1);
+        self.desktop_snapshot = None;
+        self.active_review = None;
+        self.queued_reviews = SerialQueue::default();
+        self.selected_record = None;
+        self.legal_review = None;
+        self.clear_export_clipboard(cx);
+        self.account_export = None;
+        self.command_palette = false;
+        self.activity_inspections.clear();
+        self.activity_refresh_task = None;
+        let owner = self.owner.clone();
+        gpui_tokio::Tokio::handle(cx).spawn(async move {
+            if let Err(error) = owner.disconnect_service().await {
+                tracing::warn!(%error, "could not finish disconnected desktop shutdown");
+            }
+        });
+        cx.notify();
+    }
+
     fn reload_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.service_disconnected.is_some() {
+            return;
+        }
         if self.desktop_snapshot_loading {
             self.desktop_snapshot_dirty = true;
             return;
@@ -7652,9 +7767,7 @@ impl WalletWindow {
         self.desktop_snapshot_error = None;
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || DesktopSnapshot::capture(&owner))
-                .await
-                .context("desktop snapshot task failed")
+            Ok(DesktopSnapshot::capture(&owner).await)
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -7742,13 +7855,11 @@ impl WalletWindow {
                 if sender.is_closed() {
                     break;
                 }
-                let owner = owner.clone();
-                let batch = batch.to_vec();
-                let summaries = tokio::task::spawn_blocking(move || {
-                    owner.transaction_previews(&batch.iter().collect::<Vec<_>>())
-                })
-                .await
-                .context("transaction summary task failed")??;
+                let request_ids = batch
+                    .iter()
+                    .map(|record| record.request_id)
+                    .collect::<Vec<_>>();
+                let summaries = owner.transaction_previews(&request_ids).await?;
                 if sender.send(summaries).await.is_err() {
                     break;
                 }
@@ -7813,14 +7924,12 @@ impl WalletWindow {
     /// detection, and the session list all end by asking for a redraw. Doing
     /// it in each of those instead would mean a checklist that is right about
     /// whichever one happened to fire last.
-    fn refresh_guided_setup(&mut self) {
+    fn refresh_guided_setup(&mut self, cx: &mut Context<Self>) {
         if !self.guided_setup.is_loaded() {
-            // Retry the read that startup could not complete. Until it lands
-            // there is nothing to fold a reading into, and nothing is drawn.
-            let Ok(state) = self.owner.guided_setup() else {
-                return;
-            };
-            self.guided_setup.load(state);
+            if !self.guided_setup_loading {
+                self.load_guided_setup(cx);
+            }
+            return;
         }
         // A dismissed card keeps latching, and for two reasons now. It is
         // coming back — at the next launch, or the moment a task is finished —
@@ -7849,8 +7958,50 @@ impl WalletWindow {
             // Best effort. A checklist that redraws correctly but forgets by
             // tomorrow is far better than one that refuses to advance because
             // the settings store is momentarily unavailable.
-            let _ = self.owner.set_guided_setup(state);
+            if let Some(state) = self.guided_setup_saves.submit(state.clone()) {
+                self.save_guided_setup(state, cx);
+            }
         }
+    }
+
+    fn load_guided_setup(&mut self, cx: &mut Context<Self>) {
+        self.guided_setup_loading = true;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.guided_setup().await });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.guided_setup_loading = false;
+                if let Ok(state) = result {
+                    if !view.guided_setup.is_loaded() {
+                        view.guided_setup.load(state);
+                    }
+                    view.refresh_guided_setup(cx);
+                    cx.notify();
+                }
+                // A failed read waits for another ordinary redraw to retry.
+                // Notifying here would turn a storage outage into a hot loop.
+            });
+        })
+        .detach();
+    }
+
+    fn save_guided_setup(&mut self, state: GuidedSetupState, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.set_guided_setup(&state).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let _ = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if let Some(next) = view.guided_setup_saves.finish() {
+                    view.save_guided_setup(next, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Send the checklist away until the next task is finished.
@@ -7984,11 +8135,7 @@ impl WalletWindow {
         let list = list.downgrade();
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                collect_token_inventory(|limit, offset| owner.tokens(None, limit, offset))
-            })
-            .await
-            .context("token inventory task failed")?
+            collect_token_inventory(|limit, offset| owner.tokens(None, limit, offset)).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -8491,9 +8638,9 @@ impl WalletWindow {
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             match target {
-                PriceEditorTarget::Token(token) => owner.set_token_price(&token, price),
+                PriceEditorTarget::Token(token) => owner.set_token_price(&token, price).await,
                 PriceEditorTarget::NativeCurrency { chain_id, .. } => {
-                    owner.set_native_token_price(chain_id, price)
+                    owner.set_native_token_price(chain_id, price).await
                 }
             }
         });
@@ -8637,7 +8784,7 @@ impl WalletWindow {
         // The button renders disabled while a pairing is in flight, but a
         // render-time property is not what decides this: refuse the press
         // here, where the second click of a double click arrives.
-        if self.walletconnect_connecting.is_some() {
+        if self.walletconnect_starting.is_some() || self.walletconnect_connecting.is_some() {
             return;
         }
         let text = cx
@@ -8671,33 +8818,69 @@ impl WalletWindow {
             Err(error) => anyhow::bail!("could not verify a signing account: {error:#}"),
             Ok(_) => {}
         }
-        let start = self
-            .walletconnect
-            .lock()
-            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))?
-            .begin_uri(uri)?;
-        let (start, summary) = start;
-        self.walletconnect_sessions.push(summary);
-        let session_id = start.id;
-        self.walletconnect_connecting = Some(session_id);
+        if self.walletconnect_starting.is_some() || self.walletconnect_connecting.is_some() {
+            return Ok(());
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.walletconnect_starting = Some(cancel.clone());
+        self.walletconnect_sessions_generation =
+            self.walletconnect_sessions_generation.wrapping_add(1);
         self.clear_route_error(Route::WalletConnect);
-        self.owner
-            .event_bus()
-            .publish(crate::events::DomainEventKind::WalletConnectChanged {
-                session_id: start.id.to_string(),
+        let walletconnect = self.walletconnect.clone();
+        let uri = Zeroizing::new(uri.to_owned());
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { walletconnect.begin(&uri, &cancel).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.walletconnect_sessions_generation =
+                    view.walletconnect_sessions_generation.wrapping_add(1);
+                let canceled = view
+                    .walletconnect_starting
+                    .take()
+                    .is_some_and(|cancel| cancel.is_cancelled());
+                match result {
+                    Ok(Some(started)) => {
+                        let session_id = started.summary.id;
+                        if !view
+                            .walletconnect_sessions
+                            .iter()
+                            .any(|session| session.id == session_id)
+                        {
+                            view.walletconnect_sessions.push(started.summary.clone());
+                        }
+                        view.walletconnect_connecting = walletconnect_pairing_is_in_flight(
+                            &view.walletconnect_sessions,
+                            session_id,
+                        )
+                        .then_some(session_id);
+                        Self::wait_walletconnect_session(started, cx);
+                        // Cancel may arrive after the adapter's last check but
+                        // before this GPUI completion callback.
+                        if canceled {
+                            view.disconnect_walletconnect(session_id, cx);
+                        }
+                    }
+                    Ok(None) => view.clear_route_error(Route::WalletConnect),
+                    Err(error) => view.set_route_error(
+                        Route::WalletConnect,
+                        format!("Could not connect: {error:#}"),
+                    ),
+                }
+                cx.notify();
             });
-        let dapp = self.owner.dapp_api();
-        let presenter = self.walletconnect_presenter.clone();
-        let manager = self.walletconnect.clone();
-        let events = self.owner.event_bus();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current()
-                    .block_on(run_session(start, dapp, presenter, manager, events))
-            })
-            .await
-            .context("WalletConnect session task failed")?
-        });
+        })
+        .detach();
+        cx.notify();
+        Ok(())
+    }
+
+    fn wait_walletconnect_session(started: StartedDappSession, cx: &mut Context<Self>) {
+        let session_id = started.summary.id;
+        let task = gpui_tokio::Tokio::spawn_result(cx, started.wait());
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -8713,8 +8896,14 @@ impl WalletWindow {
             });
         })
         .detach();
-        cx.notify();
-        Ok(())
+    }
+
+    fn cancel_walletconnect_pairing(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = &self.walletconnect_starting {
+            cancel.cancel();
+        } else if let Some(session_id) = self.walletconnect_connecting {
+            self.disconnect_walletconnect(session_id, cx);
+        }
     }
 
     /// Stop showing Connect as busy, if it was busy on this pairing.
@@ -8742,6 +8931,26 @@ impl WalletWindow {
         self.walletconnect_sessions = sessions;
     }
 
+    fn update_walletconnect_sessions(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<SessionSummary>>,
+    ) {
+        if generation != self.walletconnect_sessions_generation {
+            return;
+        }
+        match result {
+            Ok(sessions) => {
+                self.walletconnect_sessions_error = None;
+                self.set_walletconnect_sessions(sessions);
+            }
+            Err(error) => {
+                self.walletconnect_sessions_error =
+                    Some(format!("WalletConnect sessions unavailable: {error:#}").into());
+            }
+        }
+    }
+
     /// The dapps the owner let in — the only ones the connection list draws.
     fn approved_walletconnect_sessions(&self) -> impl Iterator<Item = &SessionSummary> {
         self.walletconnect_sessions
@@ -8750,28 +8959,90 @@ impl WalletWindow {
     }
 
     fn disconnect_walletconnect(&mut self, session_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let result = self
-            .walletconnect
-            .lock()
-            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))
-            .and_then(|mut manager| manager.disconnect(session_id).map(|_| ()));
-        self.finish_walletconnect_connecting(session_id);
-        match result {
-            Ok(()) => self.clear_route_error(Route::WalletConnect),
-            Err(error) => self.set_route_error(
-                Route::WalletConnect,
-                format!("Could not disconnect session: {error:#}"),
-            ),
+        if !self.walletconnect_disconnecting.insert(session_id) {
+            return;
         }
-        self.owner
-            .event_bus()
-            .publish(crate::events::DomainEventKind::WalletConnectChanged {
-                session_id: session_id.to_string(),
+        self.walletconnect_sessions_generation =
+            self.walletconnect_sessions_generation.wrapping_add(1);
+        let walletconnect = self.walletconnect.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            walletconnect.disconnect(session_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.walletconnect_sessions_generation =
+                    view.walletconnect_sessions_generation.wrapping_add(1);
+                view.walletconnect_disconnecting.remove(&session_id);
+                view.finish_walletconnect_connecting(session_id);
+                match result {
+                    Ok(_) => {
+                        view.walletconnect_sessions
+                            .retain(|session| session.id != session_id);
+                        view.clear_route_error(Route::WalletConnect);
+                    }
+                    Err(error) => view.set_route_error(
+                        Route::WalletConnect,
+                        format!("Could not disconnect session: {error:#}"),
+                    ),
+                }
+                cx.notify();
             });
+        })
+        .detach();
         cx.notify();
     }
 
-    fn receive_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+    fn retire_closed_walletconnect_reviews(&mut self, cx: &mut Context<Self>) {
+        self.queued_reviews.pending.retain(|queued| match queued {
+            QueuedReview::WalletConnect(prompt) => !prompt.response.is_closed(),
+            QueuedReview::Transaction(_) => true,
+        });
+        let ended = self.active_review.as_ref().is_some_and(|active| {
+            matches!(active.completion.as_ref(), Some(ActiveReviewCompletion::WalletConnect { response, .. }) if response.is_closed())
+        });
+        if ended {
+            self.active_review = None;
+            self.activate_next_waiting_surface(cx);
+        }
+    }
+
+    fn receive_dapp_proposal_update(
+        &mut self,
+        update: DappProposalUpdate,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.retire_closed_walletconnect_reviews(cx);
+        let prompts = match update {
+            DappProposalUpdate::Changed(prompts) => {
+                self.walletconnect_reviews_error = None;
+                prompts
+            }
+            DappProposalUpdate::Failed(error) => {
+                self.service_lost(&error, cx);
+                self.walletconnect_reviews_error = Some(error.into());
+                cx.notify();
+                return false;
+            }
+        };
+        let mut arrived = false;
+        for prompt in prompts {
+            if !prompt.response.is_closed() {
+                self.receive_walletconnect_prompt(prompt);
+                arrived = true;
+            }
+        }
+        if arrived {
+            self.set_route(self.active_review_route());
+        }
+        cx.notify();
+        arrived
+    }
+
+    fn receive_walletconnect_prompt(&mut self, prompt: DesktopDappPrompt) {
+        if self.service_disconnected.is_some() || prompt.response.is_closed() {
+            return;
+        }
         if !prompt
             .choices
             .iter()
@@ -8790,7 +9061,10 @@ impl WalletWindow {
         self.activate_walletconnect_prompt(*prompt);
     }
 
-    fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+    fn activate_walletconnect_prompt(&mut self, prompt: DesktopDappPrompt) {
+        if prompt.response.is_closed() {
+            return;
+        }
         // The connect button stays busy through the review rather than
         // stopping when the proposal lands: a proposal under review is not a
         // connection, and nothing else on the screen behind stands for it.
@@ -8811,6 +9085,10 @@ impl WalletWindow {
         if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             return;
         }
+        self.queued_reviews.pending.retain(|review| match review {
+            QueuedReview::Transaction(prompt) => !prompt.response.is_closed(),
+            QueuedReview::WalletConnect(prompt) => !prompt.response.is_closed(),
+        });
         let networks = self.cached_networks().unwrap_or_default().to_vec();
         let testnet_mode = self.testnet_mode;
         let next = self.queued_reviews.next_where(|review| match review {
@@ -8974,13 +9252,11 @@ impl WalletWindow {
         let owner = self.owner.clone();
         self.account_operation = Some(AccountOperation::Creating);
         self.account_status = None;
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                owner.create_account(&wallet_id, &WalletPolicy::require_approval_for_everything())
-            })
-            .await
-            .context("account creation task failed")?
-        });
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.create_account(&wallet_id).await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update_in(cx, |view, window, cx| {
@@ -9025,13 +9301,16 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        let secret = zeroize::Zeroizing::new(key_input.read(cx).value().trim().to_owned());
+        let mut secret = zeroize::Zeroizing::new(key_input.read(cx).value().trim().to_owned());
         key_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.set_masked(true, window, cx);
         });
         let key = match PrivateKeyMaterial::from_hex(&secret) {
-            Ok(key) => key,
+            Ok(_) => {
+                ekubo_wallet_client::import_key::ImportKey::from_hex(std::mem::take(&mut *secret))
+                    .expect("the owner import text was just validated")
+            }
             Err(error) => {
                 self.private_key_error = Some(format!("{error:#}").into());
                 cx.notify();
@@ -9042,9 +9321,7 @@ impl WalletWindow {
         self.account_operation = Some(AccountOperation::Importing);
         self.account_status = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.import_account(&wallet_id, key))
-                .await
-                .context("account import task failed")?
+            owner.import_account(&wallet_id, key).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -9211,12 +9488,84 @@ impl WalletWindow {
         stored.take();
     }
 
-    fn open_policy_editor(&mut self, wallet_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_policy_editor(
+        &mut self,
+        wallet_id: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_policy_editor(wallet_id.to_owned(), None, cx);
+    }
+
+    fn open_policy_proposal(
+        &mut self,
+        proposal: PolicyProposal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_policy_editor(proposal.wallet_id.clone(), Some(proposal), cx);
+    }
+
+    fn load_policy_editor(
+        &mut self,
+        wallet_id: String,
+        proposal: Option<PolicyProposal>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.policy_json_input.clone() else {
+            return;
+        };
+        let original_text = input.read(cx).value();
+        self.policy_account_id = Some(wallet_id.clone());
+        self.policy_load_generation = self.policy_load_generation.wrapping_add(1);
+        let generation = self.policy_load_generation;
+        self.policy_loading = Some(generation);
+        let owner = self.owner.clone();
+        let task_wallet = wallet_id.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.policy_history(&task_wallet).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let history = task.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                if view.policy_loading != Some(generation) {
+                    return;
+                }
+                view.policy_loading = None;
+                // A read may finish after the input has been rebuilt or the
+                // owner has continued editing the displayed draft. Neither
+                // permits replacing that newer state with the fetched policy.
+                if view.route != Route::Policies
+                    || view.policy_account_id.as_deref() != Some(wallet_id.as_str())
+                    || view.policy_json_input.as_ref() != Some(&input)
+                    || input.read(cx).value() != original_text
+                {
+                    cx.notify();
+                    return;
+                }
+                match proposal {
+                    Some(proposal) => view.finish_policy_proposal(proposal, history, window, cx),
+                    None => view.finish_policy_editor(&wallet_id, history, window, cx),
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_policy_editor(
+        &mut self,
+        wallet_id: &str,
+        history: Result<Vec<StoredPolicy>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(input) = self.policy_json_input.as_ref() else {
             return;
         };
-        self.policy_account_id = Some(wallet_id.to_owned());
-        match self.owner.policy_history(wallet_id) {
+        match history {
             Ok(history) => {
                 let current = history.last();
                 let source_revision = current.map(|policy| policy.revision);
@@ -9258,17 +9607,17 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn open_policy_proposal(
+    fn finish_policy_proposal(
         &mut self,
         proposal: PolicyProposal,
+        history: Result<Vec<StoredPolicy>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(input) = self.policy_json_input.as_ref() else {
             return;
         };
-        self.policy_account_id = Some(proposal.wallet_id.clone());
-        match self.owner.policy_history(&proposal.wallet_id) {
+        match history {
             Ok(history) => {
                 // A proposal is not itself an installed revision. Its first
                 // Previous revision action opens the latest installed policy.
@@ -9355,7 +9704,40 @@ impl WalletWindow {
     }
 
     fn reject_policy_proposal(&mut self, proposal: &PolicyProposal, cx: &mut Context<Self>) {
-        self.policy_action_error = match self.owner.reject_policy_proposal(proposal) {
+        if self.policy_installing {
+            return;
+        }
+        self.policy_loading = None;
+        self.policy_installing = true;
+        let generation = self.policy_load_generation;
+        let proposal = proposal.clone();
+        let task_proposal = proposal.clone();
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.reject_policy_proposal(&task_proposal).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.policy_installing = false;
+                view.reload_desktop_snapshot(cx);
+                if view.policy_load_generation == generation {
+                    view.finish_policy_rejection(&proposal, result, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_policy_rejection(
+        &mut self,
+        proposal: &PolicyProposal,
+        result: Result<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.policy_action_error = match result {
             Ok(true) => {
                 if self
                     .policy_editor
@@ -9367,10 +9749,6 @@ impl WalletWindow {
                     self.policy_proposal_open = false;
                     self.policy_review_open = false;
                 }
-                // The card is gone by the time this is read, so the note has
-                // to carry the whole outcome: which way it was decided, and
-                // that deciding it that way left the policy alone. "It's gone"
-                // is otherwise the only thing the screen has said.
                 self.set_policy_status("Proposal rejected. The active policy is unchanged.", cx);
                 None
             }
@@ -9379,7 +9757,6 @@ impl WalletWindow {
             }
             Err(error) => Some(format!("Could not reject proposal: {error:#}").into()),
         };
-        cx.notify();
     }
 
     /// A note that a policy decision was carried out, which then leaves.
@@ -9580,6 +9957,7 @@ impl WalletWindow {
     }
 
     fn install_policy_editor(&mut self, cx: &mut Context<Self>) {
+        self.policy_loading = None;
         if self.policy_installing {
             return;
         }
@@ -9641,10 +10019,10 @@ impl WalletWindow {
             let proposal_cleanup = if proposal_is_exact {
                 Ok(None)
             } else {
-                task_proposal
-                    .as_ref()
-                    .map(|proposal| owner.reject_policy_proposal(proposal))
-                    .transpose()
+                match task_proposal.as_ref() {
+                    Some(proposal) => owner.reject_policy_proposal(proposal).await.map(Some),
+                    None => Ok(None),
+                }
             };
             Ok::<_, anyhow::Error>((installed, proposal_cleanup))
         });
@@ -9694,7 +10072,7 @@ impl WalletWindow {
     }
 
     fn begin_account_removal(&mut self, wallet_id: String, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow.is_in_progress() {
+        if self.legal_gate || self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.account_action_errors.insert(
                 wallet_id,
                 "Finish or close the current review first.".into(),
@@ -9702,39 +10080,84 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        match self.owner.account_removal_document(&wallet_id) {
-            Ok(review) => {
-                self.account_action_errors.remove(&wallet_id);
-                self.active_review = Some(ActiveReview::new(
-                    review.document,
-                    None,
-                    Some(ActiveReviewCompletion::AccountRemoval {
-                        wallet: review.wallet,
-                    }),
-                ));
-            }
-            Err(error) => {
-                self.account_action_errors.insert(
-                    wallet_id,
-                    format!("Could not prepare account removal: {error:#}").into(),
-                );
-            }
-        }
+        self.review_flow = ReviewFlowState::Busy;
+        let owner = self.owner.clone();
+        let task_wallet = wallet_id.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.account_removal_document(&task_wallet).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.review_flow = ReviewFlowState::Ready;
+                match result {
+                    Ok(reviewed) => {
+                        view.account_action_errors.remove(&wallet_id);
+                        view.active_review = Some(ActiveReview::new(
+                            reviewed.document.clone(),
+                            None,
+                            Some(ActiveReviewCompletion::AccountRemoval {
+                                reviewed: Box::new(reviewed),
+                            }),
+                        ));
+                    }
+                    Err(error) => {
+                        view.account_action_errors.insert(
+                            wallet_id,
+                            format!("Could not prepare account removal: {error:#}").into(),
+                        );
+                        view.activate_next_waiting_surface(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
     fn open_legal_review(&mut self, document: LegalDocument, cx: &mut Context<Self>) {
-        let (text, digest) = self.owner.legal_document(document);
-        let status = self.owner.legal_status().ok();
-        let acceptance_required = legal_review_requires_acceptance(document, status.as_ref());
-        self.legal_review = Some(Self::new_legal_review(
-            document,
-            &text,
-            digest,
-            acceptance_required,
-            cx,
-        ));
-        cx.notify();
+        if self.legal_accepting {
+            return;
+        }
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        let generation = self.legal_load_generation;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            load_legal_review(&owner, Some(document)).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.legal_load_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(review) => {
+                        view.clear_route_error(Route::Settings);
+                        view.set_legal_review(review, cx);
+                    }
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not read document: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_legal_review(&mut self, review: Option<InitialLegalReview>, cx: &mut Context<Self>) {
+        self.legal_review = review.map(|review| {
+            Self::new_legal_review(
+                review.document,
+                &review.text,
+                review.digest,
+                review.acceptance_required,
+                cx,
+            )
+        });
     }
 
     fn new_legal_review(
@@ -9758,18 +10181,6 @@ impl WalletWindow {
         }
     }
 
-    fn open_next_required_legal(&mut self, cx: &mut Context<Self>) {
-        let document = match self.owner.legal_status() {
-            Ok(status) => next_required_legal(&status),
-            Err(_) => Some(LegalDocument::TermsOfService),
-        };
-        self.legal_gate = document.is_some();
-        self.legal_review = document.map(|document| {
-            let (text, digest) = self.owner.legal_document(document);
-            Self::new_legal_review(document, &text, digest, true, cx)
-        });
-    }
-
     fn update_legal_scroll_state(&mut self, digest: &str, cx: &mut Context<Self>) {
         let Some(review) = self.legal_review.as_mut() else {
             return;
@@ -9789,36 +10200,54 @@ impl WalletWindow {
         let Some(review) = self.legal_review.as_ref() else {
             return;
         };
-        if !review.acceptance_required
+        if self.legal_accepting
+            || !review.acceptance_required
             || (!review.viewed_to_end
                 && !legal_list_reached_end(&review.scroll_handle, &review.end_rendered))
         {
             return;
         }
         let document = review.document;
-        match self.owner.accept_legal(document, &review.digest) {
-            Ok(()) => {
-                self.open_next_required_legal(cx);
-                if !self.legal_gate {
-                    self.activate_next_waiting_surface(cx);
+        let digest = review.digest.clone();
+        self.legal_accepting = true;
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.accept_legal(document, &digest).await?;
+            load_legal_review(&owner, None).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.legal_accepting = false;
+                match result {
+                    Ok(next) => {
+                        view.legal_gate = next.is_some();
+                        view.set_legal_review(next, cx);
+                        if !view.legal_gate {
+                            view.activate_next_waiting_surface(cx);
+                        }
+                        // Legal acceptance emits no domain event.
+                        view.reload_desktop_snapshot(cx);
+                    }
+                    Err(error) => {
+                        if let Some(review) = view.legal_review.as_mut() {
+                            review.error =
+                                Some(format!("Could not accept document: {error:#}").into());
+                        }
+                    }
                 }
-                // Acceptance is written straight to the legal store, which
-                // raises no domain event, so nothing else was ever going to
-                // refresh the snapshot. Settings reads its acceptance dates
-                // from that snapshot and went on saying "Review required"
-                // about a document the reader had just accepted.
-                self.reload_desktop_snapshot(cx);
-            }
-            Err(error) => {
-                if let Some(review) = self.legal_review.as_mut() {
-                    review.error = Some(format!("Could not accept document: {error:#}").into());
-                }
-            }
-        }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        if !self.legal_gate {
+            self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+        }
         if self.legal_review.is_some() && !self.legal_gate {
             self.legal_review = None;
             cx.notify();
@@ -9889,14 +10318,37 @@ impl WalletWindow {
         }
         let mut selection = self.companion_servers.clone();
         selection.set_enabled(slug, enabled);
-        if let Err(error) = self.owner.set_companion_servers(&selection) {
-            self.set_route_error(
-                Route::Settings,
-                format!("Could not save the MCP server selection: {error:#}"),
-            );
-            cx.notify();
-            return;
-        }
+        self.agent_reinstall = AgentReinstallState::Running;
+        let owner = self.owner.clone();
+        let task_selection = selection.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.set_companion_servers(&task_selection).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                match result {
+                    Ok(()) => view.sync_saved_companion_selection(slug, enabled, selection, cx),
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not save the MCP server selection: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_saved_companion_selection(
+        &mut self,
+        slug: &'static str,
+        enabled: bool,
+        selection: CompanionSelection,
+        cx: &mut Context<Self>,
+    ) {
         self.companion_servers = selection.clone();
         let title = companion_by_slug(slug).map_or(slug, |server| server.title);
         self.run_agent_configuration(
@@ -10652,11 +11104,33 @@ impl WalletWindow {
     }
 
     fn reject_network_proposal(&mut self, proposal: &NetworkConfig, cx: &mut Context<Self>) {
-        self.network_proposal_error = match self.owner.reject_network_proposal(proposal) {
-            Ok(true) => None,
-            Ok(false) => Some("The network proposal changed. Review the current profile.".into()),
-            Err(error) => Some(format!("Could not reject network proposal: {error:#}").into()),
-        };
+        if self.network_proposal_busy {
+            return;
+        }
+        self.network_proposal_busy = true;
+        let proposal = proposal.clone();
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.reject_network_proposal(&proposal).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.network_proposal_busy = false;
+                view.network_proposal_error = match result {
+                    Ok(true) => None,
+                    Ok(false) => {
+                        Some("The network proposal changed. Review the current profile.".into())
+                    }
+                    Err(error) => {
+                        Some(format!("Could not reject network proposal: {error:#}").into())
+                    }
+                };
+                view.reload_desktop_snapshot(cx);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -10860,9 +11334,7 @@ impl WalletWindow {
         self.token_proposal_busy = true;
         self.token_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.reject_token_proposals(&proposals))
-                .await
-                .context("token proposal rejection task failed")?
+            owner.reject_token_proposals(&proposals).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -10885,14 +11357,33 @@ impl WalletWindow {
     }
 
     fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let feedback = match self.owner.discard_unsent_transaction(request_id) {
-            Ok(_) => ActivityFeedback::note("Discarded signed bytes that were never submitted."),
-            Err(error) => {
-                ActivityFeedback::failure(format!("Could not discard transaction: {error:#}"))
-            }
-        };
-        self.set_activity_feedback(request_id, feedback, cx);
+        if !self.activity_busy.insert(request_id) {
+            return;
+        }
         self.selected_record = Some(request_id);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.discard_unsent_transaction(request_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.activity_busy.remove(&request_id);
+                let updated = result.as_ref().ok().cloned();
+                let feedback = match result {
+                    Ok(_) => {
+                        ActivityFeedback::note("Discarded signed bytes that were never submitted.")
+                    }
+                    Err(error) => ActivityFeedback::failure(format!(
+                        "Could not discard transaction: {error:#}"
+                    )),
+                };
+                view.set_activity_feedback(request_id, feedback, cx);
+                view.synchronize_transaction_activity(request_id, updated, cx);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -10957,8 +11448,9 @@ impl WalletWindow {
     }
 
     fn load_transaction_inspection(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        let load_id = uuid::Uuid::new_v4();
         self.activity_inspections
-            .insert(request_id, ActivityInspectionState::Loading);
+            .insert(request_id, ActivityInspectionState::Loading(load_id));
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.transaction_inspection(request_id).await
@@ -10966,21 +11458,37 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.activity_inspections.insert(
-                    request_id,
-                    match result {
-                        Ok(inspection) => ActivityInspectionState::Ready(Rc::new(
-                            ReadyActivityInspection::new(inspection),
-                        )),
-                        Err(error) => ActivityInspectionState::Failed(
-                            format!("Could not inspect transaction: {error:#}").into(),
-                        ),
-                    },
-                );
-                cx.notify();
+                view.finish_transaction_inspection(request_id, load_id, result, cx);
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn finish_transaction_inspection(
+        &mut self,
+        request_id: uuid::Uuid,
+        load_id: uuid::Uuid,
+        result: Result<OwnerTransactionInspection>,
+        cx: &mut Context<Self>,
+    ) {
+        // A newer read or cache invalidation retires this response.
+        if !matches!(self.activity_inspections.get(&request_id),
+            Some(ActivityInspectionState::Loading(current)) if *current == load_id)
+        {
+            return;
+        }
+        self.activity_inspections.insert(
+            request_id,
+            match result {
+                Ok(inspection) => ActivityInspectionState::Ready(Rc::new(
+                    ReadyActivityInspection::new(inspection),
+                )),
+                Err(error) => ActivityInspectionState::Failed(
+                    format!("Could not inspect transaction: {error:#}").into(),
+                ),
+            },
+        );
         cx.notify();
     }
 
@@ -11225,11 +11733,11 @@ impl WalletWindow {
         self.history_clearing = true;
         self.history_clear_error = None;
         let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.clear_activity_history())
-                .await
-                .context("history clearing task failed")?
-        });
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.clear_activity_history().await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -11260,6 +11768,11 @@ impl WalletWindow {
     }
 
     fn check_latest_release(&mut self, cx: &mut Context<Self>) {
+        // The privileged installer updates the complete service-backed product.
+        // Do not discover an in-process installable payload for this backend.
+        if self.owner.uses_service() {
+            return;
+        }
         if matches!(self.release_state, ReleaseDisplayState::Checking) {
             return;
         }
@@ -11295,6 +11808,9 @@ impl WalletWindow {
     }
 
     fn confirm_update_installation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.owner.uses_service() {
+            return;
+        }
         let ReleaseDisplayState::Ready {
             update: Some(update),
             ..
@@ -11323,6 +11839,9 @@ impl WalletWindow {
     }
 
     fn download_update(&mut self, cx: &mut Context<Self>) {
+        if self.owner.uses_service() {
+            return;
+        }
         let ReleaseDisplayState::Ready {
             update: Some(update),
             ..
@@ -11376,6 +11895,9 @@ impl WalletWindow {
     }
 
     fn receive_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        if self.service_disconnected.is_some() || prompt.response.is_closed() {
+            return;
+        }
         if let Some(active) = self.active_review.as_mut()
             && active.awaiting_refresh
             && active.completion.is_none()
@@ -11406,6 +11928,9 @@ impl WalletWindow {
     }
 
     fn activate_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        if prompt.response.is_closed() {
+            return;
+        }
         self.review_flow = ReviewFlowState::Busy;
         self.active_review = Some(ActiveReview::new(
             prompt.document,
@@ -11442,15 +11967,11 @@ impl WalletWindow {
         self.clear_route_error(Route::Activity);
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                if typed {
-                    owner.typed_data_review_document(request_id)
-                } else {
-                    owner.message_review_document(request_id)
-                }
-            })
-            .await
-            .context("signature review task failed")?
+            if typed {
+                owner.typed_data_review_document(request_id).await
+            } else {
+                owner.message_review_document(request_id).await
+            }
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -11494,19 +12015,15 @@ impl WalletWindow {
         self.notification_record_loading = None;
         let presenter = self.review_presenter.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                tokio::runtime::Handle::current()
-                    .block_on(owner.review_transaction(request_id, &presenter))
-            })
-            .await
-            .context("transaction review task failed")?
+            owner.review_transaction(request_id, &presenter).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ =
                 view.update(cx, |view, cx| {
                     if view.active_review.as_ref().is_some_and(|active| {
-                        active.awaiting_refresh && active.completion.is_none()
+                        (active.awaiting_refresh && active.completion.is_none())
+                            || matches!(&active.completion, Some(ActiveReviewCompletion::Transaction(response)) if response.is_closed())
                     }) {
                         view.active_review = None;
                     }
@@ -11656,10 +12173,10 @@ impl WalletWindow {
             }
             (
                 GuiReviewCommand::Close | GuiReviewCommand::Reject,
-                Some(ActiveReviewCompletion::AccountRemoval { wallet }),
+                Some(ActiveReviewCompletion::AccountRemoval { reviewed }),
             ) => {
                 self.active_review = None;
-                self.account_action_errors.remove(&wallet.id);
+                self.account_action_errors.remove(&reviewed.wallet.id);
             }
             (
                 GuiReviewCommand::Reject,
@@ -11668,9 +12185,7 @@ impl WalletWindow {
                 self.active_review = None;
                 wait_for_flow = true;
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || owner.reject_message(request_id))
-                        .await
-                        .context("request rejection task failed")?
+                    owner.reject_message(request_id).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11695,9 +12210,7 @@ impl WalletWindow {
                 self.active_review = None;
                 wait_for_flow = true;
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || owner.reject_typed_data(request_id))
-                        .await
-                        .context("request rejection task failed")?
+                    owner.reject_typed_data(request_id).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11722,12 +12235,7 @@ impl WalletWindow {
                 wait_for_flow = true;
                 self.active_review = None;
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(owner.sign_message(request_id, &digest))
-                    })
-                    .await
-                    .context("message signing task failed")?
+                    owner.sign_message(request_id, &digest).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11752,12 +12260,7 @@ impl WalletWindow {
                 wait_for_flow = true;
                 self.active_review = None;
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    tokio::task::spawn_blocking(move || {
-                        tokio::runtime::Handle::current()
-                            .block_on(owner.sign_typed_data(request_id, &digest))
-                    })
-                    .await
-                    .context("typed-data signing task failed")?
+                    owner.sign_typed_data(request_id, &digest).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11777,13 +12280,13 @@ impl WalletWindow {
             }
             (
                 GuiReviewCommand::Approve,
-                Some(ActiveReviewCompletion::AccountRemoval { wallet }),
+                Some(ActiveReviewCompletion::AccountRemoval { reviewed }),
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let wallet_id = wallet.id.clone();
+                let wallet_id = reviewed.wallet.id.clone();
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.remove_account(&wallet).await
+                    owner.remove_account(&reviewed).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
@@ -11806,79 +12309,43 @@ impl WalletWindow {
                 .detach();
             }
             (
-                GuiReviewCommand::Approve,
+                command @ (GuiReviewCommand::Approve
+                | GuiReviewCommand::Reject
+                | GuiReviewCommand::Close),
                 Some(ActiveReviewCompletion::WalletConnect {
-                    choices,
                     selected_account,
                     response,
+                    ..
                 }),
             ) => {
                 wait_for_flow = true;
                 self.active_review = None;
-                let Some((index, choice)) = selected_account
-                    .and_then(|index| choices.get(index).map(|choice| (index, choice)))
-                else {
-                    let _ = response.send(ProposalCommand::Reject);
-                    self.set_route_error(
-                        Route::WalletConnect,
-                        "The selected account is no longer available.",
-                    );
-                    return;
+                let decision = match command {
+                    GuiReviewCommand::Approve => DappDecision::Approve {
+                        index: selected_account,
+                    },
+                    GuiReviewCommand::Reject => DappDecision::Reject,
+                    GuiReviewCommand::Close => DappDecision::Close,
+                    GuiReviewCommand::Refresh => unreachable!(),
                 };
-                let document = choice.document.clone();
-                let account = choice.account.clone();
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.authorize_dapp_connection(&document, &account).await
+                    response.respond(&owner, decision).await
                 });
                 cx.spawn(async move |view, cx| {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
                         view.finish_review_flow(cx);
                         match result {
-                            Ok(authorization) => {
-                                if response
-                                    .send(ProposalCommand::Approve {
-                                        index,
-                                        authorization,
-                                    })
-                                    .is_err()
-                                {
-                                    view.set_route_error(
-                                        Route::WalletConnect,
-                                        "The connection proposal is no longer active.",
-                                    );
-                                } else {
-                                    view.clear_route_error(Route::WalletConnect);
-                                }
-                            }
-                            Err(error) => {
-                                let _ = response.send(ProposalCommand::Reject);
-                                view.set_route_error(
-                                    Route::WalletConnect,
-                                    format!("Dapp connection was not authorized: {error:#}"),
-                                );
-                            }
+                            Ok(()) => view.clear_route_error(Route::WalletConnect),
+                            Err(error) => view.set_route_error(
+                                Route::WalletConnect,
+                                format!("Dapp connection decision failed: {error:#}"),
+                            ),
                         }
                         cx.notify();
                     });
                 })
                 .detach();
-            }
-            (
-                GuiReviewCommand::Reject,
-                Some(ActiveReviewCompletion::WalletConnect { response, .. }),
-            ) => {
-                self.active_review = None;
-                let _ = response.send(ProposalCommand::Reject);
-                self.clear_route_error(Route::WalletConnect);
-            }
-            (
-                GuiReviewCommand::Close,
-                Some(ActiveReviewCompletion::WalletConnect { response, .. }),
-            ) => {
-                self.active_review = None;
-                let _ = response.send(ProposalCommand::Close);
-                self.clear_route_error(Route::WalletConnect);
             }
             (GuiReviewCommand::Refresh, completion) => {
                 active.completion = completion;
@@ -11924,6 +12391,9 @@ impl WalletWindow {
             return;
         }
         if route != self.route {
+            if !self.legal_gate {
+                self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
+            }
             // The record detail belongs to the inbox. Leaving that screen with
             // it still open would strand a modal about a row nobody can see
             // over whichever page was asked for.
@@ -11932,6 +12402,7 @@ impl WalletWindow {
                 // Historical revisions are temporary views. Re-entering the
                 // tab reconstructs the editor from core's latest installed
                 // policy for the selected account.
+                self.policy_loading = None;
                 self.policy_editor = None;
                 self.policy_action_error = None;
                 self.policy_review_open = false;
@@ -11988,6 +12459,7 @@ impl WalletWindow {
             // another — taking the draft with it. The intent is retained and
             // resumes when the editor closes.
             || self.policy_editor.is_some()
+            || self.policy_loading.is_some()
     }
 
     fn take_pending_notification_route(&mut self) -> Option<NotificationRoute> {
@@ -12003,6 +12475,7 @@ impl WalletWindow {
         };
         // A read-only legal document is dismissible. Required legal review is
         // covered by `legal_gate` above and keeps the intent pending.
+        self.legal_load_generation = self.legal_load_generation.wrapping_add(1);
         self.legal_review = None;
         self.command_palette = false;
         self.set_route(Route::Activity);
@@ -12063,11 +12536,11 @@ impl WalletWindow {
         self.notification_load_generation = self.notification_load_generation.wrapping_add(1);
         let generation = self.notification_load_generation;
         let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.activity_record(request_id))
-                .await
-                .context("reading requested activity failed")?
-        });
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.activity_record(request_id).await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -12145,16 +12618,57 @@ impl WalletWindow {
     fn set_appearance_preference(
         &mut self,
         preference: AppearancePreference,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.appearance_preference == preference {
+        if !self.appearance_saves.in_flight && self.appearance_preference == preference {
             return;
         }
-        match self.owner.set_appearance_preference(preference) {
+        if let Some(preference) = self.appearance_saves.submit(preference) {
+            self.save_appearance_preference(preference, cx);
+        }
+    }
+
+    fn save_appearance_preference(
+        &mut self,
+        preference: AppearancePreference,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.set_appearance_preference(preference).await
+        });
+        cx.spawn(async move |view, cx| {
+            let mut result = Some(task.await);
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.finish_appearance_preference(
+                    preference,
+                    result.take().unwrap(),
+                    Some(window),
+                    cx,
+                );
+            });
+            // Saving remains valid if the window closed while IPC was pending.
+            if let Some(result) = result {
+                let _ = view.update(cx, |view, cx| {
+                    view.finish_appearance_preference(preference, result, None, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn finish_appearance_preference(
+        &mut self,
+        preference: AppearancePreference,
+        result: Result<()>,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
             Ok(()) => {
                 self.appearance_preference = preference;
-                apply_appearance_preference(preference, Some(window), cx);
+                apply_appearance_preference(preference, window, cx);
                 if let Some(tray) = self.tray.borrow_mut().as_mut() {
                     tray.set_dark_mode(cx.theme().is_dark());
                 }
@@ -12162,17 +12676,46 @@ impl WalletWindow {
             }
             Err(error) => self.set_route_error(
                 Route::Settings,
-                format!("Could not save appearance preference: {error:#}"),
+                format!("Could not save appearance: {error:#}"),
             ),
+        }
+        if let Some(next) = self.appearance_saves.finish() {
+            self.save_appearance_preference(next, cx);
         }
         cx.notify();
     }
 
     fn set_testnet_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.testnet_mode == enabled {
+        if !self.testnet_saves.in_flight && self.testnet_mode == enabled {
             return;
         }
-        match self.owner.set_testnet_mode(enabled) {
+        if let Some(enabled) = self.testnet_saves.submit(enabled) {
+            self.save_testnet_mode(enabled, cx);
+        }
+    }
+
+    fn save_testnet_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.set_testnet_mode(enabled).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.finish_testnet_mode(enabled, result, cx);
+                if let Some(next) = view.testnet_saves.finish() {
+                    view.save_testnet_mode(next, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn finish_testnet_mode(&mut self, enabled: bool, result: Result<()>, cx: &mut Context<Self>) {
+        match result {
             Ok(()) => {
                 self.testnet_mode = enabled;
                 self.invalidate_portfolio();
@@ -12984,7 +13527,7 @@ impl WalletWindow {
                         cx,
                     ));
                 match self.activity_inspections.get(&request_id) {
-                    Some(ActivityInspectionState::Loading) => {
+                    Some(ActivityInspectionState::Loading(_)) => {
                         detail = detail.child(
                             h_flex()
                                 .gap_2()
@@ -13257,13 +13800,15 @@ impl WalletWindow {
             return div().into_any_element();
         };
         let variable_detail_list = match record {
-            OwnerActivityRecord::Transaction(_) => self
-                .activity_inspections
-                .get(&request_id)
-                .and_then(|state| match state {
-                    ActivityInspectionState::Ready(ready) => Some(ready.detail_list.clone()),
-                    ActivityInspectionState::Loading | ActivityInspectionState::Failed(_) => None,
-                }),
+            OwnerActivityRecord::Transaction(_) => {
+                self.activity_inspections
+                    .get(&request_id)
+                    .and_then(|state| match state {
+                        ActivityInspectionState::Ready(ready) => Some(ready.detail_list.clone()),
+                        ActivityInspectionState::Loading(_)
+                        | ActivityInspectionState::Failed(_) => None,
+                    })
+            }
             OwnerActivityRecord::Message(_) | OwnerActivityRecord::TypedData(_) => None,
         };
         if self.activity_detail_record.get() != Some(request_id) {
@@ -14818,6 +15363,7 @@ impl WalletWindow {
         };
         let account_unavailable = account_error.is_some();
         let connecting = self.walletconnect_connecting;
+        let pairing_in_flight = self.walletconnect_starting.is_some() || connecting.is_some();
         // The same frame the account form and the inbox use: roomier than the
         // cards below it, and filled with the page background rather than
         // `secondary`. This is the one card on the page that is a form, and
@@ -14873,10 +15419,10 @@ impl WalletWindow {
                     .child(
                         app_button("paste-walletconnect-uri")
                             .debug_selector(|| "paste-walletconnect-uri".to_owned())
-                            .label(if connecting.is_some() { "Connecting" } else { "Paste link & connect" })
-                            .loading(connecting.is_some())
+                            .label(if pairing_in_flight { "Connecting" } else { "Paste link & connect" })
+                            .loading(pairing_in_flight)
                             .primary()
-                            .disabled(account_unavailable || connecting.is_some())
+                            .disabled(account_unavailable || pairing_in_flight)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.connect_walletconnect_from_clipboard(cx);
                             })),
@@ -14885,23 +15431,24 @@ impl WalletWindow {
                     // Disconnect button of its own, and a dapp that never
                     // proposes would otherwise leave the wallet waiting with
                     // no way out but quitting.
-                    .when_some(connecting, |row, session_id| {
+                    .when(pairing_in_flight, |row| {
                         row.child(
                             app_button("cancel-walletconnect")
                                 .debug_selector(|| "cancel-walletconnect".to_owned())
                                 .label("Cancel")
                                 .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.disconnect_walletconnect(session_id, cx);
+                                    view.cancel_walletconnect_pairing(cx);
                                 })),
                         )
                     }),
             );
-        if let Some(session_id) = connecting {
-            let status = self
-                .walletconnect_sessions
-                .iter()
-                .find(|session| session.id == session_id)
-                .map(|session| &session.status);
+        if pairing_in_flight {
+            let status = connecting.and_then(|session_id| {
+                self.walletconnect_sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| &session.status)
+            });
             panel = panel.child(
                 // With the spinner, because this is a wait on a relay and a
                 // dapp, and the only thing on screen saying so was a sentence
@@ -14929,6 +15476,23 @@ impl WalletWindow {
             // be read. As a line of red text it was the one failure in the
             // wallet that looked like a caption.
             panel = panel.child(selectable_error_alert("walletconnect-account-error", error));
+        }
+        if let Some(error) = &self.walletconnect_reviews_error {
+            panel = panel.child(
+                div()
+                    .w_full()
+                    .debug_selector(|| "walletconnect-reviews-error".to_owned())
+                    .child(selectable_error_alert(
+                        "walletconnect-reviews-error",
+                        error.clone(),
+                    )),
+            );
+        }
+        if let Some(error) = &self.walletconnect_sessions_error {
+            panel = panel.child(selectable_error_alert(
+                "walletconnect-sessions-error",
+                error.clone(),
+            ));
         }
         let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
         // Only dapps the owner approved. A pairing that has not been through
@@ -15495,9 +16059,7 @@ impl WalletWindow {
         let owner = self.owner.clone();
         self.automation_busy = Some(automation_id);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.disable_automation(automation_id))
-                .await
-                .context("stopping the automation failed")?
+            owner.disable_automation(automation_id).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -15517,9 +16079,7 @@ impl WalletWindow {
         let owner = self.owner.clone();
         self.automation_busy = Some(automation_id);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.relink_automation(automation_id))
-                .await
-                .context("restarting the automation failed")?
+            owner.relink_automation(automation_id).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -15572,9 +16132,7 @@ impl WalletWindow {
         let owner = self.owner.clone();
         self.automation_busy = Some(automation_id);
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.delete_automation(automation_id))
-                .await
-                .context("deleting the automation failed")?
+            owner.delete_automation(automation_id).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -15648,11 +16206,11 @@ impl WalletWindow {
             return;
         }
         let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || owner.activity_record(request_id))
-                .await
-                .context("reading that transaction failed")?
-        });
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.activity_record(request_id).await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| match result {
@@ -17365,6 +17923,18 @@ impl WalletWindow {
     }
 
     fn render_updates(&self, cx: &mut Context<Self>) -> gpui::Div {
+        if self.owner.uses_service() {
+            return settings_section(
+                "Updates",
+                GroupBox::new().id("software-updates").child(
+                    div().flex().flex_col().gap_3()
+                        .child(selectable_label("Update using the signed Ekubo Wallet 2 installer. Close the wallet, then run the installer to update the desktop, bridge, and protected service together. Your wallet data is preserved."))
+                        .child(gpui_component::link::Link::new("wallet-v2-installers")
+                            .href(LATEST_RELEASE_URL)
+                            .child("View releases and signed installers")),
+                ),
+            );
+        }
         let mut panel = div()
             .flex()
             .flex_col()
@@ -17433,7 +18003,7 @@ impl WalletWindow {
                     panel.child(
                         app_button("open-latest-release")
                             .self_start()
-                            .label("View latest release")
+                            .label("View releases")
                             .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
                     )
                 }),
@@ -17819,7 +18389,7 @@ impl WalletWindow {
     }
 
     fn render_review_simulation(
-        simulation: &ekubo_wallet_core::simulation::SimulationResult,
+        simulation: &ekubo_wallet_client::simulation_display::SimulationDisplay,
         cx: &App,
     ) -> gpui::Div {
         let (icon, color, title) = if simulation.simulation.success {
@@ -18428,7 +18998,7 @@ impl WalletWindow {
                             app_button("accept-legal")
                                 .label("Accept")
                                 .primary()
-                                .disabled(!viewed_to_end)
+                                .disabled(!viewed_to_end || self.legal_accepting)
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.accept_legal(cx);
                                 })),
@@ -20112,6 +20682,23 @@ impl WalletWindow {
 impl Render for WalletWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach_window(window, cx);
+        if self.service_recovery_pending {
+            self.service_recovery_pending = false;
+            cx.defer_in(window, |view, window, cx| {
+                window.close_all_dialogs(cx);
+                window.close_sheet(cx);
+                view.modal_focus.focus(window, cx);
+            });
+        }
+        if let Some(error) = &self.service_disconnected {
+            return div().track_focus(&self.modal_focus).size_full().flex().flex_col().gap_4().p_6()
+                .bg(cx.theme().background).text_color(cx.theme().foreground)
+                .child(div().text_lg().font_semibold().child("Wallet service disconnected"))
+                .child(selectable_label("Close and reopen Ekubo Wallet 2 to reconnect. If it still cannot connect, run the signed installer to repair the service. An interrupted action may have completed; check its current status after reopening before trying it again."))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(selectable_label(error.clone())))
+                .child(app_button("close-disconnected-wallet").self_start().label("Close wallet")
+                    .on_click(|_, _, cx| cx.quit()));
+        }
         if let Some(review) = self.active_review.as_mut() {
             let generation = review.state.generation();
             if review.scroll_layout_ready {
@@ -20179,6 +20766,7 @@ impl Render for WalletWindow {
         if self.route == Route::Policies
             && !self.legal_gate
             && self.policy_editor.is_none()
+            && self.policy_loading.is_none()
             && self.policy_action_error.is_none()
         {
             let default_wallet = self.cached_accounts().ok().and_then(|accounts| {
@@ -20192,7 +20780,7 @@ impl Render for WalletWindow {
         let policy_editor_layout = self.route == Route::Policies
             && self.policy_editor.is_some()
             && self.policy_json_input.is_some();
-        self.refresh_guided_setup();
+        self.refresh_guided_setup(cx);
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
@@ -20550,6 +21138,7 @@ fn show_wallet_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(960.0), px(650.0)), cx)),
             window_min_size: Some(size(px(660.0), px(500.0))),
+            app_id: Some("ekubo-wallet-v2".into()),
             ..Default::default()
         },
         |window, cx| {
@@ -20653,37 +21242,51 @@ where
     tokio.block_on(async move { tokio::time::timeout(timeout, future).await })
 }
 
+fn close_service_session(
+    tokio: &tokio::runtime::Handle,
+    session: Option<ekubo_wallet_client::desktop_session::DesktopSession>,
+) -> Result<()> {
+    if let Some(session) = session {
+        block_on_with_timeout(tokio, DESKTOP_SERVER_SHUTDOWN_TIMEOUT, session.close())
+            .context("service session shutdown timed out")??;
+    }
+    Ok(())
+}
+
 fn perform_desktop_shutdown(
     server: Option<McpIpcServer>,
     tokio: &tokio::runtime::Handle,
     prepared: Option<PreparedUpdate>,
     instance_slot: Arc<Mutex<Option<SingleInstance>>>,
     data_dir: &Path,
-    walletconnect_farewells: &[tokio_util::sync::CancellationToken],
+    walletconnect: &DesktopDapps,
+    session: Option<ekubo_wallet_client::desktop_session::DesktopSession>,
 ) -> Result<bool> {
+    if let Err(error) = close_service_session(tokio, session) {
+        let _ = crate::release_check::record_update_diagnostic(
+            data_dir,
+            &format!("service session shutdown failed: {error:#}"),
+        );
+    }
     // First, because it is the only part of shutdown someone else is watching.
     // A dapp is told the session is over by a publish to the relay, and the
     // quit used to cancel the sessions and let the process exit out from under
     // that publish — so the dapp went on showing a wallet that had closed.
-    if !walletconnect_farewells.is_empty() {
-        let waited = block_on_with_timeout(
-            tokio,
-            DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT,
-            futures::future::join_all(
-                walletconnect_farewells
-                    .iter()
-                    .map(tokio_util::sync::CancellationToken::cancelled),
-            ),
-        );
-        if waited.is_err() {
-            let _ = crate::release_check::record_update_diagnostic(
-                data_dir,
-                &format!(
-                    "WalletConnect disconnect notices exceeded {} seconds",
-                    DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT.as_secs()
-                ),
-            );
-        }
+    let disconnected = block_on_with_timeout(
+        tokio,
+        DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT,
+        walletconnect.shutdown(),
+    );
+    let failure = match disconnected {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("WalletConnect shutdown failed: {error:#}")),
+        Err(_) => Some(format!(
+            "WalletConnect disconnect notices exceeded {} seconds",
+            DESKTOP_WALLETCONNECT_FAREWELL_TIMEOUT.as_secs()
+        )),
+    };
+    if let Some(failure) = failure {
+        let _ = crate::release_check::record_update_diagnostic(data_dir, &failure);
     }
     if let Some(server) = server {
         let stopped = block_on_with_timeout(tokio, DESKTOP_SERVER_SHUTDOWN_TIMEOUT, server.stop());
@@ -20743,12 +21346,26 @@ fn close_active_window(_: &CloseWindow, cx: &mut App) {
 
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     initialize_platform_notifications();
-    let config = crate::config::ConfigStore::production()?;
+    let data_dir = crate::config::default_data_dir()?;
     let (activation_tx, activation_rx) = tokio::sync::mpsc::unbounded_channel();
-    let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
+    let instance = match SingleInstance::acquire(&data_dir, activation_tx)? {
         InstanceOutcome::Primary(instance) => instance,
         InstanceOutcome::ActivatedExisting => return Ok(()),
     };
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    match crate::desktop_startup::installed() {
+        Ok(true) => {}
+        installation => {
+            let can_enroll = matches!(&installation, Ok(false));
+            let error = installation.err().map(|error| format!("{error:#}"));
+            let restart = service_setup::run(error, can_enroll)?;
+            drop(instance);
+            if restart {
+                service_setup::relaunch()?;
+            }
+            return Ok(());
+        }
+    }
     // Only after winning the instance lock, because the helper now lives at
     // one fixed path. A second launch of a *different* build would otherwise
     // overwrite the helper, hand the user off to the running primary, and
@@ -20757,20 +21374,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     // whole entitlement, so it is also what unlocks every later write.
     crate::agent_config::grant_helper_write_authority();
     crate::agent_config::install_bridge_helper()?;
-    let data_dir = config.data_dir().to_path_buf();
     let _ = crate::release_check::record_update_diagnostic(&data_dir, "wallet process started");
-    let authority = ApplicationAuthority::open(config)?;
-    let owner = authority.owner_api();
-    let agent = authority.agent_api();
-    let events = authority.events();
     let server_slot = Arc::new(Mutex::new(None::<McpIpcServer>));
     let pending_update = Arc::new(Mutex::new(None::<PreparedUpdate>));
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
-    let walletconnect = Arc::new(Mutex::new(
-        crate::walletconnect::WalletConnectManager::default(),
-    ));
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
-    let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
+    let (walletconnect_presenter, walletconnect_prompts) = ProposalPresenter::channel();
 
     // Built here rather than by `gpui_tokio::init` so that the runtime outlives
     // the GPUI application and can be *joined* on the way out; see
@@ -20781,6 +21390,93 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .enable_all()
         .build()
         .context("could not start the Tokio runtime")?;
+    let crate::desktop_startup::DesktopStartup {
+        owner,
+        dapps: walletconnect,
+        local,
+    } = match crate::desktop_startup::DesktopStartup::open(&tokio, walletconnect_presenter) {
+        Ok(startup) => startup,
+        Err(error) => {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                return service_setup::recover_connection(&error, None, &tokio, &instance_slot);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            return Err(error);
+        }
+    };
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let (move_status, accounts_empty) = {
+        match tokio.block_on(async {
+            Ok::<_, anyhow::Error>((
+                owner.legacy_move_status().await?,
+                owner.accounts().await?.is_empty(),
+            ))
+        }) {
+            Ok(state) => state,
+            Err(error) => {
+                return service_setup::recover_connection(
+                    &error,
+                    Some(&owner),
+                    &tokio,
+                    &instance_slot,
+                );
+            }
+        }
+    };
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if service_setup::show_move(
+        &move_status,
+        accounts_empty,
+        std::env::var_os(service_setup::CONTINUE_EMPTY).as_deref()
+            == Some(std::ffi::OsStr::new("1")),
+    ) {
+        // Before normal desktop initialization can change the fresh baseline.
+        // Continuing is an optional UI choice; core still enforces every move.
+        let result = service_setup::first_run(owner.clone(), move_status);
+        if let Err(error) = tokio.block_on(owner.disconnect_service()) {
+            tracing::warn!(%error, "first-run owner connection shutdown failed");
+        }
+        drop(owner);
+        drop(walletconnect);
+        drop(tokio);
+        release_single_instance(&instance_slot)?;
+        if result? {
+            service_setup::continue_to_wallet()?;
+        }
+        return Ok(());
+    }
+    let session =
+        match crate::desktop_startup::DesktopStartup::start_service_session(&owner, &tokio) {
+            Ok(session) => session,
+            Err(error) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    return service_setup::recover_connection(
+                        &error,
+                        Some(&owner),
+                        &tokio,
+                        &instance_slot,
+                    );
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                return Err(error);
+            }
+        };
+    let initial = match tokio.block_on(InitialDesktopState::capture(&owner)) {
+        Ok(initial) => initial,
+        Err(error) => {
+            if let Some(session) = session {
+                let _ = close_service_session(tokio.handle(), Some(session));
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            return service_setup::recover_connection(&error, Some(&owner), &tokio, &instance_slot);
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            return Err(error);
+        }
+    };
+    let service_session = Arc::new(Mutex::new(session));
+    let fallback_session = service_session.clone();
     let tokio_handle = tokio.handle().clone();
     // In a slot because the quit handler and the tail of this function both
     // have to be able to claim it; see `join_tokio_runtime`.
@@ -20808,7 +21504,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             apply_appearance_preference(
-                owner.appearance_preference().unwrap_or_default(),
+                initial.appearance.as_ref().copied().unwrap_or_default(),
                 None,
                 cx,
             );
@@ -20818,11 +21514,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let tray = Rc::new(RefCell::new(
                 PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
             ));
-            let initial_networks = owner.networks().unwrap_or_default();
-            let initial_testnet_mode = owner.testnet_mode().unwrap_or(false);
-            let initial_pending_reviews = owner.reviews(None).map_or(0, |queues| {
-                review_queue_decision_count(&queues, &initial_networks, initial_testnet_mode)
-            });
+            let initial_pending_reviews = initial.pending_reviews;
             if let Some(tray) = tray.borrow_mut().as_mut() {
                 tray.update(&TraySnapshot {
                     pending_reviews: initial_pending_reviews,
@@ -20839,61 +21531,23 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             // needs the Tokio runtime `gpui_tokio::init` just installed. It
             // holds an `AgentExecutionAuthority` — the same narrow signing
             // capability the MCP server gets — and never a key store.
-            {
-                let automation_config = owner.config().clone();
-                let automation_events = events.clone();
+            if let Some(local) = &local {
+                let automation_config = local.config.clone();
+                let automation_events = local.events.clone();
                 gpui_tokio::Tokio::spawn(cx, async move {
-                    let data_dir = automation_config.data_dir().to_path_buf();
-                    let stores = (|| {
-                        Ok::<_, anyhow::Error>((
-                            ekubo_wallet_core::automation_store::AutomationStore::production(
-                                &data_dir,
-                            )?,
-                            ekubo_wallet_core::pending::PendingStore::production(&data_dir)?,
-                            ekubo_wallet_core::policy_store::PolicyStore::production(&data_dir)?,
-                        ))
-                    })();
-                    let Ok((automations, pending, policies)) = stores else {
-                        // Nothing to run against. The wallet is fully usable
-                        // without automations, so this must not take the
-                        // application down with it.
-                        return;
-                    };
-                    let policies = Arc::new(Mutex::new(policies));
-                    let scheduler =
-                        ekubo_wallet_core::automation_scheduler::AutomationScheduler::new(
-                            ekubo_wallet_core::agent_authority::AgentExecutionAuthority::production(
-                                Arc::clone(&policies),
-                            ),
-                        );
-                    let automations = Mutex::new(automations);
-                    let pending = Mutex::new(pending);
-                    ekubo_wallet_core::automation_scheduler::drive(
-                        &scheduler,
-                        &automation_config,
-                        &automations,
-                        &pending,
-                        &policies,
-                        |outcome| {
-                            // Every pass that did something redraws the tab.
-                            // Publishing only on change keeps an idle wallet
-                            // from waking the UI on a timer.
-                            if outcome.is_ok() {
-                                automation_events.publish(
-                                    crate::events::DomainEventKind::AutomationsChanged {
-                                        wallet_id: String::new(),
-                                    },
-                                );
-                            }
-                        },
-                    )
-                    .await;
+                    if let Err(error) =
+                        crate::automation_runtime::run(automation_config, automation_events).await
+                    {
+                        // Preserve desktop startup when automations cannot open.
+                        tracing::warn!(%error, "automation supervisor could not start");
+                    }
                 })
                 .detach();
             }
             cx.set_global(DesktopRuntime {
                 _instance: instance_slot.clone(),
                 _server: server_slot.clone(),
+                _service_session: service_session.clone(),
                 _walletconnect: walletconnect.clone(),
                 _tray: tray.clone(),
                 _pending_update: pending_update.clone(),
@@ -20937,10 +21591,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 let update_data_dir = update_data_dir.clone();
                 let shutdown_instance = shutdown_instance.clone();
                 let quit_tokio_slot = Arc::clone(&quit_tokio_slot);
-                let farewells = shutdown_walletconnect
-                    .lock()
-                    .map(|mut sessions| sessions.disconnect_all())
-                    .unwrap_or_default();
+                let walletconnect = shutdown_walletconnect.clone();
                 let server = shutdown_server
                     .lock()
                     .ok()
@@ -20950,6 +21601,10 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     .lock()
                     .ok()
                     .and_then(|mut update| update.take());
+                let session = service_session
+                    .lock()
+                    .ok()
+                    .and_then(|mut session| session.take());
                 let update_requested = prepared.is_some();
                 if update_requested {
                     let _ = crate::release_check::record_update_diagnostic(
@@ -20970,7 +21625,8 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             prepared,
                             shutdown_instance,
                             &worker_data_dir,
-                            &farewells,
+                            &walletconnect,
+                            session,
                         )
                     });
                 async move {
@@ -21006,7 +21662,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &message,
                             );
                             tracing::error!(%error, "authorized update installation failed");
-                            let _ = notify_rust::Notification::new()
+                            let _ = crate::notifications::platform_notification()
                                 .summary("Ekubo Wallet update failed")
                                 .body(&format!(
                                     "{message}. Details: {}",
@@ -21026,9 +21682,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let wallet_view = cx.new(|cx| {
                 WalletWindow::new(
                     owner.clone(),
+                    initial,
                     review_presenter.clone(),
                     walletconnect.clone(),
-                    walletconnect_presenter.clone(),
                     tray.clone(),
                     pending_update.clone(),
                     &data_dir,
@@ -21072,6 +21728,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let review_window = window_slot.clone();
             cx.spawn(async move |cx| {
                 while let Some(prompt) = review_prompts.recv().await {
+                    if prompt.response.is_closed() {
+                        continue;
+                    }
                     review_view.update(cx, |view, cx| {
                         view.receive_transaction_prompt(prompt);
                         let route = view.active_review_route();
@@ -21084,35 +21743,48 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             .detach();
             let walletconnect_review_view = wallet_view.clone();
             let walletconnect_review_window = window_slot.clone();
-            cx.spawn(async move |cx| {
-                while let Some(prompt) = walletconnect_prompts.recv().await {
-                    walletconnect_review_view.update(cx, |view, cx| {
-                        view.receive_walletconnect_prompt(prompt);
-                        let route = view.active_review_route();
-                        view.set_route(route);
-                        cx.notify();
-                    });
-                    let _ = cx.update(|cx| {
-                        show_wallet_window(
-                            cx,
-                            &walletconnect_review_view,
-                            &walletconnect_review_window,
-                        )
-                    });
-                }
+            let proposal_backend = walletconnect.clone();
+            let (proposal_updates, mut incoming_proposal_updates) = tokio::sync::mpsc::channel(32);
+            gpui_tokio::Tokio::spawn(cx, async move {
+                proposal_backend
+                    .run_proposals(walletconnect_prompts, proposal_updates)
+                    .await;
             })
             .detach();
-            let mut view_events = events.subscribe();
+            cx.spawn(async move |cx| {
+                while let Some(update) = incoming_proposal_updates.recv().await {
+                    let arrived = walletconnect_review_view
+                        .update(cx, |view, cx| view.receive_dapp_proposal_update(update, cx));
+                    if arrived {
+                        let _ = cx.update(|cx| {
+                            show_wallet_window(
+                                cx,
+                                &walletconnect_review_view,
+                                &walletconnect_review_window,
+                            )
+                        });
+                    }
+                }
+                walletconnect_review_view.update(cx, |view, cx| {
+                    view.retire_closed_walletconnect_reviews(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+            let mut view_events = crate::desktop_events::DesktopEvents::subscribe(
+                &owner.clone(),
+                &gpui_tokio::Tokio::handle(cx),
+            );
             let event_view = wallet_view.clone();
             let event_owner = owner.clone();
             let event_tray = tray.clone();
-            let event_walletconnect = walletconnect.clone();
+            let event_walletconnect = wallet_view.read(cx).walletconnect.clone();
             let event_tokio = gpui_tokio::Tokio::handle(cx);
             cx.spawn(async move |cx| {
                 let mut mcp_online = false;
                 loop {
                     let changed = match view_events.recv().await {
-                        Ok(event) => {
+                        Ok(crate::desktop_events::DesktopEvent::Event(event)) => {
                             let transaction_request = match &event.kind {
                                 crate::events::DomainEventKind::Transaction {
                                     request_id, ..
@@ -21123,6 +21795,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind
                             {
                                 mcp_online = *online;
+                                event_view.update(cx, |view, cx| {
+                                    view.update_mcp_listener_status(*online, cx);
+                                });
                             }
                             let portfolio_changed = matches!(
                                 &event.kind,
@@ -21167,21 +21842,51 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             true
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                        Ok(crate::desktop_events::DesktopEvent::Refresh { mcp_online: status }) => {
+                            if let Some(online) = status {
+                                mcp_online = online;
+                                event_view.update(cx, |view, cx| {
+                                    view.update_mcp_listener_status(online, cx);
+                                });
+                            }
+                            event_view.update(cx, |view, cx| {
+                                view.invalidate_portfolio();
+                                view.reload_tokens(cx);
+                                view.reload_desktop_snapshot(cx);
+                                view.activity_inspections.clear();
+                                if let Some(request_id) = view.selected_record {
+                                    view.load_transaction_inspection(request_id, cx);
+                                }
+                                cx.notify();
+                            });
+                            true
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "desktop event stream stopped");
+                            event_view.update(cx, |view, cx| {
+                                view.service_lost(&format!("{error:#}"), cx);
+                                view.mcp_status =
+                                    McpGatewayStatus::Offline(format!("{error:#}").into());
+                                cx.notify();
+                            });
+                            if let Some(tray) = event_tray.borrow_mut().as_mut() {
+                                tray.set_mcp_online(false);
+                            }
+                            false
+                        }
                     };
                     if changed {
                         let owner = event_owner.clone();
                         let walletconnect = event_walletconnect.clone();
+                        let session_generation =
+                            event_view.update(cx, |view, _| view.walletconnect_sessions_generation);
                         let counts = event_tokio
-                            .spawn_blocking(move || {
-                                let sessions = walletconnect
-                                    .lock()
-                                    .map_or_else(|_| Vec::new(), |manager| manager.sessions());
-                                let networks = owner.networks().unwrap_or_default();
-                                let testnet_mode = owner.testnet_mode().unwrap_or(false);
+                            .spawn(async move {
+                                let sessions = walletconnect.sessions().await;
+                                let networks = owner.networks().await.unwrap_or_default();
+                                let testnet_mode = owner.testnet_mode().await.unwrap_or(false);
                                 (
-                                    owner.reviews(None).map_or(0, |queues| {
+                                    owner.reviews(None).await.map_or(0, |queues| {
                                         review_queue_decision_count(
                                             &queues,
                                             &networks,
@@ -21192,22 +21897,19 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 )
                             })
                             .await
-                            .unwrap_or_default();
+                            .unwrap_or_else(|error| (0, Err(error.into())));
+                        let session_count = event_view.update(cx, |view, cx| {
+                            view.update_walletconnect_sessions(session_generation, counts.1);
+                            cx.notify();
+                            view.approved_walletconnect_sessions().count()
+                        });
                         if let Some(tray) = event_tray.borrow_mut().as_mut() {
                             tray.update(&TraySnapshot {
                                 pending_reviews: counts.0,
                                 mcp_online,
-                                walletconnect_sessions: counts
-                                    .1
-                                    .iter()
-                                    .filter(|session| session.settled)
-                                    .count(),
+                                walletconnect_sessions: session_count,
                             });
                         }
-                        event_view.update(cx, |view, cx| {
-                            view.set_walletconnect_sessions(counts.1);
-                            cx.notify();
-                        });
                     } else {
                         break;
                     }
@@ -21256,25 +21958,27 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let (notification_clicks, mut clicked_notifications) =
                 tokio::sync::mpsc::unbounded_channel();
             let notification_service = PlatformNotificationService::new(notification_clicks);
-            let mut domain_events = events.subscribe();
+            let mut domain_events = crate::desktop_events::DesktopEvents::subscribe(
+                &owner.clone(),
+                &gpui_tokio::Tokio::handle(cx),
+            );
             let notification_owner = owner.clone();
             gpui_tokio::Tokio::spawn(cx, async move {
                 loop {
                     match domain_events.recv().await {
-                        Ok(event) => {
-                            let owner = notification_owner.clone();
-                            let described = tokio::task::spawn_blocking(move || {
-                                let context = notification_context(&owner, &event)?;
+                        Ok(crate::desktop_events::DesktopEvent::Event(event)) => {
+                            let described = async {
+                                let context =
+                                    notification_context(&notification_owner, &event).await?;
                                 let preferences = NotificationPreferences {
-                                    detailed_previews: owner
+                                    detailed_previews: notification_owner
                                         .detailed_notification_previews()
+                                        .await
                                         .ok()?,
                                 };
                                 Some((event, context, preferences))
-                            })
-                            .await
-                            .ok()
-                            .flatten();
+                            }
+                            .await;
                             if let Some(notification) =
                                 described
                                     .as_ref()
@@ -21285,8 +21989,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 notification_service.show(notification);
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Ok(crate::desktop_events::DesktopEvent::Refresh { .. }) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "notification event stream stopped");
+                            break;
+                        }
                     }
                 }
             })
@@ -21325,35 +22032,47 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             })
             .detach();
 
-            let slot = server_slot.clone();
-            let status_tray = tray.clone();
-            let server_events = events.clone();
-            let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                McpIpcServer::start(&data_dir, agent, server_events)
-            });
-            cx.spawn(async move |cx| match server_task.await {
-                Ok(server) => {
-                    if let Ok(mut guard) = slot.lock() {
-                        *guard = Some(server);
+            if let Some(local) = local {
+                let slot = server_slot.clone();
+                let status_tray = tray.clone();
+                let server_events = local.events;
+                let agent = local.agent;
+                let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    McpIpcServer::start(&data_dir, agent, server_events)
+                });
+                cx.spawn(async move |cx| match server_task.await {
+                    Ok(server) => {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = Some(server);
+                        }
+                        if let Some(tray) = status_tray.borrow_mut().as_mut() {
+                            tray.set_mcp_online(true);
+                        }
+                        wallet_view.update(cx, |view, cx| {
+                            view.mcp_status = McpGatewayStatus::Online;
+                            cx.notify();
+                        });
                     }
-                    if let Some(tray) = status_tray.borrow_mut().as_mut() {
-                        tray.set_mcp_online(true);
-                    }
-                    wallet_view.update(cx, |view, cx| {
-                        view.mcp_status = McpGatewayStatus::Online;
+                    Err(error) => wallet_view.update(cx, |view, cx| {
+                        view.mcp_status = McpGatewayStatus::Offline(format!("{error:#}").into());
                         cx.notify();
-                    });
-                }
-                Err(error) => wallet_view.update(cx, |view, cx| {
-                    view.mcp_status = McpGatewayStatus::Offline(format!("{error:#}").into());
-                    cx.notify();
-                }),
-            })
-            .detach();
+                    }),
+                })
+                .detach();
+            }
         });
     // Ordinarily a no-op: the quit handler has already claimed the runtime by
     // the time control gets here. This covers an exit that never ran one, and
     // it is the last thing between here and `main` returning into `exit`.
+    if let Some(session) = fallback_session
+        .lock()
+        .ok()
+        .and_then(|mut session| session.take())
+        && let Ok(runtime) = tokio_slot.lock()
+        && let Some(runtime) = runtime.as_ref()
+    {
+        let _ = close_service_session(runtime.handle(), Some(session));
+    }
     join_tokio_runtime(&tokio_slot, &shutdown_data_dir);
     Ok(())
 }

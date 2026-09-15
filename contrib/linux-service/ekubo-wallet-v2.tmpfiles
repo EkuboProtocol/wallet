@@ -1,0 +1,8 @@
+# Product-scoped root-owned parents only; never recursively repair a profile.
+d /etc/ekubo-wallet-v2 0755 root root -
+d /etc/ekubo-wallet-v2/owners 0755 root root -
+d /etc/ekubo-wallet-v2/pending 0755 root root -
+d /etc/ekubo-wallet-v2/relay-confirmed 0755 root root -
+d /var/lib/ekubo-wallet-v2 0755 root root -
+d /var/lib/ekubo-wallet-v2/pending 0755 root root -
+d /run/ekubo-wallet-v2 0755 root root -

@@ -23,6 +23,13 @@ pub mod config;
 pub mod core;
 mod credential_store;
 pub mod custody;
+pub mod custody_envelope;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod custody_provisioning;
+pub mod custody_relay;
+pub mod custody_staging;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod database_staging;
 pub mod default_tokens;
 pub mod desktop_store;
 /// Debug-build-only scratch sessions. Never compiled into a release binary.
@@ -33,20 +40,39 @@ pub mod fork;
 pub mod fourbyte;
 pub mod human_presence;
 pub mod input_validation;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod legacy_move;
 pub mod legal;
+#[cfg(target_os = "linux")]
+pub mod linux_provisioning_client;
+#[cfg(target_os = "linux")]
+pub mod linux_provisioning_io;
 pub mod mcp_companions;
 pub mod message;
 pub mod networks;
 pub mod orchestrator;
+pub mod owner_call_monitor;
+pub mod owner_framing;
+pub mod owner_stream_protocol;
 pub mod pending;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod pending_profile;
 pub mod plan_fetch;
 pub mod policy_store;
 #[cfg(target_os = "linux")]
 pub mod polkit;
+pub mod preview_evidence;
+pub mod provisioning_io;
 pub mod reconcile;
 pub mod rpc;
 pub mod sanitize;
 mod sealed;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod service_custody;
+#[cfg(target_os = "linux")]
+pub mod service_presence;
+#[cfg(target_os = "linux")]
+pub mod service_storage;
 pub(crate) mod signature_requests;
 pub mod signature_review;
 pub mod simulation;
@@ -57,3 +83,45 @@ pub mod token_prices;
 pub mod token_store;
 pub mod typed_data;
 pub mod update_trust;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_service_config;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_service_identity;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_service_manager;
+
+#[cfg(target_os = "windows")]
+mod windows_auth_image;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_owner_pipe;
+#[cfg(any(target_os = "windows", test))]
+mod windows_security;
+#[cfg(target_os = "windows")]
+pub mod windows_service_custody;
+#[cfg(target_os = "windows")]
+pub mod windows_service_presence;
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_service_storage;
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod service_profile_lock;
+
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_provisioning_pipe;
+
+#[cfg(target_os = "windows")]
+pub mod windows_fresh_setup;
+#[cfg(target_os = "windows")]
+pub mod windows_provisioning_client;
+
+#[cfg(target_os = "linux")]
+pub mod linux_relay_handoff;
+
+#[cfg(any(target_os = "windows", test))]
+pub mod windows_relay_pipe;
+
+#[cfg(target_os = "windows")]
+pub mod windows_relay_handoff;
+
+#[cfg(any(target_os = "windows", test))]
+mod relay_frame;

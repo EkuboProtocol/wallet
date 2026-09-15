@@ -112,7 +112,7 @@ pub(super) fn invalid_request(message: &Value) -> Option<Vec<u8>> {
     None
 }
 
-fn offline_discovery() -> Value {
+pub(super) fn offline_discovery() -> Value {
     json!({
         "supportedVersions":[PROTOCOL],
         // Unlike the legacy path, modern clients may rediscover after startup.
@@ -121,7 +121,7 @@ fn offline_discovery() -> Value {
         "instructions":"Ekubo Wallet is not running. Retry discovery or a catalog request after starting the wallet application.",
         "resultType":"complete","ttlMs":0,"cacheScope":"private",
         "_meta":{
-            SERVER_INFO_KEY:{"name":"ekubo-wallet-mcp-bridge","version":BUILD_VERSION},
+            SERVER_INFO_KEY:{"name":BRIDGE_SERVER_NAME,"version":BUILD_VERSION},
             BRIDGE_PROTOCOL_META_KEY:BRIDGE_PROTOCOL_VERSION
         }
     })

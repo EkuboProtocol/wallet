@@ -140,7 +140,7 @@ SOFTWARE.
 ## Apache-2.0 OR ISC OR MIT
 
 - hyper-rustls 0.27.9 — https://github.com/rustls/hyper-rustls
-- rustls 0.23.43 — https://github.com/rustls/rustls
+- rustls 0.23.45 — https://github.com/rustls/rustls
 - rustls-native-certs 0.8.4 — https://github.com/rustls/rustls-native-certs
 - rustls-pemfile 2.2.0 — https://github.com/rustls/pemfile
 
@@ -389,16 +389,16 @@ SOFTWARE.
 - libloading 0.7.4 — Simonas Kazlauskas <libloading@kazlauskas.me> — https://github.com/nagisa/rust_libloading/
 - libloading 0.8.9 — Simonas Kazlauskas <libloading@kazlauskas.me> — https://github.com/nagisa/rust_libloading/
 - libloading 0.9.0 — Simonas Kazlauskas <libloading@kazlauskas.me> — https://github.com/nagisa/rust_libloading/
-- rustls-webpki 0.103.13 — https://github.com/rustls/webpki
+- rustls-webpki 0.103.15 — https://github.com/rustls/webpki
 - untrusted 0.9.0 — Brian Smith <brian@briansmith.org> — https://github.com/briansmith/untrusted
 
 ## ISC AND (Apache-2.0 OR ISC)
 
-- aws-lc-rs 1.17.3 — AWS-LibCrypto — https://github.com/aws/aws-lc-rs
+- aws-lc-rs 1.18.1 — AWS-LibCrypto — https://github.com/aws/aws-lc-rs
 
 ## ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)
 
-- aws-lc-sys 0.43.0 — AWS-LC — https://github.com/aws/aws-lc-rs
+- aws-lc-sys 0.45.0 — AWS-LC — https://github.com/aws/aws-lc-rs
 
 ## LGPL-2.1
 
@@ -2689,7 +2689,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: aws-lc-rs 1.17.3
+## License text for: aws-lc-rs 1.18.1
 
 ```text
 SPDX-License-Identifier: ISC AND (Apache-2.0 OR ISC)
@@ -2896,7 +2896,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## License text for: aws-lc-sys 0.43.0
+## License text for: aws-lc-sys 0.45.0
 
 ```text
 AWS Libcrypto (AWS-LC)
@@ -10484,7 +10484,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## License text for: hyper-rustls 0.27.9, rustls 0.23.43
+## License text for: hyper-rustls 0.27.9, rustls 0.23.45
 
 ```text
 ISC License (ISC)
@@ -14555,7 +14555,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: rustls-webpki 0.103.13
+## License text for: rustls-webpki 0.103.15
 
 ```text
 Except as otherwise noted, this project is licensed under the following

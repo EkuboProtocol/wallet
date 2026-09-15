@@ -5,6 +5,11 @@ use std::os::unix::process::ExitStatusExt;
 
 #[test]
 fn the_shipped_definition_declares_the_action_the_backend_asks_for() {
+    assert_eq!(ACTION_ID, "com.ekubo.wallet.v2.human-presence");
+    assert_eq!(POLICY_FILE_NAME, "com.ekubo.wallet.v2.policy");
+    assert!(POLICY_DOCUMENT.contains("unix-user:ekubo-wallet-v2</annotate>"));
+    assert!(!POLICY_DOCUMENT.contains("<allow_active>auth_self_keep</allow_active>"));
+    assert!(!POLICY_DOCUMENT.contains("<action id=\"com.ekubo.wallet.human-presence\">"));
     assert!(
         POLICY_DOCUMENT.contains(&format!("<action id=\"{ACTION_ID}\">")),
         "human_presence.rs and contrib/polkit must name the same action"
@@ -34,6 +39,22 @@ fn the_exported_copy_is_this_builds_document_and_replaces_a_stale_one() {
 }
 
 #[test]
+fn exporting_v2_does_not_replace_the_v1_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy = directory.path().join("com.ekubo.wallet.policy");
+    std::fs::write(&legacy, "legacy policy bytes").unwrap();
+    export_policy(directory.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(legacy).unwrap(),
+        "legacy policy bytes"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join(POLICY_FILE_NAME)).unwrap(),
+        POLICY_DOCUMENT
+    );
+}
+
+#[test]
 fn a_link_planted_at_the_export_name_is_refused_not_followed() {
     let directory = tempfile::tempdir().unwrap();
     let victim = directory.path().join("wallet.db");
@@ -58,14 +79,14 @@ fn the_manual_command_installs_the_exported_file_to_the_same_place() {
     assert_eq!(
         command,
         "sudo install -m 644 '/home/o wner/.local/state/it'\\''s.policy' \
-         /usr/share/polkit-1/actions/com.ekubo.wallet.policy"
+         /usr/share/polkit-1/actions/com.ekubo.wallet.v2.policy"
     );
     assert_eq!(
         manual_install_command(Path::new(
             "/home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy"
         )),
         "sudo install -m 644 /home/owner/.local/share/ekubo-wallet/com.ekubo.wallet.policy \
-         /usr/share/polkit-1/actions/com.ekubo.wallet.policy"
+         /usr/share/polkit-1/actions/com.ekubo.wallet.v2.policy"
     );
 }
 

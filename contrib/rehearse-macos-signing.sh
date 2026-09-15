@@ -48,7 +48,7 @@ fi
 intermediate="$repo_root/.github/apple/DeveloperIDG2CA.cer"
 expected_digest=f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
 
-binary="${1:-$repo_root/target/release/ekubo-wallet}"
+binary="${1:-$repo_root/target/release/ekubo-wallet-v2}"
 
 for required in "$p12" "$p8" "$intermediate"; do
   if [ ! -f "$required" ]; then
@@ -127,7 +127,7 @@ fi
 echo "==> $valid valid identity in the temporary keychain"
 
 echo "==> signing with hardened runtime and a secure timestamp"
-staged="$work/ekubo-wallet"
+staged="$work/ekubo-wallet-v2"
 cp "$binary" "$staged"
 codesign --force --options runtime --timestamp --sign "$identity" "$staged"
 codesign --verify --strict --verbose=2 "$staged"
@@ -142,9 +142,9 @@ security list-keychains -d user -s $original_keychains
 echo "==> keychain search list restored; notarization does not need it"
 
 echo "==> packaging exactly as the release job does"
-package="$work/ekubo-wallet-rehearsal"
+package="$work/ekubo-wallet-v2-rehearsal"
 mkdir -p "$package"
-install -m 0755 "$staged" "$package/ekubo-wallet"
+install -m 0755 "$staged" "$package/ekubo-wallet-v2"
 install -m 0644 "$repo_root/LICENSE" "$package/LICENSE"
 install -m 0644 "$repo_root/README.md" "$package/README.md"
 ditto -c -k --sequesterRsrc --keepParent "$package" "$package.zip"

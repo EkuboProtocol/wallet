@@ -1,10 +1,12 @@
-//! Whether a newer signed desktop release exists.
+//! Whether the v2 channel advertises a newer stable desktop release.
 //!
 //! This module answers "am I behind?" for the Updates screen and the read-only
 //! `wallet_check_for_updates` MCP tool. The security kernel owns authenticated
 //! update discovery, download, authorization, and installation. The release tag
-//! used for the informational check is validated before it enters a URL. Every
-//! failure here — offline, rate limited, or malformed JSON —
+//! used for the informational check is validated before it enters a URL. The
+//! manifest read here is unauthenticated metadata, never signature verification
+//! or installation authority; those checks belong to the security kernel.
+//! Every failure here — offline, rate limited, or malformed JSON —
 //! resolves to "no update known" rather than an error, because nothing that
 //! depends on this answer should fail when the answer is merely unavailable.
 
@@ -237,7 +239,7 @@ pub struct ReleaseCheck {
     /// True only when both versions parsed and the published one is newer.
     /// An unknown answer is never reported as an update.
     pub update_available: bool,
-    /// The repository's stable latest-release page.
+    /// The version-specific release page advertised by the v2 manifest.
     pub release_url: Option<String>,
     /// When `latest_version` was learned from the release endpoint.
     pub checked_at: Option<DateTime<Utc>>,
@@ -273,8 +275,9 @@ the wallet. Do not retry, and do not tell the user to upgrade."
             return None;
         }
         Some(format!(
-            "Ekubo Wallet {latest} is available; you are running {}. Open Updates to install the verified stable release.",
-            self.installed_version
+            "Ekubo Wallet {latest} is available; you are running {}. {}",
+            self.installed_version,
+            update_guidance()
         ))
     }
 }
@@ -287,6 +290,35 @@ fn valid_tag(tag: &str) -> bool {
         && tag
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+}
+
+/// Syntax and channel scoping only: this does not authenticate a release.
+fn stable_v2_tag(version: &str) -> Option<String> {
+    let version = version.trim();
+    let version = semver::Version::parse(version.strip_prefix('v').unwrap_or(version)).ok()?;
+    if version.major != 2 || !version.pre.is_empty() {
+        return None;
+    }
+    let tag = format!("v{version}");
+    valid_tag(&tag).then_some(tag)
+}
+
+fn manifest_tag(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("product")?.as_str()? != "org.ekubo.wallet.v2"
+        || value.get("channel")?.as_str()? != "v2"
+    {
+        return None;
+    }
+    stable_v2_tag(value.get("version")?.as_str()?)
+}
+
+fn update_guidance() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Open Updates in Ekubo Wallet to download, verify, and install the release after explicit confirmation."
+    } else {
+        "Open Updates in Ekubo Wallet for the signed manual installer for Linux or Windows."
+    }
 }
 
 /// A repository, as `owner/name`. Read from the environment rather than the
@@ -311,6 +343,12 @@ fn repository() -> String {
         .ok()
         .filter(|repository| valid_repository(repository))
         .unwrap_or_else(|| DEFAULT_REPOSITORY.to_string())
+}
+
+fn manifest_url(repository: &str) -> Option<String> {
+    valid_repository(repository).then(|| {
+        format!("https://github.com/{repository}/releases/download/v2-channel/latest-v2.json")
+    })
 }
 
 fn skip_requested() -> bool {
@@ -374,7 +412,7 @@ fn is_newer(installed: &str, latest: &str) -> Option<bool> {
 /// JSON document is not a release, and the whole call is already best-effort.
 async fn bounded_body(mut response: reqwest::Response) -> Option<String> {
     let mut body = Vec::new();
-    while let Ok(Some(chunk)) = response.chunk().await {
+    while let Some(chunk) = response.chunk().await.ok()? {
         // Compared as `u64`, the type the ceiling is declared in. Casting it
         // down would truncate on a 32-bit target, which is the one place a
         // ceiling silently becoming a different number matters.
@@ -395,10 +433,8 @@ async fn fetch_latest_tag(repository: String) -> Option<String> {
         .build()
         .ok()?;
     let response = client
-        .get(format!(
-            "https://api.github.com/repos/{repository}/releases/latest"
-        ))
-        .header("Accept", "application/vnd.github+json")
+        .get(manifest_url(&repository)?)
+        .header("Accept", "application/json")
         .send()
         .await
         .ok()?;
@@ -412,9 +448,7 @@ async fn fetch_latest_tag(repository: String) -> Option<String> {
         return None;
     }
     let body = bounded_body(response).await?;
-    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let tag = value.get("tag_name")?.as_str()?.trim().to_string();
-    valid_tag(&tag).then_some(tag)
+    manifest_tag(&body)
 }
 
 /// The check, with the network call and the clock supplied by the caller so
@@ -436,7 +470,10 @@ where
 
     // Validated here rather than only in the fetch, so the guard sits where
     // the tag is used. Rejecting one is the same as being offline.
-    let Some(tag) = fetch().await.filter(|tag| valid_tag(tag)) else {
+    if !valid_repository(repository) {
+        return ReleaseCheck::unknown(installed_version, CheckSource::Unavailable);
+    }
+    let Some(tag) = fetch().await.and_then(|tag| stable_v2_tag(&tag)) else {
         return ReleaseCheck::unknown(installed_version, CheckSource::Unavailable);
     };
 
@@ -444,10 +481,12 @@ where
         return ReleaseCheck::unknown(installed_version, CheckSource::Network);
     };
 
-    let release_url = format!("https://github.com/{repository}/releases/latest");
+    let release_url = format!("https://github.com/{repository}/releases/tag/{tag}");
     let instruction = if update_available {
-        "A newer stable desktop release is published. Tell the user to open Updates in Ekubo Wallet, where the wallet can download, verify, and install it after explicit confirmation."
-            .to_string()
+        format!(
+            "The v2 channel advertises a newer stable desktop release. This informational check does not verify its signature or authorize installation. {}",
+            update_guidance()
+        )
     } else {
         "This build is the latest published release. Say so if asked; there is nothing to do."
             .to_string()

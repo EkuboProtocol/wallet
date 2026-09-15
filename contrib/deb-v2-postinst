@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+if [ "$1" = configure ]; then
+    systemd-sysusers /usr/lib/sysusers.d/ekubo-wallet-v2.conf
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/ekubo-wallet-v2.conf
+    systemctl daemon-reload
+    /usr/lib/ekubo-wallet-v2/install-profile --restore-activations
+    systemctl reload dbus
+    # try-restart affects only running v2 instances, never enrolls or resets data.
+    systemctl try-restart 'ekubo-wallet-v2@*.service'
+fi

@@ -23,12 +23,12 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName", "Ekubo\0"
-            VALUE "FileDescription", "Ekubo Wallet\0"
+            VALUE "FileDescription", "Ekubo Wallet 2\0"
             VALUE "FileVersion", EKUBO_FILE_VERSION_STRING
-            VALUE "InternalName", "ekubo-wallet\0"
+            VALUE "InternalName", "ekubo-wallet-v2\0"
             VALUE "LegalCopyright", "Copyright Ekubo contributors\0"
-            VALUE "OriginalFilename", "ekubo-wallet.exe\0"
-            VALUE "ProductName", "Ekubo Wallet\0"
+            VALUE "OriginalFilename", "ekubo-wallet-v2.exe\0"
+            VALUE "ProductName", "Ekubo Wallet 2\0"
             VALUE "ProductVersion", EKUBO_FILE_VERSION_STRING
         END
     END

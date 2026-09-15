@@ -1,0 +1,648 @@
+//! Closed owner operations for desktop IPC. There is no generic SQL, signing,
+//! credential access, or client-supplied authorization proof in this protocol.
+
+use crate::{authority::OwnerApi, dapp_runtime::DappRuntime};
+use ekubo_wallet_client::activity::{
+    OwnerActivityRecord, OwnerActivityReference, OwnerReviewRecord, OwnerReviewReference,
+};
+use serde_json::Value;
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+pub(crate) use crate::linux_owner_rpc::LinuxOwnerInterface;
+#[cfg(target_os = "linux")]
+pub(crate) use ekubo_wallet_client::owner_protocol::OBJECT_PATH;
+pub use ekubo_wallet_client::owner_protocol::Request;
+
+pub(crate) struct OwnerDispatcher {
+    owner: OwnerApi,
+    dapps: Arc<DappRuntime>,
+    transactions: crate::transaction_reviews::TransactionReviews,
+    previews: crate::transaction_previews::TransactionPreviews,
+    reads: crate::preview_transfer::PreviewTransfers,
+}
+
+impl Drop for OwnerDispatcher {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+impl OwnerDispatcher {
+    /// Encode authenticated replies directly. Exported material never enters
+    /// the ordinary JSON Value tree, where its strings would not erase on drop.
+    pub(crate) async fn encode(
+        &self,
+        request: Request,
+    ) -> anyhow::Result<zeroize::Zeroizing<String>> {
+        let private_key_export = matches!(&request, Request::BeginPrivateKeyExport { .. });
+        let encoded = match request {
+            Request::BeginPrivateKeyExport { wallet_id } => {
+                let lease = self.owner.begin_private_key_export(&wallet_id).await?;
+                serde_json::to_string(&lease)?
+            }
+            request => serde_json::to_string(&self.dispatch(request).await?)?,
+        };
+        // Record-bearing mutation replies can be large too. Capture the result
+        // once, then page that immutable result without replaying the mutation.
+        // Key exports are tiny and never enter the transfer store.
+        let encoded = if !private_key_export
+            && encoded.len() > ekubo_wallet_client::framing::MAX_FRAME_BYTES / 8
+        {
+            serde_json::to_string(&ekubo_wallet_client::preview_page::RecordTransferReply {
+                owner_record_transfer: self.reads.begin(encoded)?,
+            })?
+        } else {
+            encoded
+        };
+        Ok(zeroize::Zeroizing::new(encoded))
+    }
+
+    /// Platform hosts close pending reviews before tearing down their owner
+    /// transport. This also cancels preparation before any frame is published.
+    pub(crate) fn shutdown(&self) -> anyhow::Result<()> {
+        self.previews.shutdown();
+        self.reads.clear();
+        self.transactions.shutdown()
+    }
+
+    // Platform adapters establish caller identity and native authentication
+    // context before entering this shared dispatcher. No transport handle or
+    // Linux UID is part of the wallet operation protocol.
+    pub(crate) fn new(owner: OwnerApi, dapps: Arc<DappRuntime>) -> Self {
+        Self {
+            owner,
+            dapps,
+            transactions: crate::transaction_reviews::TransactionReviews::default(),
+            previews: crate::transaction_previews::TransactionPreviews::default(),
+            reads: crate::preview_transfer::PreviewTransfers::default(),
+        }
+    }
+
+    fn read_reply(&self, value: &impl serde::Serialize) -> anyhow::Result<Value> {
+        // Reuse the service's expiring UTF-8 preview transfer. Clients discard
+        // these read handles when their authenticated connection closes.
+        Ok(serde_json::to_value(
+            self.reads.begin(serde_json::to_string(value)?)?,
+        )?)
+    }
+
+    fn review_record(&self, reference: &OwnerReviewReference) -> anyhow::Result<OwnerReviewRecord> {
+        let row = match reference {
+            OwnerReviewReference::Activity(OwnerActivityReference::Transaction(id)) => {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::Transaction(Box::new(
+                    self.owner.transaction(*id)?,
+                ))))
+            }
+            OwnerReviewReference::Activity(OwnerActivityReference::Message(id)) => {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::Message(
+                    self.owner.message(*id)?,
+                )))
+            }
+            OwnerReviewReference::Activity(OwnerActivityReference::TypedData(id)) => {
+                OwnerReviewRecord::Activity(Box::new(OwnerActivityRecord::TypedData(
+                    self.owner.typed_data(*id)?,
+                )))
+            }
+            _ => self
+                .review_proposals(std::slice::from_ref(reference))?
+                .remove(reference)
+                .ok_or_else(|| anyhow::anyhow!("proposal changed; refresh reviews"))?,
+        };
+        anyhow::ensure!(
+            row.reference() == *reference,
+            "review record identity changed"
+        );
+        Ok(row)
+    }
+
+    fn review_batch(&self, references: &[OwnerReviewReference]) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            (1..=64).contains(&references.len()),
+            "review batches require between 1 and 64 selectors"
+        );
+        // Read each proposal store once per batch, not once per token. Activity
+        // rows remain lazy so one large plan stops the bounded prefix promptly.
+        let proposals = self.review_proposals(references)?;
+        crate::owner_activity_batch::bounded_batch(references.iter().map(|reference| {
+            if matches!(reference, OwnerReviewReference::Activity(_)) {
+                self.review_record(reference)
+            } else {
+                proposals
+                    .get(reference)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("proposal changed; refresh reviews"))
+            }
+        }))
+    }
+
+    fn review_proposals(
+        &self,
+        references: &[OwnerReviewReference],
+    ) -> anyhow::Result<std::collections::BTreeMap<OwnerReviewReference, OwnerReviewRecord>> {
+        let mut proposals = Vec::new();
+        if references
+            .iter()
+            .any(|reference| matches!(reference, OwnerReviewReference::Policy(_)))
+        {
+            proposals.extend(
+                self.owner
+                    .policy_proposals()?
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Policy(Box::new(row))),
+            );
+        }
+        if references
+            .iter()
+            .any(|reference| matches!(reference, OwnerReviewReference::Network(_)))
+        {
+            proposals.extend(
+                self.owner
+                    .network_proposals()?
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Network(Box::new(row))),
+            );
+        }
+        if references
+            .iter()
+            .any(|reference| matches!(reference, OwnerReviewReference::Token { .. }))
+        {
+            proposals.extend(
+                self.owner
+                    .token_proposals()?
+                    .into_iter()
+                    .map(|row| OwnerReviewRecord::Token(Box::new(row))),
+            );
+        }
+        Ok(proposals
+            .into_iter()
+            .map(|record| (record.reference(), record))
+            .collect())
+    }
+
+    fn transaction_records(
+        &self,
+        ids: &[uuid::Uuid],
+    ) -> anyhow::Result<Vec<ekubo_wallet_core::pending::PendingTransaction>> {
+        anyhow::ensure!(
+            ids.len() <= 1000,
+            "at most 1000 transaction records can be read at once"
+        );
+        ids.iter().map(|id| self.owner.transaction(*id)).collect()
+    }
+
+    async fn remove_account(
+        &self,
+        reviewed: &ekubo_wallet_core::config::WalletMetadata,
+        reviewed_identity: &str,
+    ) -> anyhow::Result<ekubo_wallet_core::config::WalletMetadata> {
+        let current = self.owner.account_removal_document(&reviewed.id)?;
+        anyhow::ensure!(
+            current.wallet.instance_id == reviewed.instance_id
+                && current.wallet.address == reviewed.address
+                && current.document.identity == reviewed_identity,
+            "account changed; review its removal again"
+        );
+        // Keep this future on the initiating owner call. Core authenticates
+        // natively and rechecks the exact account under its lifecycle lock.
+        self.owner.remove_account(&current.wallet).await
+    }
+
+    pub(crate) async fn dispatch(&self, request: Request) -> anyhow::Result<Value> {
+        let owner = &self.owner;
+        let reviews = self.dapps.reviews();
+        Ok(match request {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            Request::LegacyMove(command) => legacy_move_reply(command).await?,
+            Request::LegacyMoveStatus => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    serde_json::to_value(ekubo_wallet_core::legacy_move::move_status()?)?
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                anyhow::bail!("legacy moves are unavailable on this platform")
+            }
+            request @ (Request::Networks
+            | Request::NetworkByChainId { .. }
+            | Request::ResetNetworksToDefaults { .. }
+            | Request::NetworkProposals
+            | Request::AcceptNetworkProposal { .. }
+            | Request::RejectNetworkProposal { .. }
+            | Request::AddNetwork { .. }
+            | Request::ReplaceNetwork { .. }
+            | Request::SetNetworkDisabled { .. }) => self.dispatch_network(request).await?,
+            Request::BeginPrivateKeyExport { .. } => {
+                anyhow::bail!("private-key export requires the direct reply encoder")
+            }
+            Request::ImportAccount { wallet_id, key } => {
+                serde_json::to_value(owner.import_account(&wallet_id, key.into_material()?)?)?
+            }
+            Request::CreateAccount { wallet_id } => {
+                // Preserve the desktop's initial policy. Creating an account
+                // must not become a way to install caller-selected permissions.
+                serde_json::to_value(owner.create_account(
+                    &wallet_id,
+                    &ekubo_wallet_core::core::policy::WalletPolicy::require_approval_for_everything(
+                    ),
+                )?)?
+            }
+            Request::AccountRemovalDocument { wallet_id } => {
+                serde_json::to_value(owner.account_removal_document(&wallet_id)?)?
+            }
+            Request::RemoveAccount {
+                reviewed,
+                reviewed_identity,
+            } => serde_json::to_value(self.remove_account(&reviewed, &reviewed_identity).await?)?,
+            Request::ReviewTransaction {
+                request_id,
+                review_id,
+            } => serde_json::to_value(
+                Box::pin(self.transactions.review(owner, request_id, review_id)).await?,
+            )?,
+            Request::TransactionReviewFrame {
+                request_id,
+                review_id,
+            } => self.read_reply(&self.transactions.frame(request_id, review_id)?)?,
+            Request::DecideTransactionReview {
+                request_id,
+                review_id,
+                frame_id,
+                reviewed_identity,
+                choice,
+            } => {
+                self.transactions.decide(
+                    request_id,
+                    review_id,
+                    frame_id,
+                    &reviewed_identity,
+                    choice,
+                    &owner.event_bus(),
+                )?;
+                Value::Null
+            }
+            Request::SignMessage {
+                request_id,
+                reviewed_digest,
+            } => serde_json::to_value(owner.sign_message(request_id, &reviewed_digest).await?)?,
+            Request::RejectMessage { request_id } => {
+                serde_json::to_value(owner.reject_message(request_id)?)?
+            }
+            Request::SignTypedData {
+                request_id,
+                reviewed_digest,
+            } => serde_json::to_value(owner.sign_typed_data(request_id, &reviewed_digest).await?)?,
+            Request::RejectTypedData { request_id } => {
+                serde_json::to_value(owner.reject_typed_data(request_id)?)?
+            }
+            Request::DiscardUnsentTransaction { request_id } => {
+                serde_json::to_value(owner.discard_unsent_transaction(request_id)?)?
+            }
+            Request::TransactionInspection { request_id } => {
+                serde_json::to_value(Box::pin(owner.transaction_inspection(request_id)).await?)?
+            }
+            Request::RebroadcastTransaction { request_id } => {
+                serde_json::to_value(owner.rebroadcast_transaction(request_id).await?)?
+            }
+            Request::AttemptTransactionCancellation { request_id } => {
+                serde_json::to_value(owner.attempt_transaction_cancellation(request_id).await?)?
+            }
+            Request::Portfolio { wallet_id } => {
+                serde_json::to_value(owner.portfolio(wallet_id.as_deref()).await?)?
+            }
+            Request::RefreshTransaction { request_id } => {
+                serde_json::to_value(owner.refresh_transaction(request_id).await?)?
+            }
+            Request::Transactions { wallet_id, limit } => {
+                serde_json::to_value(owner.transactions(wallet_id.as_deref(), limit)?)?
+            }
+            Request::ClearActivityHistory => {
+                serde_json::to_value(owner.clear_activity_history().await?)?
+            }
+            Request::Activity { wallet_id, limit } => {
+                serde_json::to_value(owner.activity(wallet_id.as_deref(), limit)?)?
+            }
+            Request::ActivityIndex { wallet_id, limit } => serde_json::to_value(
+                owner
+                    .activity(wallet_id.as_deref(), limit)?
+                    .iter()
+                    .map(ekubo_wallet_client::activity::OwnerActivityRecord::reference)
+                    .collect::<Vec<_>>(),
+            )?,
+            Request::ActivityRecords { references } => {
+                crate::owner_activity_batch::read(owner, &references)?
+            }
+            Request::ActivityRecord { request_id } => {
+                self.read_reply(&owner.activity_record(request_id)?)?
+            }
+            Request::ActivitySources => serde_json::to_value(owner.activity_sources()?)?,
+            Request::Transaction { request_id } => {
+                self.read_reply(&owner.transaction(request_id)?)?
+            }
+            Request::Message { request_id } => self.read_reply(&owner.message(request_id)?)?,
+            Request::TypedData { request_id } => self.read_reply(&owner.typed_data(request_id)?)?,
+            Request::Reviews { wallet_id } => {
+                let index = owner
+                    .reviews(wallet_id.as_deref())?
+                    .into_records()
+                    .iter()
+                    .map(OwnerReviewRecord::reference)
+                    .collect::<Vec<_>>();
+                self.read_reply(&index)?
+            }
+            Request::ReviewRecord { reference } => {
+                self.read_reply(&self.review_record(&reference)?)?
+            }
+            Request::ReviewRecords { references } => self.review_batch(&references)?,
+            Request::ReadPage {
+                transfer_id,
+                offset,
+            } => serde_json::to_value(self.reads.read(transfer_id, offset)?)?,
+            Request::MessageReviewDocument { request_id } => {
+                self.read_reply(&owner.message_review_document(request_id)?)?
+            }
+            Request::TypedDataReviewDocument { request_id } => {
+                self.read_reply(&owner.typed_data_review_document(request_id)?)?
+            }
+            Request::TransactionHeadlines { request_ids } => {
+                let records = self.transaction_records(&request_ids)?;
+                serde_json::to_value(
+                    owner.transaction_headlines(&records.iter().collect::<Vec<_>>())?,
+                )?
+            }
+            Request::TransactionPreviewInputs { request_ids } => {
+                serde_json::to_value(self.previews.begin(owner.clone(), request_ids).await?)?
+            }
+            Request::TransactionPreviewPage {
+                transfer_id,
+                offset,
+            } => serde_json::to_value(self.previews.page(transfer_id, offset)?)?,
+            Request::SaveAdvisorySummary { summary } => {
+                serde_json::to_value(owner.save_advisory_summary(&summary)?)?
+            }
+            Request::SavedTransactionSummaries { request_ids } => {
+                let records = self.transaction_records(&request_ids)?;
+                serde_json::to_value(
+                    owner.saved_transaction_summaries(&records.iter().collect::<Vec<_>>())?,
+                )?
+            }
+            Request::WaitForEvents { after } => {
+                serde_json::to_value(owner.event_bus().wait_since(after).await?)?
+            }
+            request @ (Request::Automations
+            | Request::AutomationRuns { .. }
+            | Request::DisableAutomation { .. }
+            | Request::RelinkAutomation { .. }
+            | Request::DeleteAutomation { .. }
+            | Request::DryRunAutomation { .. }) => self.dispatch_automation(request).await?,
+            Request::Tokens {
+                chain_id,
+                limit,
+                offset,
+            } => serde_json::to_value(owner.tokens(chain_id, limit, offset)?)?,
+            Request::AddToken {
+                token,
+                approximate_usd_price,
+            } => serde_json::to_value(owner.add_token(token, approximate_usd_price).await?)?,
+            Request::NativeTokenPrices => serde_json::to_value(owner.native_token_prices()?)?,
+            Request::SetNativeTokenPrice { chain_id, price } => {
+                owner.set_native_token_price(chain_id, price)?;
+                Value::Null
+            }
+            Request::SetTokenPrice { reviewed, price } => {
+                owner.set_token_price(&reviewed, price)?;
+                Value::Null
+            }
+            Request::RemoveToken { reviewed } => {
+                owner.remove_token(&reviewed)?;
+                Value::Null
+            }
+            Request::ImportTokenListForReview {
+                url,
+                requested_chain_ids,
+            } => serde_json::to_value(
+                owner
+                    .import_token_list_for_review(&url, &requested_chain_ids)
+                    .await?,
+            )?,
+            Request::TokenProposals => serde_json::to_value(owner.token_proposals()?)?,
+            Request::AcceptTokenProposals { proposals } => {
+                serde_json::to_value(owner.accept_token_proposals(&proposals).await?)?
+            }
+            Request::RejectTokenProposals { proposals } => {
+                serde_json::to_value(owner.reject_token_proposals(&proposals)?)?
+            }
+            Request::BeginDappSession { uri } => serde_json::to_value(self.dapps.begin(&uri)?)?,
+            Request::DappSessions => serde_json::to_value(self.dapps.sessions()?)?,
+            Request::WaitDappSession { session_id } => {
+                self.dapps.wait(session_id).await?;
+                Value::Null
+            }
+            Request::DisconnectDappSession { session_id } => {
+                serde_json::to_value(self.dapps.disconnect(session_id)?)?
+            }
+
+            Request::DappReviews => serde_json::to_value(reviews.pending()?)?,
+            Request::ApproveDappReview {
+                session_id,
+                index,
+                reviewed_identity,
+            } => {
+                reviews
+                    .approve(owner, session_id, index, &reviewed_identity)
+                    .await?;
+                Value::Null
+            }
+            Request::RejectDappReview {
+                session_id,
+                reviewed_identity,
+            } => {
+                reviews.reject(session_id, &reviewed_identity)?;
+                Value::Null
+            }
+            Request::CloseDappReview {
+                session_id,
+                reviewed_identity,
+            } => {
+                reviews.close(session_id, &reviewed_identity)?;
+                Value::Null
+            }
+            Request::Snapshot => serde_json::to_value(owner.snapshot()?)?,
+            Request::Accounts => serde_json::to_value(owner.accounts()?)?,
+            Request::Account { wallet_id } => serde_json::to_value(owner.account(&wallet_id)?)?,
+            Request::Policy { wallet_id } => serde_json::to_value(owner.policy(&wallet_id)?)?,
+            Request::PolicyHistory { wallet_id } => {
+                serde_json::to_value(owner.policy_history(&wallet_id)?)?
+            }
+            Request::InstallPolicy {
+                wallet_id,
+                policy,
+                reviewed_revision,
+            } => serde_json::to_value(
+                owner
+                    .install_policy(&wallet_id, &policy, reviewed_revision)
+                    .await?,
+            )?,
+            Request::PolicyProposals => serde_json::to_value(owner.policy_proposals()?)?,
+            Request::ApplyPolicyProposal { proposal } => {
+                serde_json::to_value(owner.apply_policy_proposal(&proposal).await?)?
+            }
+            Request::RejectPolicyProposal { proposal } => {
+                serde_json::to_value(owner.reject_policy_proposal(&proposal)?)?
+            }
+            Request::DetailedNotificationPreviews => {
+                serde_json::to_value(owner.detailed_notification_previews()?)?
+            }
+            Request::SetDetailedNotificationPreviews { enabled } => {
+                owner.set_detailed_notification_previews(enabled).await?;
+                Value::Null
+            }
+            Request::AppearancePreference => serde_json::to_value(owner.appearance_preference()?)?,
+            Request::SetAppearancePreference { preference } => {
+                owner.set_appearance_preference(preference)?;
+                Value::Null
+            }
+            Request::CompanionServers => serde_json::to_value(owner.companion_servers()?)?,
+            Request::SetCompanionServers { selection } => {
+                owner.set_companion_servers(&selection)?;
+                Value::Null
+            }
+            Request::GuidedSetup => serde_json::to_value(owner.guided_setup()?)?,
+            Request::SetGuidedSetup { state } => {
+                owner.set_guided_setup(&state)?;
+                Value::Null
+            }
+            Request::TestnetMode => serde_json::to_value(owner.testnet_mode()?)?,
+            Request::SetTestnetMode { enabled } => {
+                owner.set_testnet_mode(enabled)?;
+                Value::Null
+            }
+            Request::LegalStatus => serde_json::to_value(owner.legal_status()?)?,
+            Request::LegalDocument { document } => {
+                serde_json::to_value(owner.legal_document(document))?
+            }
+            Request::AcceptLegal {
+                document,
+                reviewed_digest,
+            } => {
+                owner.accept_legal(document, &reviewed_digest).await?;
+                Value::Null
+            }
+        })
+    }
+    async fn dispatch_automation(&self, request: Request) -> anyhow::Result<Value> {
+        let owner = &self.owner;
+        Ok(match request {
+            Request::Automations => serde_json::to_value(owner.automations()?)?,
+            Request::AutomationRuns {
+                automation_id,
+                limit,
+            } => serde_json::to_value(owner.automation_runs(automation_id, limit)?)?,
+            Request::DisableAutomation { automation_id } => {
+                serde_json::to_value(owner.disable_automation(automation_id)?)?
+            }
+            Request::RelinkAutomation { automation_id } => {
+                serde_json::to_value(owner.relink_automation(automation_id)?)?
+            }
+            Request::DeleteAutomation { automation_id } => {
+                owner.delete_automation(automation_id).await?;
+                Value::Null
+            }
+            Request::DryRunAutomation { automation_id } => {
+                serde_json::to_value(Box::pin(owner.dry_run_automation(automation_id)).await?)?
+            }
+            _ => anyhow::bail!("not an automation operation"),
+        })
+    }
+
+    /// Network operations retain the initiating owner's authentication context
+    /// and delegate every mutation to the existing core-enforced `OwnerApi`.
+    async fn dispatch_network(&self, request: Request) -> anyhow::Result<Value> {
+        let owner = &self.owner;
+        Ok(match request {
+            Request::Networks => serde_json::to_value(owner.networks()?)?,
+            Request::NetworkByChainId { chain_id } => {
+                serde_json::to_value(owner.network_by_chain_id(chain_id)?)?
+            }
+            Request::ResetNetworksToDefaults { reviewed } => {
+                serde_json::to_value(owner.reset_networks_to_defaults(&reviewed).await?)?
+            }
+            Request::NetworkProposals => serde_json::to_value(owner.network_proposals()?)?,
+            Request::AcceptNetworkProposal { proposal } => {
+                owner.accept_network_proposal(&proposal).await?;
+                Value::Null
+            }
+            Request::RejectNetworkProposal { proposal } => {
+                serde_json::to_value(owner.reject_network_proposal(&proposal)?)?
+            }
+            Request::AddNetwork { network } => {
+                owner.add_network(network).await?;
+                Value::Null
+            }
+            Request::ReplaceNetwork {
+                reviewed,
+                replacement,
+            } => {
+                owner.replace_network(&reviewed, *replacement).await?;
+                Value::Null
+            }
+            Request::SetNetworkDisabled { reviewed, disabled } => {
+                serde_json::to_value(owner.set_network_disabled(&reviewed, disabled).await?)?
+            }
+            _ => anyhow::bail!("not a network operation"),
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+async fn legacy_move_reply(
+    command: ekubo_wallet_core::legacy_move::ServiceCommand,
+) -> anyhow::Result<Value> {
+    let receipt = ekubo_wallet_core::legacy_move::service_command(command).await?;
+    let encoded = serde_json::to_vec(&receipt)?;
+    anyhow::ensure!(
+        encoded.len() <= 1024 * 1024,
+        "legacy move receipt is oversized"
+    );
+    Ok(serde_json::from_slice(&encoded)?)
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch(
+    owner: &OwnerApi,
+    reviews: &crate::dapp_reviews::DappReviews,
+    request: Request,
+) -> anyhow::Result<Value> {
+    let receiver = crate::desktop_sessions::DesktopSessions::default();
+    let dapps = Arc::new(DappRuntime::new(owner.clone(), reviews.clone(), receiver));
+    OwnerDispatcher::new(owner.clone(), dapps)
+        .dispatch(request)
+        .await
+}
+
+#[cfg(test)]
+#[path = "owner_rpc_test.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "owner_token_rpc_test.rs"]
+mod token_tests;
+
+#[cfg(test)]
+#[path = "owner_automation_rpc_test.rs"]
+mod automation_tests;
+
+#[cfg(test)]
+#[path = "owner_activity_rpc_test.rs"]
+mod activity_tests;
+
+#[cfg(test)]
+#[path = "owner_signature_rpc_test.rs"]
+mod signature_tests;
+
+#[cfg(test)]
+#[path = "owner_account_rpc_test.rs"]
+mod account_tests;
+
+#[cfg(test)]
+#[path = "owner_portfolio_rpc_test.rs"]
+mod portfolio_tests;

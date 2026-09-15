@@ -25,8 +25,11 @@ struct Harness {
 
 impl Harness {
     fn new(home: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
             .args(["--client", "codex"])
+            .env("EKUBO_WALLET_V2_HOME", home)
+            // Both overrides point at the fixture so the Linux refusal case
+            // catches fallback through either product's former local path.
             .env("EKUBO_WALLET_HOME", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -72,6 +75,28 @@ impl Drop for Harness {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn protected_bridge_never_connects_to_a_home_override_socket() {
+    use std::os::unix::net::UnixListener;
+
+    let home = tempfile::tempdir().unwrap();
+    let fake_wallet = UnixListener::bind(home.path().join("mcp.sock")).unwrap();
+    fake_wallet.set_nonblocking(true).unwrap();
+    let mut harness = Harness::new(home.path());
+    harness.send(&request(1, "server/discover"));
+    assert!(harness.receive().get("result").is_some());
+    harness.send(&request(2, "tools/list"));
+    let refused = harness.receive();
+    assert!(refused.get("error").is_some());
+    assert!(refused.get("result").is_none());
+    assert_eq!(
+        fake_wallet.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "service-only bridge attempted a user-controlled local socket"
+    );
+}
+
 #[test]
 fn offline_discovery_and_metadata_errors_keep_the_bridge_alive() {
     let home = tempfile::tempdir().unwrap();
@@ -115,20 +140,20 @@ fn a_probe_without_modern_metadata_can_fall_back_to_legacy_initialization() {
     assert_eq!(harness.receive()["result"]["protocolVersion"], "2025-11-25");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn read(reader: &mut BufReader<std::os::unix::net::UnixStream>) -> Value {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn write(stream: &mut std::os::unix::net::UnixStream, message: &Value) {
     serde_json::to_writer(&mut *stream, message).unwrap();
     stream.write_all(b"\n").unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn accept(
     listener: &std::os::unix::net::UnixListener,
     protocol: u32,
@@ -156,12 +181,12 @@ fn accept(
     (stream, reader)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn reply(id: &Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":{"tools":[],"resultType":"complete","ttlMs":0,"cacheScope":"private"}})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn ordinary_first_request_and_per_request_metadata_are_forwarded_unchanged() {
     let home = tempfile::tempdir().unwrap();
@@ -185,7 +210,7 @@ fn ordinary_first_request_and_per_request_metadata_are_forwarded_unchanged() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn disconnect_reconnects_without_replaying_a_tool_call() {
     let home = tempfile::tempdir().unwrap();
@@ -217,7 +242,7 @@ fn disconnect_reconnects_without_replaying_a_tool_call() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn incompatible_wallet_receives_no_business_requests() {
     let home = tempfile::tempdir().unwrap();
@@ -238,7 +263,7 @@ fn incompatible_wallet_receives_no_business_requests() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn cancellation_is_forwarded_and_late_results_are_suppressed() {
     let home = tempfile::tempdir().unwrap();
@@ -261,7 +286,7 @@ fn cancellation_is_forwarded_and_late_results_are_suppressed() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn wallet_startup_after_offline_discovery_requires_no_new_bridge_process() {
     let home = tempfile::tempdir().unwrap();
@@ -285,7 +310,7 @@ fn wallet_startup_after_offline_discovery_requires_no_new_bridge_process() {
     wallet.join().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn partial_wallet_frames_survive_concurrent_client_requests() {
     let home = tempfile::tempdir().unwrap();

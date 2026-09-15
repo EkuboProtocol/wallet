@@ -1,0 +1,1444 @@
+//! Explicit owner-directed first-run move. Never called by fresh enrollment.
+//! The source database is read-only and kept under the old application/lifecycle
+//! locks. Retirement is bound to the durable installed-service receipt.
+use crate::{
+    config::WalletMetadata,
+    human_presence::{OwnerAuthorization, OwnerAuthorizationScope, authorize_owner},
+    policy_store::{DatabaseKey, legacy_move_database as database},
+};
+use alloy::signers::local::PrivateKeySigner;
+use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    path::{Path, PathBuf},
+};
+use uuid::Uuid;
+use zeroize::Zeroizing;
+
+#[cfg(target_os = "windows")]
+#[path = "legacy_move_native.rs"]
+mod native;
+#[path = "legacy_move_retirement.rs"]
+mod retirement;
+pub use retirement::Identity as RetirementIdentity;
+#[path = "legacy_move_transport.rs"]
+mod transport;
+
+#[derive(Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct Secret(Vec<u8>);
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountMaterial {
+    instance: Uuid,
+    key: Secret,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Transfer {
+    snapshot: database::Snapshot,
+    keys: Vec<AccountMaterial>,
+    binding: MoveBinding,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveBinding {
+    pub profile: Uuid,
+    pub source: PathBuf,
+    pub preserved_profiles: Vec<PathBuf>,
+    pub retained_shared_accounts: Vec<Uuid>,
+    #[serde(default)]
+    pub retirement: Option<RetirementIdentity>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MoveStatus {
+    Unavailable,
+    Baseline,
+    PendingCleanup {
+        digest: [u8; 32],
+        binding: MoveBinding,
+    },
+    Complete {
+        binding: MoveBinding,
+        shared_database_credential_retained: bool,
+    },
+}
+
+impl MoveStatus {
+    #[must_use]
+    pub const fn pending(&self) -> bool {
+        matches!(self, Self::PendingCleanup { .. })
+    }
+}
+
+/// Only the already-authenticated owner dispatcher may route these requests.
+/// Core additionally authenticates the owner before accepting an import.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceCommand {
+    AuthorizeSource {
+        nonce: Uuid,
+        source: PathBuf,
+        preserved_profiles: Vec<PathBuf>,
+    },
+    Inspect {
+        nonce: Uuid,
+    },
+    Import {
+        payload: String,
+    },
+    Verify {
+        digest: [u8; 32],
+        nonce: Uuid,
+        binding: MoveBinding,
+    },
+    Complete {
+        digest: [u8; 32],
+        nonce: Uuid,
+        binding: MoveBinding,
+    },
+    /// Owner-authorized entry into source-less recovery. Natively
+    /// authenticates the owner and binds the pending receipt (destination
+    /// re-verification included) before the desktop retires anything. The
+    /// returned receipt is what [`retire_recovered_credentials`] requires.
+    AuthorizeRecovery {
+        nonce: Uuid,
+    },
+    /// Owner-authorized recovery when the 1.x source directory was deleted
+    /// before cleanup finished. The pending receipt stays bound to the
+    /// re-read destination state; no source path is accepted. The sandboxed
+    /// service cannot stat the owner-profile filesystem, so absence travels
+    /// as a caller-attested [`RecoveryAbsence`] the service re-validates
+    /// against the pending receipt. A missing or mismatched attestation
+    /// fails closed.
+    CompleteWithoutSource {
+        nonce: Uuid,
+        #[serde(default)]
+        absence: Option<RecoveryAbsence>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReceiptPhase {
+    SourceAuthorized,
+    RecoveryAuthorized,
+    Inspected,
+    Imported,
+    Verified,
+    Complete,
+}
+
+impl ServiceCommand {
+    fn phase(&self) -> ReceiptPhase {
+        match self {
+            Self::AuthorizeSource { .. } => ReceiptPhase::SourceAuthorized,
+            Self::AuthorizeRecovery { .. } => ReceiptPhase::RecoveryAuthorized,
+            Self::Inspect { .. } => ReceiptPhase::Inspected,
+            Self::Import { .. } => ReceiptPhase::Imported,
+            Self::Verify { .. } => ReceiptPhase::Verified,
+            // Recovery completes the same pending receipt, so it carries the
+            // same phase; transport validation distinguishes it by shape.
+            Self::Complete { .. } | Self::CompleteWithoutSource { .. } => ReceiptPhase::Complete,
+        }
+    }
+}
+impl Drop for ServiceCommand {
+    fn drop(&mut self) {
+        if let Self::Import { payload } = self {
+            zeroize::Zeroize::zeroize(payload);
+        }
+    }
+}
+
+/// Wire shape of the shared owner protocol's `Request::LegacyMove(ServiceCommand)`.
+/// Kept below the client dependency boundary so core authenticates its own peer.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Serialize)]
+#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+enum OwnerRequest<'a> {
+    LegacyMove(&'a ServiceCommand),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    phase: ReceiptPhase,
+    selection_digest: Option<[u8; 32]>,
+    digest: [u8; 32],
+    nonce: Uuid,
+    accounts: Vec<Uuid>,
+    profile: Uuid,
+    binding: Option<MoveBinding>,
+    wallets: Vec<WalletMetadata>,
+}
+
+impl Receipt {
+    /// The fresh nonce this receipt answers. Clients fail closed on mismatch.
+    #[must_use]
+    pub fn nonce(&self) -> Uuid {
+        self.nonce
+    }
+
+    /// The destination-bound source identity. Recovery retires credentials
+    /// from this binding, never from caller-supplied paths.
+    #[must_use]
+    pub fn binding(&self) -> Option<&MoveBinding> {
+        self.binding.as_ref()
+    }
+
+    /// The destination-verified account identities whose unshared 1.x
+    /// credentials recovery retires.
+    #[must_use]
+    pub fn wallets(&self) -> &[WalletMetadata] {
+        &self.wallets
+    }
+
+    /// The destination digest the owner-side absence attestation binds to.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+/// Caller-attested, receipt-bound proof that the bound 1.x source database
+/// is absent. Produced by the owner-side gate — the desktop runs
+/// un-sandboxed as the login owner, so only it can stat the owner-profile
+/// filesystem — after [`require_source_absent`] succeeds. The sandboxed
+/// service re-validates the digest and source against the pending receipt
+/// instead of re-statting the filesystem, which it cannot read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryAbsence {
+    pub digest: [u8; 32],
+    pub source: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MoveSummary {
+    pub source: PathBuf,
+    pub accounts: Vec<WalletMetadata>,
+    pub tables: Vec<(String, usize)>,
+    pub retained_shared_accounts: Vec<Uuid>,
+    pub preserved_profiles: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupReport {
+    pub deleted_account_credentials: Vec<Uuid>,
+    pub already_absent: Vec<Uuid>,
+    pub retained_shared_accounts: Vec<Uuid>,
+    pub shared_database_credential_retained: bool,
+}
+
+struct Frozen {
+    connection: Option<rusqlite::Connection>,
+    // SQLite closes before any other descriptor for its inode is closed.
+    pin: File,
+    _locks: Vec<File>,
+    root: PathBuf,
+    digest: [u8; 32],
+}
+
+pub struct LegacySource {
+    authorized_profile: Uuid,
+    frozen: Vec<Frozen>,
+    summary: MoveSummary,
+    snapshot: Option<database::Snapshot>,
+    digest: [u8; 32],
+    retirement: retirement::Identity,
+}
+
+/// An owner-reviewed inventory, not an automatically discovered list. If the
+/// owner cannot identify the other profiles, automatic retirement is refused.
+pub enum ProfileInventory {
+    ReviewedComplete { preserve_profiles: Vec<PathBuf> },
+    Unknown,
+}
+
+// Secret Service's synchronous platform adapter owns a Tokio runtime. Its
+// construction, operations AND drop must run outside async execution. Unlike
+// block_in_place, spawn_blocking also supports current-thread caller runtimes.
+async fn blocking_phase<T: Send + 'static>(
+    phase: &'static str,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .with_context(|| format!("legacy move {phase}: blocking worker failed"))?
+        .with_context(|| format!("legacy move {phase}"))
+}
+
+/// Suggest the released 1.x path only when the owner explicitly opens the move
+/// flow. This is never a v2 data-root fallback and performs no credential access.
+pub fn suggested_legacy_root() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("EKUBO_WALLET_HOME") {
+        let path = PathBuf::from(path);
+        ensure!(
+            path.is_absolute(),
+            "select the absolute legacy profile path explicitly"
+        );
+        return Ok(path);
+    }
+    let base = directories::BaseDirs::new().context("cannot determine legacy profile path")?;
+    #[cfg(target_os = "linux")]
+    return Ok(std::env::var_os("XDG_STATE_HOME")
+        .map_or_else(|| base.home_dir().join(".local/state"), PathBuf::from)
+        .join("ekubo-wallet"));
+    #[cfg(target_os = "windows")]
+    return Ok(base.data_local_dir().join("Ekubo/wallet"));
+}
+
+/// Attach the narrow source-missing marker when a bound-source lookup
+/// already failed with filesystem not-found. Preserved-profile lookups and
+/// every other failure keep their own errors, so [`is_source_missing`]
+/// only matches the bound source itself — never a mistyped preserved path.
+fn missing_source<T>(source: &Path, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error)
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            Err(error.context(format!(
+                "legacy move source is missing at {}; resume the exact source review or use the owner-authorized source-less recovery",
+                source.display()
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+impl LegacySource {
+    /// Must be an explicit first-run choice. The reviewed inventory includes all
+    /// known custom profiles which must remain usable. 1.x has no global profile
+    /// registry: the UI must ask about custom profiles rather than claim discovery
+    /// is exhaustive. Shared account entries in this inventory are not removed.
+    pub async fn review(source: PathBuf, inventory: ProfileInventory) -> Result<Self> {
+        let ProfileInventory::ReviewedComplete { preserve_profiles } = inventory else {
+            anyhow::bail!(
+                "cannot retire legacy credentials without an explicitly reviewed complete profile inventory"
+            );
+        };
+        ensure!(
+            source.is_absolute() && preserve_profiles.iter().all(|path| path.is_absolute()),
+            "legacy profile paths must be explicit absolute paths"
+        );
+        ensure!(
+            preserve_profiles.len() <= 32,
+            "this bounded move supports at most 32 preserved profiles; do not omit profiles to bypass the limit"
+        );
+        let source = missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?;
+        let preserve_profiles = preserve_profiles
+            .into_iter()
+            .map(|path| path.canonicalize())
+            .collect::<std::io::Result<BTreeSet<_>>>()?
+            .into_iter()
+            .collect::<Vec<_>>();
+        #[cfg(target_os = "linux")]
+        {
+            let authorization = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+        }
+        let mut peer = transport::Peer::connect().await?;
+        let authorized_profile = peer.profile();
+        let nonce = Uuid::new_v4();
+        #[cfg(target_os = "windows")]
+        let receipt = peer
+            .call(&ServiceCommand::AuthorizeSource {
+                nonce,
+                source: source.clone(),
+                preserved_profiles: preserve_profiles.clone(),
+            })
+            .await?;
+        #[cfg(target_os = "linux")]
+        let receipt = peer.call(&ServiceCommand::Inspect { nonce }).await?;
+        ensure!(receipt.nonce == nonce, "stale move inspection");
+        blocking_phase("source review or cleanup recovery", move || {
+            ensure!(
+                missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?
+                    == source
+                    && preserve_profiles
+                        .iter()
+                        .all(|path| path.canonicalize().is_ok_and(|current| current == *path)),
+                "authorized source selection changed before reading legacy credentials"
+            );
+            let mut reviewed = if let Some(binding) = &receipt.binding {
+                let source =
+                    missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?;
+                let preserved = preserve_profiles
+                    .into_iter()
+                    .map(|p| p.canonicalize())
+                    .collect::<std::io::Result<BTreeSet<_>>>()?;
+                ensure!(
+                    source == binding.source
+                        && preserved.into_iter().collect::<Vec<_>>() == binding.preserved_profiles,
+                    "resume requires the exact destination-bound source inventory"
+                );
+                Self::resume(receipt)?
+            } else {
+                Self::open(&source, preserve_profiles)?
+            };
+            reviewed.authorized_profile = authorized_profile;
+            Ok(reviewed)
+        })
+        .await
+    }
+
+    fn open(source: &Path, preserve_profiles: Vec<PathBuf>) -> Result<Self> {
+        require_legacy_owner()?;
+        let source = source.canonicalize()?;
+        let v2 = crate::config::default_data_dir()?;
+        ensure!(
+            source != v2.canonicalize().unwrap_or(v2),
+            "source is the v2 profile"
+        );
+        let mut paths = preserve_profiles
+            .into_iter()
+            .map(|path| path.canonicalize().map_err(anyhow::Error::from))
+            .collect::<Result<BTreeSet<_>>>()?;
+        ensure!(
+            !paths.contains(&source),
+            "source cannot also be an unmigrated profile"
+        );
+        paths.insert(source.clone());
+        let raw = Zeroizing::new(
+            crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
+                .context("open legacy database credential store")?
+                .get_secret()
+                .context("read legacy database credential for source review")?,
+        );
+        let retirement_key = retirement::hash(&raw);
+        let key = DatabaseKey::new(
+            raw.as_slice()
+                .try_into()
+                .context("invalid legacy database credential")?,
+        );
+        let mut frozen = Vec::new();
+        for path in paths {
+            frozen.push(Frozen::open(path, &key)?);
+        }
+        let source_index = frozen
+            .iter()
+            .position(|item| item.root == source)
+            .expect("source was included");
+        let selected = frozen.remove(source_index);
+        frozen.insert(0, selected);
+        let accounts = database::wallets(frozen[0].connection.as_ref().expect("open source"))?;
+        let mut preserved_accounts = Vec::new();
+        for other in &frozen[1..] {
+            preserved_accounts.extend(database::wallets(
+                other.connection.as_ref().expect("open source"),
+            )?);
+        }
+        let snapshot =
+            database::capture(frozen[0].connection.as_ref().expect("open source"), false)?;
+        let retirement = retirement::Identity {
+            database_key_hash: retirement_key,
+            source_file_hash: retirement::file_hash(&frozen[0].pin)?,
+        };
+        let digest = snapshot.digest()?;
+        let summary = MoveSummary {
+            source,
+            retained_shared_accounts: shared_accounts(&accounts, &preserved_accounts),
+            accounts,
+            tables: snapshot
+                .tables
+                .iter()
+                .map(|table| (table.name.clone(), table.rows.len()))
+                .collect(),
+            preserved_profiles: frozen[1..]
+                .iter()
+                .map(|profile| profile.root.clone())
+                .collect(),
+        };
+        Ok(Self {
+            authorized_profile: Uuid::nil(),
+            frozen,
+            summary,
+            snapshot: Some(snapshot),
+            digest,
+            retirement,
+        })
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> &MoveSummary {
+        &self.summary
+    }
+
+    /// Import and re-open/verify the durable protected destination over a native
+    /// authenticated connection. No caller-supplied success flag/receipt can
+    /// authorize source cleanup. A failure leaves source credentials in place.
+    pub async fn move_and_cleanup(mut self) -> Result<CleanupReport> {
+        self.revalidate()?;
+        let mut peer = transport::Peer::connect().await?;
+        ensure!(
+            peer.profile() == self.authorized_profile,
+            "installed destination changed since source authorization"
+        );
+        let binding = MoveBinding {
+            profile: peer.profile(),
+            source: self.summary.source.clone(),
+            preserved_profiles: self.summary.preserved_profiles.clone(),
+            retained_shared_accounts: self.summary.retained_shared_accounts.clone(),
+            retirement: Some(self.retirement.clone()),
+        };
+        let preparation_binding = binding.clone();
+        let (source, command) = blocking_phase("prepare source account transfer", move || {
+            self.revalidate()?;
+            let command = self.prepare_import(preparation_binding)?;
+            Ok((self, command))
+        })
+        .await?;
+        self = source;
+        if let Some(command) = command {
+            let imported = peer
+                .call(&command)
+                .await
+                .context("legacy move destination import")?;
+            ensure!(
+                imported.digest == self.digest,
+                "destination import identity mismatch"
+            );
+        }
+        self.finish_move(peer, binding).await
+    }
+
+    // Called only by the blocking preparation worker, which owns the locked
+    // source until all credential handles have been dropped and the payload is ready.
+    fn prepare_import(&mut self, binding: MoveBinding) -> Result<Option<ServiceCommand>> {
+        if let Some(snapshot) = self.snapshot.take() {
+            let mut keys = Vec::new();
+            for wallet in &self.summary.accounts {
+                if let Some(key) = legacy_key(wallet)? {
+                    keys.push(AccountMaterial {
+                        instance: wallet.instance_id,
+                        key: Secret(key.to_vec()),
+                    });
+                }
+            }
+            let transfer = Transfer {
+                snapshot,
+                keys,
+                binding,
+            };
+            let bytes = Zeroizing::new(serde_json::to_vec(&transfer)?);
+            ensure!(
+                bytes.len() <= database::MAX_BYTES,
+                "legacy move exceeds bounded transfer size; no source credentials were deleted"
+            );
+            return Ok(Some(ServiceCommand::Import {
+                payload: STANDARD.encode(bytes.as_slice()),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn finish_move(
+        mut self,
+        mut peer: transport::Peer,
+        binding: MoveBinding,
+    ) -> Result<CleanupReport> {
+        // Authentication is renewed immediately before destructive cleanup. The
+        // same locks and exact source identity remain alive through the prompt.
+        #[cfg(target_os = "linux")]
+        {
+            let authorization = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+        }
+        let nonce = Uuid::new_v4();
+        let verified = peer
+            .call(&ServiceCommand::Verify {
+                digest: self.digest,
+                nonce,
+                binding: binding.clone(),
+            })
+            .await
+            .context("legacy move authorize cleanup and verify destination")?;
+        let expected: BTreeSet<_> = self
+            .summary
+            .accounts
+            .iter()
+            .map(|wallet| wallet.instance_id)
+            .collect();
+        ensure!(
+            verified.digest == self.digest
+                && verified.nonce == nonce
+                && verified.accounts.len() == expected.len()
+                && verified.accounts.into_iter().collect::<BTreeSet<_>>() == expected,
+            "destination did not freshly verify every moved account"
+        );
+        let cleanup_binding = binding.clone();
+        // Own the locks in the worker: cancelling the caller must not release
+        // them while an already-started credential deletion is still running.
+        let (source, report) =
+            blocking_phase("source retirement and credential cleanup", move || {
+                self.revalidate()
+                    .context("revalidate locked source before cleanup")?;
+                retirement::check_database_key(
+                    &self.retirement,
+                    self.frozen[0].connection.is_some()
+                        || !self.summary.preserved_profiles.is_empty(),
+                )
+                .context("check old global database credential before retirement")?;
+                self.frozen[0]
+                    .retire(&cleanup_binding)
+                    .context("publish encrypted backup and source tombstone")?;
+                let mut report =
+                    cleanup(&self.summary).context("retire unshared source account credentials")?;
+                report.shared_database_credential_retained = retirement::retire_database_key(
+                    &self.retirement,
+                    !self.summary.preserved_profiles.is_empty(),
+                )
+                .context("retire old global database credential and confirm absence")?;
+                Ok((self, report))
+            })
+            .await?;
+        self = source;
+        // A crash here leaves the durable receipt pending. Explicit resume can
+        // verify the destination keys even when old keys are already absent.
+        let nonce = Uuid::new_v4();
+        let completed = peer
+            .call(&ServiceCommand::Complete {
+                digest: self.digest,
+                nonce,
+                binding,
+            })
+            .await
+            .context("legacy move record durable cleanup completion")?;
+        ensure!(
+            completed.digest == self.digest
+                && completed.nonce == nonce
+                && completed.accounts.len() == expected.len()
+                && completed.accounts.into_iter().collect::<BTreeSet<_>>() == expected,
+            "cleanup completion receipt did not match the reviewed move"
+        );
+        Ok(report)
+    }
+
+    fn revalidate(&self) -> Result<()> {
+        for profile in &self.frozen {
+            profile.revalidate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Frozen {
+    fn open(root: PathBuf, key: &DatabaseKey) -> Result<Self> {
+        let mut locks = Vec::new();
+        for name in ["application.lock", "lifecycle.lock"] {
+            let file = open_legacy_file(&root.join(name), true)
+                .with_context(|| format!("cannot open legacy profile lock {name}"))?;
+            fs2::FileExt::try_lock_exclusive(&file)
+                .context("close the 1.x application before moving its profile")?;
+            locks.push(file);
+        }
+        let pin = open_legacy_file(&root.join("wallet.db"), false)?;
+        ensure!(
+            pin.metadata()?.len() <= 64 * 1024 * 1024,
+            "legacy database exceeds the bounded move size"
+        );
+        let connection = database::open_source(&root.join("wallet.db"), key)?;
+        database::require_quiescent(&connection)?;
+        let digest = database::capture(&connection, false)?.digest()?;
+        let result = Self {
+            connection: Some(connection),
+            pin,
+            _locks: locks,
+            root,
+            digest,
+        };
+        result.revalidate()?;
+        Ok(result)
+    }
+    fn revalidate(&self) -> Result<()> {
+        let current = std::fs::symlink_metadata(self.root.join("wallet.db"))?;
+        ensure!(
+            current.is_file() && !current.file_type().is_symlink(),
+            "legacy database path changed"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let pinned = self.pin.metadata()?;
+            ensure!(
+                (current.dev(), current.ino()) == (pinned.dev(), pinned.ino()),
+                "legacy database inode changed"
+            );
+        }
+        #[cfg(target_os = "windows")]
+        ensure!(
+            native::identity(&open_legacy_file(&self.root.join("wallet.db"), false)?)?
+                == native::identity(&self.pin)?,
+            "legacy database file changed"
+        );
+        if let Some(connection) = &self.connection {
+            ensure!(
+                database::capture(connection, false)?.digest()? == self.digest,
+                "legacy database changed during move"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn open_legacy_file(path: &Path, write: bool) -> Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(write);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK)
+                .bits()
+                .cast_signed(),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.share_mode(3).custom_flags(0x0020_0000); // no delete sharing; OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "legacy source object is not a regular file"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        ensure!(
+            file.metadata()?.uid() == rustix::process::geteuid().as_raw(),
+            "legacy profile belongs to another owner"
+        );
+        ensure!(
+            file.metadata()?.nlink() == 1,
+            "legacy source has multiple hard links"
+        );
+    }
+    #[cfg(target_os = "windows")]
+    native::identity(&file)?;
+    Ok(file)
+}
+
+fn require_legacy_owner() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    ensure!(
+        crate::service_storage::data_dir().is_none()
+            && rustix::process::getuid().as_raw() != 0
+            && rustix::process::getuid() == rustix::process::geteuid(),
+        "legacy move requires the actual login owner"
+    );
+    #[cfg(target_os = "windows")]
+    {
+        ensure!(
+            crate::windows_service_custody::data_dir().is_none(),
+            "service cannot read legacy credentials"
+        );
+        crate::windows_service_config::validate_owner_component(
+            crate::windows_service_identity::current_process_identity()?.user_sid(),
+        )?;
+    }
+    Ok(())
+}
+
+fn shared_accounts(source: &[WalletMetadata], preserved: &[WalletMetadata]) -> Vec<Uuid> {
+    let instances: BTreeSet<_> = preserved.iter().map(|wallet| wallet.instance_id).collect();
+    let addresses: BTreeSet<_> = preserved.iter().map(|wallet| wallet.address).collect();
+    source
+        .iter()
+        .filter(|wallet| {
+            instances.contains(&wallet.instance_id) || addresses.contains(&wallet.address)
+        })
+        .map(|wallet| wallet.instance_id)
+        .collect()
+}
+
+fn legacy_key(wallet: &WalletMetadata) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    match crate::credential_store::legacy_entry(
+        "org.ekubo.wallet.private-key.instance",
+        &wallet.instance_id.to_string(),
+    )
+    .context("open legacy account credential store")?
+    .get_secret()
+    {
+        Ok(bytes) => {
+            let bytes = Zeroizing::new(bytes);
+            verify_key(wallet, &bytes)?;
+            Ok(Some(bytes))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(anyhow::Error::from(error).context("read legacy account credential")),
+    }
+}
+fn verify_key(wallet: &WalletMetadata, bytes: &[u8]) -> Result<()> {
+    ensure!(
+        bytes.len() == 32 && PrivateKeySigner::from_slice(bytes)?.address() == wallet.address,
+        "account credential does not match its reviewed legacy identity"
+    );
+    Ok(())
+}
+
+fn cleanup(summary: &MoveSummary) -> Result<CleanupReport> {
+    require_legacy_owner()?;
+    cleanup_with(summary, legacy_key, delete_legacy_account)
+}
+
+/// The exact per-account deletion used by normal completion, reused verbatim
+/// by source-less recovery so both paths delete and verify the same entries.
+fn delete_legacy_account(wallet: &WalletMetadata, expected: &[u8]) -> Result<()> {
+    let entry = crate::credential_store::legacy_entry(
+        "org.ekubo.wallet.private-key.instance",
+        &wallet.instance_id.to_string(),
+    )
+    .context("open legacy account credential for deletion")?;
+    let current = Zeroizing::new(
+        entry
+            .get_secret()
+            .context("reread legacy account credential before deletion")?,
+    );
+    ensure!(
+        current.as_slice() == expected,
+        "legacy credential changed before deletion"
+    );
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error).context("delete legacy account credential")),
+    }
+}
+
+fn cleanup_with(
+    summary: &MoveSummary,
+    mut read: impl FnMut(&WalletMetadata) -> Result<Option<Zeroizing<Vec<u8>>>>,
+    mut remove: impl FnMut(&WalletMetadata, &[u8]) -> Result<()>,
+) -> Result<CleanupReport> {
+    // Check all identities before the first deletion, then re-read each exact key
+    // immediately before deleting it. Legacy keyrings have no compare-and-delete
+    // primitive: application/lifecycle exclusion covers cooperating 1.x writers,
+    // not a hostile same-user process that already controls 1.x credentials.
+    for wallet in &summary.accounts {
+        if let Some(key) = read(wallet)? {
+            verify_key(wallet, &key)?;
+        }
+    }
+    let mut report = CleanupReport {
+        deleted_account_credentials: Vec::new(),
+        already_absent: Vec::new(),
+        retained_shared_accounts: summary.retained_shared_accounts.clone(),
+        shared_database_credential_retained: true,
+    };
+    for wallet in &summary.accounts {
+        if summary
+            .retained_shared_accounts
+            .contains(&wallet.instance_id)
+        {
+            continue;
+        }
+        let Some(expected) = read(wallet)? else {
+            report.already_absent.push(wallet.instance_id);
+            continue;
+        };
+        verify_key(wallet, &expected)?;
+        remove(wallet, &expected)?;
+        ensure!(
+            read(wallet)?.is_none(),
+            "legacy credential deletion was not confirmed; cleanup remains incomplete"
+        );
+        report.deleted_account_credentials.push(wallet.instance_id);
+    }
+    Ok(report)
+}
+
+/// Called inside the authenticated owner native context. Import authorization is
+/// checked in core, while verification returns only public identity evidence.
+pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
+    let root = crate::config::default_data_dir()?;
+    #[cfg(target_os = "linux")]
+    ensure!(
+        crate::service_storage::data_dir().is_some(),
+        "legacy import requires protected v2 custody"
+    );
+    #[cfg(target_os = "windows")]
+    ensure!(
+        crate::windows_service_custody::data_dir().is_some(),
+        "legacy import requires protected v2 custody"
+    );
+    let mut receipt = match &command {
+        ServiceCommand::AuthorizeSource {
+            nonce,
+            source,
+            preserved_profiles,
+        } => {
+            ensure!(
+                !nonce.is_nil(),
+                "source authorization requires a fresh nonce"
+            );
+            let selection = selection_digest(service_profile()?, source, preserved_profiles)?;
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            let mut receipt = inspected_receipt(&root, *nonce)?;
+            if let Some(binding) = &receipt.binding {
+                ensure!(
+                    binding.source == *source && binding.preserved_profiles == *preserved_profiles,
+                    "source authorization differs from pending destination binding"
+                );
+            }
+            receipt.selection_digest = Some(selection);
+            Ok(receipt)
+        }
+        ServiceCommand::Inspect { nonce } => {
+            ensure!(!nonce.is_nil(), "inspection requires a fresh nonce");
+            inspected_receipt(&root, *nonce)
+        }
+        ServiceCommand::Import { payload } => {
+            ensure!(
+                payload.len() <= database::MAX_BYTES.div_ceil(3) * 4,
+                "legacy payload is oversized"
+            );
+            let bytes = Zeroizing::new(STANDARD.decode(payload)?);
+            ensure!(
+                bytes.len() <= database::MAX_BYTES,
+                "legacy payload is oversized"
+            );
+            let transfer: Transfer = serde_json::from_slice(&bytes)?;
+            ensure!(
+                transfer.binding.retirement.is_some(),
+                "new imports require resumable retirement identity"
+            );
+            let binding = validated_binding(&transfer.binding)?;
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            let config = crate::config::ConfigStore::production()?;
+            config.with_lifecycle_lock(|| {
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                let digest =
+                    database::import_bound(&root, &transfer.snapshot, &binding, |wallets| {
+                        auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                        prepare_keys(wallets, &transfer.keys)?;
+                        auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                        Ok(())
+                    })?;
+                verified_receipt(&root, digest, Uuid::nil())
+            })
+        }
+        ServiceCommand::Verify {
+            digest,
+            nonce,
+            binding,
+        } => {
+            ensure!(!nonce.is_nil(), "verification requires a fresh nonce");
+            let binding = validated_binding(binding)?;
+            // Windows authorization must execute inside the service's sealed
+            // authenticated owner-call task-local, never in the desktop process.
+            #[cfg(target_os = "windows")]
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            let config = crate::config::ConfigStore::production()?;
+            config.with_lifecycle_lock(|| {
+                #[cfg(target_os = "windows")]
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                database::verify_binding(&root, &binding)?;
+                let receipt = verified_receipt(&root, *digest, *nonce)?;
+                #[cfg(target_os = "windows")]
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                Ok(receipt)
+            })
+        }
+        ServiceCommand::Complete {
+            digest,
+            nonce,
+            binding,
+        } => {
+            ensure!(!nonce.is_nil(), "completion requires a fresh nonce");
+            let binding = validated_binding(binding)?;
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            let config = crate::config::ConfigStore::production()?;
+            config.with_lifecycle_lock(|| {
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                database::verify_binding(&root, &binding)?;
+                let receipt = verified_receipt(&root, *digest, *nonce)?;
+                auth.require(OwnerAuthorizationScope::LegacyMove)?;
+                database::finish_cleanup(&root, *digest, &binding)?;
+                Ok(receipt)
+            })
+        }
+        ServiceCommand::CompleteWithoutSource { nonce, absence } => {
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            // Scope recovery to this destination before touching state: a
+            // pending receipt bound to another profile must not be completed
+            // here, even by its owner.
+            ensure!(
+                matches!(move_status()?, MoveStatus::PendingCleanup { .. }),
+                "no pending legacy move cleanup for this destination"
+            );
+            complete_move_without_source(&auth, &root, *nonce, absence.as_ref())
+        }
+        ServiceCommand::AuthorizeRecovery { nonce } => {
+            ensure!(
+                !nonce.is_nil(),
+                "recovery authorization requires a fresh nonce"
+            );
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            // Owner-authorized entry into source-less recovery, before the
+            // desktop retires anything. Destination custody is re-verified
+            // here so retirement never precedes authentication — mirroring
+            // how `move_and_cleanup` verifies before mutating.
+            ensure!(
+                matches!(move_status()?, MoveStatus::PendingCleanup { .. }),
+                "no pending legacy move cleanup for this destination"
+            );
+            let receipt = inspected_receipt(&root, *nonce)?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            Ok(receipt)
+        }
+    }?;
+    receipt.phase = command.phase();
+    Ok(receipt)
+}
+
+fn inspected_receipt(root: &Path, nonce: Uuid) -> Result<Receipt> {
+    match move_status()? {
+        MoveStatus::PendingCleanup { digest, .. } => verified_receipt(root, digest, nonce),
+        MoveStatus::Baseline => Ok(Receipt {
+            phase: ReceiptPhase::Inspected,
+            selection_digest: None,
+            digest: [0; 32],
+            nonce,
+            accounts: vec![],
+            profile: service_profile()?,
+            binding: None,
+            wallets: vec![],
+        }),
+        _ => anyhow::bail!("destination is not available for a move"),
+    }
+}
+
+fn selection_digest(profile: Uuid, source: &Path, preserved: &[PathBuf]) -> Result<[u8; 32]> {
+    ensure!(
+        source.is_absolute()
+            && preserved.len() <= 32
+            && preserved
+                .iter()
+                .all(|path| path.is_absolute() && path != source)
+            && preserved.windows(2).all(|pair| pair[0] < pair[1]),
+        "invalid source authorization selection"
+    );
+    let bytes = serde_json::to_vec(&(
+        "legacy_move.authorize_source.v1",
+        profile,
+        source,
+        preserved,
+    ))?;
+    ensure!(
+        bytes.len() <= 256 * 1024,
+        "source authorization selection is oversized"
+    );
+    Ok(retirement::hash(&bytes))
+}
+
+fn prepare_keys(wallets: &[WalletMetadata], keys: &[AccountMaterial]) -> Result<()> {
+    let instances: BTreeSet<_> = keys.iter().map(|key| key.instance).collect();
+    ensure!(
+        instances.len() == keys.len()
+            && instances
+                .iter()
+                .all(|id| wallets.iter().any(|wallet| wallet.instance_id == *id)),
+        "unexpected or duplicate moved account keys"
+    );
+    for wallet in wallets {
+        let entry = crate::credential_store::entry(
+            crate::custody::KEYRING_SERVICE,
+            &wallet.instance_id.to_string(),
+        )?;
+        let supplied = keys.iter().find(|key| key.instance == wallet.instance_id);
+        match entry.get_secret() {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                verify_key(wallet, &bytes)?;
+                if let Some(key) = supplied {
+                    ensure!(
+                        bytes.as_slice() == key.key.0.as_slice(),
+                        "existing destination key differs"
+                    );
+                }
+            }
+            Err(keyring::Error::NoEntry) => {
+                let key = supplied
+                    .context("missing account credential; no verified destination copy exists")?;
+                verify_key(wallet, &key.key.0)?;
+                entry.set_secret(&key.key.0)?;
+                let bytes = Zeroizing::new(entry.get_secret()?);
+                ensure!(
+                    bytes.as_slice() == key.key.0.as_slice(),
+                    "destination key readback mismatch"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+fn verified_receipt(root: &Path, digest: [u8; 32], nonce: Uuid) -> Result<Receipt> {
+    let wallets = database::verify(root, digest)?;
+    prepare_keys(&wallets, &[])?;
+    let profile = service_profile()?;
+    Ok(Receipt {
+        phase: ReceiptPhase::Verified,
+        selection_digest: None,
+        digest,
+        nonce,
+        accounts: wallets.iter().map(|wallet| wallet.instance_id).collect(),
+        profile,
+        binding: database::move_state(root)?
+            .binding
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        wallets,
+    })
+}
+
+fn service_profile() -> Result<Uuid> {
+    #[cfg(target_os = "linux")]
+    return crate::service_storage::profile_id().context("missing service profile");
+    #[cfg(target_os = "windows")]
+    return crate::windows_service_custody::profile_id().context("missing service profile");
+}
+
+fn validated_binding(binding: &MoveBinding) -> Result<String> {
+    ensure!(
+        binding.profile == service_profile()?
+            && binding.source.is_absolute()
+            && binding.preserved_profiles.len() <= 32
+            && binding
+                .preserved_profiles
+                .iter()
+                .all(|path| path.is_absolute() && path != &binding.source)
+            && binding
+                .preserved_profiles
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && binding.retained_shared_accounts.len() <= 512
+            && (!binding.preserved_profiles.is_empty()
+                || binding.retained_shared_accounts.is_empty()),
+        "invalid move source/destination binding"
+    );
+    let encoded = serde_json::to_string(binding)?;
+    ensure!(
+        encoded.len() <= 256 * 1024,
+        "move identity metadata is oversized"
+    );
+    Ok(encoded)
+}
+
+/// Public metadata only. A pending receipt must stop startup before any normal
+/// desktop work, even after account credentials have already been imported.
+pub fn move_status() -> Result<MoveStatus> {
+    let profile = service_profile()?;
+    let state = database::move_state(&crate::config::default_data_dir()?)?;
+    if let Some(digest) = state.receipt {
+        let encoded = state.binding.context(
+            "legacy move cleanup is pending without bound source metadata; keep the wallet paused",
+        )?;
+        ensure!(
+            encoded.len() <= 256 * 1024,
+            "move identity metadata is oversized"
+        );
+        let binding: MoveBinding = serde_json::from_str(&encoded)?;
+        ensure!(
+            binding.profile == profile,
+            "move receipt belongs to another destination"
+        );
+        return Ok(if state.complete {
+            let retained = !binding.preserved_profiles.is_empty() || binding.retirement.is_none();
+            MoveStatus::Complete {
+                binding,
+                shared_database_credential_retained: retained,
+            }
+        } else {
+            MoveStatus::PendingCleanup { digest, binding }
+        });
+    }
+    Ok(if state.baseline {
+        MoveStatus::Baseline
+    } else {
+        MoveStatus::Unavailable
+    })
+}
+
+/// Service-side backstop: no desktop can activate execution while cleanup is
+/// pending, including a client that skips the first-run screen.
+pub fn require_cleanup_finished(root: &Path) -> Result<()> {
+    let state = database::move_state(root)?;
+    ensure!(
+        state.receipt.is_none() || state.complete,
+        "legacy move cleanup is pending; resume its exact source review before starting the wallet"
+    );
+    Ok(())
+}
+
+/// Owner-authorized recovery for a pending move whose 1.x source directory
+/// was deleted before cleanup finished. The pending receipt otherwise blocks
+/// sessions forever: the only other exit re-opens the exact 1.x source files.
+///
+/// The pending binding and digest are re-read from protected destination
+/// state, never accepted from the caller. Absence of the bound source is
+/// established owner-side by [`require_source_absent`] — the desktop runs
+/// un-sandboxed as the login owner — and travels as a receipt-bound
+/// [`RecoveryAbsence`] attestation: its digest and source must match the
+/// pending receipt exactly, otherwise recovery fails closed. The service
+/// deliberately never stats the source itself: under `ProtectHome=yes` the
+/// owner-profile lookup returns `EACCES`, which must not fail a
+/// legitimately-absent source. Then the durable destination is re-verified
+/// first: its state digest must still match the receipt and every
+/// destination key must still decrypt to its reviewed identity. Only then is
+/// the pending receipt atomically marked complete. A missing or mismatched
+/// destination key fails closed and leaves cleanup pending.
+///
+/// 1.x keyring retirement is deliberately not done here: the protected
+/// service cannot access login-owner legacy credentials. The login-owner
+/// desktop retires them with [`retire_recovered_credentials`] from the
+/// [`ServiceCommand::AuthorizeRecovery`] receipt *after* that
+/// owner-authorized service step and *before* requesting completion, so a
+/// refusal never strands deleted keys behind a completed receipt; the
+/// routine is idempotent, so a crash between retirement and completion
+/// resumes cleanly with the same call. The exact retired/retained outcome
+/// travels in that [`CleanupReport`], never in this [`Receipt`]: the receipt
+/// is phase-bound wire state, while the report is the same path normal
+/// completion uses. Because retirement precedes completion, a
+/// [`MoveStatus::Complete`] receipt never claims a shared key was deleted
+/// that recovery left behind.
+pub fn complete_move_without_source(
+    authorization: &OwnerAuthorization,
+    root: &Path,
+    nonce: Uuid,
+    absence: Option<&RecoveryAbsence>,
+) -> Result<Receipt> {
+    authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+    ensure!(!nonce.is_nil(), "completion requires a fresh nonce");
+    // Same file as `ConfigStore::with_lifecycle_lock`, scoped to the explicit
+    // root so recovery stays testable without an installed service identity.
+    with_root_lifecycle_lock(root, || {
+        authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+        let state = database::move_state(root)?;
+        let digest = state
+            .receipt
+            .context("no pending legacy move cleanup to complete")?;
+        ensure!(!state.complete, "legacy move cleanup is already complete");
+        let encoded = state.binding.context(
+            "legacy move cleanup is pending without bound source metadata; keep the wallet paused",
+        )?;
+        ensure!(
+            encoded.len() <= 256 * 1024,
+            "move identity metadata is oversized"
+        );
+        let binding: MoveBinding = serde_json::from_str(&encoded)?;
+        ensure!(
+            binding.source.is_absolute()
+                && binding.preserved_profiles.len() <= 32
+                && binding
+                    .preserved_profiles
+                    .iter()
+                    .all(|path| path.is_absolute() && path != &binding.source)
+                && binding
+                    .preserved_profiles
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && binding.retained_shared_accounts.len() <= 512
+                && (!binding.preserved_profiles.is_empty()
+                    || binding.retained_shared_accounts.is_empty()),
+            "invalid move source/destination binding"
+        );
+        // The owner-side gate proved absence; the service re-validates the
+        // receipt-bound attestation instead of re-statting a filesystem it
+        // cannot read. No attestation — no completion.
+        let absence = absence.context(
+            "recovery requires the owner-attested source absence bound to this receipt; prove the bound source is gone owner-side first",
+        )?;
+        ensure!(
+            absence.digest == digest && absence.source == binding.source,
+            "recovery absence attestation does not match the pending receipt; prove the bound source is gone owner-side first"
+        );
+        let wallets = database::verify(root, digest)?;
+        prepare_keys(&wallets, &[])?;
+        authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+        database::finish_cleanup(root, digest, &encoded)?;
+        Ok(Receipt {
+            phase: ReceiptPhase::Complete,
+            selection_digest: None,
+            digest,
+            nonce,
+            accounts: wallets.iter().map(|wallet| wallet.instance_id).collect(),
+            profile: binding.profile,
+            binding: Some(binding),
+            wallets,
+        })
+    })
+}
+
+/// The standard 1.x database path under a bound source profile, resolved
+/// exactly the way `Frozen::open` locates it. Recovery invents no layout.
+fn source_wallet_db(source: &Path) -> PathBuf {
+    source.join("wallet.db")
+}
+
+/// Fail closed unless the bound source's standard database file is absent. A
+/// present file (including a dangling symlink, which is never dereferenced)
+/// means 1.x is still live and recovery refuses, naming it. Only a missing
+/// file is acceptance; any other I/O outcome also refuses without proof.
+pub fn require_source_absent(source: &Path) -> Result<()> {
+    let path = source_wallet_db(source);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => anyhow::bail!(
+            "legacy move source is still present at {}; recovery refuses while 1.x is live — resume the exact source review instead",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error).context(format!(
+                "could not verify the legacy move source is gone at {}; recovery refuses without proof of absence",
+                path.display()
+            ))),
+    }
+}
+
+/// True only when a legacy-move failure carries the narrow bound-source
+/// marker from [`missing_source`], or the distinct source-missing text the
+/// owner service reports over D-Bus. A bare filesystem not-found — such as
+/// a mistyped preserved-profile path — never matches: recovery is offered
+/// only for the bound source itself. Generic failures never match.
+#[must_use]
+pub fn is_source_missing(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("legacy move source is missing")
+}
+
+/// Login-owner 1.x credential retirement for a receipt whose source database
+/// is already gone. The `recovery` receipt must come from the
+/// owner-authorized [`ServiceCommand::AuthorizeRecovery`] service step:
+/// retirement never precedes authentication, mirroring how `move_and_cleanup`
+/// verifies before mutating. A receipt of any other phase refuses without
+/// touching a credential. The normal-completion inventory is rebuilt from
+/// the destination-bound wallets and the exact same deletion routine is
+/// reused: every unshared account credential is re-read, compared, deleted
+/// and confirmed absent, shared/retained entries stay, and the global
+/// database credential is retired only when no preserved profiles need it.
+/// A binding without retirement identity cannot verify the global key, so it
+/// is retained rather than deleted blindly.
+///
+/// Must run outside async execution on a blocking worker (never inside
+/// `block_on`): the Secret Service adapter owns its own Tokio runtime, like
+/// every other keyring call wrapped in [`blocking_phase`]. Desktop callers
+/// perform the async service steps with `block_on`, then retire on the
+/// blocking thread between those steps.
+pub fn retire_recovered_credentials(recovery: &Receipt) -> Result<CleanupReport> {
+    ensure!(
+        matches!(recovery.phase, ReceiptPhase::RecoveryAuthorized),
+        "recovery requires the owner-authorized service step before retiring 1.x credentials"
+    );
+    ensure!(
+        !recovery.nonce.is_nil(),
+        "recovery requires the fresh authorized receipt"
+    );
+    let binding = recovery
+        .binding
+        .as_ref()
+        .context("recovery authorization carries no bound source; keep the wallet paused")?;
+    require_legacy_owner()?;
+    retire_recovered_with(
+        binding,
+        &recovery.wallets,
+        legacy_key,
+        delete_legacy_account,
+        retirement::read_database_key,
+        retirement::delete_database_key,
+    )
+}
+
+pub(crate) fn retire_recovered_with(
+    binding: &MoveBinding,
+    wallets: &[WalletMetadata],
+    read: impl FnMut(&WalletMetadata) -> Result<Option<Zeroizing<Vec<u8>>>>,
+    remove: impl FnMut(&WalletMetadata, &[u8]) -> Result<()>,
+    read_global: impl FnMut() -> Result<Option<Zeroizing<Vec<u8>>>>,
+    remove_global: impl FnMut() -> Result<()>,
+) -> Result<CleanupReport> {
+    let summary = MoveSummary {
+        source: binding.source.clone(),
+        accounts: wallets.to_vec(),
+        tables: Vec::new(),
+        retained_shared_accounts: binding.retained_shared_accounts.clone(),
+        preserved_profiles: binding.preserved_profiles.clone(),
+    };
+    let mut report = cleanup_with(&summary, read, remove)
+        .context("retire recovered unshared account credentials")?;
+    let preserved = !binding.preserved_profiles.is_empty();
+    report.shared_database_credential_retained = match &binding.retirement {
+        Some(identity) => {
+            retirement::retire_key_with(identity, preserved, read_global, remove_global)
+                .context("retire recovered global database credential and confirm absence")?
+        }
+        None => true,
+    };
+    Ok(report)
+}
+
+/// Desktop-side read of the pending receipt for source-less recovery. Prefer
+/// the owner-authorized [`ServiceCommand::AuthorizeRecovery`] step: it binds
+/// the same receipt and its return value is what
+/// [`retire_recovered_credentials`] requires before retiring. Refuses when
+/// no cleanup is pending.
+pub async fn inspect_pending_receipt() -> Result<Receipt> {
+    let mut peer = transport::Peer::connect().await?;
+    let receipt = peer
+        .call(&ServiceCommand::Inspect {
+            nonce: Uuid::new_v4(),
+        })
+        .await?;
+    ensure!(
+        receipt.binding.is_some(),
+        "no pending legacy move cleanup for this destination"
+    );
+    Ok(receipt)
+}
+
+fn with_root_lifecycle_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    crate::config::create_private_dir(root)?;
+    let lock_path = root.join("lifecycle.lock");
+    let lock = crate::config::open_private_file(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    let result = body();
+    let _ = fs2::FileExt::unlock(&lock);
+    result
+}
+
+/// True when a legacy-move failure is the fail-closed refusal for a 1.x
+/// source whose schema predates the supported gate. The Linux service maps
+/// this to a distinct hint; every other failure keeps the generic message.
+#[must_use]
+pub fn is_predates_supported_schema(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("predates the supported move schema")
+}
+
+pub(crate) fn initialize_baseline(root: &Path) -> Result<()> {
+    database::initialize_baseline(root)
+}
+
+#[cfg(test)]
+#[path = "legacy_move_test.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "legacy_move_complete_without_source_test.rs"]
+mod complete_without_source_tests;
