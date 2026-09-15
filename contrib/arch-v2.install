@@ -1,13 +1,7 @@
 # Pacman runs these functions as root. Never enroll an owner during installation.
-pre_upgrade() {
-    # Mirror contrib/deb-v2-preinst: do not replace an enrollment protocol
-    # while it is creating custody.
-    units="$(systemctl list-units --state=active,activating --no-legend 'ekubo-wallet-v2-provision@*.service')"
-    if [ -n "$units" ]; then
-        printf '%s\n' 'Complete or recover v2 enrollment before installing this package.' >&2
-        return 1
-    fi
-}
+# Upgrade guard lives in contrib/arch-v2-pretransaction.hook: libalpm
+# discards install-scriptlet exit status, so a pre_upgrade() refusal is dead
+# code. The PreTransaction hook aborts while provision@*.service is active.
 post_install() {
     # Pacman's global sysusers/tmpfiles hooks run after package install scripts.
     systemd-sysusers /usr/lib/sysusers.d/ekubo-wallet-v2.conf || return
@@ -20,10 +14,10 @@ post_install() {
 }
 
 post_upgrade() {
+    # Active enrollment never reaches here: the PreTransaction hook above
+    # aborts the transaction first, so stopping provisioning mid-enrollment
+    # would be the bug this used to be.
     post_install "$@" || return
-    # pre_upgrade refuses an active enrollment above, so this stop is a
-    # fail-closed belt-and-braces matching pre_remove semantics below.
-    systemctl stop 'ekubo-wallet-v2-provision@*.service'
 }
 
 pre_remove() {

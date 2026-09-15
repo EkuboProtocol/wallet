@@ -72,7 +72,7 @@ def deb(version, output):
                             if line.startswith("shlibs:Depends="))
         control = (f"Package: ekubo-wallet-v2\nVersion: {version}\nArchitecture: amd64\n"
                    "Maintainer: Ekubo, Inc. <support@ekubo.org>\n"
-                   f"Depends: {dependencies}, python3, polkitd, pkexec, dbus, systemd\n"
+                   f"Depends: {dependencies}, python3, polkitd, pkexec, dbus, systemd, gnome-keyring\n"
                    "Description: Ekubo Wallet 2 protected-service desktop wallet\n")
         (root / "DEBIAN/control").write_text(control, encoding="utf-8")
         subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(root),
@@ -83,6 +83,13 @@ def stage_arch_build(version, output, work):
     """Write conventional makepkg inputs; makepkg owns all pacman metadata."""
     root = work / "payload"
     stage_linux_payload(output, root)
+    # Arch-only exception to the DEB/Arch payload parity above: libalpm
+    # discards install-scriptlet exit status, so the upgrade guard must be a
+    # PreTransaction hook under usr/share/libalpm/hooks. DEB needs no hook
+    # because its preinst maintainer script can abort, so the DEB payload is
+    # unaffected and stage_linux_payload stays the single common manifest.
+    copy(ROOT / "contrib/arch-v2-pretransaction.hook", root,
+         "usr/share/libalpm/hooks/ekubo-wallet-v2-pretransaction.hook")
 
     def normalize(info):
         info.uid = info.gid = 0
@@ -108,11 +115,12 @@ arch=('x86_64')
 url='https://ekubo.org'
 license=('LicenseRef-FSL-1.1-MIT')
 # Runtime libraries for the Ubuntu-built ELF payload, plus service enrollment.
-depends=('alsa-lib' 'fontconfig' 'glib2' 'glibc' 'gcc-libs' 'libx11'
-         'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'openssl'
+# gnome-keyring is a hard dependency: the Secret Service provider for owner
+# credentials and legacy-wallet migration must always be present.
+depends=('alsa-lib' 'fontconfig' 'glib2' 'glibc' 'gcc-libs' 'gnome-keyring'
+         'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'openssl'
          'zlib' 'xdotool' 'libsecret' 'dbus' 'polkit' 'systemd' 'python'
          'vulkan-icd-loader' 'libglvnd')
-optdepends=('gnome-keyring: Secret Service provider for owner credentials and legacy-wallet migration')
 options=('!strip' '!debug')
 install=arch-v2.install
 source=('payload.tar')

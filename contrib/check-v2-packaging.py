@@ -34,12 +34,31 @@ def check_arch_release():
     builder = (ROOT / "contrib/build-v2-packages.py").read_text(encoding="utf-8")
     assert "'vulkan-icd-loader'" in builder
     assert "'libglvnd'" in builder
+    assert "'gnome-keyring'" in builder
+    assert "optdepends=" not in builder
+    assert "gnome-keyring" in builder  # DEB Depends hard requirement
+    assert "usr/share/libalpm/hooks/ekubo-wallet-v2-pretransaction.hook" in builder
     assert 'makensis", "/VERSION"' in builder
     assert '"3.12"' in builder
     install = (ROOT / "contrib/arch-v2.install").read_text(encoding="utf-8")
-    assert "pre_upgrade()" in install
-    assert "ekubo-wallet-v2-provision@*.service" in install
-    assert "Complete or recover v2 enrollment before installing this package." in install
+    # libalpm discards install-scriptlet exit status: the upgrade guard must
+    # live in the PreTransaction hook, never as an install-scriptlet function.
+    assert re.search(r"(?m)^\s*pre_upgrade\s*\(\)", install) is None
+    assert "pre_remove()" in install
+    assert "post_remove()" in install
+    assert "ekubo-wallet-v2-provision@*.service" in install  # pre_remove stop
+    post_upgrade = install.split("post_upgrade()")[1].split("pre_remove()")[0]
+    assert "systemctl stop" not in post_upgrade
+    hook = (ROOT / "contrib/arch-v2-pretransaction.hook").read_text(encoding="utf-8")
+    assert "[Trigger]" in hook
+    assert "Operation = Upgrade" in hook
+    assert "Type = Package" in hook
+    assert "Target = ekubo-wallet-v2" in hook
+    assert "[Action]" in hook
+    assert "When = PreTransaction" in hook
+    assert "AbortOnFail" in hook
+    assert "ekubo-wallet-v2-provision@*.service" in hook
+    assert "Complete or recover v2 enrollment before installing this package." in hook
     readme = (ROOT / "contrib/linux-service/README.md").read_text(encoding="utf-8")
     assert "signed" in readme and "GitHub release" in readme
     assert "sudo pacman -U ./ekubo-wallet-v2-*.pkg.tar.zst" not in readme
@@ -49,7 +68,10 @@ def main():
     check_windows_auth_payload()
     check_arch_release()
     assert (ROOT / 'contrib/arch-v2.install').is_file()
+    assert (ROOT / 'contrib/arch-v2-pretransaction.hook').is_file()
     assert (ROOT / 'contrib/arch-ci/Dockerfile').is_file()
+    dockerfile = (ROOT / 'contrib/arch-ci/Dockerfile').read_text(encoding="utf-8")
+    assert "archlinux:base@sha256:" in dockerfile
     with (ROOT / "Cargo.toml").open("rb") as source:
         manifest = tomllib.load(source)
     assert manifest["workspace"]["package"]["version"].split(".")[0] == "2"

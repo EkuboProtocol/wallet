@@ -4,6 +4,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -40,11 +41,20 @@ class LinuxPackagingTest(unittest.TestCase):
         with patch.object(builder.subprocess, "check_output", return_value="shlibs:Depends=libc6\n"), \
                 patch.object(builder.subprocess, "run", side_effect=capture_deb):
             builder.deb("2.0.0", self.output)
+        # The libalpm PreTransaction hook is Arch-only by design (DEB aborts
+        # via its preinst instead), so it is the sole allowed payload delta.
+        hook_rel = "usr/share/libalpm/hooks/ekubo-wallet-v2-pretransaction.hook"
+        self.assertNotIn(hook_rel, deb_files)
         builder.stage_arch_build("2.0.0", self.output, self.work)
         with tarfile.open(self.work / "payload.tar") as archive:
             arch_files = {item.name: (archive.extractfile(item).read(), item.mode)
                           for item in archive if item.isfile()}
             self.assertTrue(all(item.uid == item.gid == 0 for item in archive))
+        self.assertIn(hook_rel, arch_files)
+        hook_bytes, hook_mode = arch_files.pop(hook_rel)
+        self.assertEqual(hook_bytes,
+                         (builder.ROOT / "contrib/arch-v2-pretransaction.hook").read_bytes())
+        self.assertEqual(hook_mode, 0o644)
         self.assertEqual(deb_files, arch_files)
         self.assertEqual(arch_files["usr/bin/ekubo-wallet-v2"][1], 0o755)
         self.assertIn("usr/share/licenses/ekubo-wallet-v2/LICENSE", arch_files)
@@ -62,12 +72,31 @@ class LinuxPackagingTest(unittest.TestCase):
         self.assertIn("pkgver = 2.0.0-1\n", info)
         self.assertIn("arch = x86_64\n", info)
         self.assertIn("depend = python\n", info)
+        self.assertIn("depend = gnome-keyring\n", info)
+        self.assertNotIn("optdepend = gnome-keyring", info)
         members = subprocess.check_output(["bsdtar", "-tf", str(package)], text=True).splitlines()
         self.assertTrue({".PKGINFO", ".BUILDINFO", ".MTREE", ".INSTALL"}.issubset(members))
+        self.assertIn("usr/share/libalpm/hooks/ekubo-wallet-v2-pretransaction.hook", members)
         actual = subprocess.check_output(["bsdtar", "-xOf", str(package), "usr/bin/ekubo-wallet-v2"])
         self.assertEqual(actual, (self.output / "ekubo-wallet-v2").read_bytes())
         install = subprocess.check_output(["bsdtar", "-xOf", str(package), ".INSTALL"])
         self.assertEqual(install, (builder.ROOT / "contrib/arch-v2.install").read_bytes())
+
+    def test_linux_depends_require_secret_service_provider(self):
+        captured = {}
+
+        def capture_deb(command, **kwargs):
+            root = Path(command[3])
+            captured["control"] = (root / "DEBIAN/control").read_text()
+
+        with patch.object(builder.subprocess, "check_output", return_value="shlibs:Depends=libc6\n"), \
+                patch.object(builder.subprocess, "run", side_effect=capture_deb):
+            builder.deb("2.0.0", self.output)
+        self.assertIn("gnome-keyring", captured["control"])
+        builder.stage_arch_build("2.0.0", self.output, self.work)
+        pkgbuild = (self.work / "PKGBUILD").read_text()
+        self.assertIn("'gnome-keyring'", pkgbuild)
+        self.assertNotIn("optdepends=", pkgbuild)
 
     def test_root_is_rejected_before_staging(self):
         with patch.object(builder.os, "geteuid", return_value=0), \
@@ -104,22 +133,31 @@ restore_profile() { record restore "$@"; }
             "busctl --system call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig",
             "systemctl try-restart ekubo-wallet-v2@*.service",
         ]
-        upgrade_expected = [
-            *install_expected,
-            "systemctl stop ekubo-wallet-v2-provision@*.service",
-        ]
-        for hook, expected in (("post_install", install_expected),
-                               ("post_upgrade", upgrade_expected)):
+        # post_upgrade delegates to post_install only: the PreTransaction hook
+        # aborts active enrollment first, so no mid-enrollment stop belongs here.
+        for hook in ("post_install", "post_upgrade"):
             result = self.hook(hook)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.splitlines(), expected)
+            self.assertEqual(result.stdout.splitlines(), install_expected)
+
+    def test_upgrade_guard_moved_from_scriptlet_to_pretransaction_hook(self):
+        install = (builder.ROOT / "contrib/arch-v2.install").read_text()
+        self.assertIsNone(re.search(r"(?m)^\s*pre_upgrade\s*\(\)", install))
+        post_upgrade = install.split("post_upgrade()")[1].split("pre_remove()")[0]
+        self.assertNotIn("systemctl stop", post_upgrade)
+        hook = (builder.ROOT / "contrib/arch-v2-pretransaction.hook").read_text()
+        for expected in ("[Trigger]", "Operation = Upgrade", "Type = Package",
+                         "Target = ekubo-wallet-v2", "[Action]",
+                         "When = PreTransaction", "AbortOnFail",
+                         "ekubo-wallet-v2-provision@*.service",
+                         "Complete or recover v2 enrollment before installing this package."):
+            self.assertIn(expected, hook)
 
     def test_failed_profile_restoration_prevents_restart(self):
         result = self.hook("post_upgrade", fail="restore")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("try-restart", result.stdout)
         self.assertNotIn("busctl", result.stdout)
-        self.assertNotIn("stop", result.stdout)
 
     def test_remove_stops_only_v2_and_retains_profile_metadata(self):
         before = self.hook("pre_remove")
