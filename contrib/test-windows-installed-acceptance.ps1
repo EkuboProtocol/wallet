@@ -581,6 +581,11 @@ try {
             $strandSentinel = Join-Path $strandOwnerProfile 'AppData\Local\Ekubo\wallet\acceptance-sentinel'
             if (-not (Test-Path -LiteralPath $strandSentinel -PathType Leaf)) { throw 'Disposable 1.x sentinel is missing after the stranded run.' }
             Remove-Item -LiteralPath $strandSentinel -Force
+            # The restarted worker's enroll phase requires no 1.x owner
+            # directory at all, not just no sentinel file. Remove the exact
+            # fixture-owned directory the worker asserts on.
+            $strandLegacyDir = Join-Path $strandOwnerProfile 'AppData\Local\Ekubo\wallet'
+            if (Test-Path -LiteralPath $strandLegacyDir) { Remove-Item -LiteralPath $strandLegacyDir -Recurse -Force }
             foreach ($name in @('identity.json', 'begin.json', 'relay.json', 'connect-error.txt', 'failure.json')) {
                 $report = Join-Path $exchange $name
                 if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force }
