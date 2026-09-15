@@ -197,6 +197,18 @@ function Stop-RecoveryService($name) {
         foreach ($handle in $handles) { [EkuboRecoveryProcess]::Wait($handle) }
     } finally { foreach ($handle in $handles) { [void][EkuboRecoveryProcess]::CloseHandle($handle) } }
 }
+function Wait-ServiceDeletion($name) {
+    # CIM and Get-Service read different SCM views that converge with a
+    # delay: a deletion confirmed through one API can still be listed by the
+    # other. Callers (and the acceptance gate) check both, so wait on both
+    # before reporting cleanup complete. Bounded and fail-closed.
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Get-CimInstance Win32_Service -Filter "Name='$name'") -or
+        (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
+        if ([DateTime]::UtcNow -gt $deadline) { throw 'Service deletion is still pending; identity retained for retry.' }
+        Start-Sleep -Milliseconds 200
+    }
+}
 function Assert-PlainDirectory($path) {
     if (Test-Path -LiteralPath $path) {
         $item = Get-Item -LiteralPath $path -Force
@@ -361,11 +373,7 @@ try {
         if ($registration) {
             & $sc delete $service
             if ($LASTEXITCODE -ne 0) { throw 'Service registration cleanup failed; rerun discard with retained pending identity.' }
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            while (Get-CimInstance Win32_Service -Filter "Name='$service'") {
-                if ([DateTime]::UtcNow -gt $deadline) { throw 'Service deletion is still pending; identity retained for retry.' }
-                Start-Sleep -Milliseconds 200
-            }
+            Wait-ServiceDeletion $service
         }
         Remove-Item -LiteralPath $pendingKey -Recurse
         Remove-Item -LiteralPath (Join-Path $registry 'Pending')
@@ -475,11 +483,7 @@ try {
         if ($registration) {
             & $sc delete $service
             if ($LASTEXITCODE -ne 0) { throw 'Service registration cleanup failed; rerun reset with retained pending identity.' }
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            while (Get-CimInstance Win32_Service -Filter "Name='$service'") {
-                if ([DateTime]::UtcNow -gt $deadline) { throw 'Service deletion is still pending; identity retained for retry.' }
-                Start-Sleep -Milliseconds 200
-            }
+            Wait-ServiceDeletion $service
         }
         Remove-Item -LiteralPath $pendingKey -Recurse
         if ($hasActiveKey) { Remove-Item -LiteralPath $activeKey -Recurse }

@@ -559,8 +559,11 @@ try {
             Write-Output "STEP $stage"
             Invoke-SetupScript (Join-Path $install 'recover-windows-v2.ps1') @('-OwnerSid', $ownerSid, '-ResetConfirmed')
             if ($LASTEXITCODE -ne 0) { throw 'Production reset of the stranded profile failed.' }
-            if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage) -or
-                @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue).Count) { throw 'Production reset left setup-blocking state.' }
+            $leftover = @()
+            if (Test-Path -LiteralPath $registry) { $leftover += "registry:$registry" }
+            if (Test-Path -LiteralPath $storage) { $leftover += "storage:$storage" }
+            $leftover += @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue | ForEach-Object { "service:$($_.Name)" })
+            if ($leftover.Count) { throw "Production reset left setup-blocking state: $($leftover -join ', ')." }
             if ((Get-FileHash -LiteralPath $unrelated).Hash -ne $unrelatedHash) { throw 'Reset changed unrelated files.' }
             foreach ($before in $profilesBefore) {
                 $after = Get-CimInstance Win32_UserProfile -Filter "SID='$($before.SID)'"
