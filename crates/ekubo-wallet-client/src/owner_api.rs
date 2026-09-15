@@ -28,15 +28,23 @@ impl<T: OwnerTransport> OwnerConnection<T> {
     /// Owner-authorized recovery when the 1.x source was deleted before
     /// cleanup finished. The service re-verifies destination custody and
     /// natively authenticates the owner; this call carries no source path.
+    /// The returned receipt must echo the sent nonce; anything else fails
+    /// closed without touching local state.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub async fn complete_legacy_move_without_source(
         &self,
         nonce: uuid::Uuid,
     ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
-        self.call(&Request::LegacyMove(
-            ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource { nonce },
-        ))
-        .await
+        let receipt: ekubo_wallet_core::legacy_move::Receipt = self
+            .call(&Request::LegacyMove(
+                ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource { nonce },
+            ))
+            .await?;
+        anyhow::ensure!(
+            receipt.nonce() == nonce,
+            "legacy move recovery receipt does not match its fresh nonce"
+        );
+        Ok(receipt)
     }
     pub async fn portfolio(
         &self,

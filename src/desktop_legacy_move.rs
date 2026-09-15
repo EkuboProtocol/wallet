@@ -17,14 +17,32 @@ pub(super) struct MoveWindow {
     restart: Rc<Cell<bool>>,
     /// Recovery from a pending cleanup whose 1.x source is unreadable or
     /// deleted. Grouped so the window stays under the boolean-count lint.
+    /// `source_missing` is set only after a review/resume attempt fails with
+    /// an absent source; a pending receipt alone never offers recovery.
     recovery: Recovery,
 }
 
-/// Whether the pending-cleanup recovery path is available, confirmed, done.
-struct Recovery {
-    offered: bool,
-    confirmed: bool,
-    done: bool,
+/// Pending-cleanup recovery state. A bound receipt alone never offers
+/// recovery; only a review/resume failure proving the source is absent moves
+/// past `AwaitingSource`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    /// No pending receipt, or recovery already resolved out of band.
+    Unavailable,
+    /// A receipt is pending but the source has not yet proven absent.
+    AwaitingSource,
+    /// A review/resume attempt failed with an absent source.
+    Offered,
+    /// The owner confirmed recovery of the absent source.
+    Confirmed,
+    /// Recovery completed.
+    Done,
+}
+
+impl Recovery {
+    fn offerable(self) -> bool {
+        matches!(self, Self::Offered | Self::Confirmed)
+    }
 }
 
 fn selected_profiles(
@@ -61,6 +79,24 @@ fn selected_profiles(
             preserve_profiles: profiles,
         },
     ))
+}
+
+/// Offer source-less recovery only when a cleanup receipt is pending and the
+/// failed review/resume ended because the 1.x source is absent. Generic
+/// review errors (wrong paths, locked profiles, unreadable inventories) must
+/// resume the exact source, never bypass it.
+fn should_offer_recovery(has_pending_receipt: bool, error: &anyhow::Error) -> bool {
+    has_pending_receipt && ekubo_wallet_core::legacy_move::is_source_missing(error)
+}
+
+fn recovery_message(report: &ekubo_wallet_core::legacy_move::CleanupReport) -> String {
+    format!(
+        "Pending cleanup finished after destination re-verification. Deleted {} old account credential(s); {} already absent; {} shared account credential(s) retained.\nThe shared 1.x database credential is retained: {}. Encrypted history is preserved in wallet.db.retired-v2-backup. Any retained shared signing key still remains accessible to 1.x. Close and reopen v2 to reload the moved state.",
+        report.deleted_account_credentials.len(),
+        report.already_absent.len(),
+        report.retained_shared_accounts.len(),
+        report.shared_database_credential_retained
+    )
 }
 
 fn inventory_text(summary: &MoveSummary) -> String {
@@ -107,7 +143,9 @@ impl MoveWindow {
     fn finished(&self) -> bool {
         // The reviewed source is consumed exactly once by move_and_cleanup.
         // Recovery completes the pending receipt without a source review.
-        !self.busy && (self.recovery.done || (self.summary.is_some() && self.reviewed.is_none()))
+        !self.busy
+            && (self.recovery == Recovery::Done
+                || (self.summary.is_some() && self.reviewed.is_none()))
     }
     pub(super) const fn busy(&self) -> bool {
         self.busy
@@ -169,6 +207,10 @@ impl MoveWindow {
                         view.message = None;
                     }
                     Err(error) => {
+                        if should_offer_recovery(view.recovery == Recovery::AwaitingSource, &error)
+                        {
+                            view.recovery = Recovery::Offered;
+                        }
                         view.message = Some(format!("Could not review this source: {error:#}"));
                     }
                 }
@@ -209,31 +251,52 @@ impl MoveWindow {
     }
 
     /// Owner-authorized recovery when the 1.x source is gone but a cleanup
-    /// receipt is pending. The service re-verifies destination custody and
-    /// natively authenticates the owner; the window only carries intent.
+    /// receipt is pending. The window only carries intent: core inspects the
+    /// pending receipt, proves the bound source database is absent, retires
+    /// the bound unshared 1.x credentials with the login-owner authority, and
+    /// only then asks the service to re-verify destination custody and finish
+    /// the receipt. A refusal leaves the receipt pending so recovery retries
+    /// cleanly; retirement itself is idempotent.
     fn complete_without_source(&mut self, cx: &mut Context<Self>) {
-        if self.busy || !self.recovery.confirmed || self.finished() {
+        if self.busy || self.recovery != Recovery::Confirmed || self.finished() {
             return;
         }
         self.busy = true;
-        self.message = Some("Re-verifying the protected destination and requesting owner authorization to finish the pending cleanup. Keep this window open.".into());
+        self.message = Some("Re-verifying the protected destination, retiring the moved profile's unshared 1.x credentials, and requesting owner authorization to finish the pending cleanup. Keep this window open.".into());
         let owner = self.owner.clone();
         let runtime = gpui_tokio::Tokio::handle(cx);
         let worker = runtime.clone();
-        let task = runtime.spawn_blocking(move || {
-            worker.block_on(owner.complete_legacy_move_without_source(uuid::Uuid::new_v4()))
-        });
+        let task = runtime.spawn_blocking(
+            move || -> anyhow::Result<ekubo_wallet_core::legacy_move::CleanupReport> {
+                worker.block_on(async move {
+                    let inspected =
+                        ekubo_wallet_core::legacy_move::inspect_pending_receipt().await?;
+                    let Some(binding) = inspected.binding().cloned() else {
+                        anyhow::bail!("no pending legacy move cleanup for this destination");
+                    };
+                    ekubo_wallet_core::legacy_move::require_source_absent(&binding.source)?;
+                    let report = ekubo_wallet_core::legacy_move::retire_recovered_credentials(
+                        &binding,
+                        inspected.wallets(),
+                    )?;
+                    owner
+                        .complete_legacy_move_without_source(uuid::Uuid::new_v4())
+                        .await?;
+                    Ok(report)
+                })
+            },
+        );
         cx.spawn(async move |view, cx| {
             let result = task.await.unwrap_or_else(|error| Err(error.into()));
             let _ = view.update(cx, |view, cx| {
                 view.busy = false;
                 match result {
-                    Ok(_) => {
-                        view.recovery.done = true;
-                        view.message = Some("Pending cleanup finished after destination re-verification. Close and reopen v2 to reload the moved state.".into());
+                    Ok(report) => {
+                        view.recovery = Recovery::Done;
+                        view.message = Some(recovery_message(&report));
                     }
                     Err(error) => {
-                        view.message = Some(format!("Recovery did not complete: {error:#}\nNothing was deleted. Keep both profiles and retry only after inspecting the result."));
+                        view.message = Some(format!("Recovery did not complete: {error:#}\nThe pending cleanup was not marked complete. Unshared 1.x credentials may already be retired; keep both profiles and retry only after inspecting the result."));
                     }
                 }
                 cx.notify();
@@ -265,12 +328,23 @@ impl Render for MoveWindow {
                         .label("Retire this profile after verifying v2. Delete its unshared account credentials and, if no other profiles need it, the old database key. Keep the shared keys shown above.")
                         .on_click(cx.listener(|view, checked, _, cx| { view.deletion_confirmed = *checked; cx.notify(); })))))
                 .when_some(self.message.clone(), |panel, message| panel.child(div().id("legacy-move-status").role(Role::Status).child(selectable_label(message)))))
-                .when(self.recovery.offered && !self.finished(), |panel| panel
-                    .child(selectable_label("A previous move left cleanup unfinished and the 1.x source cannot be read. If the 1.x profile or directory was deleted, the moved keys may still be sealed in v2. Recovery re-verifies the protected destination and finishes the pending cleanup after owner authorization. Nothing is deleted by this step itself."))
+                .when(self.recovery.offerable() && !self.finished(), |panel| panel
+                    .child(selectable_label("A previous move left cleanup unfinished and the 1.x source cannot be read. If the 1.x profile or directory was deleted, the moved keys may still be sealed in v2. Recovery re-verifies the protected destination, retires the moved profile's unshared 1.x credentials after owner authorization, and finishes the pending cleanup. Shared keys stay with the preserved profiles bound to the receipt."))
                     .child(Checkbox::new("confirm-legacy-recovery")
-                        .checked(self.recovery.confirmed).disabled(self.busy)
-                        .label("The 1.x source is gone and I cannot restore it. Re-verify the destination and finish the pending cleanup.")
-                        .on_click(cx.listener(|view, checked, _, cx| { view.recovery.confirmed = *checked; cx.notify(); }))))
+                        .checked(self.recovery == Recovery::Confirmed).disabled(self.busy)
+                        .label("The 1.x source is gone and I cannot restore it. Re-verify the destination, retire its unshared credentials, and finish the pending cleanup.")
+                        .on_click(cx.listener(|view, checked, _, cx| {
+                            if view.recovery == Recovery::Offered
+                                || view.recovery == Recovery::Confirmed
+                            {
+                                view.recovery = if *checked {
+                                    Recovery::Confirmed
+                                } else {
+                                    Recovery::Offered
+                                };
+                            }
+                            cx.notify();
+                        }))))
             .when(self.summary.is_none() && !self.finished(), |panel| panel.child(app_button("review-legacy-source").self_start().label("Review selected source…")
                 .disabled(self.busy || !self.inventory_complete).on_click(cx.listener(|view, _, _, cx| view.review(cx)))))
             .when(self.reviewed.is_some(), |panel| panel
@@ -278,7 +352,7 @@ impl Render for MoveWindow {
                     .disabled(self.busy || !self.deletion_confirmed).on_click(cx.listener(|view, _, _, cx| view.move_reviewed(cx))))
                 .child(app_button("change-legacy-source").self_start().label("Change source").disabled(self.busy)
                     .on_click(cx.listener(|view, _, _, cx| { view.reviewed = None; view.summary = None; view.deletion_confirmed = false; cx.notify(); }))))
-            .when(self.recovery.offered && self.recovery.confirmed && !self.finished(), |panel| panel.child(app_button("complete-legacy-without-source").self_start().label("Re-verify and finish pending cleanup").danger()
+            .when(self.recovery == Recovery::Confirmed && !self.finished(), |panel| panel.child(app_button("complete-legacy-without-source").self_start().label("Re-verify and finish pending cleanup").danger()
                 .disabled(self.busy).on_click(cx.listener(|view, _, _, cx| view.complete_without_source(cx)))))
             .child(app_button("close-legacy-move").self_start().label(if self.finished() { "Open wallet" } else { "Close" }).disabled(self.busy)
                 .on_click(cx.listener(|view, _, _, cx| {
@@ -299,7 +373,9 @@ pub(super) fn create(
         Some(binding) => binding.source.clone(),
         None => ekubo_wallet_core::legacy_move::suggested_legacy_root()?,
     };
-    let recovery_offered = pending.is_some();
+    // A pending receipt alone never offers recovery: the checkbox appears
+    // only after a review/resume attempt fails with the source absent.
+    let pending_receipt = pending.is_some();
     let preserved = pending.map_or_else(String::new, |binding| {
         binding
             .preserved_profiles
@@ -315,7 +391,7 @@ pub(super) fn create(
         restart,
         &suggested,
         &preserved,
-        recovery_offered,
+        pending_receipt,
     ))
 }
 
@@ -326,7 +402,7 @@ fn create_with_path(
     restart: Rc<Cell<bool>>,
     suggested: &std::path::Path,
     preserved: &str,
-    recovery_offered: bool,
+    pending_receipt: bool,
 ) -> Entity<MoveWindow> {
     cx.new(|cx| MoveWindow {
         owner,
@@ -345,10 +421,10 @@ fn create_with_path(
         busy: false,
         message: None,
         restart,
-        recovery: Recovery {
-            offered: recovery_offered,
-            confirmed: false,
-            done: false,
+        recovery: if pending_receipt {
+            Recovery::AwaitingSource
+        } else {
+            Recovery::Unavailable
         },
     })
 }
