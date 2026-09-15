@@ -336,6 +336,10 @@ try {
             @($leaf.GetValueNames() | Where-Object { $_ -notin @('Profile', 'RelayConfirmed', 'Discarding') }).Count) { throw 'Unexpected pending registry state.' }
         $discarding = $record.PSObject.Properties['Discarding'] -and $record.Discarding -eq 1
         $registration = Get-CimInstance Win32_Service -Filter "Name='$service'"
+        # The authentication broker is only ever registered for a published
+        # profile. Its presence on an unconfirmed attempt means unexpected
+        # state; refuse rather than orphan it.
+        if (Get-CimInstance Win32_Service -Filter "Name='$service-Auth'") { throw 'Unexpected authentication broker for an unconfirmed attempt; refusing discard.' }
         if ($registration) {
             $expectedCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --provision-owner-sid ' + $OwnerSid
             if ($registration.StartName -ne ('NT SERVICE\' + $service) -or $registration.PathName -ne $expectedCommand) { throw 'Not the exact pending provisioning service.' }
@@ -484,6 +488,21 @@ try {
             & $sc delete $service
             if ($LASTEXITCODE -ne 0) { throw 'Service registration cleanup failed; rerun reset with retained pending identity.' }
             Wait-ServiceDeletion $service
+        }
+        # The per-profile LocalSystem authentication broker is registered
+        # alongside a published profile. A stranded never-ready profile leaves
+        # it behind, and fresh setup refuses while any EkuboWalletV2-* service
+        # remains. Remove exactly this profile's broker: the name embeds the
+        # validated profile GUID and the command embeds this owner.
+        $authService = $service + '-Auth'
+        $authRegistration = Get-CimInstance Win32_Service -Filter "Name='$authService'"
+        if ($authRegistration) {
+            $authCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --authenticate-owner-sid ' + $OwnerSid
+            if ($authRegistration.StartName -ne 'LocalSystem' -or $authRegistration.PathName -ne $authCommand) { throw 'Unexpected native authentication service; reset refused.' }
+            Stop-RecoveryService $authService
+            & $sc delete $authService
+            if ($LASTEXITCODE -ne 0) { throw 'Authentication broker cleanup failed; rerun reset with retained pending identity.' }
+            Wait-ServiceDeletion $authService
         }
         Remove-Item -LiteralPath $pendingKey -Recurse
         if ($hasActiveKey) { Remove-Item -LiteralPath $activeKey -Recurse }
