@@ -118,8 +118,14 @@ def publish_activation(owner, account):
 
 
 def reload_bus():
-    subprocess.run(['/usr/bin/busctl', '--system', 'call', 'org.freedesktop.DBus',
-                    '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'ReloadConfig'], check=True)
+    # The DEB hooks assume a running systemd/D-Bus; name that runtime when the
+    # reload cannot happen instead of surfacing a bare busctl traceback.
+    try:
+        subprocess.run(['/usr/bin/busctl', '--system', 'call', 'org.freedesktop.DBus',
+                        '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'ReloadConfig'], check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError('Cannot reload the system bus configuration '
+                           f'(systemd/D-Bus runtime missing or not running): {error}') from error
 
 
 def restore_activations():
@@ -131,8 +137,12 @@ def restore_activations():
     account = pwd.getpwnam('ekubo-wallet-v2')
     for path in sorted((ETC / 'owners').iterdir()):
         if path.suffix != '.json':
-            raise RuntimeError('Unexpected owner metadata entry')
-        publish_activation(owner_uid(path.stem), account)
+            raise RuntimeError(f'Unexpected owner metadata entry: {path}')
+        try:
+            uid = owner_uid(path.stem)
+        except RuntimeError as error:
+            raise RuntimeError(f'Unexpected owner metadata entry: {path}: {error}') from error
+        publish_activation(uid, account)
 
 
 def protected(path, mode=0o755, uid=0, gid=0):
@@ -159,6 +169,11 @@ def publish(path, payload):
 
 
 def main():
+    # pkexec preserves the caller's umask and Arch's polkit PAM stack has no
+    # pam_umask, so an inherited restrictive umask (e.g. 077) would otherwise
+    # make fresh directories fail the exact-mode checks below. Every protected
+    # path is created with an explicit mode, so resetting to 022 is safe.
+    os.umask(0o022)
     if os.getuid() != 0 or os.geteuid() != 0:
         raise RuntimeError('Root is required')
     if sys.argv[1:] == ['--restore-activations']:

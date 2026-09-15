@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -130,6 +131,56 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(self.target.stat().st_nlink, 1)
         self.publish()
         self.assertEqual(list(self.target.parent.iterdir()), [self.target])
+
+    def test_stray_entry_error_names_offending_path(self):
+        stray = self.root / 'etc/owners/stray.txt'
+        stray.write_text('tamper')
+        with patch.object(installer.pwd, 'getpwnam', return_value=self.account):
+            with self.assertRaises(RuntimeError) as raised:
+                installer.restore_activations()
+        self.assertIn(str(stray), str(raised.exception))
+
+    def test_bad_stem_error_names_offending_path(self):
+        bad = self.root / 'etc/owners/evil.json'
+        bad.write_text('{}')
+        with patch.object(installer.pwd, 'getpwnam', return_value=self.account):
+            with self.assertRaises(RuntimeError) as raised:
+                installer.restore_activations()
+        self.assertIn(str(bad), str(raised.exception))
+
+    def test_reload_bus_failure_names_runtime(self):
+        for failure in [subprocess.CalledProcessError(1, 'busctl'),
+                        FileNotFoundError('No such file or directory')]:
+            with self.subTest(failure=failure):
+                with patch.object(installer.subprocess, 'run', side_effect=failure):
+                    with self.assertRaises(RuntimeError) as raised:
+                        installer.reload_bus()
+                self.assertIn('D-Bus', str(raised.exception))
+
+
+class UmaskTests(unittest.TestCase):
+    """Static guard: pkexec preserves the caller umask (and Arch polkit PAM
+    has no pam_umask), so main() must reset it; every protected creation uses
+    an explicit mode, so nothing depends on a stricter inherited umask."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = Path(__file__).with_name('install-profile').read_text()
+
+    def test_main_resets_umask_first(self):
+        main = self.source.split('def main():', 1)[1].split('\ndef ', 1)[0]
+        first = next(line.strip() for line in main.splitlines()
+                     if line.strip() and not line.strip().startswith('#'))
+        self.assertEqual(first, 'os.umask(0o022)')
+
+    def test_all_protected_creations_use_explicit_modes(self):
+        for marker in ['path.mkdir(mode=mode)',
+                       'os.fchmod(output.fileno(), 0o644)',
+                       'os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644',
+                       'os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600']:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.source)
+        self.assertEqual(self.source.count('os.umask('), 1)
 
 
 if __name__ == '__main__':
