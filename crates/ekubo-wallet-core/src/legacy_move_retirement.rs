@@ -51,7 +51,7 @@ fn marker(binding: &MoveBinding) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn read_database_key() -> Result<Option<Zeroizing<Vec<u8>>>> {
+pub(super) fn read_database_key() -> Result<Option<Zeroizing<Vec<u8>>>> {
     // All production callers run in blocking_phase (review/resume or cleanup).
     match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
         .context("open legacy global database credential store")?
@@ -89,20 +89,22 @@ fn check_key(identity: &Identity, preserved: bool, key: Option<&[u8]>) -> Result
 }
 
 pub(super) fn retire_database_key(identity: &Identity, preserved: bool) -> Result<bool> {
-    retire_key_with(identity, preserved, read_database_key, || {
-        match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
-            .context("open legacy global database credential for deletion")?
-            .delete_credential()
-        {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => {
-                Err(anyhow::Error::from(error).context("delete legacy global database credential"))
-            }
-        }
-    })
+    retire_key_with(identity, preserved, read_database_key, delete_database_key)
 }
 
-fn retire_key_with(
+pub(super) fn delete_database_key() -> Result<()> {
+    match crate::credential_store::legacy_entry("org.ekubo.wallet.db", "default")
+        .context("open legacy global database credential for deletion")?
+        .delete_credential()
+    {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => {
+            Err(anyhow::Error::from(error).context("delete legacy global database credential"))
+        }
+    }
+}
+
+pub(super) fn retire_key_with(
     identity: &Identity,
     preserved: bool,
     mut read: impl FnMut() -> Result<Option<Zeroizing<Vec<u8>>>>,

@@ -163,6 +163,28 @@ pub struct Receipt {
     wallets: Vec<WalletMetadata>,
 }
 
+impl Receipt {
+    /// The fresh nonce this receipt answers. Clients fail closed on mismatch.
+    #[must_use]
+    pub fn nonce(&self) -> Uuid {
+        self.nonce
+    }
+
+    /// The destination-bound source identity. Recovery retires credentials
+    /// from this binding, never from caller-supplied paths.
+    #[must_use]
+    pub fn binding(&self) -> Option<&MoveBinding> {
+        self.binding.as_ref()
+    }
+
+    /// The destination-verified account identities whose unshared 1.x
+    /// credentials recovery retires.
+    #[must_use]
+    pub fn wallets(&self) -> &[WalletMetadata] {
+        &self.wallets
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct MoveSummary {
     pub source: PathBuf,
@@ -710,28 +732,30 @@ fn verify_key(wallet: &WalletMetadata, bytes: &[u8]) -> Result<()> {
 
 fn cleanup(summary: &MoveSummary) -> Result<CleanupReport> {
     require_legacy_owner()?;
-    cleanup_with(summary, legacy_key, |wallet, expected| {
-        let entry = crate::credential_store::legacy_entry(
-            "org.ekubo.wallet.private-key.instance",
-            &wallet.instance_id.to_string(),
-        )
-        .context("open legacy account credential for deletion")?;
-        let current = Zeroizing::new(
-            entry
-                .get_secret()
-                .context("reread legacy account credential before deletion")?,
-        );
-        ensure!(
-            current.as_slice() == expected,
-            "legacy credential changed before deletion"
-        );
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => {
-                Err(anyhow::Error::from(error).context("delete legacy account credential"))
-            }
-        }
-    })
+    cleanup_with(summary, legacy_key, delete_legacy_account)
+}
+
+/// The exact per-account deletion used by normal completion, reused verbatim
+/// by source-less recovery so both paths delete and verify the same entries.
+fn delete_legacy_account(wallet: &WalletMetadata, expected: &[u8]) -> Result<()> {
+    let entry = crate::credential_store::legacy_entry(
+        "org.ekubo.wallet.private-key.instance",
+        &wallet.instance_id.to_string(),
+    )
+    .context("open legacy account credential for deletion")?;
+    let current = Zeroizing::new(
+        entry
+            .get_secret()
+            .context("reread legacy account credential before deletion")?,
+    );
+    ensure!(
+        current.as_slice() == expected,
+        "legacy credential changed before deletion"
+    );
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error).context("delete legacy account credential")),
+    }
 }
 
 fn cleanup_with(
@@ -1091,11 +1115,26 @@ pub fn require_cleanup_finished(root: &Path) -> Result<()> {
 /// sessions forever: the only other exit re-opens the exact 1.x source files.
 ///
 /// The pending binding and digest are re-read from protected destination
-/// state, never accepted from the caller. The durable destination is
-/// re-verified first — its state digest must still match the receipt and
-/// every destination key must still decrypt to its reviewed identity — and
-/// only then is the pending receipt atomically marked complete. A missing or
-/// mismatched destination key fails closed and leaves cleanup pending.
+/// state, never accepted from the caller. The bound source's standard
+/// database file must be absent — a live source refuses recovery outright —
+/// then the durable destination is re-verified first: its state digest must
+/// still match the receipt and every destination key must still decrypt to
+/// its reviewed identity. Only then is the pending receipt atomically marked
+/// complete. A missing or mismatched destination key fails closed and leaves
+/// cleanup pending.
+///
+/// 1.x keyring retirement is deliberately not done here: the protected
+/// service cannot access login-owner legacy credentials. The login-owner
+/// desktop retires them with [`retire_recovered_credentials`] from an
+/// [`inspect_pending_receipt`] snapshot *before* requesting completion, so a
+/// refusal never strands deleted keys behind a completed receipt; the routine
+/// is idempotent, so a crash between retirement and completion resumes
+/// cleanly with the same call. The exact retired/retained outcome travels in
+/// that [`CleanupReport`], never in this [`Receipt`]: the receipt is
+/// phase-bound wire state, while the report is the same path normal
+/// completion uses. Because retirement precedes completion, a
+/// [`MoveStatus::Complete`] receipt never claims a shared key was deleted
+/// that recovery left behind.
 pub fn complete_move_without_source(
     authorization: &OwnerAuthorization,
     root: &Path,
@@ -1136,6 +1175,7 @@ pub fn complete_move_without_source(
                     || binding.retained_shared_accounts.is_empty()),
             "invalid move source/destination binding"
         );
+        require_source_absent(&binding.source)?;
         let wallets = database::verify(root, digest)?;
         prepare_keys(&wallets, &[])?;
         authorization.require(OwnerAuthorizationScope::LegacyMove)?;
@@ -1151,6 +1191,113 @@ pub fn complete_move_without_source(
             wallets,
         })
     })
+}
+
+/// The standard 1.x database path under a bound source profile, resolved
+/// exactly the way `Frozen::open` locates it. Recovery invents no layout.
+fn source_wallet_db(source: &Path) -> PathBuf {
+    source.join("wallet.db")
+}
+
+/// Fail closed unless the bound source's standard database file is absent. A
+/// present file (including a dangling symlink, which is never dereferenced)
+/// means 1.x is still live and recovery refuses, naming it. Only a missing
+/// file is acceptance; any other I/O outcome also refuses without proof.
+pub fn require_source_absent(source: &Path) -> Result<()> {
+    let path = source_wallet_db(source);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => anyhow::bail!(
+            "legacy move source is still present at {}; recovery refuses while 1.x is live — resume the exact source review instead",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error).context(format!(
+                "could not verify the legacy move source is gone at {}; recovery refuses without proof of absence",
+                path.display()
+            ))),
+    }
+}
+
+/// True when a legacy-move failure signals an absent 1.x source: either the
+/// error chain carries a filesystem not-found, or the text carries the
+/// distinct source-missing marker the owner service reports over D-Bus.
+/// Generic failures never match.
+#[must_use]
+pub fn is_source_missing(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    }) || format!("{error:#}").contains("legacy move source is missing")
+}
+
+/// Login-owner 1.x credential retirement for a receipt whose source database
+/// is already gone. Rebuilds the normal-completion inventory from the
+/// destination-bound wallets and reuses the exact same deletion routine:
+/// every unshared account credential is re-read, compared, deleted and
+/// confirmed absent, shared/retained entries stay, and the global database
+/// credential is retired only when no preserved profiles need it. A binding
+/// without retirement identity cannot verify the global key, so it is
+/// retained rather than deleted blindly. Must run as the login owner (never
+/// in the protected service); the returned report is what the UI shows.
+pub fn retire_recovered_credentials(
+    binding: &MoveBinding,
+    wallets: &[WalletMetadata],
+) -> Result<CleanupReport> {
+    require_legacy_owner()?;
+    retire_recovered_with(
+        binding,
+        wallets,
+        legacy_key,
+        delete_legacy_account,
+        retirement::read_database_key,
+        retirement::delete_database_key,
+    )
+}
+
+pub(crate) fn retire_recovered_with(
+    binding: &MoveBinding,
+    wallets: &[WalletMetadata],
+    read: impl FnMut(&WalletMetadata) -> Result<Option<Zeroizing<Vec<u8>>>>,
+    remove: impl FnMut(&WalletMetadata, &[u8]) -> Result<()>,
+    read_global: impl FnMut() -> Result<Option<Zeroizing<Vec<u8>>>>,
+    remove_global: impl FnMut() -> Result<()>,
+) -> Result<CleanupReport> {
+    let summary = MoveSummary {
+        source: binding.source.clone(),
+        accounts: wallets.to_vec(),
+        tables: Vec::new(),
+        retained_shared_accounts: binding.retained_shared_accounts.clone(),
+        preserved_profiles: binding.preserved_profiles.clone(),
+    };
+    let mut report = cleanup_with(&summary, read, remove)
+        .context("retire recovered unshared account credentials")?;
+    let preserved = !binding.preserved_profiles.is_empty();
+    report.shared_database_credential_retained = match &binding.retirement {
+        Some(identity) => {
+            retirement::retire_key_with(identity, preserved, read_global, remove_global)
+                .context("retire recovered global database credential and confirm absence")?
+        }
+        None => true,
+    };
+    Ok(report)
+}
+
+/// Desktop-side read of the pending receipt for source-less recovery. Returns
+/// the destination-verified binding and wallets the login owner retires
+/// before requesting completion. Refuses when no cleanup is pending.
+pub async fn inspect_pending_receipt() -> Result<Receipt> {
+    let mut peer = transport::Peer::connect().await?;
+    let receipt = peer
+        .call(&ServiceCommand::Inspect {
+            nonce: Uuid::new_v4(),
+        })
+        .await?;
+    ensure!(
+        receipt.binding.is_some(),
+        "no pending legacy move cleanup for this destination"
+    );
+    Ok(receipt)
 }
 
 fn with_root_lifecycle_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
