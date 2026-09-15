@@ -41,6 +41,11 @@ async fn main() -> anyhow::Result<()> {
             service_storage::installer_journal::acquire_installer()?.resume(uid)
         }
         Some("--owner" | "--resume-owner") if args.len() == 1 => {
+            // Fail fast when the owner's platform credential store is
+            // unreachable: the relay delivery below persists through the
+            // session Secret Service, so without it enrollment would fail
+            // late, after admin authentication and privileged key generation.
+            require_secret_service().await?;
             let resume=args[0]=="--resume-owner";
             let endpoint = linux_relay_handoff::OwnerRelayEndpoint::bind().await?;
             let uid = rustix::process::getuid().as_raw();
@@ -91,6 +96,34 @@ async fn main() -> anyhow::Result<()> {
             "expected --owner, --resume-owner, --discard-unused, or --installer <uid> <owner-unique-bus-name>"
         ))
         .context("fresh v2 enrollment"),
+    }
+}
+
+/// Fail fast when no Secret Service answers on the owner's session bus.
+/// The desktop relay persists the installer's ciphertext through the platform
+/// credential store (`credential_store::entry` builds a
+/// `zbus_secret_service_keyring_store::Store`, which resolves this same
+/// well-known session-bus name), so probing name ownership here reuses that
+/// availability signal instead of a new bus mechanism. This only avoids the
+/// late failure after elevation; core's entry construction remains the
+/// authoritative check and can still refuse an unusable store.
+#[cfg(target_os = "linux")]
+async fn require_secret_service() -> anyhow::Result<()> {
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let connection = zbus::Connection::session().await?;
+        let registry = zbus::fdo::DBusProxy::new(&connection).await?;
+        registry
+            .get_name_owner("org.freedesktop.secrets".try_into()?)
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(anyhow::anyhow!("no reachable Secret Service: {error:#}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "no reachable Secret Service: session bus lookup timed out"
+        )),
     }
 }
 
@@ -158,6 +191,29 @@ async fn main() -> anyhow::Result<()> {
         })
         .await??;
         println!("Only the unused unpublished v2 attempt was discarded.");
+        return Ok(());
+    }
+    if args == ["--reset-confirmed"] {
+        // Admin-plus-owner reset of a confirmed-but-never-activated pending
+        // profile (forged relay receipt or lost credential entry). Never
+        // escalate once an installed profile exists; the SYSTEM recovery
+        // script re-enforces the zero-account/no-setup-complete allowlist and
+        // refuses any installed or activated state.
+        if ekubo_wallet_core::windows_service_config::find_installed_service_identity()?.is_some() {
+            anyhow::bail!("an installed v2 profile exists; reset is refused");
+        }
+        let owner = ekubo_wallet_core::windows_service_identity::current_process_identity()?
+            .user_sid()
+            .to_owned();
+        tokio::task::spawn_blocking(move || {
+            ekubo_wallet_core::windows_fresh_setup::run_elevated(
+                &owner,
+                uuid::Uuid::new_v4(),
+                ekubo_wallet_core::windows_fresh_setup::SetupAction::ResetConfirmed,
+            )
+        })
+        .await??;
+        println!("Only the confirmed-but-never-activated v2 attempt was reset.");
         return Ok(());
     }
     if args == ["--owner"] || args == ["--resume-owner"] {

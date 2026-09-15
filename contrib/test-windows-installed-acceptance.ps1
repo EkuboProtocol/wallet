@@ -1,10 +1,13 @@
-# Disposable hosted VM only. This creates fixture CA trust, a standard owner and
-# actual installed service state. It never requests Hello or signs a release.
+# Disposable hosted VM only. This creates fixture chain trust, a standard owner
+# and actual installed service state. It never requests Hello or signs a release.
 # Installer invocations drive the real enroll --launch-install trampoline (the
-# signed helper's verify_installer_process + run_install_script under AllSigned);
-# fixture CA trust pre-registered in LocalMachine Root/TrustedPublisher keeps
-# that production AllSigned invocation prompt-free. Only the OS-mediated UAC
-# credential prompt is unexercised: the coordinator is already elevated.
+# signed helper's verify_installer_process + run_install_script verified Bypass
+# bootstrap); the nested auth-registration calls use the same verified pattern.
+# Only LocalMachine Root carries fixture chain trust so Authenticode reads
+# Valid. The fixture publisher is deliberately absent from TrustedPublisher,
+# so an AllSigned regression would prompt and fail closed under NonInteractive
+# instead of passing silently. Only the OS-mediated UAC credential prompt is
+# unexercised: the coordinator is already elevated.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Invoke acceptance with pwsh (PowerShell 7).' }
@@ -171,29 +174,36 @@ function Await-Report($directory, $name, $process, $seconds = 90) {
     }
     return Get-Content -LiteralPath (Join-Path $directory $name) -Raw | ConvertFrom-Json
 }
-function Invoke-SetupScript($path, [string[]]$arguments) {
-    & $powershell -NoProfile -NonInteractive -ExecutionPolicy AllSigned -File $path @arguments
-    if ($LASTEXITCODE -ne 0) { throw "Signed setup script failed: $path" }
+function Invoke-SetupScript($path, [string[]]$arguments, [switch]$AllowFailure) {
+    # No store trust: verify the exact fixture signature, then a process-scoped
+    # Bypass invocation with -NonInteractive. Authenticode Valid already binds
+    # the exact approved bytes, mirroring the production verified bootstrap.
+    $setup = Get-AuthenticodeSignature -LiteralPath $path
+    if ($setup.Status -ne 'Valid' -or $setup.SignerCertificate.Thumbprint -cne $certificate.Thumbprint) { throw "Setup script is not the exact fixture-signed file: $path" }
+    & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path @arguments
+    if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) { throw "Signed setup script failed: $path" }
 }
 function Assert-LaunchInstallTrust {
     # Fail-closed preflight for the real --launch-install trampoline: every
-    # file the trampoline executes must carry the exact fixture signature, and
-    # the fixture publisher must already be trusted in the LocalMachine stores
-    # the trampoline's PowerShell consults, so the AllSigned "untrusted
-    # publisher" prompt can never appear. Production trust behavior is
-    # unchanged; only this disposable VM carries fixture trust.
+    # file the trampoline executes must carry the exact fixture signature.
+    # Only chain trust (LocalMachine Root) is present so Authenticode reads
+    # Valid. The fixture publisher must stay absent from TrustedPublisher:
+    # that absence proves the verified Bypass path is exercised, because an
+    # AllSigned regression would prompt and fail closed under NonInteractive.
+    # Production trust behavior is unchanged; only this disposable VM carries
+    # fixture chain trust.
     foreach ($file in @((Join-Path $install 'ekubo-wallet-v2-enroll.exe'), (Join-Path $install 'install-windows-v2.ps1'), (Join-Path $install 'register-windows-v2-auth.ps1'))) {
         $signature = Get-AuthenticodeSignature -LiteralPath $file
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -cne $certificate.Thumbprint) { throw "Trampoline input is not the exact fixture-signed file: $file" }
     }
-    foreach ($store in @('Root', 'TrustedPublisher')) {
-        if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\$store\$($certificate.Thumbprint)")) { throw "Fixture publisher trust is absent from LocalMachine/$store; the AllSigned prompt would appear." }
-    }
+    if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$($certificate.Thumbprint)")) { throw 'Fixture chain trust is absent from LocalMachine/Root; Authenticode cannot read Valid.' }
+    if (Test-Path -LiteralPath "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)") { throw 'Fixture publisher trust is present in LocalMachine/TrustedPublisher; the verified Bypass path is not being exercised.' }
 }
 function Invoke-RecoveryFixture([switch]$RunOnce) {
     # Fixture-only equivalent of an operator approving this one signed script.
-    # The normal baseline still invokes -File with AllSigned. Diagnostics run in
-    # Windows PowerShell 5.1, not the coordinating pwsh 7 process.
+    # The normal baseline invokes -File with verified process-scoped Bypass
+    # (no store trust anywhere). Diagnostics run in Windows PowerShell 5.1,
+    # not the coordinating pwsh 7 process.
     $path = Join-Path $install 'recover-windows-v2.ps1'
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     $thumbprint = $certificate.Thumbprint
@@ -387,8 +397,10 @@ try {
     $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Disposable wallet acceptance $nonce" -CertStoreLocation Cert:\LocalMachine\My -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddDays(1)
     $public = Join-Path $work 'fixture-public.cer'
     Export-Certificate -Cert $certificate -FilePath $public | Out-Null
+    # Chain trust only, so Authenticode reads Valid. Never import the fixture
+    # publisher into TrustedPublisher: prompt suppression would let an
+    # AllSigned regression pass silently instead of failing closed.
     Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-    Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
     $staging = Join-Path $work 'payload'
     New-Item -ItemType Directory $staging | Out-Null
     foreach ($name in @('ekubo-wallet-service', 'ekubo-wallet-v2-enroll', 'ekubo-wallet-v2-owner-auth')) {
@@ -441,10 +453,12 @@ try {
                     # Real trampoline, not a direct script call: the signed enroll
                     # helper (already elevated here; the only unexercised step
                     # is the OS-mediated UAC credential prompt) re-executes the
-                    # signed install script under AllSigned via
-                    # verify_installer_process + run_install_script. The relay
-                    # still comes from the genuine standard-owner logon, so a
-                    # prompt regression hangs here and fails closed on timeout.
+                    # signed install script through the verified Bypass
+                    # bootstrap via verify_installer_process +
+                    # run_install_script. The relay still comes from the
+                    # genuine standard-owner logon, so a trust regression
+                    # fails here: provisioning never reaches service-created
+                    # state and the pending-file checks below fail closed.
                     Assert-LaunchInstallTrust
                     $installer = Start-Process -FilePath (Join-Path $install 'ekubo-wallet-v2-enroll.exe') -ArgumentList @('--launch-install', $ownerSid, $missingRelay) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
                     if (-not $installer.WaitForExit(120000)) { throw 'Interrupted enrollment did not fail within 120 seconds.' }
@@ -463,11 +477,11 @@ try {
                         Invoke-RecoveryFixture
                     } else {
                         # No publisher approval is silently installed in either
-                        # user store. Model Run once only for the verified bytes.
-                        Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)"
-                        try { Invoke-RecoveryFixture -RunOnce } finally {
-                            Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
-                        }
+                        # user store, and machine TrustedPublisher stays absent
+                        # throughout: the verified invocation must not need it.
+                        # Model Run once only for the verified bytes.
+                        if (Test-Path -LiteralPath "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)") { throw 'Machine publisher trust must stay absent; the verified recovery invocation must not need it.' }
+                        Invoke-RecoveryFixture -RunOnce
                     }
                     if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage) -or
                         @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue).Count) { throw 'Production discard left setup-blocking state.' }
@@ -516,7 +530,9 @@ try {
         foreach ($file in $raw) { if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing actual protected file: $file" } }
         if ($phase -eq 'enroll') {
             $stage = 'active profile / production discard must refuse'
-            & $powershell -NoProfile -NonInteractive -ExecutionPolicy AllSigned -File (Join-Path $install 'recover-windows-v2.ps1') -OwnerSid $ownerSid -DiscardUnused
+            # Bypass (not AllSigned) so the non-zero exit below proves the
+            # script's own active-profile guard refused, not a policy prompt.
+            Invoke-SetupScript (Join-Path $install 'recover-windows-v2.ps1') @('-OwnerSid', $ownerSid, '-DiscardUnused') -AllowFailure
             if ($LASTEXITCODE -eq 0) { throw 'Production discard accepted an active wallet.' }
             $stillRunning = Get-CimInstance Win32_Service -Filter "Name='$($ready.service_name)'"
             if ($stillRunning.ProcessId -ne $service.ProcessId -or $stillRunning.State -ne 'Running') { throw 'Rejected discard disrupted the active authority.' }

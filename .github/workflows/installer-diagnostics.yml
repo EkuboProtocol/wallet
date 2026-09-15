@@ -46,7 +46,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Temporary lifecycle $mode failed: $LASTEXITCODE" }
           }
       - name: Install NSIS compiler
-        run: choco install nsis --no-progress -y
+        run: choco install nsis --version=3.12.0 --no-progress -y
       - name: Compile actual installer template with inert payload files
         shell: pwsh
         run: |

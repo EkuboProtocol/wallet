@@ -1,5 +1,36 @@
-# Explicit publication recovery or exact unused pending discard; never recreates custody.
-param([Parameter(Mandatory=$true)][string]$OwnerSid, [switch]$DiscardUnused)
+# Explicit publication recovery, exact unused pending discard (-DiscardUnused),
+# or confirmed-but-never-activated reset (-ResetConfirmed); never recreates
+# custody.
+#
+# -ResetConfirmed exists for the stuck middle state neither discard nor resume
+# can clear: a forged relay receipt (same-user pipe instance) or a lost
+# Credential Manager entry leaves a RelayConfirmed profile with no usable
+# relay. Discard refuses confirmed profiles, resume only restarts them, fresh
+# install refuses existing roots, and uninstall keeps everything, yet recovery
+# is documented as "a fresh install or reset of the v2 profile". Reset is that
+# reset: it removes only the confirmed-but-never-activated pending state so a
+# fresh install can retry. It does not recover the relay or the credential.
+#
+# -ResetConfirmed preconditions, all fail closed:
+# - Administrator elevation plus the exact ordinary owner SID (admin-plus-owner).
+# - The signed installed script invoked from the fixed install path
+#   (Authenticode Valid); SYSTEM re-validates Valid plus the exact bytes the
+#   administrator approved before executing.
+# - The pending identity re-validates exactly under the installer mutex:
+#   canonical owner SID, non-empty profile GUID, derived virtual-service SID
+#   equals the recorded one, a single pending owner, and an unchanged profile
+#   record on re-read after the service stop.
+# - RelayConfirmed must be durably recorded (unconfirmed attempts stay with
+#   -DiscardUnused).
+# - Zero account keys (no key-account-* record) AND no setup-complete marker
+#   anywhere for this profile, mirroring the pending-discard file allowlist
+#   exactly; fresh-profile-ready from provisioning is allowed.
+# - Never activated: no Owners registry key or collection, no active storage
+#   directory, and a service registration (if any) that still shows the exact
+#   pending provisioning command, never the activated --owner-sid command.
+# Installed and active profiles are left untouched; owner credential entries
+# are never read or deleted.
+param([Parameter(Mandatory=$true)][string]$OwnerSid, [switch]$DiscardUnused, [switch]$ResetConfirmed)
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 Set-StrictMode -Version Latest
@@ -7,20 +38,23 @@ $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.Wind
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or -not [Environment]::Is64BitProcess) { throw 'Elevated 64-bit PowerShell is required.' }
 if ($OwnerSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'An ordinary owner SID is required.' }
 if ([Security.Principal.SecurityIdentifier]::new($OwnerSid).Value -cne $OwnerSid) { throw 'A canonical owner SID is required.' }
+if ($DiscardUnused -and $ResetConfirmed) { throw 'Choose a single recovery cleanup mode.' }
 # The administrator cannot delete SYSTEM-integrity private files. Re-enter only
 # this fixed installed script; SYSTEM repeats every prerequisite under the mutex.
 # The interactive AllSigned parent may have been approved with Run once. That
 # approval does not install publisher trust in SYSTEM's certificate store.
 $install = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2'
 $script = Join-Path $install 'recover-windows-v2.ps1'
-if ($DiscardUnused) {
-    if ($PSCommandPath -ne $script) { throw 'Discard must use the signed installed recovery script.' }
+if ($DiscardUnused -or $ResetConfirmed) {
+    if ($PSCommandPath -ne $script) { throw 'Cleanup must use the signed installed recovery script.' }
     $signature = Get-AuthenticodeSignature -LiteralPath $script
     if ($signature.Status -ne 'Valid') { throw 'Installed recovery signature is not valid.' }
 }
-if ($DiscardUnused -and [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+if (($DiscardUnused -or $ResetConfirmed) -and [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+    $actionNoun = if ($ResetConfirmed) { 'reset' } else { 'discard' }
+    $taskName = if ($ResetConfirmed) { 'EkuboWalletV2-Reset-' + $OwnerSid } else { 'EkuboWalletV2-Discard-' + $OwnerSid }
+    $cleanupSwitch = if ($ResetConfirmed) { '-ResetConfirmed' } else { '-DiscardUnused' }
     $powershell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
-    $taskName = 'EkuboWalletV2-Discard-' + $OwnerSid
     $approvedHash = (Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash
     # Process-only Bypass avoids the SYSTEM publisher prompt; it is NOT signature
     # validation. The fixed bootstrap explicitly verifies both Authenticode and
@@ -34,7 +68,7 @@ try {
     $script = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\recover-windows-v2.ps1'
     if ((Get-AuthenticodeSignature -LiteralPath $script).Status -ne 'Valid') { throw 'Installed recovery signature is not valid under SYSTEM.' }
     if ((Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash -cne '__HASH__') { throw 'Installed recovery changed after operator approval.' }
-    & $script -OwnerSid '__OWNER__' -DiscardUnused
+    & $script -OwnerSid '__OWNER__' __SWITCH__
     exit 0
 } catch {
     $failure = $_
@@ -50,19 +84,19 @@ try {
     if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
     [Console]::Error.WriteLine($detail)
     try {
-        $task = Get-ScheduledTask -TaskPath '\' -TaskName 'EkuboWalletV2-Discard-__OWNER__'
+        $task = Get-ScheduledTask -TaskPath '\' -TaskName '__TASK__'
         $task.Description = $detail
         Set-ScheduledTask -InputObject $task | Out-Null
     } catch { [Console]::Error.WriteLine('Could not publish recovery task diagnostic.') }
     exit (10000 + $failure.InvocationInfo.ScriptLineNumber)
 }
 '@
-    $bootstrap = $bootstrap.Replace('__HASH__', $approvedHash).Replace('__OWNER__', $OwnerSid)
+    $bootstrap = $bootstrap.Replace('__HASH__', $approvedHash).Replace('__OWNER__', $OwnerSid).Replace('__SWITCH__', $cleanupSwitch).Replace('__TASK__', $taskName)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
     $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded)
     $previous = Get-ScheduledTask -TaskPath '\' -TaskName $taskName -ErrorAction SilentlyContinue
     if ($previous) {
-        if ($previous.State -eq 'Running' -or $previous.State -eq 'Queued') { throw 'The previous SYSTEM discard is still running; wait for its completion.' }
+        if ($previous.State -eq 'Running' -or $previous.State -eq 'Queued') { throw "The previous SYSTEM $actionNoun is still running; wait for its completion." }
         if (@($previous.Actions).Count -ne 1 -or $previous.Actions[0].Execute -ne $action.Execute -or
             $previous.Actions[0].Arguments -ne $action.Arguments -or $previous.Principal.UserId -notin @('SYSTEM', 'S-1-5-18')) {
             throw 'Unexpected task occupies the fixed recovery task name; refusing to replace it.'
@@ -90,16 +124,17 @@ try {
         $finished = $terminal -and $run -eq $completedRun
         $completedRun = $run
         if (-not $finished -and $wait.Elapsed.TotalSeconds -ge 120) {
-            throw "SYSTEM discard has not completed within 120 seconds (task $taskName, state $($task.State), result $($info.LastTaskResult)). Task and recovery journal retained; inspect completion before retrying. Cleanup was not terminated."
+            throw "SYSTEM $actionNoun has not completed within 120 seconds (task $taskName, state $($task.State), result $($info.LastTaskResult)). Task and recovery journal retained; inspect completion before retrying. Cleanup was not terminated."
         }
     } until ($finished)
     Unregister-ScheduledTask -TaskPath '\' -TaskName $taskName -Confirm:$false
     if ($info.LastTaskResult -ne 0) {
         $detail = [string]$task.Description
         if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
-        throw "SYSTEM discard failed ($($info.LastTaskResult)); codes above 10000 identify the source line. Task diagnostic: $detail. Inspect pending state before retrying."
+        throw "SYSTEM $actionNoun failed ($($info.LastTaskResult)); codes above 10000 identify the source line. Task diagnostic: $detail. Inspect pending state before retrying."
     }
-    Write-Output 'SYSTEM discarded the unused pending setup; fresh setup can retry.'
+    if ($ResetConfirmed) { Write-Output 'SYSTEM reset the confirmed-but-never-activated setup; fresh setup can retry.' }
+    else { Write-Output 'SYSTEM discarded the unused pending setup; fresh setup can retry.' }
     return
 }
 
@@ -194,6 +229,20 @@ function Assert-ProtectedRegistry($path, [bool]$requireProtected = $false) {
             throw 'Pending registry is writable by an untrusted identity.'
         }
     }
+}
+function Invoke-VerifiedAuthRegistration($owner, $approvedHash) {
+    $authScript = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1'
+    # Process-scoped Bypass is NOT trust: Authenticode plus the exact
+    # installer-approved hash are re-validated immediately before every
+    # invocation, so the untrusted-publisher prompt can never appear and
+    # "Never run" can never brick recovery. Machine/User Group Policy still
+    # takes precedence and is never changed; publisher trust is never
+    # installed. -NonInteractive fails closed on any unexpected prompt.
+    if ((Get-AuthenticodeSignature -LiteralPath $authScript).Status -ne 'Valid') { throw 'Native authentication registration signature is not valid.' }
+    if ((Get-FileHash -LiteralPath $authScript -Algorithm SHA256).Hash -cne $approvedHash) { throw 'Native authentication registration changed after approval.' }
+    $powershell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $authScript -OwnerSid $owner
+    if ($LASTEXITCODE -ne 0) { throw 'Native authentication registration failed.' }
 }
 $mutex = [Threading.Mutex]::new($false, 'Global\EkuboWalletV2-Installer')
 try { $locked = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
@@ -307,6 +356,91 @@ try {
         Write-Output 'Discarded only unpublished unused v2 setup. Owner credential entries were not read or deleted.'
         return
     }
+    if ($ResetConfirmed) {
+        if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') { throw 'Reset requires SYSTEM.' }
+        if (-not $confirmed) { throw 'Relay was not durably confirmed. Only explicit -DiscardUnused can discard this unconfirmed attempt.' }
+        if ((Test-Path -LiteralPath $activeKey) -or (Test-Path -LiteralPath $active)) { throw 'An installed or active profile exists; reset is refused.' }
+        # Never-activated means all of: zero account keys, no setup-complete
+        # marker, no installed-owner collection, and a service registration
+        # (if any) that still shows the exact pending provisioning command.
+        # provisioning-completed fresh-profile-ready is allowed; anything
+        # showing account authority or readiness is refused.
+        foreach ($path in @($storage, (Join-Path $storage 'Pending'), (Join-Path $storage 'Owners'), $pending)) { Assert-PlainDirectory $path }
+        if (@(Get-ChildItem -LiteralPath (Join-Path $registry 'Pending')).Count -ne 1) { throw 'Unexpected pending owners.' }
+        Assert-DirectoryChildren -path $storage -allowedNames @('Pending', 'Owners')
+        Assert-DirectoryChildren -path (Join-Path $storage 'Pending') -allowedNames @($profile.ToString('N'))
+        Assert-DirectoryChildren -path (Join-Path $storage 'Owners') -allowedNames @()
+        if (Test-Path -LiteralPath (Join-Path $registry 'Owners')) { throw 'An installed-owner collection exists; refusing reset.' }
+        if ($record.PSObject.Properties['Discarding']) { throw 'A discard is already journaled for this pending identity; refusing reset.' }
+        $root = Get-Item -LiteralPath $registry
+        if ($root.ValueCount -ne 0 -or @($root.GetSubKeyNames() | Where-Object { $_ -ne 'Pending' }).Count) { throw 'Unexpected product registry state.' }
+        $pendingRoot = Get-Item -LiteralPath (Join-Path $registry 'Pending')
+        $leaf = Get-Item -LiteralPath $pendingKey
+        if ($pendingRoot.ValueCount -ne 0 -or $leaf.SubKeyCount -ne 0 -or
+            @($leaf.GetValueNames() | Where-Object { $_ -notin @('Profile', 'RelayConfirmed', 'Resetting') }).Count) { throw 'Unexpected pending registry state.' }
+        $resetting = $record.PSObject.Properties['Resetting'] -and $record.Resetting -eq 1
+        $registration = Get-CimInstance Win32_Service -Filter "Name='$service'"
+        if ($registration) {
+            $expectedCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --provision-owner-sid ' + $OwnerSid
+            if ($registration.StartName -ne ('NT SERVICE\' + $service) -or $registration.PathName -ne $expectedCommand) { throw 'Not the exact pending provisioning service; the profile may have been activated. Reset refused.' }
+            # Prevent a restart while removing state. This is recoverable even
+            # if validation below fails: rerunning reset repeats the checks.
+            Set-Service -Name $service -StartupType Disabled
+            Stop-RecoveryService $service
+        } elseif (-not $resetting) { throw 'Missing pending provisioning service.' }
+        $again = Get-ItemProperty -LiteralPath $pendingKey
+        if ([Convert]::ToBase64String([byte[]]$again.Profile) -ne [Convert]::ToBase64String($bytes) -or
+            -not ($again.PSObject.Properties['RelayConfirmed'] -and $again.RelayConfirmed -eq 1) -or
+            (Test-Path -LiteralPath (Join-Path $registry 'Owners')) -or (Test-Path -LiteralPath $active)) { throw 'Pending authority changed; refusing reset.' }
+        $items = @()
+        if (Test-Path -LiteralPath $pending) { $items = @(Get-ChildItem -LiteralPath $pending -Force) }
+        elseif (-not $resetting) { throw 'Missing pending storage without a reset journal.' }
+        # Zero account keys AND no setup-complete marker, checked explicitly
+        # ahead of the closed allowlist mirrored from pending discard.
+        foreach ($item in $items) {
+            if ($item.Name -like 'key-account-*') { throw 'Pending profile holds account keys; reset refused.' }
+        }
+        if (Test-Path -LiteralPath (Join-Path $pending 'setup-complete')) { throw 'Pending profile reached readiness; reset refused.' }
+        # Closed allowlist, never a recursive arbitrary-file delete.
+        # Provisioning creates an empty database; account custody cannot exist
+        # without a key-account-* record, and active/readiness/move records
+        # are not allowed.
+        $allowed = @('service.lock', 'wallet.db', 'wallet.db-wal', 'wallet.db-shm', 'wrapping.key', 'key-database', 'custody.json', 'fresh-profile-ready')
+        foreach ($item in $items) {
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $item.Name -notin $allowed) { throw 'Pending profile may have active authority or unsafe objects; refusing reset.' }
+        }
+        if (Test-Path -LiteralPath (Join-Path $pending 'fresh-profile-ready')) {
+            if ([IO.File]::ReadAllText((Join-Path $pending 'fresh-profile-ready')) -ne $profile.ToString()) { throw 'Pending readiness identity mismatch.' }
+        }
+        # Durable intent survives a crash after any deletion. Keep the identity
+        # until files and SCM are gone, so rerunning repeats the exact checks.
+        New-ItemProperty -LiteralPath $pendingKey -Name Resetting -PropertyType DWord -Value 1 -Force | Out-Null
+        (Get-Item -LiteralPath $pendingKey).Flush()
+        foreach ($item in $items) { Remove-Item -LiteralPath $item.FullName -Force }
+        foreach ($path in @($pending, (Join-Path $storage 'Pending'), (Join-Path $storage 'Owners'), $storage)) {
+            if (Test-Path -LiteralPath $path) { [IO.Directory]::Delete($path) }
+        }
+        if ($registration) {
+            & $sc delete $service
+            if ($LASTEXITCODE -ne 0) { throw 'Service registration cleanup failed; rerun reset with retained pending identity.' }
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (Get-CimInstance Win32_Service -Filter "Name='$service'") {
+                if ([DateTime]::UtcNow -gt $deadline) { throw 'Service deletion is still pending; identity retained for retry.' }
+                Start-Sleep -Milliseconds 200
+            }
+        }
+        Remove-Item -LiteralPath $pendingKey -Recurse
+        Remove-Item -LiteralPath (Join-Path $registry 'Pending')
+        Remove-Item -LiteralPath $registry
+        Write-Output 'Reset only confirmed-but-never-activated v2 setup. Owner credential entries were not read or deleted; fresh setup can retry.'
+        return
+    }
+    # The recovery path below publishes; bind the nested registration bytes
+    # before use. Discard and reset returned above and never depend on this file.
+    $authScript = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1'
+    if ((Get-AuthenticodeSignature -LiteralPath $authScript).Status -ne 'Valid') { throw 'Installed native authentication registration signature is not valid.' }
+    $approvedAuthHash = (Get-FileHash -LiteralPath $authScript -Algorithm SHA256).Hash
     if (-not $confirmed) { throw 'Relay was not durably confirmed. Only explicit -DiscardUnused can discard this unpublished attempt.' }
     if (Test-Path -LiteralPath $activeKey) {
         $activeRecord = Get-ItemProperty -LiteralPath $activeKey
@@ -316,7 +450,7 @@ try {
             (Get-Item -LiteralPath $activeKey).Flush()
             & $sc sdset $service "O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;LCRP;;;$OwnerSid)"
             if ($LASTEXITCODE -ne 0) { throw 'Could not restore owner service query/start access.' }
-            & (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
+            Invoke-VerifiedAuthRegistration $OwnerSid $approvedAuthHash
             Start-Service $service
             Write-Output 'Existing installed v2 service started; unlock from the owner desktop.'
             return
@@ -338,7 +472,7 @@ try {
     New-Item -Path $activeKey -Force | Out-Null
     New-ItemProperty -LiteralPath $activeKey -Name Profile -PropertyType Binary -Value $bytes | Out-Null
     (Get-Item -LiteralPath $activeKey).Flush()
-    & (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Ekubo Wallet 2\register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
+    Invoke-VerifiedAuthRegistration $OwnerSid $approvedAuthHash
     Start-Service $service
     Write-Output 'Relay-confirmed v2 profile published. Unlock from the owner desktop to finish readiness.'
 } finally {

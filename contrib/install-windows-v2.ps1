@@ -22,6 +22,18 @@ foreach ($file in @($binary, $enroll, (Join-Path $install 'ekubo-wallet-v2-owner
         throw "The installed v2 binary must have a valid Authenticode signature: $file"
     }
 }
+# The nested native-auth registration below runs with process-scoped Bypass,
+# never AllSigned: a real user without the publisher in TrustedPublisher
+# would otherwise face the untrusted-publisher prompt a second time here,
+# and "Never run" would brick enrollment. Bypass is NOT trust: the exact
+# bytes are bound by Authenticode plus the approved hash captured here and
+# re-validated immediately before invocation. AllSigned is never weakened
+# globally and publisher trust is never installed.
+$authScript = Join-Path $install 'register-windows-v2-auth.ps1'
+if ((Get-AuthenticodeSignature -LiteralPath $authScript).Status -ne 'Valid') {
+    throw 'The installed native authentication registration must have a valid Authenticode signature.'
+}
+$approvedAuthHash = (Get-FileHash -LiteralPath $authScript -Algorithm SHA256).Hash
 $registry = 'HKLM:\SOFTWARE\EkuboWalletV2'
 $storage = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'EkuboWalletV2'
 # v2's first release installs one profile per machine. Existing machine roots
@@ -115,7 +127,14 @@ public static class EkuboV2VirtualService {
     New-Item -Path $activeKey -Force | Out-Null
     New-ItemProperty -LiteralPath $activeKey -Name Profile -PropertyType Binary -Value $bytes | Out-Null
     (Get-Item -LiteralPath $activeKey).Flush()
-    & (Join-Path $install 'register-windows-v2-auth.ps1') -OwnerSid $OwnerSid
+    if ((Get-AuthenticodeSignature -LiteralPath $authScript).Status -ne 'Valid') { throw 'Native authentication registration signature changed; refusing invocation.' }
+    if ((Get-FileHash -LiteralPath $authScript -Algorithm SHA256).Hash -cne $approvedAuthHash) { throw 'Native authentication registration changed after approval; refusing invocation.' }
+    # Process-scoped Bypass: the fixed bootstrap above already verified both
+    # Authenticode and the exact bytes. -NonInteractive fails closed on any
+    # unexpected prompt instead of hanging.
+    $powershell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
+    & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $authScript -OwnerSid $OwnerSid
+    if ($LASTEXITCODE -ne 0) { throw 'Native authentication registration failed; profile retained.' }
     Start-Service $service
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not (Test-Path -LiteralPath (Join-Path $active 'setup-complete'))) {
