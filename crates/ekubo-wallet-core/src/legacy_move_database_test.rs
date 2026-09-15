@@ -144,6 +144,34 @@ fn first_run_owner_changes_and_oversized_snapshots_refuse_without_import() {
 }
 
 #[test]
+fn predated_source_schema_fails_with_upgrade_hint() {
+    let (_directory, older) = fixture([0x38; 32]);
+    older
+        .connection
+        .execute(
+            "UPDATE schema_metadata SET version=version-1 WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    let error = capture(&older.connection, false).map(|_| ()).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("predates the supported move schema"));
+    assert!(message.contains("1.8.2"));
+    assert!(message.contains("left unchanged"));
+    assert!(crate::legacy_move::is_predates_supported_schema(&error));
+    let (_directory, newer) = fixture([0x39; 32]);
+    newer
+        .connection
+        .execute(
+            "UPDATE schema_metadata SET version=version+1 WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    let error = capture(&newer.connection, false).map(|_| ()).unwrap_err();
+    assert!(!crate::legacy_move::is_predates_supported_schema(&error));
+}
+
+#[test]
 fn account_identity_policy_revisions_and_configuration_are_preserved() {
     let (source_dir, mut source) = fixture([0x36; 32]);
     let wallet = crate::config::WalletMetadata {

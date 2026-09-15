@@ -87,10 +87,20 @@ impl LinuxOwnerInterface {
         .map_err(|_| {
             zbus::fdo::Error::AccessDenied("legacy move owner authentication failed".into())
         })?
-        .map_err(|_| {
-            zbus::fdo::Error::Failed(
-                "legacy move failed; inspect pending cleanup before retrying".into(),
-            )
+        .map_err(|error| {
+            // Fail closed with a distinct hint: a 1.x source below 1.8.2 is
+            // refused by the schema gate, and retrying without upgrading 1.x
+            // first cannot succeed. Every other failure keeps the generic
+            // message and leaves cleanup pending.
+            if ekubo_wallet_core::legacy_move::is_predates_supported_schema(&error) {
+                zbus::fdo::Error::Failed(
+                    "legacy move refused: the selected 1.x source predates the supported schema; upgrade the 1.x application to 1.8.2 or newer first, then retry. Nothing was copied or deleted".into(),
+                )
+            } else {
+                zbus::fdo::Error::Failed(
+                    "legacy move failed; inspect pending cleanup before retrying".into(),
+                )
+            }
         })
     }
 

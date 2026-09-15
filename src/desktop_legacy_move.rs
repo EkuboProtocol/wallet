@@ -15,6 +15,16 @@ pub(super) struct MoveWindow {
     busy: bool,
     message: Option<String>,
     restart: Rc<Cell<bool>>,
+    /// Recovery from a pending cleanup whose 1.x source is unreadable or
+    /// deleted. Grouped so the window stays under the boolean-count lint.
+    recovery: Recovery,
+}
+
+/// Whether the pending-cleanup recovery path is available, confirmed, done.
+struct Recovery {
+    offered: bool,
+    confirmed: bool,
+    done: bool,
 }
 
 fn selected_profiles(
@@ -96,7 +106,8 @@ fn inventory_text(summary: &MoveSummary) -> String {
 impl MoveWindow {
     fn finished(&self) -> bool {
         // The reviewed source is consumed exactly once by move_and_cleanup.
-        self.summary.is_some() && self.reviewed.is_none() && !self.busy
+        // Recovery completes the pending receipt without a source review.
+        !self.busy && (self.recovery.done || (self.summary.is_some() && self.reviewed.is_none()))
     }
     pub(super) const fn busy(&self) -> bool {
         self.busy
@@ -196,6 +207,41 @@ impl MoveWindow {
         }).detach();
         cx.notify();
     }
+
+    /// Owner-authorized recovery when the 1.x source is gone but a cleanup
+    /// receipt is pending. The service re-verifies destination custody and
+    /// natively authenticates the owner; the window only carries intent.
+    fn complete_without_source(&mut self, cx: &mut Context<Self>) {
+        if self.busy || !self.recovery.confirmed || self.finished() {
+            return;
+        }
+        self.busy = true;
+        self.message = Some("Re-verifying the protected destination and requesting owner authorization to finish the pending cleanup. Keep this window open.".into());
+        let owner = self.owner.clone();
+        let runtime = gpui_tokio::Tokio::handle(cx);
+        let worker = runtime.clone();
+        let task = runtime.spawn_blocking(move || {
+            worker.block_on(owner.complete_legacy_move_without_source(uuid::Uuid::new_v4()))
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await.unwrap_or_else(|error| Err(error.into()));
+            let _ = view.update(cx, |view, cx| {
+                view.busy = false;
+                match result {
+                    Ok(_) => {
+                        view.recovery.done = true;
+                        view.message = Some("Pending cleanup finished after destination re-verification. Close and reopen v2 to reload the moved state.".into());
+                    }
+                    Err(error) => {
+                        view.message = Some(format!("Recovery did not complete: {error:#}\nNothing was deleted. Keep both profiles and retry only after inspecting the result."));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
 }
 
 impl Render for MoveWindow {
@@ -219,6 +265,12 @@ impl Render for MoveWindow {
                         .label("Retire this profile after verifying v2. Delete its unshared account credentials and, if no other profiles need it, the old database key. Keep the shared keys shown above.")
                         .on_click(cx.listener(|view, checked, _, cx| { view.deletion_confirmed = *checked; cx.notify(); })))))
                 .when_some(self.message.clone(), |panel, message| panel.child(div().id("legacy-move-status").role(Role::Status).child(selectable_label(message)))))
+                .when(self.recovery.offered && !self.finished(), |panel| panel
+                    .child(selectable_label("A previous move left cleanup unfinished and the 1.x source cannot be read. If the 1.x profile or directory was deleted, the moved keys may still be sealed in v2. Recovery re-verifies the protected destination and finishes the pending cleanup after owner authorization. Nothing is deleted by this step itself."))
+                    .child(Checkbox::new("confirm-legacy-recovery")
+                        .checked(self.recovery.confirmed).disabled(self.busy)
+                        .label("The 1.x source is gone and I cannot restore it. Re-verify the destination and finish the pending cleanup.")
+                        .on_click(cx.listener(|view, checked, _, cx| { view.recovery.confirmed = *checked; cx.notify(); }))))
             .when(self.summary.is_none() && !self.finished(), |panel| panel.child(app_button("review-legacy-source").self_start().label("Review selected source…")
                 .disabled(self.busy || !self.inventory_complete).on_click(cx.listener(|view, _, _, cx| view.review(cx)))))
             .when(self.reviewed.is_some(), |panel| panel
@@ -226,6 +278,8 @@ impl Render for MoveWindow {
                     .disabled(self.busy || !self.deletion_confirmed).on_click(cx.listener(|view, _, _, cx| view.move_reviewed(cx))))
                 .child(app_button("change-legacy-source").self_start().label("Change source").disabled(self.busy)
                     .on_click(cx.listener(|view, _, _, cx| { view.reviewed = None; view.summary = None; view.deletion_confirmed = false; cx.notify(); }))))
+            .when(self.recovery.offered && self.recovery.confirmed && !self.finished(), |panel| panel.child(app_button("complete-legacy-without-source").self_start().label("Re-verify and finish pending cleanup").danger()
+                .disabled(self.busy).on_click(cx.listener(|view, _, _, cx| view.complete_without_source(cx)))))
             .child(app_button("close-legacy-move").self_start().label(if self.finished() { "Open wallet" } else { "Close" }).disabled(self.busy)
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.restart.set(view.finished());
@@ -245,6 +299,7 @@ pub(super) fn create(
         Some(binding) => binding.source.clone(),
         None => ekubo_wallet_core::legacy_move::suggested_legacy_root()?,
     };
+    let recovery_offered = pending.is_some();
     let preserved = pending.map_or_else(String::new, |binding| {
         binding
             .preserved_profiles
@@ -254,7 +309,13 @@ pub(super) fn create(
             .join("\n")
     });
     Ok(create_with_path(
-        owner, window, cx, restart, &suggested, &preserved,
+        owner,
+        window,
+        cx,
+        restart,
+        &suggested,
+        &preserved,
+        recovery_offered,
     ))
 }
 
@@ -265,6 +326,7 @@ fn create_with_path(
     restart: Rc<Cell<bool>>,
     suggested: &std::path::Path,
     preserved: &str,
+    recovery_offered: bool,
 ) -> Entity<MoveWindow> {
     cx.new(|cx| MoveWindow {
         owner,
@@ -283,6 +345,11 @@ fn create_with_path(
         busy: false,
         message: None,
         restart,
+        recovery: Recovery {
+            offered: recovery_offered,
+            confirmed: false,
+            done: false,
+        },
     })
 }
 

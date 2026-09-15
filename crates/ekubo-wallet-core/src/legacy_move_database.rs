@@ -103,16 +103,23 @@ pub(crate) fn capture(connection: &Connection, destination: bool) -> Result<Snap
 
 /// Fail-closed schema gate for the first-run-only move contract: the source
 /// must be exactly `SCHEMA_VERSION`. Anything else refuses the move and
-/// leaves the source unchanged; there is no upgrade or partial path.
+/// leaves the source unchanged; there is no upgrade or partial path. A source
+/// that predates the gate fails with a distinct upgrade hint so the Linux
+/// service can tell 1.x-below-1.8.2 users to upgrade 1.x first.
 fn capture_with_limit(
     connection: &Connection,
     destination: bool,
     limit: usize,
 ) -> Result<Snapshot> {
-    ensure!(
-        schema_version(connection)? == Some(SCHEMA_VERSION),
-        "legacy move requires the exact supported schema; source was left unchanged"
-    );
+    match schema_version(connection)? {
+        Some(version) if version == SCHEMA_VERSION => {}
+        Some(version) if version < SCHEMA_VERSION => anyhow::bail!(
+            "legacy move source schema version {version} predates the supported move schema version {SCHEMA_VERSION}; upgrade the 1.x application to 1.8.2 or newer first, then retry the move. The source was left unchanged"
+        ),
+        _ => anyhow::bail!(
+            "legacy move requires the exact supported schema; source was left unchanged"
+        ),
+    }
     let actual = layout(connection, destination)?;
     ensure!(
         actual == compiled_layout()?,

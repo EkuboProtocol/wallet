@@ -25,6 +25,19 @@ impl<T: OwnerTransport> OwnerConnection<T> {
     pub async fn legacy_move_status(&self) -> Result<ekubo_wallet_core::legacy_move::MoveStatus> {
         self.call(&Request::LegacyMoveStatus).await
     }
+    /// Owner-authorized recovery when the 1.x source was deleted before
+    /// cleanup finished. The service re-verifies destination custody and
+    /// natively authenticates the owner; this call carries no source path.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn complete_legacy_move_without_source(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        self.call(&Request::LegacyMove(
+            ekubo_wallet_core::legacy_move::ServiceCommand::CompleteWithoutSource { nonce },
+        ))
+        .await
+    }
     pub async fn portfolio(
         &self,
         wallet_id: Option<&str>,

@@ -3,7 +3,7 @@
 //! locks. Retirement is bound to the durable installed-service receipt.
 use crate::{
     config::WalletMetadata,
-    human_presence::{OwnerAuthorizationScope, authorize_owner},
+    human_presence::{OwnerAuthorization, OwnerAuthorizationScope, authorize_owner},
     policy_store::{DatabaseKey, legacy_move_database as database},
 };
 use alloy::signers::local::PrivateKeySigner;
@@ -102,6 +102,12 @@ pub enum ServiceCommand {
         nonce: Uuid,
         binding: MoveBinding,
     },
+    /// Owner-authorized recovery when the 1.x source directory was deleted
+    /// before cleanup finished. The pending receipt stays bound to the
+    /// re-read destination state; no source path is accepted.
+    CompleteWithoutSource {
+        nonce: Uuid,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,7 +127,9 @@ impl ServiceCommand {
             Self::Inspect { .. } => ReceiptPhase::Inspected,
             Self::Import { .. } => ReceiptPhase::Imported,
             Self::Verify { .. } => ReceiptPhase::Verified,
-            Self::Complete { .. } => ReceiptPhase::Complete,
+            // Recovery completes the same pending receipt, so it carries the
+            // same phase; transport validation distinguishes it by shape.
+            Self::Complete { .. } | Self::CompleteWithoutSource { .. } => ReceiptPhase::Complete,
         }
     }
 }
@@ -881,6 +889,18 @@ pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
                 Ok(receipt)
             })
         }
+        ServiceCommand::CompleteWithoutSource { nonce } => {
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            // Scope recovery to this destination before touching state: a
+            // pending receipt bound to another profile must not be completed
+            // here, even by its owner.
+            ensure!(
+                matches!(move_status()?, MoveStatus::PendingCleanup { .. }),
+                "no pending legacy move cleanup for this destination"
+            );
+            complete_move_without_source(&auth, &root, *nonce)
+        }
     }?;
     receipt.phase = command.phase();
     Ok(receipt)
@@ -1066,6 +1086,93 @@ pub fn require_cleanup_finished(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Owner-authorized recovery for a pending move whose 1.x source directory
+/// was deleted before cleanup finished. The pending receipt otherwise blocks
+/// sessions forever: the only other exit re-opens the exact 1.x source files.
+///
+/// The pending binding and digest are re-read from protected destination
+/// state, never accepted from the caller. The durable destination is
+/// re-verified first — its state digest must still match the receipt and
+/// every destination key must still decrypt to its reviewed identity — and
+/// only then is the pending receipt atomically marked complete. A missing or
+/// mismatched destination key fails closed and leaves cleanup pending.
+pub fn complete_move_without_source(
+    authorization: &OwnerAuthorization,
+    root: &Path,
+    nonce: Uuid,
+) -> Result<Receipt> {
+    authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+    ensure!(!nonce.is_nil(), "completion requires a fresh nonce");
+    // Same file as `ConfigStore::with_lifecycle_lock`, scoped to the explicit
+    // root so recovery stays testable without an installed service identity.
+    with_root_lifecycle_lock(root, || {
+        authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+        let state = database::move_state(root)?;
+        let digest = state
+            .receipt
+            .context("no pending legacy move cleanup to complete")?;
+        ensure!(!state.complete, "legacy move cleanup is already complete");
+        let encoded = state.binding.context(
+            "legacy move cleanup is pending without bound source metadata; keep the wallet paused",
+        )?;
+        ensure!(
+            encoded.len() <= 256 * 1024,
+            "move identity metadata is oversized"
+        );
+        let binding: MoveBinding = serde_json::from_str(&encoded)?;
+        ensure!(
+            binding.source.is_absolute()
+                && binding.preserved_profiles.len() <= 32
+                && binding
+                    .preserved_profiles
+                    .iter()
+                    .all(|path| path.is_absolute() && path != &binding.source)
+                && binding
+                    .preserved_profiles
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && binding.retained_shared_accounts.len() <= 512
+                && (!binding.preserved_profiles.is_empty()
+                    || binding.retained_shared_accounts.is_empty()),
+            "invalid move source/destination binding"
+        );
+        let wallets = database::verify(root, digest)?;
+        prepare_keys(&wallets, &[])?;
+        authorization.require(OwnerAuthorizationScope::LegacyMove)?;
+        database::finish_cleanup(root, digest, &encoded)?;
+        Ok(Receipt {
+            phase: ReceiptPhase::Complete,
+            selection_digest: None,
+            digest,
+            nonce,
+            accounts: wallets.iter().map(|wallet| wallet.instance_id).collect(),
+            profile: binding.profile,
+            binding: Some(binding),
+            wallets,
+        })
+    })
+}
+
+fn with_root_lifecycle_lock<T>(root: &Path, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    crate::config::create_private_dir(root)?;
+    let lock_path = root.join("lifecycle.lock");
+    let lock = crate::config::open_private_file(&lock_path)
+        .with_context(|| format!("failed to open {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    let result = body();
+    let _ = fs2::FileExt::unlock(&lock);
+    result
+}
+
+/// True when a legacy-move failure is the fail-closed refusal for a 1.x
+/// source whose schema predates the supported gate. The Linux service maps
+/// this to a distinct hint; every other failure keeps the generic message.
+#[must_use]
+pub fn is_predates_supported_schema(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("predates the supported move schema")
+}
+
 pub(crate) fn initialize_baseline(root: &Path) -> Result<()> {
     database::initialize_baseline(root)
 }
@@ -1073,3 +1180,7 @@ pub(crate) fn initialize_baseline(root: &Path) -> Result<()> {
 #[cfg(test)]
 #[path = "legacy_move_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "legacy_move_complete_without_source_test.rs"]
+mod complete_without_source_tests;

@@ -44,6 +44,16 @@ impl DesktopOwner {
             Self::Local(_) => Ok(ekubo_wallet_core::legacy_move::MoveStatus::Unavailable),
         }
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub async fn complete_legacy_move_without_source(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> Result<ekubo_wallet_core::legacy_move::Receipt> {
+        match self {
+            Self::Service(owner) => owner.complete_legacy_move_without_source(nonce).await,
+            Self::Local(_) => anyhow::bail!("recovery requires the v2 service"),
+        }
+    }
     #[must_use]
     pub const fn uses_service(&self) -> bool {
         match self {
