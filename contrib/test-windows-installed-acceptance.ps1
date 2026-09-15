@@ -1,5 +1,10 @@
 # Disposable hosted VM only. This creates fixture CA trust, a standard owner and
 # actual installed service state. It never requests Hello or signs a release.
+# Installer invocations drive the real enroll --launch-install trampoline (the
+# signed helper's verify_installer_process + run_install_script under AllSigned);
+# fixture CA trust pre-registered in LocalMachine Root/TrustedPublisher keeps
+# that production AllSigned invocation prompt-free. Only the OS-mediated UAC
+# credential prompt is unexercised: the coordinator is already elevated.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Invoke acceptance with pwsh (PowerShell 7).' }
@@ -169,6 +174,21 @@ function Await-Report($directory, $name, $process, $seconds = 90) {
 function Invoke-SetupScript($path, [string[]]$arguments) {
     & $powershell -NoProfile -NonInteractive -ExecutionPolicy AllSigned -File $path @arguments
     if ($LASTEXITCODE -ne 0) { throw "Signed setup script failed: $path" }
+}
+function Assert-LaunchInstallTrust {
+    # Fail-closed preflight for the real --launch-install trampoline: every
+    # file the trampoline executes must carry the exact fixture signature, and
+    # the fixture publisher must already be trusted in the LocalMachine stores
+    # the trampoline's PowerShell consults, so the AllSigned "untrusted
+    # publisher" prompt can never appear. Production trust behavior is
+    # unchanged; only this disposable VM carries fixture trust.
+    foreach ($file in @((Join-Path $install 'ekubo-wallet-v2-enroll.exe'), (Join-Path $install 'install-windows-v2.ps1'), (Join-Path $install 'register-windows-v2-auth.ps1'))) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $file
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -cne $certificate.Thumbprint) { throw "Trampoline input is not the exact fixture-signed file: $file" }
+    }
+    foreach ($store in @('Root', 'TrustedPublisher')) {
+        if (-not (Test-Path -LiteralPath "Cert:\LocalMachine\$store\$($certificate.Thumbprint)")) { throw "Fixture publisher trust is absent from LocalMachine/$store; the AllSigned prompt would appear." }
+    }
 }
 function Invoke-RecoveryFixture([switch]$RunOnce) {
     # Fixture-only equivalent of an operator approving this one signed script.
@@ -418,7 +438,15 @@ try {
                     Write-Output "STEP $stage"
                     # Real empty SQLCipher/key creation precedes failed handoff.
                     $missingRelay = [Guid]::NewGuid().ToString()
-                    $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $missingRelay) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+                    # Real trampoline, not a direct script call: the signed enroll
+                    # helper (already elevated here; the only unexercised step
+                    # is the OS-mediated UAC credential prompt) re-executes the
+                    # signed install script under AllSigned via
+                    # verify_installer_process + run_install_script. The relay
+                    # still comes from the genuine standard-owner logon, so a
+                    # prompt regression hangs here and fails closed on timeout.
+                    Assert-LaunchInstallTrust
+                    $installer = Start-Process -FilePath (Join-Path $install 'ekubo-wallet-v2-enroll.exe') -ArgumentList @('--launch-install', $ownerSid, $missingRelay) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
                     if (-not $installer.WaitForExit(120000)) { throw 'Interrupted enrollment did not fail within 120 seconds.' }
                     Get-Content -LiteralPath $stdout, $stderr | Write-Output
                     if ($installer.ExitCode -eq 0) { throw 'Absent owner relay unexpectedly completed enrollment.' }
@@ -457,7 +485,8 @@ try {
             $relay = Await-Report $exchange 'relay.json' $worker
             if ($relay.owner_sid -ne $ownerSid -or $relay.owner_sid -eq $administrator.User.Value) { throw 'Relay is not owned by the standard fixture user.' }
             $stage = 'enroll / retry production installer after discard'
-            $installer = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-File', "`"$install/install-windows-v2.ps1`"", '-OwnerSid', $ownerSid, '-RelayEndpoint', $relay.endpoint) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            Assert-LaunchInstallTrust
+            $installer = Start-Process -FilePath (Join-Path $install 'ekubo-wallet-v2-enroll.exe') -ArgumentList @('--launch-install', $ownerSid, $relay.endpoint) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             if (-not $installer.WaitForExit(120000)) { throw 'Production enrollment exceeded 120 seconds.' }
             Get-Content $stdout, $stderr | Write-Output
             if ($installer.ExitCode -ne 0) { throw "Production enrollment failed: $($installer.ExitCode)" }
