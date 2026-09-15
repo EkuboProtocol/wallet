@@ -102,11 +102,24 @@ pub enum ServiceCommand {
         nonce: Uuid,
         binding: MoveBinding,
     },
+    /// Owner-authorized entry into source-less recovery. Natively
+    /// authenticates the owner and binds the pending receipt (destination
+    /// re-verification included) before the desktop retires anything. The
+    /// returned receipt is what [`retire_recovered_credentials`] requires.
+    AuthorizeRecovery {
+        nonce: Uuid,
+    },
     /// Owner-authorized recovery when the 1.x source directory was deleted
     /// before cleanup finished. The pending receipt stays bound to the
-    /// re-read destination state; no source path is accepted.
+    /// re-read destination state; no source path is accepted. The sandboxed
+    /// service cannot stat the owner-profile filesystem, so absence travels
+    /// as a caller-attested [`RecoveryAbsence`] the service re-validates
+    /// against the pending receipt. A missing or mismatched attestation
+    /// fails closed.
     CompleteWithoutSource {
         nonce: Uuid,
+        #[serde(default)]
+        absence: Option<RecoveryAbsence>,
     },
 }
 
@@ -114,6 +127,7 @@ pub enum ServiceCommand {
 #[serde(rename_all = "snake_case")]
 enum ReceiptPhase {
     SourceAuthorized,
+    RecoveryAuthorized,
     Inspected,
     Imported,
     Verified,
@@ -124,6 +138,7 @@ impl ServiceCommand {
     fn phase(&self) -> ReceiptPhase {
         match self {
             Self::AuthorizeSource { .. } => ReceiptPhase::SourceAuthorized,
+            Self::AuthorizeRecovery { .. } => ReceiptPhase::RecoveryAuthorized,
             Self::Inspect { .. } => ReceiptPhase::Inspected,
             Self::Import { .. } => ReceiptPhase::Imported,
             Self::Verify { .. } => ReceiptPhase::Verified,
@@ -183,6 +198,25 @@ impl Receipt {
     pub fn wallets(&self) -> &[WalletMetadata] {
         &self.wallets
     }
+
+    /// The destination digest the owner-side absence attestation binds to.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+/// Caller-attested, receipt-bound proof that the bound 1.x source database
+/// is absent. Produced by the owner-side gate — the desktop runs
+/// un-sandboxed as the login owner, so only it can stat the owner-profile
+/// filesystem — after [`require_source_absent`] succeeds. The sandboxed
+/// service re-validates the digest and source against the pending receipt
+/// instead of re-statting the filesystem, which it cannot read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryAbsence {
+    pub digest: [u8; 32],
+    pub source: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -260,6 +294,29 @@ pub fn suggested_legacy_root() -> Result<PathBuf> {
     return Ok(base.data_local_dir().join("Ekubo/wallet"));
 }
 
+/// Attach the narrow source-missing marker when a bound-source lookup
+/// already failed with filesystem not-found. Preserved-profile lookups and
+/// every other failure keep their own errors, so [`is_source_missing`]
+/// only matches the bound source itself — never a mistyped preserved path.
+fn missing_source<T>(source: &Path, result: Result<T>) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error)
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            Err(error.context(format!(
+                "legacy move source is missing at {}; resume the exact source review or use the owner-authorized source-less recovery",
+                source.display()
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl LegacySource {
     /// Must be an explicit first-run choice. The reviewed inventory includes all
     /// known custom profiles which must remain usable. 1.x has no global profile
@@ -279,7 +336,7 @@ impl LegacySource {
             preserve_profiles.len() <= 32,
             "this bounded move supports at most 32 preserved profiles; do not omit profiles to bypass the limit"
         );
-        let source = source.canonicalize()?;
+        let source = missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?;
         let preserve_profiles = preserve_profiles
             .into_iter()
             .map(|path| path.canonicalize())
@@ -307,14 +364,14 @@ impl LegacySource {
         ensure!(receipt.nonce == nonce, "stale move inspection");
         blocking_phase("source review or cleanup recovery", move || {
             ensure!(
-                source.canonicalize()? == source
+                missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))? == source
                     && preserve_profiles
                         .iter()
                         .all(|path| path.canonicalize().is_ok_and(|current| current == *path)),
                 "authorized source selection changed before reading legacy credentials"
             );
             let mut reviewed = if let Some(binding) = &receipt.binding {
-                let source = source.canonicalize()?;
+                let source = missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?;
                 let preserved = preserve_profiles
                     .into_iter()
                     .map(|p| p.canonicalize())
@@ -913,7 +970,7 @@ pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
                 Ok(receipt)
             })
         }
-        ServiceCommand::CompleteWithoutSource { nonce } => {
+        ServiceCommand::CompleteWithoutSource { nonce, absence } => {
             let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
             auth.require(OwnerAuthorizationScope::LegacyMove)?;
             // Scope recovery to this destination before touching state: a
@@ -923,7 +980,26 @@ pub async fn service_command(command: ServiceCommand) -> Result<Receipt> {
                 matches!(move_status()?, MoveStatus::PendingCleanup { .. }),
                 "no pending legacy move cleanup for this destination"
             );
-            complete_move_without_source(&auth, &root, *nonce)
+            complete_move_without_source(&auth, &root, *nonce, absence.as_ref())
+        }
+        ServiceCommand::AuthorizeRecovery { nonce } => {
+            ensure!(
+                !nonce.is_nil(),
+                "recovery authorization requires a fresh nonce"
+            );
+            let auth = authorize_owner(OwnerAuthorizationScope::LegacyMove).await?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            // Owner-authorized entry into source-less recovery, before the
+            // desktop retires anything. Destination custody is re-verified
+            // here so retirement never precedes authentication — mirroring
+            // how `move_and_cleanup` verifies before mutating.
+            ensure!(
+                matches!(move_status()?, MoveStatus::PendingCleanup { .. }),
+                "no pending legacy move cleanup for this destination"
+            );
+            let receipt = inspected_receipt(&root, *nonce)?;
+            auth.require(OwnerAuthorizationScope::LegacyMove)?;
+            Ok(receipt)
         }
     }?;
     receipt.phase = command.phase();
@@ -1115,23 +1191,29 @@ pub fn require_cleanup_finished(root: &Path) -> Result<()> {
 /// sessions forever: the only other exit re-opens the exact 1.x source files.
 ///
 /// The pending binding and digest are re-read from protected destination
-/// state, never accepted from the caller. The bound source's standard
-/// database file must be absent — a live source refuses recovery outright —
-/// then the durable destination is re-verified first: its state digest must
-/// still match the receipt and every destination key must still decrypt to
-/// its reviewed identity. Only then is the pending receipt atomically marked
-/// complete. A missing or mismatched destination key fails closed and leaves
-/// cleanup pending.
+/// state, never accepted from the caller. Absence of the bound source is
+/// established owner-side by [`require_source_absent`] — the desktop runs
+/// un-sandboxed as the login owner — and travels as a receipt-bound
+/// [`RecoveryAbsence`] attestation: its digest and source must match the
+/// pending receipt exactly, otherwise recovery fails closed. The service
+/// deliberately never stats the source itself: under `ProtectHome=yes` the
+/// owner-profile lookup returns `EACCES`, which must not fail a
+/// legitimately-absent source. Then the durable destination is re-verified
+/// first: its state digest must still match the receipt and every
+/// destination key must still decrypt to its reviewed identity. Only then is
+/// the pending receipt atomically marked complete. A missing or mismatched
+/// destination key fails closed and leaves cleanup pending.
 ///
 /// 1.x keyring retirement is deliberately not done here: the protected
 /// service cannot access login-owner legacy credentials. The login-owner
-/// desktop retires them with [`retire_recovered_credentials`] from an
-/// [`inspect_pending_receipt`] snapshot *before* requesting completion, so a
-/// refusal never strands deleted keys behind a completed receipt; the routine
-/// is idempotent, so a crash between retirement and completion resumes
-/// cleanly with the same call. The exact retired/retained outcome travels in
-/// that [`CleanupReport`], never in this [`Receipt`]: the receipt is
-/// phase-bound wire state, while the report is the same path normal
+/// desktop retires them with [`retire_recovered_credentials`] from the
+/// [`ServiceCommand::AuthorizeRecovery`] receipt *after* that
+/// owner-authorized service step and *before* requesting completion, so a
+/// refusal never strands deleted keys behind a completed receipt; the
+/// routine is idempotent, so a crash between retirement and completion
+/// resumes cleanly with the same call. The exact retired/retained outcome
+/// travels in that [`CleanupReport`], never in this [`Receipt`]: the receipt
+/// is phase-bound wire state, while the report is the same path normal
 /// completion uses. Because retirement precedes completion, a
 /// [`MoveStatus::Complete`] receipt never claims a shared key was deleted
 /// that recovery left behind.
@@ -1139,6 +1221,7 @@ pub fn complete_move_without_source(
     authorization: &OwnerAuthorization,
     root: &Path,
     nonce: Uuid,
+    absence: Option<&RecoveryAbsence>,
 ) -> Result<Receipt> {
     authorization.require(OwnerAuthorizationScope::LegacyMove)?;
     ensure!(!nonce.is_nil(), "completion requires a fresh nonce");
@@ -1175,7 +1258,16 @@ pub fn complete_move_without_source(
                     || binding.retained_shared_accounts.is_empty()),
             "invalid move source/destination binding"
         );
-        require_source_absent(&binding.source)?;
+        // The owner-side gate proved absence; the service re-validates the
+        // receipt-bound attestation instead of re-statting a filesystem it
+        // cannot read. No attestation — no completion.
+        let absence = absence.context(
+            "recovery requires the owner-attested source absence bound to this receipt; prove the bound source is gone owner-side first",
+        )?;
+        ensure!(
+            absence.digest == digest && absence.source == binding.source,
+            "recovery absence attestation does not match the pending receipt; prove the bound source is gone owner-side first"
+        );
         let wallets = database::verify(root, digest)?;
         prepare_keys(&wallets, &[])?;
         authorization.require(OwnerAuthorizationScope::LegacyMove)?;
@@ -1218,36 +1310,51 @@ pub fn require_source_absent(source: &Path) -> Result<()> {
     }
 }
 
-/// True when a legacy-move failure signals an absent 1.x source: either the
-/// error chain carries a filesystem not-found, or the text carries the
-/// distinct source-missing marker the owner service reports over D-Bus.
-/// Generic failures never match.
+/// True only when a legacy-move failure carries the narrow bound-source
+/// marker from [`missing_source`], or the distinct source-missing text the
+/// owner service reports over D-Bus. A bare filesystem not-found — such as
+/// a mistyped preserved-profile path — never matches: recovery is offered
+/// only for the bound source itself. Generic failures never match.
 #[must_use]
 pub fn is_source_missing(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    }) || format!("{error:#}").contains("legacy move source is missing")
+    format!("{error:#}").contains("legacy move source is missing")
 }
 
 /// Login-owner 1.x credential retirement for a receipt whose source database
-/// is already gone. Rebuilds the normal-completion inventory from the
-/// destination-bound wallets and reuses the exact same deletion routine:
-/// every unshared account credential is re-read, compared, deleted and
-/// confirmed absent, shared/retained entries stay, and the global database
-/// credential is retired only when no preserved profiles need it. A binding
-/// without retirement identity cannot verify the global key, so it is
-/// retained rather than deleted blindly. Must run as the login owner (never
-/// in the protected service); the returned report is what the UI shows.
-pub fn retire_recovered_credentials(
-    binding: &MoveBinding,
-    wallets: &[WalletMetadata],
-) -> Result<CleanupReport> {
+/// is already gone. The `recovery` receipt must come from the
+/// owner-authorized [`ServiceCommand::AuthorizeRecovery`] service step:
+/// retirement never precedes authentication, mirroring how `move_and_cleanup`
+/// verifies before mutating. A receipt of any other phase refuses without
+/// touching a credential. The normal-completion inventory is rebuilt from
+/// the destination-bound wallets and the exact same deletion routine is
+/// reused: every unshared account credential is re-read, compared, deleted
+/// and confirmed absent, shared/retained entries stay, and the global
+/// database credential is retired only when no preserved profiles need it.
+/// A binding without retirement identity cannot verify the global key, so it
+/// is retained rather than deleted blindly.
+///
+/// Must run outside async execution on a blocking worker (never inside
+/// `block_on`): the Secret Service adapter owns its own Tokio runtime, like
+/// every other keyring call wrapped in [`blocking_phase`]. Desktop callers
+/// perform the async service steps with `block_on`, then retire on the
+/// blocking thread between those steps.
+pub fn retire_recovered_credentials(recovery: &Receipt) -> Result<CleanupReport> {
+    ensure!(
+        matches!(recovery.phase, ReceiptPhase::RecoveryAuthorized),
+        "recovery requires the owner-authorized service step before retiring 1.x credentials"
+    );
+    ensure!(
+        !recovery.nonce.is_nil(),
+        "recovery requires the fresh authorized receipt"
+    );
+    let binding = recovery
+        .binding
+        .as_ref()
+        .context("recovery authorization carries no bound source; keep the wallet paused")?;
     require_legacy_owner()?;
     retire_recovered_with(
         binding,
-        wallets,
+        &recovery.wallets,
         legacy_key,
         delete_legacy_account,
         retirement::read_database_key,
@@ -1283,9 +1390,11 @@ pub(crate) fn retire_recovered_with(
     Ok(report)
 }
 
-/// Desktop-side read of the pending receipt for source-less recovery. Returns
-/// the destination-verified binding and wallets the login owner retires
-/// before requesting completion. Refuses when no cleanup is pending.
+/// Desktop-side read of the pending receipt for source-less recovery. Prefer
+/// the owner-authorized [`ServiceCommand::AuthorizeRecovery`] step: it binds
+/// the same receipt and its return value is what
+/// [`retire_recovered_credentials`] requires before retiring. Refuses when
+/// no cleanup is pending.
 pub async fn inspect_pending_receipt() -> Result<Receipt> {
     let mut peer = transport::Peer::connect().await?;
     let receipt = peer

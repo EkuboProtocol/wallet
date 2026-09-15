@@ -264,7 +264,10 @@ impl LegacySource {
             key.as_deref().map(Vec::as_slice),
         )?;
         let marker_hash = hash(&marker(&binding)?);
-        let source_file = open_legacy_file(&binding.source.join("wallet.db"), false)?;
+        let source_file = super::missing_source(
+            &binding.source,
+            open_legacy_file(&binding.source.join("wallet.db"), false),
+        )?;
         let retired = file_hash(&source_file)? == marker_hash;
         drop(source_file);
         let database_key = key

@@ -153,7 +153,9 @@ fn predated_source_schema_fails_with_upgrade_hint() {
             [],
         )
         .unwrap();
-    let error = capture(&older.connection, false).map(|_| ()).unwrap_err();
+    let Err(error) = capture(&older.connection, false) else {
+        panic!("predated schema must refuse")
+    };
     let message = format!("{error:#}");
     assert!(message.contains("predates the supported move schema"));
     assert!(message.contains("1.8.2"));
@@ -167,7 +169,9 @@ fn predated_source_schema_fails_with_upgrade_hint() {
             [],
         )
         .unwrap();
-    let error = capture(&newer.connection, false).map(|_| ()).unwrap_err();
+    let Err(error) = capture(&newer.connection, false) else {
+        panic!("newer schema must refuse")
+    };
     assert!(!crate::legacy_move::is_predates_supported_schema(&error));
 }
 

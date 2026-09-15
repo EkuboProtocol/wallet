@@ -76,3 +76,48 @@ fn source_receipt_cannot_authorize_cleanup_or_complete_it() {
     proof.digest = [2; 32];
     assert!(validate_receipt(&complete, &proof, profile).is_err());
 }
+
+#[test]
+fn recovery_authorization_and_attested_completion_validate_their_receipts() {
+    use crate::legacy_move::RecoveryAbsence;
+    let profile = Uuid::new_v4();
+    let nonce = Uuid::new_v4();
+    let binding = MoveBinding {
+        profile,
+        source: std::env::temp_dir().join("source"),
+        preserved_profiles: vec![],
+        retained_shared_accounts: vec![],
+        retirement: None,
+    };
+    // The entry step authorizes only its own phase with a bound receipt.
+    let authorize = ServiceCommand::AuthorizeRecovery { nonce };
+    let mut proof = receipt(profile, nonce, ReceiptPhase::RecoveryAuthorized);
+    assert!(validate_receipt(&authorize, &proof, profile).is_err());
+    proof.binding = Some(binding.clone());
+    validate_receipt(&authorize, &proof, profile).unwrap();
+    proof.phase = ReceiptPhase::Verified;
+    assert!(validate_receipt(&authorize, &proof, profile).is_err());
+    // Completion requires the receipt-bound attestation to match.
+    let absence = RecoveryAbsence {
+        digest: [1; 32],
+        source: binding.source.clone(),
+    };
+    let complete = ServiceCommand::CompleteWithoutSource {
+        nonce,
+        absence: Some(absence),
+    };
+    proof.phase = ReceiptPhase::Complete;
+    validate_receipt(&complete, &proof, profile).unwrap();
+    proof.digest = [2; 32];
+    assert!(validate_receipt(&complete, &proof, profile).is_err());
+    proof.digest = [1; 32];
+    proof.binding.as_mut().unwrap().source = std::env::temp_dir().join("another-source");
+    assert!(validate_receipt(&complete, &proof, profile).is_err());
+    // An unattested completion never validates.
+    let unattested = ServiceCommand::CompleteWithoutSource {
+        nonce,
+        absence: None,
+    };
+    proof.binding = Some(binding);
+    assert!(validate_receipt(&unattested, &proof, profile).is_err());
+}

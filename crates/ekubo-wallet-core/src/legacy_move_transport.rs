@@ -119,13 +119,29 @@ fn validate_receipt(
                 "cleanup authorization receipt does not match the fresh bound phase"
             );
         }
-        ServiceCommand::CompleteWithoutSource { nonce } => {
+        ServiceCommand::CompleteWithoutSource { nonce, absence } => {
+            ensure!(
+                !nonce.is_nil()
+                    && receipt.nonce == *nonce
+                    && receipt.selection_digest.is_none()
+                    && receipt.binding.is_some()
+                    && absence.as_ref().is_some_and(|absence| {
+                        receipt.digest == absence.digest
+                            && receipt
+                                .binding
+                                .as_ref()
+                                .is_some_and(|binding| binding.source == absence.source)
+                    }),
+                "cleanup authorization receipt does not match the fresh bound phase"
+            );
+        }
+        ServiceCommand::AuthorizeRecovery { nonce } => {
             ensure!(
                 !nonce.is_nil()
                     && receipt.nonce == *nonce
                     && receipt.selection_digest.is_none()
                     && receipt.binding.is_some(),
-                "cleanup authorization receipt does not match the fresh bound phase"
+                "recovery authorization receipt does not match its fresh nonce"
             );
         }
         ServiceCommand::Import { .. } => {

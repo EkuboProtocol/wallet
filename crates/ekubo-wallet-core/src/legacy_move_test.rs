@@ -211,6 +211,55 @@ fn cleanup_resumes_after_partial_failure_and_retains_shared_credentials() {
 }
 
 #[test]
+fn source_missing_matches_only_the_bound_source_marker() {
+    // The narrow marker `missing_source` attaches at bound-source lookups.
+    let marked = anyhow::anyhow!(
+        "legacy move source is missing at /owner/legacy; resume the exact source review or use the owner-authorized source-less recovery: No such file or directory (os error 2)"
+    );
+    assert!(is_source_missing(&marked));
+    // The owner-service D-Bus hint carries the same marker.
+    let reported = anyhow::anyhow!(
+        "legacy move source is missing; the 1.x profile cannot be read. Nothing was copied or deleted"
+    );
+    assert!(is_source_missing(&reported));
+    // A bare not-found — e.g. a mistyped preserved-profile path — never
+    // offers recovery, even though the kind matches.
+    let mistyped = anyhow::Error::from(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "canonicalize failed",
+    ));
+    assert!(!is_source_missing(&mistyped));
+    // Generic failures never match.
+    let locked = anyhow::anyhow!("close the 1.x application before moving its profile");
+    assert!(!is_source_missing(&locked));
+}
+
+#[test]
+fn missing_source_marks_only_not_found_lookups() {
+    let source = PathBuf::from("/owner/legacy");
+    let missing = missing_source(
+        &source,
+        Err::<(), _>(anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "gone",
+        ))),
+    )
+    .unwrap_err();
+    assert!(is_source_missing(&missing));
+    assert!(format!("{missing:#}").contains("/owner/legacy"));
+    // Permission and other failures keep their own errors: no marker, no offer.
+    let denied = missing_source(
+        &source,
+        Err::<(), _>(anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))),
+    )
+    .unwrap_err();
+    assert!(!is_source_missing(&denied));
+}
+
+#[test]
 fn any_source_key_mismatch_prevents_cleanup_admission() {
     let summary = summary();
     assert!(
