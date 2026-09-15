@@ -7,9 +7,11 @@
 //! line, never on a generic host's elevated command line. Resume carries no
 //! relay material and elevates a bootstrap that re-validates the signed
 //! recovery script (Authenticode plus exact approved hash) before running it
-//! with process-scoped Bypass. Discard and reset-confirmed keep the
-//! interactive AllSigned outer invocation whose Run-once approval their
-//! SYSTEM task re-validates.
+//! with process-scoped Bypass. Discard and reset-confirmed elevate the same
+//! verified Bypass bootstrap (Authenticode plus the exact approved hash,
+//! executed via -EncodedCommand so the elevated host never evaluates a
+//! single-quoted -Command string literal); SYSTEM re-validates every
+//! prerequisite under the installer mutex before deleting.
 #![allow(unsafe_code)]
 use anyhow::{Result, ensure};
 use uuid::Uuid;
@@ -78,15 +80,39 @@ fn verified_script_bootstrap(
         .replace("__ARGS__", args)
 }
 
+/// Build the elevated-host argument list for a verified bootstrap, using the
+/// recovery launcher's exact encoding: UTF-16LE bytes
+/// (`[Text.Encoding]::Unicode.GetBytes`) base64-encoded
+/// (`[Convert]::ToBase64String`) for `-EncodedCommand`. This is the single
+/// encoder for every elevated bootstrap. A single-quoted `-Command '<script>'`
+/// argument is a string literal to the elevated host: it prints and exits 0
+/// without executing, so launchers must never embed the raw script in a
+/// quoted `-Command` argument. The base64 alphabet carries no quotes or
+/// `$`, which keeps the outer `Start-Process -ArgumentList '<inner>'`
+/// quoting exact.
+fn encode_bootstrap_command(bootstrap: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let wide: Vec<u8> = bootstrap
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
+        STANDARD.encode(wide)
+    )
+}
+
 #[derive(Clone, Copy)]
 pub enum SetupAction {
     Install,
     Resume,
     DiscardUnused,
-    /// Admin-plus-owner reset of a confirmed-but-never-activated pending
-    /// profile (forged relay receipt or lost credential entry). The SYSTEM
-    /// recovery script enforces the zero-account/no-setup-complete allowlist
-    /// and refuses any installed or activated state.
+    /// Admin-plus-owner reset of a confirmed-but-never-activated profile
+    /// (forged relay receipt or lost credential entry), including the
+    /// post-publish stranded state where the installer already moved Pending
+    /// to Owners before the readiness wait failed. The SYSTEM recovery script
+    /// enforces the zero-account/no-setup-complete allowlist and refuses any
+    /// profile that ever became usable.
     ResetConfirmed,
 }
 
@@ -126,9 +152,10 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
     // Resume carries no relay material. It elevates a verified Bypass
     // bootstrap of the signed recovery script: Authenticode Valid plus the
     // owner-approved hash captured below, re-checked elevated before
-    // execution. Discard and reset keep the interactive AllSigned outer
-    // invocation below: that Run-once approval is the parent binding their
-    // SYSTEM task re-validates.
+    // execution. The bootstrap travels via -EncodedCommand (UTF-16LE
+    // base64): a single-quoted -Command argument would evaluate as a string
+    // literal that prints and exits 0 without publishing. Discard and reset
+    // use the same verified bootstrap below.
     if matches!(action, SetupAction::Resume) {
         let script = folder(FOLDERID_ProgramFiles)?
             .join("Ekubo Wallet 2")
@@ -140,10 +167,7 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
             &format!(" -OwnerSid {}", ps_literal(owner_sid)),
             &approved,
         );
-        let inner = format!(
-            "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command {}",
-            ps_literal(&bootstrap)
-        );
+        let inner = encode_bootstrap_command(&bootstrap);
         let expression = format!(
             "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {} -Wait -PassThru; if ($null -eq $p.ExitCode) {{ exit 1 }}; exit $p.ExitCode",
             ps_literal(&powershell.to_string_lossy()),
@@ -152,7 +176,13 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
         return elevate(expression);
     }
     // Install returns above; resume returns above; discard and reset carry no
-    // relay material and keep elevating the signed recovery script.
+    // relay material and elevate the same verified Bypass bootstrap as
+    // resume: Authenticode plus the exact approved hash, executed via
+    // -EncodedCommand. No AllSigned prompt can appear here (a valid but
+    // not-yet-trusted publisher would prompt for Run once and brick cleanup
+    // under -NonInteractive); publisher trust is never installed and
+    // AllSigned is never weakened globally. The SYSTEM task re-validates
+    // every prerequisite under the installer mutex before deleting.
     let script = folder(FOLDERID_ProgramFiles)?
         .join("Ekubo Wallet 2")
         .join("recover-windows-v2.ps1");
@@ -163,14 +193,14 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
             unreachable!("install and resume elevate above")
         }
     };
-    // AllSigned can prompt for a valid but not-yet-trusted publisher. The
-    // elevated console must allow the operator to choose Run once; do not
-    // import a publisher certificate or answer Always run on their behalf.
-    // The outer command-only launcher remains noninteractive below.
-    let arguments = format!(
-        "-NoProfile -ExecutionPolicy AllSigned -File \"{}\" -OwnerSid {owner_sid}{option}",
-        script.display()
+    let approved = approved_script_hash(&script)?;
+    let bootstrap = verified_script_bootstrap(
+        &powershell,
+        &script,
+        &format!(" -OwnerSid {}{option}", ps_literal(owner_sid)),
+        &approved,
     );
+    let arguments = encode_bootstrap_command(&bootstrap);
     let expression = format!(
         "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {} -Wait -PassThru; exit $p.ExitCode",
         ps_literal(&powershell.to_string_lossy()),
@@ -254,3 +284,7 @@ fn elevate(expression: String) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "windows_fresh_setup_test.rs"]
+mod tests;

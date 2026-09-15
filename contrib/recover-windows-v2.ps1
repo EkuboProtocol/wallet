@@ -1,15 +1,29 @@
 # Explicit publication recovery, exact unused pending discard (-DiscardUnused),
-# or confirmed-but-never-activated reset (-ResetConfirmed); never recreates
+# or confirmed-but-never-usable reset (-ResetConfirmed); never recreates
 # custody.
 #
-# -ResetConfirmed exists for the stuck middle state neither discard nor resume
-# can clear: a forged relay receipt (same-user pipe instance) or a lost
-# Credential Manager entry leaves a RelayConfirmed profile with no usable
-# relay. Discard refuses confirmed profiles, resume only restarts them, fresh
-# install refuses existing roots, and uninstall keeps everything, yet recovery
-# is documented as "a fresh install or reset of the v2 profile". Reset is that
-# reset: it removes only the confirmed-but-never-activated pending state so a
-# fresh install can retry. It does not recover the relay or the credential.
+# Reachable states, exactly:
+# - Unconfirmed pending (no RelayConfirmed): -DiscardUnused only. The
+#   installer never confirmed an owner relay, so nothing usable exists.
+# - Relay-confirmed, never usable: -ResetConfirmed only. Either pre-publish
+#   (pending records only) or post-publish stranded (the installer moves
+#   Pending to Owners and creates the Owners key immediately after
+#   RelayConfirmed, BEFORE the 60s readiness wait, so a forged relay receipt
+#   or a lost Credential Manager entry strands Owners records with no usable
+#   profile). Reset requires all of: RelayConfirmed durably recorded, zero
+#   account keys (no key-account-* record), no setup-complete marker in
+#   either location, a service registration (if any) showing exactly the
+#   pending provisioning command or exactly the never-ready activated
+#   command, and Owners records (when present) holding exactly this same
+#   profile identity and nothing else.
+# - Relay-confirmed, published (or already installed with a matching
+#   identity): resume with no switch. Restarts and repairs the binding; it
+#   never deletes.
+# Refused everywhere once usable: any setup-complete marker, any
+# key-account-* record, any other service command, or any mismatched or
+# foreign identity. Reset does not recover the relay or the credential; it
+# removes only the confirmed-but-never-usable state so a fresh install can
+# retry. Owner credential entries are never read or deleted.
 #
 # -ResetConfirmed preconditions, all fail closed:
 # - Administrator elevation plus the exact ordinary owner SID (admin-plus-owner).
@@ -24,12 +38,15 @@
 #   -DiscardUnused).
 # - Zero account keys (no key-account-* record) AND no setup-complete marker
 #   anywhere for this profile, mirroring the pending-discard file allowlist
-#   exactly; fresh-profile-ready from provisioning is allowed.
-# - Never activated: no Owners registry key or collection, no active storage
-#   directory, and a service registration (if any) that still shows the exact
-#   pending provisioning command, never the activated --owner-sid command.
-# Installed and active profiles are left untouched; owner credential entries
-# are never read or deleted.
+#   exactly; fresh-profile-ready from provisioning is allowed. Both the
+#   pending and the active locations are checked: post-publish stranded
+#   profiles keep readiness state under Owners, not Pending.
+# - Never usable: no Owners record may hold a different identity, no extra
+#   owner may appear in either collection, and a service registration (if
+#   any) must still show exactly the pending provisioning command or exactly
+#   the never-ready activated owner command for this profile. Installed and
+#   usable profiles are left untouched; owner credential entries are never
+#   read or deleted.
 param([Parameter(Mandatory=$true)][string]$OwnerSid, [switch]$DiscardUnused, [switch]$ResetConfirmed)
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
@@ -133,7 +150,7 @@ try {
         if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
         throw "SYSTEM $actionNoun failed ($($info.LastTaskResult)); codes above 10000 identify the source line. Task diagnostic: $detail. Inspect pending state before retrying."
     }
-    if ($ResetConfirmed) { Write-Output 'SYSTEM reset the confirmed-but-never-activated setup; fresh setup can retry.' }
+    if ($ResetConfirmed) { Write-Output 'SYSTEM reset the confirmed-but-never-usable setup; fresh setup can retry.' }
     else { Write-Output 'SYSTEM discarded the unused pending setup; fresh setup can retry.' }
     return
 }
@@ -359,30 +376,58 @@ try {
     if ($ResetConfirmed) {
         if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') { throw 'Reset requires SYSTEM.' }
         if (-not $confirmed) { throw 'Relay was not durably confirmed. Only explicit -DiscardUnused can discard this unconfirmed attempt.' }
-        if ((Test-Path -LiteralPath $activeKey) -or (Test-Path -LiteralPath $active)) { throw 'An installed or active profile exists; reset is refused.' }
-        # Never-activated means all of: zero account keys, no setup-complete
-        # marker, no installed-owner collection, and a service registration
-        # (if any) that still shows the exact pending provisioning command.
-        # provisioning-completed fresh-profile-ready is allowed; anything
-        # showing account authority or readiness is refused.
-        foreach ($path in @($storage, (Join-Path $storage 'Pending'), (Join-Path $storage 'Owners'), $pending)) { Assert-PlainDirectory $path }
+        # Never-usable means all of: zero account keys, no setup-complete
+        # marker in either location, Owners records (when present) holding
+        # exactly this same profile identity and nothing else, and a service
+        # registration (if any) showing exactly the pending provisioning
+        # command or exactly the never-ready activated owner command.
+        # Eligibility turns on activation, not existence: the installer moves
+        # Pending to Owners and creates the Owners key immediately after
+        # RelayConfirmed, BEFORE the 60s readiness wait, so post-publish
+        # stranded records are reachable. provisioning-completed
+        # fresh-profile-ready is allowed; anything showing account authority
+        # or readiness is refused.
+        $ownersKey = Join-Path $registry 'Owners'
+        $hasActiveKey = Test-Path -LiteralPath $activeKey
+        $hasActiveDir = Test-Path -LiteralPath $active
+        $hasPendingDir = Test-Path -LiteralPath $pending
+        $hadOwnersCollection = Test-Path -LiteralPath $ownersKey
+        if ($hasPendingDir -and $hasActiveDir) { throw 'Conflicting profile locations; refusing reset.' }
+        $current = if ($hasPendingDir) { $pending } elseif ($hasActiveDir) { $active } else { $null }
+        if ($hasActiveKey) {
+            $activeRecord = Get-ItemProperty -LiteralPath $activeKey
+            if (-not $activeRecord.PSObject.Properties['Profile']) { throw 'Installed identity is incomplete; refusing reset.' }
+            if ([Convert]::ToBase64String([byte[]]$activeRecord.Profile) -ne [Convert]::ToBase64String($bytes)) { throw 'Installed identity differs; refusing reset.' }
+            $activeLeaf = Get-Item -LiteralPath $activeKey
+            if ($activeLeaf.SubKeyCount -ne 0 -or
+                @($activeLeaf.GetValueNames() | Where-Object { $_ -notin @('Profile') }).Count) { throw 'Unexpected installed registry state.' }
+        }
+        foreach ($path in @($storage, (Join-Path $storage 'Pending'), (Join-Path $storage 'Owners'), $pending, $active)) { Assert-PlainDirectory $path }
         if (@(Get-ChildItem -LiteralPath (Join-Path $registry 'Pending')).Count -ne 1) { throw 'Unexpected pending owners.' }
+        if ($hadOwnersCollection) {
+            $ownersChildren = @(Get-ChildItem -LiteralPath $ownersKey)
+            if ($ownersChildren.Count -ne 1 -or $ownersChildren[0].PSChildName -ne $OwnerSid) { throw 'Unexpected installed owners; refusing reset.' }
+            if (-not $hasActiveKey) { throw 'Installed-owner collection without this installed identity; refusing reset.' }
+        } elseif ($hasActiveKey -or $hasActiveDir) { throw 'Active state without an installed-owner collection; refusing reset.' }
         Assert-DirectoryChildren -path $storage -allowedNames @('Pending', 'Owners')
-        Assert-DirectoryChildren -path (Join-Path $storage 'Pending') -allowedNames @($profile.ToString('N'))
-        Assert-DirectoryChildren -path (Join-Path $storage 'Owners') -allowedNames @()
-        if (Test-Path -LiteralPath (Join-Path $registry 'Owners')) { throw 'An installed-owner collection exists; refusing reset.' }
+        $pendingNames = if ($hasPendingDir) { @($profile.ToString('N')) } else { @() }
+        $ownersNames = if ($hasActiveDir) { @($profile.ToString('N')) } else { @() }
+        Assert-DirectoryChildren -path (Join-Path $storage 'Pending') -allowedNames $pendingNames
+        Assert-DirectoryChildren -path (Join-Path $storage 'Owners') -allowedNames $ownersNames
         if ($record.PSObject.Properties['Discarding']) { throw 'A discard is already journaled for this pending identity; refusing reset.' }
         $root = Get-Item -LiteralPath $registry
-        if ($root.ValueCount -ne 0 -or @($root.GetSubKeyNames() | Where-Object { $_ -ne 'Pending' }).Count) { throw 'Unexpected product registry state.' }
+        if ($root.ValueCount -ne 0 -or @($root.GetSubKeyNames() | Where-Object { $_ -notin @('Pending', 'Owners') }).Count) { throw 'Unexpected product registry state.' }
         $pendingRoot = Get-Item -LiteralPath (Join-Path $registry 'Pending')
         $leaf = Get-Item -LiteralPath $pendingKey
         if ($pendingRoot.ValueCount -ne 0 -or $leaf.SubKeyCount -ne 0 -or
             @($leaf.GetValueNames() | Where-Object { $_ -notin @('Profile', 'RelayConfirmed', 'Resetting') }).Count) { throw 'Unexpected pending registry state.' }
         $resetting = $record.PSObject.Properties['Resetting'] -and $record.Resetting -eq 1
         $registration = Get-CimInstance Win32_Service -Filter "Name='$service'"
+        $pendingCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --provision-owner-sid ' + $OwnerSid
+        $activatedCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --owner-sid ' + $OwnerSid
         if ($registration) {
-            $expectedCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --provision-owner-sid ' + $OwnerSid
-            if ($registration.StartName -ne ('NT SERVICE\' + $service) -or $registration.PathName -ne $expectedCommand) { throw 'Not the exact pending provisioning service; the profile may have been activated. Reset refused.' }
+            if ($registration.StartName -ne ('NT SERVICE\' + $service) -or
+                ($registration.PathName -ne $pendingCommand -and $registration.PathName -ne $activatedCommand)) { throw 'Not the exact pending or never-ready activated service; the profile may be usable. Reset refused.' }
             # Prevent a restart while removing state. This is recoverable even
             # if validation below fails: rerunning reset repeats the checks.
             Set-Service -Name $service -StartupType Disabled
@@ -390,17 +435,23 @@ try {
         } elseif (-not $resetting) { throw 'Missing pending provisioning service.' }
         $again = Get-ItemProperty -LiteralPath $pendingKey
         if ([Convert]::ToBase64String([byte[]]$again.Profile) -ne [Convert]::ToBase64String($bytes) -or
-            -not ($again.PSObject.Properties['RelayConfirmed'] -and $again.RelayConfirmed -eq 1) -or
-            (Test-Path -LiteralPath (Join-Path $registry 'Owners')) -or (Test-Path -LiteralPath $active)) { throw 'Pending authority changed; refusing reset.' }
+            -not ($again.PSObject.Properties['RelayConfirmed'] -and $again.RelayConfirmed -eq 1)) { throw 'Pending authority changed; refusing reset.' }
+        if ((Test-Path -LiteralPath $ownersKey) -ne $hadOwnersCollection) { throw 'Installed state changed; refusing reset.' }
+        if ($hasActiveKey -and ([Convert]::ToBase64String([byte[]](Get-ItemProperty -LiteralPath $activeKey).Profile) -ne [Convert]::ToBase64String($bytes))) { throw 'Installed identity changed; refusing reset.' }
+        if ((Test-Path -LiteralPath $active) -ne $hasActiveDir -or (Test-Path -LiteralPath $pending) -ne $hasPendingDir) { throw 'Profile storage changed; refusing reset.' }
         $items = @()
-        if (Test-Path -LiteralPath $pending) { $items = @(Get-ChildItem -LiteralPath $pending -Force) }
-        elseif (-not $resetting) { throw 'Missing pending storage without a reset journal.' }
+        if ($null -ne $current) { $items = @(Get-ChildItem -LiteralPath $current -Force) }
+        elseif (-not $resetting) { throw 'Missing profile storage without a reset journal.' }
         # Zero account keys AND no setup-complete marker, checked explicitly
-        # ahead of the closed allowlist mirrored from pending discard.
+        # ahead of the closed allowlist mirrored from pending discard. Both
+        # locations are checked: post-publish stranded readiness state lives
+        # under Owners, not Pending.
         foreach ($item in $items) {
-            if ($item.Name -like 'key-account-*') { throw 'Pending profile holds account keys; reset refused.' }
+            if ($item.Name -like 'key-account-*') { throw 'Profile holds account keys; reset refused.' }
         }
-        if (Test-Path -LiteralPath (Join-Path $pending 'setup-complete')) { throw 'Pending profile reached readiness; reset refused.' }
+        foreach ($location in @($pending, $active)) {
+            if (Test-Path -LiteralPath (Join-Path $location 'setup-complete')) { throw 'Profile reached readiness; reset refused.' }
+        }
         # Closed allowlist, never a recursive arbitrary-file delete.
         # Provisioning creates an empty database; account custody cannot exist
         # without a key-account-* record, and active/readiness/move records
@@ -408,17 +459,17 @@ try {
         $allowed = @('service.lock', 'wallet.db', 'wallet.db-wal', 'wallet.db-shm', 'wrapping.key', 'key-database', 'custody.json', 'fresh-profile-ready')
         foreach ($item in $items) {
             if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-                $item.Name -notin $allowed) { throw 'Pending profile may have active authority or unsafe objects; refusing reset.' }
+                $item.Name -notin $allowed) { throw 'Profile may have active authority or unsafe objects; refusing reset.' }
         }
-        if (Test-Path -LiteralPath (Join-Path $pending 'fresh-profile-ready')) {
-            if ([IO.File]::ReadAllText((Join-Path $pending 'fresh-profile-ready')) -ne $profile.ToString()) { throw 'Pending readiness identity mismatch.' }
+        if ($null -ne $current -and (Test-Path -LiteralPath (Join-Path $current 'fresh-profile-ready'))) {
+            if ([IO.File]::ReadAllText((Join-Path $current 'fresh-profile-ready')) -ne $profile.ToString()) { throw 'Readiness identity mismatch.' }
         }
         # Durable intent survives a crash after any deletion. Keep the identity
         # until files and SCM are gone, so rerunning repeats the exact checks.
         New-ItemProperty -LiteralPath $pendingKey -Name Resetting -PropertyType DWord -Value 1 -Force | Out-Null
         (Get-Item -LiteralPath $pendingKey).Flush()
         foreach ($item in $items) { Remove-Item -LiteralPath $item.FullName -Force }
-        foreach ($path in @($pending, (Join-Path $storage 'Pending'), (Join-Path $storage 'Owners'), $storage)) {
+        foreach ($path in @($pending, $active, (Join-Path $storage 'Pending'), (Join-Path $storage 'Owners'), $storage)) {
             if (Test-Path -LiteralPath $path) { [IO.Directory]::Delete($path) }
         }
         if ($registration) {
@@ -431,9 +482,11 @@ try {
             }
         }
         Remove-Item -LiteralPath $pendingKey -Recurse
+        if ($hasActiveKey) { Remove-Item -LiteralPath $activeKey -Recurse }
         Remove-Item -LiteralPath (Join-Path $registry 'Pending')
+        if ($hadOwnersCollection) { Remove-Item -LiteralPath $ownersKey }
         Remove-Item -LiteralPath $registry
-        Write-Output 'Reset only confirmed-but-never-activated v2 setup. Owner credential entries were not read or deleted; fresh setup can retry.'
+        Write-Output 'Reset only confirmed-but-never-usable v2 setup. Owner credential entries were not read or deleted; fresh setup can retry.'
         return
     }
     # The recovery path below publishes; bind the nested registration bytes

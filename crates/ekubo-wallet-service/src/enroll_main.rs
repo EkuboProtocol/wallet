@@ -102,19 +102,27 @@ async fn main() -> anyhow::Result<()> {
 /// Fail fast when no Secret Service answers on the owner's session bus.
 /// The desktop relay persists the installer's ciphertext through the platform
 /// credential store (`credential_store::entry` builds a
-/// `zbus_secret_service_keyring_store::Store`, which resolves this same
-/// well-known session-bus name), so probing name ownership here reuses that
-/// availability signal instead of a new bus mechanism. This only avoids the
-/// late failure after elevation; core's entry construction remains the
-/// authoritative check and can still refuse an unusable store.
+/// `zbus_secret_service_keyring_store::Store`, whose first Secret Service
+/// method call bus-activates this same well-known session-bus name), so
+/// requesting activation here reuses that availability signal instead of a new
+/// bus mechanism. `GetNameOwner`/`NameHasOwner` never trigger D-Bus
+/// activation and would wrongly refuse sessions where the daemon is
+/// activatable but not yet owned (Hyprland/sway without a PAM-started
+/// keyring); `StartServiceByName` performs the same activation the real
+/// store's first call would. This only avoids the late failure after
+/// elevation; core's entry construction remains the authoritative check and
+/// can still refuse an unusable store.
 #[cfg(target_os = "linux")]
 async fn require_secret_service() -> anyhow::Result<()> {
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let connection = zbus::Connection::session().await?;
         let registry = zbus::fdo::DBusProxy::new(&connection).await?;
-        registry
-            .get_name_owner("org.freedesktop.secrets".try_into()?)
+        // Idempotent: returns AlreadyRunning when the daemon is up. Any other
+        // reply or an explicit refusal (e.g. ServiceUnknown) fails closed.
+        let reply = registry
+            .start_service_by_name("org.freedesktop.secrets".try_into()?, 0)
             .await?;
+        let _ = zbus::fdo::StartServiceReply::try_from(reply)?;
         Ok::<_, anyhow::Error>(())
     })
     .await;
@@ -194,14 +202,16 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if args == ["--reset-confirmed"] {
-        // Admin-plus-owner reset of a confirmed-but-never-activated pending
-        // profile (forged relay receipt or lost credential entry). Never
-        // escalate once an installed profile exists; the SYSTEM recovery
-        // script re-enforces the zero-account/no-setup-complete allowlist and
-        // refuses any installed or activated state.
-        if ekubo_wallet_core::windows_service_config::find_installed_service_identity()?.is_some() {
-            anyhow::bail!("an installed v2 profile exists; reset is refused");
-        }
+        // Admin-plus-owner reset of a confirmed-but-never-activated profile
+        // (forged relay receipt or lost credential entry), including the
+        // post-publish stranded state where the installer already created
+        // the Owners records before the readiness wait failed. Eligibility
+        // turns on activation (setup-complete, account keys, service
+        // command), which only SYSTEM can inspect against private storage:
+        // the coordinator cannot tell that stranded state apart from an
+        // active profile, so it always elevates and the SYSTEM recovery
+        // script enforces the zero-account/no-setup-complete allowlist and
+        // refuses any profile that ever became usable.
         let owner = ekubo_wallet_core::windows_service_identity::current_process_identity()?
             .user_sid()
             .to_owned();

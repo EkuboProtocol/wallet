@@ -3,6 +3,10 @@
 # Installer invocations drive the real enroll --launch-install trampoline (the
 # signed helper's verify_installer_process + run_install_script verified Bypass
 # bootstrap); the nested auth-registration calls use the same verified pattern.
+# Resume republication is asserted on the restarted service plus the durable
+# readiness marker, never on exit 0 alone; a stranded confirmed-but-never-ready
+# installer run (owner silenced at RelayConfirmed) exercises -ResetConfirmed
+# against the exact post-publish records production leaves behind.
 # Only LocalMachine Root carries fixture chain trust so Authenticode reads
 # Valid. The fixture publisher is deliberately absent from TrustedPublisher,
 # so an AllSigned regression would prompt and fail closed under NonInteractive
@@ -495,10 +499,99 @@ try {
                     Write-Output "$trustMode PASS: real unpublished custody discarded; unrelated profiles, file and synthetic credential unchanged."
                 }
             } finally { [WalletAcceptanceCredential]::Delete($credentialTarget) }
+            $stage = 'stranded confirmed-but-never-active profile / installer without owner readiness'
+            Write-Output "STEP $stage"
+            # Build the exact stranded state the installer leaves when its
+            # 60s readiness wait fails: Owners records published, no
+            # setup-complete. The owner worker is terminated the moment
+            # RelayConfirmed is durably recorded, so readiness can never
+            # complete — exactly as a forged relay receipt or a lost
+            # credential entry strands it. Afterwards -ResetConfirmed must
+            # remove precisely that state. No state is fabricated: every
+            # record below is written by the production installer itself.
+            Publish $exchange 'begin.json' @{}
+            $strandRelay = Await-Report $exchange 'relay.json' $worker
+            if ($strandRelay.owner_sid -ne $ownerSid) { throw 'Strand relay is not owned by the standard fixture user.' }
+            $strandStdout = Join-Path $work 'strand.stdout.log'; $strandStderr = Join-Path $work 'strand.stderr.log'
+            Assert-LaunchInstallTrust
+            $stranded = Start-Process -FilePath (Join-Path $install 'ekubo-wallet-v2-enroll.exe') -ArgumentList @('--launch-install', $ownerSid, $strandRelay.endpoint) -PassThru -RedirectStandardOutput $strandStdout -RedirectStandardError $strandStderr
+            $strandPending = Join-Path $registry "Pending/$ownerSid"
+            $strandDeadline = [DateTime]::UtcNow.AddSeconds(90)
+            $strandConfirmed = $false
+            while (-not $strandConfirmed) {
+                Start-Sleep -Milliseconds 200
+                if ($stranded.HasExited) { break }
+                $strandRecord = Get-ItemProperty -LiteralPath $strandPending -ErrorAction SilentlyContinue
+                if ($strandRecord -and $strandRecord.PSObject.Properties['RelayConfirmed'] -and $strandRecord.RelayConfirmed -eq 1) { $strandConfirmed = $true }
+                if (-not $strandConfirmed -and [DateTime]::UtcNow -gt $strandDeadline) { throw 'Strand installer never recorded relay confirmation.' }
+            }
+            if (-not $strandConfirmed) {
+                Get-Content -LiteralPath $strandStdout, $strandStderr | Write-Output
+                throw 'Strand installer exited before relay confirmation; see output above.'
+            }
+            # Owner silence from here: readiness can never complete.
+            $worker.Dispose(); $worker = $null
+            if (-not $stranded.WaitForExit(120000)) {
+                $stranded.Kill($true)
+                if (-not $stranded.WaitForExit(10000)) { throw 'Strand installer process did not exit after termination.' }
+                throw 'Strand installer did not fail its readiness wait within 120 seconds.'
+            }
+            Get-Content -LiteralPath $strandStdout, $strandStderr | Write-Output
+            if ($stranded.ExitCode -eq 0) { throw 'TODO: stranded orchestration lost the race (installer reached readiness); reset coverage needs a silent owner, not this worker.' }
+            $stranded.Dispose(); $stranded = $null
+            $stage = 'stranded profile / assert post-publish records without readiness'
+            $strandRecord = Get-ItemProperty -LiteralPath $strandPending
+            $strandIdentity = [Text.Encoding]::UTF8.GetString([byte[]]$strandRecord.Profile) | ConvertFrom-Json
+            $strandGuid = ([Guid]$strandIdentity.profile_id).ToString('N')
+            $strandOwnersKey = Join-Path $registry "Owners/$ownerSid"
+            $strandActive = Join-Path $storage "Owners/$strandGuid"
+            $strandPendingDir = Join-Path $storage "Pending/$strandGuid"
+            if (-not ((Test-Path -LiteralPath $strandOwnersKey) -and (Test-Path -LiteralPath $strandActive))) { throw 'TODO: installer did not strand post-publish Owners records; reset has nothing post-publish to cover.' }
+            foreach ($location in @($strandPendingDir, $strandActive)) {
+                if (Test-Path -LiteralPath (Join-Path $location 'setup-complete')) { throw 'Stranded profile unexpectedly reached readiness.' }
+            }
+            if (@(Get-ChildItem -LiteralPath $strandActive -Force | Where-Object Name -Like 'key-account-*').Count) { throw 'Stranded profile unexpectedly holds account keys.' }
+            $strandService = 'EkuboWalletV2-' + $strandGuid
+            $strandRegistration = Get-CimInstance Win32_Service -Filter "Name='$strandService'"
+            $strandCommand = '"' + (Join-Path $install 'ekubo-wallet-service.exe') + '" --owner-sid ' + $ownerSid
+            if (-not $strandRegistration -or $strandRegistration.PathName -ne $strandCommand) { throw 'TODO: stranded service is not the never-ready activated command; refusing to invent reset coverage.' }
+            $stage = 'stranded profile / production SYSTEM reset'
+            Write-Output "STEP $stage"
+            Invoke-SetupScript (Join-Path $install 'recover-windows-v2.ps1') @('-OwnerSid', $ownerSid, '-ResetConfirmed')
+            if ($LASTEXITCODE -ne 0) { throw 'Production reset of the stranded profile failed.' }
+            if ((Test-Path -LiteralPath $registry) -or (Test-Path -LiteralPath $storage) -or
+                @(Get-Service -Name 'EkuboWalletV2-*' -ErrorAction SilentlyContinue).Count) { throw 'Production reset left setup-blocking state.' }
+            if ((Get-FileHash -LiteralPath $unrelated).Hash -ne $unrelatedHash) { throw 'Reset changed unrelated files.' }
+            foreach ($before in $profilesBefore) {
+                $after = Get-CimInstance Win32_UserProfile -Filter "SID='$($before.SID)'"
+                if (-not $after -or $after.LocalPath -ne $before.LocalPath) { throw 'Reset changed an unrelated Windows profile.' }
+            }
+            Remove-FixtureProfile $strandIdentity.service_sid -AllowCachedVirtualProfile
+            Write-Output 'stranded reset PASS: post-publish never-ready records removed; unrelated profiles and file unchanged.'
+            $stage = 'stranded profile / restore preconditions for a fresh owner'
+            # Fixture-harness state only: the terminated worker already wrote
+            # the disposable 1.x sentinel, and production reset correctly left
+            # it alone. Remove it and the consumed exchange reports so the
+            # next worker starts from the exact preconditions the owner
+            # fixture asserts. No wallet state is fabricated.
+            $strandOwnerProfile = (Get-CimInstance Win32_UserProfile -Filter "SID='$ownerSid'").LocalPath
+            $strandSentinel = Join-Path $strandOwnerProfile 'AppData\Local\Ekubo\wallet\acceptance-sentinel'
+            if (-not (Test-Path -LiteralPath $strandSentinel -PathType Leaf)) { throw 'Disposable 1.x sentinel is missing after the stranded run.' }
+            Remove-Item -LiteralPath $strandSentinel -Force
+            foreach ($name in @('identity.json', 'begin.json', 'relay.json', 'connect-error.txt', 'failure.json')) {
+                $report = Join-Path $exchange $name
+                if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force }
+            }
+            $worker = [WalletAcceptanceLogon]::Start($username, $password, $fixture, "enroll `"$exchange`" $ownerSid", $work)
+            Write-Output "enroll owner PID=$($worker.Id) restarted after stranded reset."
+            $stage = 'enroll / await real owner identity'
+            $identity = Await-Report $exchange 'identity.json' $worker 30
+            $nativeProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$ownerSid'"
+            if ($identity.owner_sid -ne $ownerSid -or $nativeProfile.LocalPath -ne $identity.profile -or $identity.session -ne $installerSession) { throw 'Owner token/profile/session mapping is not the fixture logon.' }
+            $stage = 'enroll / retry production installer after discard and stranded reset'
             Publish $exchange 'begin.json' @{}
             $relay = Await-Report $exchange 'relay.json' $worker
             if ($relay.owner_sid -ne $ownerSid -or $relay.owner_sid -eq $administrator.User.Value) { throw 'Relay is not owned by the standard fixture user.' }
-            $stage = 'enroll / retry production installer after discard'
             Assert-LaunchInstallTrust
             $installer = Start-Process -FilePath (Join-Path $install 'ekubo-wallet-v2-enroll.exe') -ArgumentList @('--launch-install', $ownerSid, $relay.endpoint) -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             if (-not $installer.WaitForExit(120000)) { throw 'Production enrollment exceeded 120 seconds.' }
@@ -556,11 +649,30 @@ try {
         if (-not $worker.Wait(15000) -or $worker.ExitCode -ne 0) { throw 'Owner did not close its real client/relay cleanly.' }
         $worker.Dispose(); $worker = $null
         if ($phase -eq 'enroll') {
+            $stage = 'enroll / resume republication restarts the published service'
+            Write-Output "STEP $stage"
+            # Regression backstop for the elevated resume launcher: exit 0
+            # alone once hid a -Command string-literal no-op that printed and
+            # exited without publishing. Stop the authority, drive the resume
+            # path, and require the published service itself (not just the
+            # exit code) plus the durable readiness marker with the unchanged
+            # profile identity. The Rust run_elevated Resume argument string
+            # is pinned separately by its -EncodedCommand unit test; UAC
+            # mediation keeps this fixture from driving that launcher
+            # directly, so this covers the script half of the same hole.
+            Stop-FixtureService $ready.service_name
+            Invoke-SetupScript (Join-Path $install 'recover-windows-v2.ps1') @('-OwnerSid', $ownerSid)
+            if ($LASTEXITCODE -ne 0) { throw 'Resume republication failed.' }
+            Wait-ServiceState $ready.service_name ([ServiceProcess.ServiceControllerStatus]::Running)
+            $resumed = Get-CimInstance Win32_Service -Filter "Name='$($ready.service_name)'"
+            if ($resumed.State -ne 'Running' -or $resumed.StartName -ne "NT SERVICE\$($ready.service_name)") { throw 'Resume did not restore the published authority.' }
+            if ([IO.File]::ReadAllText((Join-Path $active 'setup-complete')) -ne $ready.profile_id) { throw 'Resume lost durable readiness.' }
+            Write-Output 'resume republication PASS: published authority restarted with durable readiness.'
             $stage = 'enroll / restart broker and authority'
             Restart-FixtureService ($ready.service_name + '-Auth')
             Restart-FixtureService $ready.service_name
             $restarted = Get-CimInstance Win32_Service -Filter "Name='$($ready.service_name)'"
-            if ($restarted.ProcessId -eq $service.ProcessId) { throw 'Authority process did not restart.' }
+            if ($restarted.ProcessId -eq $resumed.ProcessId) { throw 'Authority process did not restart.' }
         }
         Write-Output "$phase PASS: real owner logon, protected authority/account, raw file access denied, native authorization rejected without a collector, 1.x sentinel unchanged."
     }
