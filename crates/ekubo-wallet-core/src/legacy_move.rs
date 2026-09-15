@@ -364,14 +364,16 @@ impl LegacySource {
         ensure!(receipt.nonce == nonce, "stale move inspection");
         blocking_phase("source review or cleanup recovery", move || {
             ensure!(
-                missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))? == source
+                missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?
+                    == source
                     && preserve_profiles
                         .iter()
                         .all(|path| path.canonicalize().is_ok_and(|current| current == *path)),
                 "authorized source selection changed before reading legacy credentials"
             );
             let mut reviewed = if let Some(binding) = &receipt.binding {
-                let source = missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?;
+                let source =
+                    missing_source(&source, source.canonicalize().map_err(anyhow::Error::from))?;
                 let preserved = preserve_profiles
                     .into_iter()
                     .map(|p| p.canonicalize())
