@@ -471,18 +471,40 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # The publish job has no checkout, so `gh release` subcommands cannot
+          # discover the repo from a git remote; GH_REPO (which gh reads, unlike
+          # GITHUB_REPOSITORY) makes repo resolution checkout-independent.
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.tag }}
+          COMMIT_SHA: ${{ needs.verify-build.outputs.commit_sha }}
         run: |
           set -euo pipefail
           release_body='Ekubo Wallet 2 is a separate fresh-install product. Linux and Windows require protected service enrollment and signed installer updates. 1.x wallets are never migrated automatically; the only supported path is the explicit first-run move from 1.x documented in docs/service-isolation.md.'
-          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TAG" \
-            -f body="$release_body" \
-            -f make_latest=false \
-            -F prerelease="$( [[ "$RELEASE_TAG" == *-* ]] && echo true || echo false )" > release.json
+          if existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null)"; then
+            # Rerun after a partial publish (the tag release and its assets are
+            # created before the channel upload below, so a failure there used
+            # to leave a rerun dying on the duplicate tag). Reuse the existing
+            # tag release after verifying the tag still resolves to the
+            # verified build commit.
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$COMMIT_SHA"
+            printf '%s\n' "$existing" > release.json
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$RELEASE_TAG" -f name="$RELEASE_TAG" \
+              -f target_commitish="$COMMIT_SHA" \
+              -f body="$release_body" \
+              -f make_latest=false \
+              -F prerelease="$( [[ "$RELEASE_TAG" == *-* ]] && echo true || echo false )" > release.json
+          fi
           upload_url="$(jq -r '.upload_url | sub("\\{.*"; "")' release.json)"
           for file in dist/*; do
-            encoded="$(printf '%s' "$(basename "$file")" | jq -sRr @uri)"
+            name="$(basename "$file")"
+            asset_id="$(jq -r --arg name "$name" '.assets[]? | select(.name == $name) | .id' release.json)"
+            if [[ -n "$asset_id" ]]; then
+              # Rerun idempotency: replace the previous attempt's same-name asset.
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            fi
+            encoded="$(printf '%s' "$name" | jq -sRr @uri)"
             gh api --method POST "$upload_url?name=$encoded" --input "$file" -H 'Content-Type: application/octet-stream'
           done
           # A separate, explicitly non-latest release is the v2 discovery channel.
@@ -504,4 +526,10 @@ jobs:
           set -euo pipefail
           # Only make_latest=false keeps the numeric-compare 1.x updater off
           # v2 tags. Fail closed: any mismatch or lookup failure blocks here.
-          test "$(gh release view "$RELEASE_TAG" --json isLatest --jq .isLatest)" = false
+          # `gh release view --json` exposes no isLatest field (its fields are
+          # apiUrl, assets, author, body, createdAt, databaseId, id, isDraft,
+          # isImmutable, isPrerelease, name, publishedAt, tagName,
+          # targetCommitish, uploadUrl, url, zipballUrl), so compare the tag
+          # against the releases/latest REST endpoint instead.
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          test -n "$latest_tag" && test "$latest_tag" != "$RELEASE_TAG"

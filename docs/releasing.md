@@ -34,7 +34,11 @@ bytes still hash exactly, and the tag resolves to the manifested commit. That
 manifested commit must be on protected `main` history. CI results are not a
 release prerequisite. Only then do isolated trusted jobs receive Apple, Azure,
 or Minisign credentials. The publishing job creates the release at the verified
-commit SHA and uploads only the strict native-asset allowlist. The verifier
+commit SHA and uploads only the strict native-asset allowlist. The publish step
+is rerun-safe: if the tag release already exists from a partial attempt, the
+rerun verifies the tag still resolves to the verified commit, reuses the
+release, and replaces same-name assets before re-uploading. Repo resolution
+for `gh release` subcommands uses `GH_REPO`, so no checkout is required. The verifier
 checks out only its trusted workflow revision; no trusted job checks out or
 executes build-run source.
 
