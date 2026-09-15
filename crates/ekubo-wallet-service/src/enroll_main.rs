@@ -21,6 +21,11 @@ async fn main() -> anyhow::Result<()> {
             let uid=rustix::process::getuid().as_raw();
             refuse_published_reset(uid)?;
             let status=tokio::task::spawn_blocking(move || std::process::Command::new("/usr/bin/pkexec")
+                // Mirror polkit::install_policy: no agent on a controlling
+                // terminal the desktop does not have, and no caller SHELL for
+                // pkexec to reject before polkit is even consulted.
+                .arg("--disable-internal-agent")
+                .env_remove("SHELL")
                 .args(["/usr/lib/ekubo-wallet-v2/install-profile","--discard-unused",&uid.to_string()]).status()).await??;
             ensure!(status.success(),"unused setup was not discarded");
             Ok(())
@@ -45,6 +50,10 @@ async fn main() -> anyhow::Result<()> {
             // that exact executable. The helper re-validates everything.
             let status = tokio::task::spawn_blocking(move || {
                 std::process::Command::new("/usr/bin/pkexec")
+                    // Mirror polkit::install_policy (see hardening note on the
+                    // --discard-unused call above).
+                    .arg("--disable-internal-agent")
+                    .env_remove("SHELL")
                     .args(if resume { vec!["/usr/lib/ekubo-wallet-v2/install-profile".to_owned(),"--resume".into(),uid.to_string()] }
                         else { vec!["/usr/lib/ekubo-wallet-v2/install-profile".to_owned(),uid.to_string(),recipient] })
                     .status()
