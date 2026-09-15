@@ -79,6 +79,7 @@ pub struct BatchReadCall {
     pub to: String,
     pub data: String,
     #[serde(default)]
+    #[schemars(schema_with = "ekubo_wallet_core::abi_decoder::abi_decode_plan_object_schema")]
     pub decode: Option<AbiDecodePlan>,
     #[serde(default = "default_true")]
     pub include_raw: bool,

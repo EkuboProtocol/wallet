@@ -469,6 +469,92 @@ fn tool_schemas_contain_no_boolean_schemas() {
 }
 
 #[test]
+fn tool_schemas_contain_no_recursive_refs() {
+    // Some MCP clients (Muse Spark among them) reject tools/list outright
+    // when any served schema is recursive ("Recursive JSON schemas are not
+    // currently supported"). Recursive request/response types therefore
+    // advertise shallow object envelopes at tool sites — the complete
+    // recursive schemas stay on dedicated resources, and deserialization
+    // remains the admission check.
+    fn resolve_pointer<'a>(
+        root: &'a serde_json::Value,
+        pointer: &str,
+    ) -> Option<&'a serde_json::Value> {
+        let path = pointer.strip_prefix('#')?;
+        if path.is_empty() {
+            return Some(root);
+        }
+        let mut current = root;
+        for segment in path.split('/').skip(1) {
+            current = current.get(segment.replace("~1", "/").replace("~0", "~"))?;
+        }
+        Some(current)
+    }
+
+    fn collect_cycles(
+        root: &serde_json::Value,
+        node: &serde_json::Value,
+        stack: &mut Vec<String>,
+        cycles: &mut Vec<String>,
+    ) {
+        match node {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(target)) = map.get("$ref") {
+                    if stack.contains(target) {
+                        let mut chain = stack.clone();
+                        chain.push(target.clone());
+                        cycles.push(chain.join(" -> "));
+                        return;
+                    }
+                    if let Some(resolved) = resolve_pointer(root, target) {
+                        stack.push(target.clone());
+                        collect_cycles(root, resolved, stack, cycles);
+                        stack.pop();
+                    }
+                }
+                for child in map.values() {
+                    collect_cycles(root, child, stack, cycles);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_cycles(root, item, stack, cycles);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut cycles = Vec::new();
+    for tool in WalletMcpServer::sanitized_tool_router().list_all() {
+        let name = tool.name.clone();
+        let input = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        let mut found = Vec::new();
+        collect_cycles(&input, &input, &mut Vec::new(), &mut found);
+        cycles.extend(
+            found
+                .into_iter()
+                .map(|cycle| format!("{name}.inputSchema: {cycle}")),
+        );
+        if let Some(output) = &tool.output_schema {
+            let output = serde_json::to_value(output.as_ref()).unwrap();
+            let mut found = Vec::new();
+            collect_cycles(&output, &output, &mut Vec::new(), &mut found);
+            cycles.extend(
+                found
+                    .into_iter()
+                    .map(|cycle| format!("{name}.outputSchema: {cycle}")),
+            );
+        }
+    }
+    assert!(
+        cycles.is_empty(),
+        "served tool schemas must not recurse: {}",
+        cycles.join("; ")
+    );
+}
+
+#[test]
 fn artifact_reference_inputs_are_explicit_json_objects() {
     let router = WalletMcpServer::sanitized_tool_router();
     for tool_name in [
@@ -522,7 +608,7 @@ fn artifact_reference_inputs_reject_json_encoded_strings() {
 }
 
 #[test]
-fn policy_proposal_schema_is_the_exact_policy_object_shape() {
+fn policy_proposal_schema_is_a_shallow_non_recursive_envelope() {
     let router = WalletMcpServer::sanitized_tool_router();
     let tool = router
         .get("wallet_propose_policy")
@@ -539,7 +625,21 @@ fn policy_proposal_schema_is_the_exact_policy_object_shape() {
         .expect("policy object describes its fields");
     assert!(properties.contains_key("version"));
     assert!(properties.contains_key("rules"));
-    assert!(policy.to_string().contains("tuple"));
+    // The tool input stays non-recursive: rule detail lives at
+    // `wallet://schemas/policy` and `WalletPolicy::parse` validates it.
+    let rendered = policy.to_string();
+    assert!(
+        !rendered.contains("$ref"),
+        "policy tool schema must not recurse: {rendered}"
+    );
+    let rules = properties
+        .get("rules")
+        .expect("policy object describes its rules");
+    assert_eq!(
+        rules.get("items"),
+        Some(&serde_json::json!({"type": "object"})),
+        "rules stay opaque objects; detail lives at wallet://schemas/policy: {rendered}"
+    );
 }
 
 #[test]

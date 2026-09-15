@@ -27,6 +27,21 @@ pub fn any_json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sc
     schemars::json_schema!({"type": "object"})
 }
 
+/// Shallow, non-recursive envelope for an [`AbiDecodePlan`] at MCP tool sites.
+///
+/// Decode plans nest — parameters hold components, multicall selections hold
+/// child plans — so the derived schema is a `$ref` cycle several MCP clients
+/// fail to decode or display. The tool argument therefore names only an
+/// object; deserialization into [`AbiDecodePlan`] remains the admission
+/// check, so a shallow tool schema accepts nothing on its own authority.
+#[must_use]
+pub fn abi_decode_plan_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "description": "How to read the return bytes: one of the function_result, abi_parameters, semantic_value, multicall3, or function_result_bytes_array plans described by wallet_decode_abi_result. Plans nest, so inner selections are objects of the same shape."
+    })
+}
+
 pub const MAX_ABI_ENTRIES: usize = 128;
 pub const MAX_ABI_BYTES: usize = 65_536;
 pub const MAX_RETURN_DATA_BYTES: usize = 1_048_576;

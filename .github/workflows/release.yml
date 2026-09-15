@@ -182,7 +182,7 @@ jobs:
             --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID"
           xcrun stapler staple "dist/Ekubo.Wallet.2_${version}_aarch64.dmg"
       - name: Sign updater artifacts
-        uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
           tool: cargo-packager@0.11.8
       - shell: bash
@@ -258,7 +258,7 @@ jobs:
         run: if ($env:ENABLED -ne 'true') { throw 'V2 service payload signing is mandatory.' }
       - name: Authenticate to Azure with GitHub OIDC
         if: vars.AZURE_TRUSTED_SIGNING_ENABLED == 'true'
-        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -316,7 +316,7 @@ jobs:
           exclude-azure-powershell-credential: true
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
-      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
           tool: cargo-packager@0.11.8
       - name: Sign final installer for updater and enforce Authenticode mode
@@ -353,7 +353,7 @@ jobs:
           mkdir dist
           cp input/unsigned-linux-x86_64/*.deb dist/
           cp input/unsigned-linux-x86_64/*.pkg.tar.zst dist/
-      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
           tool: cargo-packager@0.11.8
       - name: Sign Linux updater artifacts
@@ -452,7 +452,7 @@ jobs:
             --arg lu "$(url "$linux_bundle")" --arg ls "$(cat "$linux_bundle.sig")" --arg lh "$(sha256sum "$linux_bundle" | cut -d ' ' -f 1)" \
             --arg au "$(url "$arch_bundle")" --arg as "$(cat "$arch_bundle.sig")" --arg ah "$(sha256sum "$arch_bundle" | cut -d ' ' -f 1)" \
             '{product:"org.ekubo.wallet.v2",channel:"v2",version:$version,pub_date:$pub_date,platforms:{"macos-aarch64":{url:$mu,signature:$ms,sha256:$mh,format:"app"}},manual_installers:{"windows-x86_64":{url:$wu,signature:$ws,sha256:$wh,format:"nsis"},"linux-x86_64":{url:$lu,signature:$ls,sha256:$lh,format:"deb"},"linux-x86_64-arch":{url:$au,signature:$as,sha256:$ah,format:"pacman"}}}' > dist/latest-v2.json
-      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6 # v2.87.7
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
           tool: cargo-packager@0.11.8
       - name: Sign metadata
