@@ -8,6 +8,47 @@ fn tray_icon_has_valid_dimensions() {
 }
 
 #[test]
+fn tray_artwork_is_monochrome_for_each_theme() {
+    for (encoded, bright) in [
+        (
+            include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice(),
+            true,
+        ),
+        (
+            include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice(),
+            false,
+        ),
+    ] {
+        let image = image::load_from_memory_with_format(encoded, image::ImageFormat::Png)
+            .unwrap()
+            .into_rgba8();
+        let mut opaque = 0_u64;
+        let mut total = 0_u64;
+        for pixel in image.pixels() {
+            let [red, green, blue, alpha] = pixel.0;
+            if alpha == 0 {
+                continue;
+            }
+            assert_eq!(
+                (red, green, blue),
+                (red, red, red),
+                "tray pixel is not monochrome"
+            );
+            opaque += 1;
+            total += u64::from(red);
+        }
+        assert!(opaque > 0, "tray icon has no visible pixels");
+        #[allow(clippy::cast_precision_loss)]
+        let mean = total as f32 / opaque as f32;
+        if bright {
+            assert!(mean > 200.0, "dark-mode tray icon is not bright");
+        } else {
+            assert!(mean < 55.0, "light-mode tray icon is not dark");
+        }
+    }
+}
+
+#[test]
 fn application_badge_is_hidden_at_zero_and_exact_above_zero() {
     assert_eq!(application_badge_label(0), None);
     assert_eq!(application_badge_label(1).as_deref(), Some("1"));
