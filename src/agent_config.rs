@@ -36,9 +36,12 @@ pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet_v2";
 /// local bridge entry, plus one entry per hosted Ekubo server.
 ///
 /// It is the removal and diff list, not the write list — a companion the owner
-/// has switched off is still ours to take back out. The 1.x local and companion
-/// keys are deliberately absent: both products may use the same harness file.
-/// Everything outside this list belongs to the harness and is never touched.
+/// has switched off is still ours to take back out. Only the 1.x *local* key
+/// is deliberately absent: both products may use the same harness file, but
+/// only v2 may touch `ekubo_wallet_v2`. The hosted companion keys are the
+/// same stable names 1.x writes, so a v2 write is byte-identical to a 1.x
+/// write and v2 deselect/removal takes the shared entry out. Everything
+/// outside this list belongs to the harness and is never touched.
 fn managed_keys() -> impl Iterator<Item = &'static str> {
     std::iter::once(LOCAL_SERVER_NAME)
         .chain(COMPANION_SERVERS.iter().map(|server| server.config_key))

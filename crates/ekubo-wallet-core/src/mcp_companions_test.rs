@@ -52,25 +52,19 @@ fn config_keys_are_unique_and_underscore_only() {
     }
 }
 
-/// Legacy endpoint recognition does not transfer ownership of 1.x's key.
+/// Legacy endpoint recognition is by URL, never by key: the `ekubo` key names
+/// v2's own per-protocol entry now, exactly as post-split 1.x writes it.
 #[test]
-fn the_legacy_key_is_not_managed_by_v2() {
+fn the_legacy_endpoint_is_recognized_by_url_not_key() {
     assert_eq!(LEGACY_COMPANION_KEY, "ekubo");
     assert_eq!(
         companion_by_slug("ekubo").map(|server| server.config_key),
-        Some("ekubo_v2")
+        Some("ekubo")
     );
     assert!(is_legacy_companion("https://mcp.ekubo.org/mcp"));
     assert!(!is_legacy_companion("https://mcp.ekubo.org/mcp/ekubo"));
     for server in COMPANION_SERVERS {
         assert!(!is_legacy_companion(server.url));
-        assert_ne!(server.config_key, LEGACY_COMPANION_KEY);
-        let legacy_key = if server.slug == "ekubo" {
-            "ekubo".to_owned()
-        } else {
-            format!("ekubo_{}", server.slug)
-        };
-        assert_ne!(server.config_key, legacy_key);
     }
 }
 

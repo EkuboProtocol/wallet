@@ -3,8 +3,12 @@
 //! Ekubo serves one MCP endpoint per protocol. Each is credential-free, each
 //! carries only that protocol's tools, and the owner chooses which of them the
 //! wallet writes into a harness configuration alongside the local
-//! `ekubo_wallet_v2` bridge entry. Configuration keys are product-scoped so
-//! v2 sync and removal preserve every 1.x-managed companion.
+//! `ekubo_wallet_v2` bridge entry. Configuration keys are the same stable
+//! names 1.x writes: the hosted servers did not change, so neither did their
+//! keys. A v2 write is therefore byte-identical to a 1.x write for the same
+//! selection, and v2 deselect/removal takes the shared entry out — same
+//! owner, same harness file, last writer wins, exactly as two 1.x builds
+//! would behave toward each other.
 //!
 //! Nothing here signs, authorizes, or holds a secret. It is a fixed table of
 //! public URLs plus the owner's selection over it, kept in the kernel because
@@ -57,7 +61,7 @@ pub struct CompanionServer {
 pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     CompanionServer {
         slug: "ekubo",
-        config_key: "ekubo_v2",
+        config_key: "ekubo",
         title: "Ekubo",
         description: "Swaps and bridges, pools, LP positions, TWAMM, auctions, incentives, and ve(3,3) STONX voting.",
         url: "https://mcp.ekubo.org/mcp/ekubo",
@@ -65,7 +69,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "aave",
-        config_key: "ekubo_v2_aave",
+        config_key: "ekubo_aave",
         title: "Aave V3",
         description: "Aave V3 market discovery and supply, withdraw, borrow, repay, collateral, and eMode preparation.",
         url: "https://mcp.ekubo.org/mcp/aave",
@@ -73,7 +77,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "aerodrome",
-        config_key: "ekubo_v2_aerodrome",
+        config_key: "ekubo_aerodrome",
         title: "Aerodrome",
         description: "Aerodrome Sugar lens reads and liquidity, gauge, lock, vote, and incentive-claim preparation on Base.",
         url: "https://mcp.ekubo.org/mcp/aerodrome",
@@ -81,7 +85,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "lido",
-        config_key: "ekubo_v2_lido",
+        config_key: "ekubo_lido",
         title: "Lido",
         description: "Lido staking, wrapping, and unstETH withdrawal preparation.",
         url: "https://mcp.ekubo.org/mcp/lido",
@@ -89,7 +93,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "merkl",
-        config_key: "ekubo_v2_merkl",
+        config_key: "ekubo_merkl",
         title: "Merkl",
         description: "Merkl reward discovery and proof-verified claim preparation.",
         url: "https://mcp.ekubo.org/mcp/merkl",
@@ -97,7 +101,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "morpho",
-        config_key: "ekubo_v2_morpho",
+        config_key: "ekubo_morpho",
         title: "Morpho",
         description: "Morpho Vault V2 discovery and deposit, withdraw, and redeem preparation.",
         url: "https://mcp.ekubo.org/mcp/morpho",
@@ -105,7 +109,7 @@ pub const COMPANION_SERVERS: [CompanionServer; 7] = [
     },
     CompanionServer {
         slug: "sky",
-        config_key: "ekubo_v2_sky",
+        config_key: "ekubo_sky",
         title: "Sky",
         description: "Sky savings discovery and sUSDS deposit, withdraw, and redeem preparation.",
         url: "https://mcp.ekubo.org/mcp/sky",
@@ -133,8 +137,11 @@ pub const TOTAL_TOOL_COUNT: usize = 84;
 /// identifies the endpoint without granting ownership of its config entry.
 pub const LEGACY_COMPANION_URL: &str = "https://mcp.ekubo.org/mcp";
 
-/// The 1.x config key that predates the split. Kept for identification only;
-/// v2 must never write or remove this key.
+/// The 1.x config key that predates the split. It names the same entry v2
+/// itself writes now, so legacy identity is by URL only
+/// ([`is_legacy_companion`]), never by key: v2 sync upgrades a pre-split
+/// combined-endpoint entry to the per-protocol URL in place, exactly as a
+/// post-split 1.x sync does.
 pub const LEGACY_COMPANION_KEY: &str = "ekubo";
 
 #[must_use]

@@ -282,7 +282,7 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
 
 #[test]
 fn claude_desktop_keeps_only_local_stdio_in_its_config() {
-    let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo_v2":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
+    let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
     let output = merge_json(
         before,
         "mcpServers",
@@ -414,23 +414,22 @@ fn managed_diff_never_discloses_unrelated_credentials() {
 #[test]
 fn local_and_companion_names_are_stable() {
     assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet_v2");
-    // v2 never takes ownership of a 1.x companion, including the pre-split key.
-    assert_ne!(
-        COMPANION_SERVERS[0].config_key,
-        ekubo_wallet_core::mcp_companions::LEGACY_COMPANION_KEY
-    );
+    // The hosted keys are the same stable names 1.x writes: the servers did
+    // not change, so neither did their keys. Only the local bridge entry is
+    // product-scoped; legacy identity is by URL, never by key.
+    assert_eq!(COMPANION_SERVERS[0].config_key, "ekubo");
     assert_eq!(COMPANION_SERVERS[0].url, "https://mcp.ekubo.org/mcp/ekubo");
     assert_eq!(
         managed_keys().collect::<Vec<_>>(),
         [
             "ekubo_wallet_v2",
-            "ekubo_v2",
-            "ekubo_v2_aave",
-            "ekubo_v2_aerodrome",
-            "ekubo_v2_lido",
-            "ekubo_v2_merkl",
-            "ekubo_v2_morpho",
-            "ekubo_v2_sky",
+            "ekubo",
+            "ekubo_aave",
+            "ekubo_aerodrome",
+            "ekubo_lido",
+            "ekubo_merkl",
+            "ekubo_morpho",
+            "ekubo_sky",
         ]
     );
     assert_eq!(
@@ -449,7 +448,7 @@ fn removal_deletes_only_wallet_managed_entries_for_every_shape() {
 command = "keep"
 [mcp_servers.ekubo_wallet_v2]
 command = "bridge"
-[mcp_servers.ekubo_v2]
+[mcp_servers.ekubo]
 url = "https://mcp.ekubo.org/mcp"
 "#;
     let removed = remove_codex(codex).unwrap();
@@ -603,10 +602,10 @@ fn deselecting_a_server_removes_it_from_an_existing_config() {
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&after).unwrap();
-    assert!(parsed["mcpServers"].get("ekubo_v2_aave").is_none());
-    assert!(parsed["mcpServers"].get("ekubo_v2_sky").is_none());
+    assert!(parsed["mcpServers"].get("ekubo_aave").is_none());
+    assert!(parsed["mcpServers"].get("ekubo_sky").is_none());
     assert_eq!(
-        parsed["mcpServers"]["ekubo_v2_morpho"],
+        parsed["mcpServers"]["ekubo_morpho"],
         json!({"type": "http", "url": "https://mcp.ekubo.org/mcp/morpho"})
     );
     assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
@@ -666,9 +665,13 @@ fn validation_rejects_a_config_that_disagrees_with_the_selection() {
     assert!(validate_json_shape(&smuggled, AgentKind::Cursor, &without_aave).is_err());
 }
 
-/// Adding v2 to a pre-split 1.x config preserves the existing integration.
+/// Adding v2 to a pre-split 1.x config upgrades the combined entry in place.
+/// The hosted keys are shared with 1.x, so there is no second `ekubo` entry
+/// to preserve alongside: v2 writes the per-protocol URL over the legacy
+/// combined URL, exactly as a post-split 1.x sync does. The 1.x local entry
+/// and everything outside the managed keys are untouched.
 #[test]
-fn a_pre_split_v1_config_is_preserved_when_v2_is_added() {
+fn a_pre_split_v1_config_is_upgraded_when_v2_is_added() {
     let before = r#"{"mcpServers":{"keep":{"command":"keep"},"ekubo_wallet":{"command":"bridge"},"ekubo":{"type":"http","url":"https://mcp.ekubo.org/mcp"}}}"#;
     let selection = CompanionSelection::all();
     let after = merge_json(
@@ -684,13 +687,9 @@ fn a_pre_split_v1_config_is_preserved_when_v2_is_added() {
     assert_eq!(parsed["mcpServers"]["keep"]["command"], "keep");
     assert_eq!(
         parsed["mcpServers"]["ekubo"]["url"],
-        "https://mcp.ekubo.org/mcp"
-    );
-    assert_eq!(parsed["mcpServers"]["ekubo_wallet"]["command"], "bridge");
-    assert_eq!(
-        parsed["mcpServers"]["ekubo_v2"]["url"],
         "https://mcp.ekubo.org/mcp/ekubo"
     );
+    assert_eq!(parsed["mcpServers"]["ekubo_wallet"]["command"], "bridge");
     assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
 }
 
@@ -733,9 +732,18 @@ fn a_v1_only_config_requires_explicit_v2_installation() {
     assert!(adapter.in_sync(&selection).unwrap());
     let installed = parse_json_document(&fs::read_to_string(&config).unwrap()).unwrap();
     let legacy = parse_json_document(&legacy).unwrap();
-    for key in ["ekubo_wallet", "ekubo"] {
-        assert_eq!(installed["mcpServers"][key], legacy["mcpServers"][key]);
-    }
+    // The 1.x local entry is untouched. The pre-split combined entry under the
+    // shared `ekubo` key is upgraded to the per-protocol URL in place —
+    // the hosted keys are 1.x's own keys, so there is no second entry to
+    // preserve alongside, exactly as a post-split 1.x sync behaves.
+    assert_eq!(
+        installed["mcpServers"]["ekubo_wallet"],
+        legacy["mcpServers"]["ekubo_wallet"]
+    );
+    assert_eq!(
+        installed["mcpServers"]["ekubo"]["url"],
+        "https://mcp.ekubo.org/mcp/ekubo"
+    );
 }
 
 /// An agent the owner never connected is left alone. Propagating a selection
@@ -820,8 +828,8 @@ fn the_managed_diff_names_a_server_being_removed() {
     )
     .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, &before, &after).unwrap();
-    assert!(diff.contains("mcpServers.ekubo_v2_merkl"));
+    assert!(diff.contains("mcpServers.ekubo_merkl"));
     assert!(diff.contains("<not configured>"));
     // Nothing else moved.
-    assert!(!diff.contains("mcpServers.ekubo_v2_morpho"));
+    assert!(!diff.contains("mcpServers.ekubo_morpho"));
 }

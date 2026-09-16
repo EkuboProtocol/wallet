@@ -15,7 +15,7 @@ The threat includes an ordinary hostile process running as the desktop user. Mat
 - Linux service: `ekubo-wallet-v2` account, `/etc/ekubo-wallet-v2`, `/var/lib/ekubo-wallet-v2`, `/run/ekubo-wallet-v2`, and `org.ekubo.Wallet2` IPC.
 - Windows service: `EkuboWalletV2` machine configuration/storage and product-scoped SCM registrations.
 - Agent helper and entry: `ekubo-wallet-v2-mcp-bridge` in the separate helpers directory; `ekubo_wallet_v2`.
-- Hosted companion entries: `ekubo_v2` and `ekubo_v2_<protocol>`. Their URLs are unchanged. V2 sync/removal preserves 1.x entries and retains the common external-file lock protocol.
+- Hosted companion entries: `ekubo` and `ekubo_<protocol>`, the same stable keys 1.x writes. Their URLs are unchanged. V2 writes are byte-identical to 1.x writes, so sync preserves 1.x entries; v2 deselect/removal takes the shared entry out, and the common external-file lock protocol is retained.
 - V2 publication uses a separate signed `v2-channel/latest-v2.json` and never becomes the repository's latest release. Old 1.x binaries follow `releases/latest/download/latest.json` without a major restriction; preserve that channel for them.
 - The 1.x line is at 1.8.4 and is preserved on the `release-1.x` branch,
 but that branch's two workflows still require builds from `main` (its

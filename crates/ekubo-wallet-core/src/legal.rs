@@ -302,13 +302,13 @@ entry for each hosted Ekubo server you have selected in **Settings → Ekubo MCP
 servers**. Ekubo runs one server per protocol, and every one of them is
 selected until you turn it off:
 
-- `ekubo_v2` — `https://mcp.ekubo.org/mcp/ekubo`
-- `ekubo_v2_aave` — `https://mcp.ekubo.org/mcp/aave`
-- `ekubo_v2_aerodrome` — `https://mcp.ekubo.org/mcp/aerodrome`
-- `ekubo_v2_lido` — `https://mcp.ekubo.org/mcp/lido`
-- `ekubo_v2_merkl` — `https://mcp.ekubo.org/mcp/merkl`
-- `ekubo_v2_morpho` — `https://mcp.ekubo.org/mcp/morpho`
-- `ekubo_v2_sky` — `https://mcp.ekubo.org/mcp/sky`
+- `ekubo` — `https://mcp.ekubo.org/mcp/ekubo`
+- `ekubo_aave` — `https://mcp.ekubo.org/mcp/aave`
+- `ekubo_aerodrome` — `https://mcp.ekubo.org/mcp/aerodrome`
+- `ekubo_lido` — `https://mcp.ekubo.org/mcp/lido`
+- `ekubo_merkl` — `https://mcp.ekubo.org/mcp/merkl`
+- `ekubo_morpho` — `https://mcp.ekubo.org/mcp/morpho`
+- `ekubo_sky` — `https://mcp.ekubo.org/mcp/sky`
 
 Changing your selection rewrites the configuration of every agent you have
 already connected, adding the entries you selected and removing the ones you

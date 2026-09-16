@@ -56,10 +56,21 @@ fn assert_v1_preserved(kind: AgentKind, before: &str, after: &str) {
         let before = parse_codex_document(before).unwrap();
         let after = parse_codex_document(after).unwrap();
         assert_eq!(before["model"].as_str(), after["model"].as_str());
+        // Compare values, not renderings: rewriting a table through toml_edit
+        // normalizes its quotes while leaving every value identical.
         for key in V1_KEYS {
+            let (before, after) = (&before["mcp_servers"][key], &after["mcp_servers"][key]);
+            for field in ["url", "command"] {
+                assert_eq!(
+                    before.get(field).and_then(Item::as_str),
+                    after.get(field).and_then(Item::as_str),
+                    "{key}.{field} changed"
+                );
+            }
             assert_eq!(
-                before["mcp_servers"][key].to_string(),
-                after["mcp_servers"][key].to_string()
+                before.get("args").map(Item::to_string),
+                after.get("args").map(Item::to_string),
+                "{key}.args changed"
             );
         }
     } else {
@@ -72,8 +83,45 @@ fn assert_v1_preserved(kind: AgentKind, before: &str, after: &str) {
     }
 }
 
+/// After v2 deselect or removal, the shared hosted keys are gone — v2 and 1.x
+/// write the same keys, so taking an entry out takes it out for both — while
+/// 1.x's own local entry and everything outside the managed keys survives.
+fn assert_v1_companions_removed(kind: AgentKind, before: &str, after: &str) {
+    if matches!(kind, AgentKind::Codex | AgentKind::GrokBuild) {
+        let before = parse_codex_document(before).unwrap();
+        let after = parse_codex_document(after).unwrap();
+        assert_eq!(before["model"].as_str(), after["model"].as_str());
+        let servers = after["mcp_servers"].as_table().unwrap();
+        assert_eq!(
+            before["mcp_servers"]["ekubo_wallet"].to_string(),
+            servers["ekubo_wallet"].to_string()
+        );
+        for key in &V1_KEYS[1..] {
+            assert!(
+                !servers.contains_key(key),
+                "{key} survived v2 deselect/removal"
+            );
+        }
+    } else {
+        let before = parse_json_document(before).unwrap();
+        let after = parse_json_document(after).unwrap();
+        assert_eq!(before["ownerSetting"], after["ownerSetting"]);
+        let servers = after[json_root(kind)].as_object().unwrap();
+        assert_eq!(
+            before[json_root(kind)]["ekubo_wallet"],
+            servers["ekubo_wallet"]
+        );
+        for key in &V1_KEYS[1..] {
+            assert!(
+                !servers.contains_key(*key),
+                "{key} survived v2 deselect/removal"
+            );
+        }
+    }
+}
+
 #[test]
-fn every_harness_preserves_v1_across_v2_install_repair_sync_and_removal() {
+fn every_harness_shares_hosted_keys_with_v1_across_install_repair_and_removal() {
     for kind in [
         AgentKind::Codex,
         AgentKind::GrokBuild,
@@ -99,8 +147,10 @@ fn every_harness_preserves_v1_across_v2_install_repair_sync_and_removal() {
         let mut selection = CompanionSelection::all();
         assert!(!adapter.has_wallet_entry().unwrap());
         assert!(!adapter.in_sync(&selection).unwrap());
+        // Removal takes the shared hosted keys out with v2's own entries;
+        // only 1.x's local entry and the owner's content survive it.
         let removal = adapter.preview_remove().unwrap();
-        assert_v1_preserved(kind, &before, &removal.after);
+        assert_v1_companions_removed(kind, &before, &removal.after);
 
         // Explicit installation is needed; launch repair must not see v1 as v2.
         ConfigBatchInstall::install(vec![adapter.preview_install(&selection).unwrap()])
@@ -109,7 +159,14 @@ fn every_harness_preserves_v1_across_v2_install_repair_sync_and_removal() {
         assert!(adapter.has_wallet_entry().unwrap());
         assert!(adapter.in_sync(&selection).unwrap());
         let installed = fs::read_to_string(&adapter.config_path).unwrap();
-        assert_v1_preserved(kind, &before, &installed);
+        // Claude Desktop's file never carries hosted servers, so even a full
+        // install takes the shared keys out; every other harness rewrites
+        // them byte-identically.
+        if kind == AgentKind::ClaudeDesktop {
+            assert_v1_companions_removed(kind, &before, &installed);
+        } else {
+            assert_v1_preserved(kind, &before, &installed);
+        }
         assert!(!adapter.preview_install(&selection).unwrap().has_changes());
 
         // A stale v2 bridge is repaired without taking over any 1.x entry.
@@ -122,11 +179,19 @@ fn every_harness_preserves_v1_across_v2_install_repair_sync_and_removal() {
             .unwrap()
             .commit();
         assert!(adapter.in_sync(&selection).unwrap());
-        assert_v1_preserved(
-            kind,
-            &before,
-            &fs::read_to_string(&adapter.config_path).unwrap(),
-        );
+        if kind == AgentKind::ClaudeDesktop {
+            assert_v1_companions_removed(
+                kind,
+                &before,
+                &fs::read_to_string(&adapter.config_path).unwrap(),
+            );
+        } else {
+            assert_v1_preserved(
+                kind,
+                &before,
+                &fs::read_to_string(&adapter.config_path).unwrap(),
+            );
+        }
 
         for server in COMPANION_SERVERS {
             selection.set_enabled(server.slug, false);
@@ -135,7 +200,7 @@ fn every_harness_preserves_v1_across_v2_install_repair_sync_and_removal() {
             .unwrap()
             .commit();
         assert!(adapter.in_sync(&selection).unwrap());
-        assert_v1_preserved(
+        assert_v1_companions_removed(
             kind,
             &before,
             &fs::read_to_string(&adapter.config_path).unwrap(),
@@ -144,7 +209,7 @@ fn every_harness_preserves_v1_across_v2_install_repair_sync_and_removal() {
             .unwrap()
             .commit();
         assert!(!adapter.has_wallet_entry().unwrap());
-        assert_v1_preserved(
+        assert_v1_companions_removed(
             kind,
             &before,
             &fs::read_to_string(&adapter.config_path).unwrap(),
