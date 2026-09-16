@@ -23,8 +23,7 @@ can validate the pacman lifecycle, and it carries no release signature.
 
 Run the desktop as your ordinary login user. Its first-run enrollment requests
 Polkit elevation for the protected service. A running Secret Service provider is
-required for owner credentials; Omarchy normally provides GNOME Keyring. Complete
-the desktop's setup flow before attempting an explicit legacy-wallet move.
+required for owner credentials; Omarchy normally provides GNOME Keyring.
 
 The Arch package uses the same Linux payload as the DEB, with native pacman
 metadata and lifecycle hooks. It preserves owner profiles on removal and restores
@@ -90,9 +89,8 @@ and enables/starts the authority. The owner then authenticates and unlocks the
 normal service through the normal owner client.
 
 The native hosts call `mark_setup_complete()` after relay unlock and successful
-authority publication. This also captures an immutable, encrypted-database
-first-run baseline for an optional explicitly authorized legacy move. Fresh
-installation itself never reads the legacy profile or legacy credentials.
+authority publication. Fresh installation never reads the legacy profile or
+legacy credentials.
 
 ## Interrupted fresh setup
 

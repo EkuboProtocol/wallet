@@ -97,7 +97,6 @@ impl PrivateStorageRoot {
                             == windows::Win32::Foundation::STATUS_OBJECT_NAME_NOT_FOUND.to_hresult()
                     }) =>
             {
-                crate::legacy_move::initialize_baseline(&self.data_dir)?;
                 write::publish(
                     &self.directory,
                     "setup-complete",

@@ -73,7 +73,6 @@ pub enum OwnerAuthorizationScope {
     NetworkSettings,
     NotificationPrivacy,
     TokenMetadata,
-    LegacyMove,
 }
 
 /// Single-use proof that the owner authenticated the exact dapp review and
@@ -289,9 +288,6 @@ impl PresenceRequest {
                 }
                 OwnerAuthorizationScope::NotificationPrivacy => {
                     "change whether notifications reveal wallet activity".into()
-                }
-                OwnerAuthorizationScope::LegacyMove => {
-                    "move the reviewed legacy profile to v2 and retire its verified, unshared 1.x account credentials".into()
                 }
                 OwnerAuthorizationScope::TokenMetadata => {
                     "change trusted token names and amount scaling".into()

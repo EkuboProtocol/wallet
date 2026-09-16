@@ -1,6 +1,5 @@
 //! Pre-custody setup. Only the installed coordinator performs enrollment.
 use super::*;
-use ekubo_wallet_core::legacy_move::MoveStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetupAction {
@@ -71,19 +70,12 @@ struct SetupWindow {
     busy: bool,
     can_enroll: bool,
     restart: Rc<Cell<bool>>,
-    owner: Option<crate::desktop_owner::DesktopOwner>,
-    move_view: Option<Entity<super::legacy_move::MoveWindow>>,
     completed: bool,
-    move_status: MoveStatus,
 }
 
 impl SetupWindow {
     fn start(&mut self, action: SetupAction, cx: &mut Context<Self>) {
-        if self.busy
-            || self.completed
-            || self.owner.is_some()
-            || (action != SetupAction::Resume && !self.can_enroll)
-        {
+        if self.busy || self.completed || (action != SetupAction::Resume && !self.can_enroll) {
             return;
         }
         self.busy = true;
@@ -109,34 +101,10 @@ impl SetupWindow {
 
 impl Render for SetupWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(view) = &self.move_view {
-            return div().size_full().child(view.clone());
-        }
-        if self.owner.is_some() {
-            return div().size_full().p_6().flex().flex_col().gap_4()
-                .bg(cx.theme().background).text_color(cx.theme().foreground)
-                .child(div().text_lg().font_semibold().child(if self.move_status.pending() { "Resume move cleanup" } else { "Start with Ekubo Wallet 2" }))
-                .when(!self.move_status.pending(), |panel| panel.child(selectable_label("Your protected v2 wallet has no accounts. Continue to create or import an account, or choose an explicit move from 1.x. A move requires v2 to remain unchanged from fresh setup; core refuses to overwrite a configured profile. Nothing from 1.x has been read.")))
-                .when(self.move_status.pending(), |panel| panel.child(selectable_label("Your accounts are stored in v2, but source retirement is incomplete. Review the bound source to resume after owner authorization, including if its old database key is already gone. Execution stays paused until cleanup finishes.")))
-                .child(app_button("first-run-continue").self_start().label("Continue without moving").disabled(self.move_status.pending())
-                    .on_click(cx.listener(|view, _, _, cx| { if !view.move_status.pending() { view.restart.set(true); cx.quit(); } })))
-                .child(app_button("first-run-move").self_start().label(if self.move_status.pending() { "Review pending cleanup…" } else { "Move from 1.x…" })
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        let Some(owner) = view.owner.clone() else { return; };
-                        let pending = match &view.move_status { MoveStatus::PendingCleanup { binding, .. } => Some(binding.clone()), _ => None };
-                        match super::legacy_move::create(owner, window, cx, view.restart.clone(), pending) {
-                            Ok(child) => view.move_view = Some(child),
-                            Err(error) => view.message = Some(format!("Could not open the move review: {error:#}")),
-                        }
-                        cx.notify();
-                    })))
-                .when(cfg!(target_os = "windows"), |panel| panel.child(selectable_label("Moving requires the installed service and Windows owner authorization. If either is unavailable, the move stops before reading old credentials.")))
-                .when_some(self.message.clone(), |panel, message| panel.child(selectable_label(message)));
-        }
         div().size_full().p_6().flex().flex_col().gap_4()
             .bg(cx.theme().background).text_color(cx.theme().foreground)
             .child(div().text_lg().font_semibold().child("Set up Ekubo Wallet 2"))
-            .child(selectable_label("The protected service must be ready before the wallet can open. Set up wallet runs the installed coordinator and asks the operating system for approval. Existing 1.x data is not read or moved during setup."))
+            .child(selectable_label("The protected service must be ready before the wallet can open. Set up wallet runs the installed coordinator and asks the operating system for approval. Existing 1.x data is not read."))
             .when_some(self.message.clone(), |panel, message| panel.child(div().id("setup-status").overflow_y_scroll().flex_1().min_h_0().child(selectable_label(message))))
             .when(self.can_enroll, |panel| panel
                 .child(app_button("enroll-wallet").label("Set up wallet").self_start().primary().disabled(self.busy)
@@ -161,34 +129,10 @@ impl Render for SetupWindow {
 }
 
 pub(super) fn run(error: Option<String>, can_enroll: bool) -> Result<bool> {
-    run_window(error, can_enroll, None, MoveStatus::Unavailable)
+    run_window(error, can_enroll)
 }
 
-pub(super) fn first_run(
-    owner: crate::desktop_owner::DesktopOwner,
-    status: MoveStatus,
-) -> Result<bool> {
-    run_window(None, false, Some(owner), status)
-}
-
-pub(super) const fn show_move(
-    status: &MoveStatus,
-    accounts_empty: bool,
-    continue_empty: bool,
-) -> bool {
-    match status {
-        MoveStatus::PendingCleanup { .. } => true,
-        MoveStatus::Baseline => accounts_empty && !continue_empty,
-        MoveStatus::Unavailable | MoveStatus::Complete { .. } => false,
-    }
-}
-
-fn run_window(
-    error: Option<String>,
-    can_enroll: bool,
-    owner: Option<crate::desktop_owner::DesktopOwner>,
-    move_status: MoveStatus,
-) -> Result<bool> {
+fn run_window(error: Option<String>, can_enroll: bool) -> Result<bool> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -222,22 +166,11 @@ fn run_window(
                         busy: false,
                         can_enroll,
                         restart,
-                        owner,
-                        move_view: None,
                         completed: false,
-                        move_status,
                     });
                     let closing = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
-                        closing
-                            .read_with(cx, |view, cx| {
-                                !view.busy
-                                    && view
-                                        .move_view
-                                        .as_ref()
-                                        .is_none_or(|child| !child.read(cx).busy())
-                            })
-                            .unwrap_or(true)
+                        closing.read_with(cx, |view, _| !view.busy).unwrap_or(true)
                     });
                     let host = cx.new(|_| ComponentLayerHost::new(view));
                     cx.new(|cx| Root::new(host, window, cx))
@@ -278,19 +211,6 @@ pub(super) fn recover_connection(
     if restart {
         relaunch()?;
     }
-    Ok(())
-}
-
-// UI continuation only: this skips an optional chooser, never authorization,
-// enrollment, empty-destination validation, or a source review. It is passed
-// only to the child process and writes no persistent wallet setting.
-pub(super) const CONTINUE_EMPTY: &str = "EKUBO_WALLET_V2_CONTINUE_EMPTY";
-
-pub(super) fn continue_to_wallet() -> Result<()> {
-    std::process::Command::new(std::env::current_exe()?)
-        .env(CONTINUE_EMPTY, "1")
-        .spawn()
-        .context("could not reopen the wallet; open Ekubo Wallet 2 again")?;
     Ok(())
 }
 

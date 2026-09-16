@@ -1,6 +1,6 @@
 # Service-isolated Wallet 2
 
-Status: native authorization, explicit credential retirement, and installed acceptance harnesses are implemented. Platform execution and actual PIN/biometric release acceptance must be distinguished from source checks. See [Windows native authorization](windows-owner-auth-feasibility-v2.md) and [Linux installed acceptance](native-linux-acceptance.md). The released 1.x application retains its documented credential-store limitation.
+Status: native authorization and installed acceptance harnesses are implemented. Platform execution and actual PIN/biometric release acceptance must be distinguished from source checks. See [Windows native authorization](windows-owner-auth-feasibility-v2.md) and [Linux installed acceptance](native-linux-acceptance.md). The released 1.x application retains its documented credential-store limitation.
 
 ## Product boundary
 
@@ -22,7 +22,7 @@ but that branch's two workflows still require builds from `main` (its
 verifier pins `head_branch` to `main` and compares against `main`), so they
 need a rewrite before a 1.x hotfix can ship. The **Sign and publish release** workflow is v2-only: its tag gate accepts only `v2.*` tags, and it never writes `latest.json` or mutates the 1.x latest release.
 
-Fresh setup, upgrade and uninstall do not read or delete 1.x credentials or authoritative state. An explicit owner-directed move is the only exception.
+Fresh setup, upgrade and uninstall never read 1.x state. V2 is standalone: users migrate manually on-chain. There is no automated 1.x import.
 
 ## Fresh enrollment
 
@@ -36,34 +36,13 @@ Explicit resume/discard actions distinguish relay-confirmed publication from unu
 
 Initial Linux packaging is DEB; Windows packaging is machine-wide NSIS. Service upgrades use signed privileged installers rather than the old portable in-app replacement path. MacOS uses its existing app/DMG delivery. The actual package builders are `contrib/build-v2-packages.py` and `contrib/windows-v2.nsi`.
 
-## Optional first-run move from 1.x
-
-This is an explicit owner flow after fresh v2 enrollment, not automatic installer migration. The Windows transport uses the shared owner stream protocol and service-side native authorization for source reading, destination verification, and completion.
-
-1. Before starting an execution lease or changing v2 onboarding state, offer the move for a fresh destination or an existing pending cleanup.
-2. The owner selects the source and explicitly identifies all other custom 1.x profiles to preserve. Unknown inventories are refused.
-3. Core authorizes the read, takes the old application/lifecycle locks and opens the source read-only. 1.x must be closed, transactions quiescent and automations disabled. Unsupported schemas and oversized state are refused rather than partially copied.
-4. The UI presents exact paths, addresses, instance IDs, table inventory and credentials that must remain shared. A separate explicit confirmation precedes the move.
-5. Core imports supported schema data and account material through the authenticated service, preserving identities, policies, revisions, stored history, pending records and settings. It rejects a configured destination. The service reopens/verifies durable state and all keys before source cleanup is possible.
-6. After renewed owner authorization and fresh destination verification, publish an encrypted `wallet.db.retired-v2-backup`, then atomically replace the selected source's `wallet.db` with an intentionally invalid database retirement file. Both old locks stay held. Released 1.x fails to open this nonempty database; it need not understand any new marker format. Do not remove/reset the retirement file. Other profiles are not modified.
-7. Delete exact verified unshared account-credential entries and confirm their absence. If no preserved profiles need `org.ekubo.wallet.db/default`, delete that exact database credential and confirm absence too. Otherwise retain it. A changed database credential is a hard stop, never permission to delete a newly created authority.
-8. The protected pending receipt binds the source ciphertext hash, old database-key hash, destination profile and preserved inventory. An authenticated `Inspect` request freshly verifies destination state and signing keys and returns only nonsecret account identities. Recovery uses that receipt and the exact retirement file/backup even after the source database key has been deleted. It never regenerates an old key or requires decrypting the retired backup. Completion remains pending until cleanup succeeds; execution stays blocked throughout.
-
-**Do not delete the 1.x profile or its directory until the move reports completion.** A pending move with a deleted source permanently locks v2 out: the normal resume path re-opens the exact 1.x source files. If the source is already gone, the owner-authorized `complete-without-source` recovery inspects the pending receipt, proves the bound source's standard `wallet.db` is absent, retires the bound unshared 1.x credentials with the login-owner authority, and only then re-verifies destination state, decrypts every destination key against the sealed store, and atomically clears the pending receipt. The absence gate fails closed: a still-present source (including a dangling symlink, never dereferenced) refuses recovery and names the live profile, only a missing file is acceptance, and any other I/O outcome refuses without proof. Retirement reuses the exact normal-completion deletion routine from the receipt's wallet list — unshared account credentials re-read, compared, deleted and confirmed absent, shared entries kept, the global database credential retired only when no preserved profiles need it — and the UI reports that `CleanupReport` (deleted, already-absent, shared-retained, database-key-retained) rather than the phase-bound receipt. Because retirement precedes completion, a `Complete` status never claims a shared key was deleted that recovery left behind. Recovery requires the same core owner authorization as the move itself, never marks completion on unverified state, and leaves cleanup pending when any destination key is missing or mismatched. A 1.x source below 1.8.2 is refused by the schema gate without modification; upgrade 1.x first and retry.
-
-**First-run-only contract:** the move imports into an empty, unchanged v2 profile only. Any pre-move v2 write — legal acceptance, settings changes, or a schema bump — permanently refuses the move for that profile, and a source that is not exactly the supported schema version is refused without modification. Both gates fail closed with no overwrite or upgrade path. Recovery is a fresh install or reset of the v2 profile.
-
-**Shared-key cases:** preserved profiles require the global 1.x database key, so the encrypted source backup remains readable while that key is retained. Account credentials shared with those profiles remain accessible to 1.x and must not be described as fully isolated. No silent rekeying of preserved profiles occurs. With no preserved profiles, all reviewed source account entries and the global database entry are retired. Histories are not deleted. Keyring APIs have no atomic compare-and-delete against noncooperating same-user software, and no move revokes a previously copied key.
-
-**Windows integration:** `Request::LegacyMove(ServiceCommand)` dispatches to core inside the authenticated owner-call context. The move peer authenticates the installed pipe, unlocks with the opaque owner relay, pins the service instance, and uses shared stream framing. `AuthorizeSource` binds a fresh nonce and exact source selection to native authorization before credential access; phase-specific receipts prevent interchange with import/verify/complete responses. Receipts are bounded to 1 MiB. No presentation-supplied successful receipt is accepted. Retirement file publication uses Windows write-through rename; Linux fsyncs the containing directory. Older receipts missing retirement identity metadata are refused for keyless resume rather than guessed.
-
 ## Windows native owner authorization
 
 The per-profile SYSTEM broker accepts only the installed custody service SID. The custody service scopes authorization to kernel-authenticated owner session/logon identity, the exact request digest, and a retained live connection. The broker launches only the installed collector, under the actual interactive owner's token with SYSTEM-owned process/thread security, a restricted token default ACL, high integrity, startup mitigations, a clean environment, and a kill-on-close job. The complete machine image path is pinned and validated through native handles before launch.
 
 Only this protected collector calls `IUserConsentVerifierInterop` from the fixed System32 implementation. The broker consumes its retained process object's result once; arbitrary desktop processes, supplied PIDs, software keys, or approval booleans have no authority. Expiry, disconnect, changed logon identity and cancellation refuse authorization. This requires Windows 11's HWND interop API and Windows Hello configuration. CI's SYSTEM fixture exercises isolation without inventing or automatically approving a biometric gesture.
 
-The old cross-identity migration transfer, snapshot staging, installer commit/cutover and recovery framework has been removed. The smaller optional move is in `legacy_move*` and is separate from fresh installation.
+The old cross-identity migration transfer, snapshot staging, installer commit/cutover and recovery framework has been removed.
 
 ## Runtime contracts
 
@@ -83,7 +62,7 @@ Required before release:
 
 - Real Windows protected enrollment and interactive owner authorization, including separate-admin elevation, cancellation and replay rejection.
 - Actual Linux/Windows install, fresh enrollment, account creation, native approval, reboot and service reconnection.
-- Interrupted fresh setup and explicit move cleanup; exact old-key absence and preservation of shared profiles.
+- Interrupted fresh setup recovery.
 - A separate hostile same-user executable probing protected state and owner IPC.
 - Populated-profile signed upgrades and repair; simultaneous released 1.x/v2 use with both agent helpers.
 - Old 1.x update discovery never selecting v2; macOS regression checks.

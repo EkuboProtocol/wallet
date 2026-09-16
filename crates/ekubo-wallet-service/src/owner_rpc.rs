@@ -212,16 +212,6 @@ impl OwnerDispatcher {
         let owner = &self.owner;
         let reviews = self.dapps.reviews();
         Ok(match request {
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            Request::LegacyMove(command) => legacy_move_reply(command).await?,
-            Request::LegacyMoveStatus => {
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
-                {
-                    serde_json::to_value(ekubo_wallet_core::legacy_move::move_status()?)?
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-                anyhow::bail!("legacy moves are unavailable on this platform")
-            }
             request @ (Request::Networks
             | Request::NetworkByChainId { .. }
             | Request::ResetNetworksToDefaults { .. }
@@ -591,19 +581,6 @@ impl OwnerDispatcher {
             _ => anyhow::bail!("not a network operation"),
         })
     }
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-async fn legacy_move_reply(
-    command: ekubo_wallet_core::legacy_move::ServiceCommand,
-) -> anyhow::Result<Value> {
-    let receipt = ekubo_wallet_core::legacy_move::service_command(command).await?;
-    let encoded = serde_json::to_vec(&receipt)?;
-    anyhow::ensure!(
-        encoded.len() <= 1024 * 1024,
-        "legacy move receipt is oversized"
-    );
-    Ok(serde_json::from_slice(&encoded)?)
 }
 
 #[cfg(test)]

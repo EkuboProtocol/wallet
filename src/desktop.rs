@@ -1436,10 +1436,6 @@ fn account_required_panel(
 #[path = "desktop_setup.rs"]
 mod service_setup;
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[path = "desktop_legacy_move.rs"]
-mod legacy_move;
-
 /// One row of the About panel: a name, an optional status line beneath it, and
 /// a single action on the right. Each row used to assemble its own container,
 /// so the buttons did not share a column and the status hung off the name
@@ -21405,47 +21401,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             return Err(error);
         }
     };
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    let (move_status, accounts_empty) = {
-        match tokio.block_on(async {
-            Ok::<_, anyhow::Error>((
-                owner.legacy_move_status().await?,
-                owner.accounts().await?.is_empty(),
-            ))
-        }) {
-            Ok(state) => state,
-            Err(error) => {
-                return service_setup::recover_connection(
-                    &error,
-                    Some(&owner),
-                    &tokio,
-                    &instance_slot,
-                );
-            }
-        }
-    };
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if service_setup::show_move(
-        &move_status,
-        accounts_empty,
-        std::env::var_os(service_setup::CONTINUE_EMPTY).as_deref()
-            == Some(std::ffi::OsStr::new("1")),
-    ) {
-        // Before normal desktop initialization can change the fresh baseline.
-        // Continuing is an optional UI choice; core still enforces every move.
-        let result = service_setup::first_run(owner.clone(), move_status);
-        if let Err(error) = tokio.block_on(owner.disconnect_service()) {
-            tracing::warn!(%error, "first-run owner connection shutdown failed");
-        }
-        drop(owner);
-        drop(walletconnect);
-        drop(tokio);
-        release_single_instance(&instance_slot)?;
-        if result? {
-            service_setup::continue_to_wallet()?;
-        }
-        return Ok(());
-    }
     let session =
         match crate::desktop_startup::DesktopStartup::start_service_session(&owner, &tokio) {
             Ok(session) => session,

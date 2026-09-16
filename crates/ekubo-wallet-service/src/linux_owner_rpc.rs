@@ -63,52 +63,6 @@ async fn hold_desktop(
 
 #[zbus::interface(name = "org.ekubo.Wallet2.Owner1")]
 impl LinuxOwnerInterface {
-    async fn legacy_move(
-        &self,
-        command: &str,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-        #[zbus(connection)] connection: &zbus::Connection,
-    ) -> zbus::fdo::Result<String> {
-        if command.len() > 12 * 1024 * 1024 {
-            return Err(zbus::fdo::Error::LimitsExceeded(
-                "legacy move is oversized".into(),
-            ));
-        }
-        ekubo_wallet_core::service_presence::with_owner_call(
-            connection,
-            &header,
-            Box::pin(async {
-                let command = serde_json::from_str(command)?;
-                let receipt = ekubo_wallet_core::legacy_move::service_command(command).await?;
-                Ok::<_, anyhow::Error>(serde_json::to_string(&receipt)?)
-            }),
-        )
-        .await
-        .map_err(|_| {
-            zbus::fdo::Error::AccessDenied("legacy move owner authentication failed".into())
-        })?
-        .map_err(|error| {
-            // Fail closed with distinct hints: a 1.x source below 1.8.2 is
-            // refused by the schema gate, and a missing 1.x source means the
-            // move cannot resume its files and must use source-less recovery.
-            // Retrying either without fixing the cause cannot succeed. Every
-            // other failure keeps the generic message and leaves cleanup pending.
-            if ekubo_wallet_core::legacy_move::is_source_missing(&error) {
-                zbus::fdo::Error::Failed(
-                    "legacy move source is missing; the 1.x profile cannot be read. If a cleanup receipt is pending and the source is unrecoverable, use the owner-authorized source-less recovery. Nothing was copied or deleted".into(),
-                )
-            } else if ekubo_wallet_core::legacy_move::is_predates_supported_schema(&error) {
-                zbus::fdo::Error::Failed(
-                    "legacy move refused: the selected 1.x source predates the supported schema; upgrade the 1.x application to 1.8.2 or newer first, then retry. Nothing was copied or deleted".into(),
-                )
-            } else {
-                zbus::fdo::Error::Failed(
-                    "legacy move failed; inspect pending cleanup before retrying".into(),
-                )
-            }
-        })
-    }
-
     async fn hold_desktop_session(
         &self,
         nonce: &str,

@@ -191,17 +191,6 @@ jobs:
           cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 1
           sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" \
             python3 contrib/accept-installed-linux.py --run-disposable "$PWD/target/debug"
-      - name: Installed Linux first-run move and interrupted retirement resume
-        if: runner.os == 'Linux'
-        timeout-minutes: 20
-        run: |
-          # Hooks construct ONLY the synthetic released-schema source. The move
-          # client refuses to run with hooks, and the service stays production.
-          cargo build --locked -p ekubo-wallet-core --example linux-move-fixture --features test-hooks --jobs 1
-          cargo build --locked -p ekubo-wallet-core --example linux-move-client --no-default-features --jobs 1
-          cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 1
-          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" \
-            python3 contrib/accept-installed-linux.py --run-migration-disposable "$PWD/target/debug"
 
   linux-acceptance:
     if: github.event_name == 'workflow_dispatch' && inputs.linux_acceptance_only
@@ -218,13 +207,9 @@ jobs:
           # fails; Cargo still recompiles changed workspace code on the next run.
           cache-on-failure: true
       - run: |
-          cargo build --locked -p ekubo-wallet-core --example linux-move-fixture --features test-hooks --jobs 2
-          cargo build --locked -p ekubo-wallet-core --example linux-move-client --no-default-features --jobs 2
           cargo build --locked -p ekubo-wallet-service --bins --no-default-features --jobs 2
       - name: Installed fresh enrollment and restart
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" python3 contrib/accept-installed-linux.py --run-disposable "$PWD/target/debug"
-      - name: Installed move and keyless recovery
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" python3 contrib/accept-installed-linux.py --run-migration-disposable "$PWD/target/debug"
 
   lint:
     if: github.event_name == 'workflow_dispatch' && !inputs.windows_primitives_only && !inputs.linux_acceptance_only && !inputs.windows_auth_only && !inputs.windows_installed_only

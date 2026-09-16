@@ -425,10 +425,6 @@ pub(crate) fn owner_uid() -> Option<u32> {
     STORAGE.get().map(|storage| storage.owner_uid)
 }
 
-pub(crate) fn profile_id() -> Option<uuid::Uuid> {
-    STORAGE.get().map(|storage| storage.profile_id)
-}
-
 pub(crate) fn data_dir() -> Option<&'static Path> {
     STORAGE.get().map(|storage| storage.data_dir.as_path())
 }
@@ -484,7 +480,6 @@ pub fn mark_setup_complete() -> Result<()> {
         Err(error)
             if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) =>
         {
-            crate::legacy_move::initialize_baseline(&storage.data_dir)?;
             publish_private_record(&storage.directory, "setup-complete", bytes.as_bytes())
         }
         Err(error) => Err(error),

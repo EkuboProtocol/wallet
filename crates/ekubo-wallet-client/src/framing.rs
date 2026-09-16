@@ -1,2 +1,2 @@
-//! Shared bounded framing; core also uses this exact protocol for legacy moves.
+//! Shared bounded framing.
 pub use ekubo_wallet_core::owner_framing::*;

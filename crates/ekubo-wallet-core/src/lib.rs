@@ -40,8 +40,6 @@ pub mod fork;
 pub mod fourbyte;
 pub mod human_presence;
 pub mod input_validation;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-pub mod legacy_move;
 pub mod legal;
 #[cfg(target_os = "linux")]
 pub mod linux_provisioning_client;

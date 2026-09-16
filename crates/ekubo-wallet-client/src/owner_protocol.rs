@@ -20,9 +20,6 @@ pub const CUSTODY_OBJECT_PATH: &str = "/org/ekubo/Wallet2/Custody";
     deny_unknown_fields
 )]
 pub enum Request {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    LegacyMove(ekubo_wallet_core::legacy_move::ServiceCommand),
-    LegacyMoveStatus,
     ClearActivityHistory,
     Portfolio {
         wallet_id: Option<String>,

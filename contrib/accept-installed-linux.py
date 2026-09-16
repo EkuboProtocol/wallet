@@ -30,7 +30,6 @@ ACCEPTANCE_PACKAGE = 'ekubo-wallet-v2-activation-acceptance'
 RUNNER_SHARE_PATHS = tuple(map(Path, ['/usr/share', '/usr/share/dbus-1',
                                     '/usr/share/dbus-1/system-services']))
 UNITS = ['ekubo-wallet-v2@.service', 'ekubo-wallet-v2-provision@.service']
-FAULT_DIR = Path('/run/ekubo-wallet-v2/acceptance-fault')
 ASSETS = {
     **{f'linux-service/{name}': Path('/usr/lib/systemd/system') / name for name in UNITS},
     **{f'linux-service/org.ekubo.Wallet2.{kind}.conf':
@@ -154,7 +153,7 @@ def hardened_runner_activation_ancestors(snapshots):
             raise RuntimeError('Could not restore all runner activation ancestors') from failures[0]
 
 
-def preflight(binary_dir, owner, home, rule, migration):
+def preflight(binary_dir, owner, home, rule):
     require_runner(os.environ, os.geteuid(), sys.platform, True)
     if Path('/proc/1/comm').read_text().strip() != 'systemd':
         raise RuntimeError('REFUSED: PID 1 must be real systemd')
@@ -169,33 +168,17 @@ def preflight(binary_dir, owner, home, rule, migration):
     for binary in ['ekubo-wallet-service', 'ekubo-wallet-v2-enroll']:
         if not os.access(binary_dir / binary, os.X_OK):
             raise RuntimeError(f'Missing production binary: {binary_dir / binary}')
-    if migration:
-        for name in ['linux-move-fixture', 'linux-move-client']:
-            if not os.access(binary_dir / 'examples' / name, os.X_OK):
-                raise RuntimeError(f'Missing acceptance example: {name}')
     run('systemctl', 'is-active', 'dbus.service')
     return inspect_runner_activation_ancestors()
 
 
-def policy(owner, uid, migration=False):
+def policy(owner, uid):
     # pkexec still runs the fixed root installer with the real endpoint's unique
     # bus name; the normal helper persists/readbacks the real opaque envelope.
-    fault = '''
-        // Import is the first service-side move challenge; Complete is second.
-        // Source-process challenges have no polkit.message detail. Block at
-        // Complete until the root coordinator kills this service, breaking the
-        // actual transport. The next service process may resume the receipt.
-        if (action.lookup("polkit.message") === "move the reviewed legacy profile to v2 and retire its verified, unshared 1.x account credentials" && ++serviceMoveCalls === 2) {
-            polkit.spawn(["/usr/bin/python3", "/usr/lib/ekubo-wallet-v2/acceptance-fault.py"]);
-            return polkit.Result.NO;
-        }
-''' if migration else ''
     return f'''// DISPOSABLE CI ONLY: synthetic consent, never a shipped policy.
-var serviceMoveCalls = 0;
 polkit.addRule(function(action, subject) {{
     if (subject.user !== "{owner}") return polkit.Result.NOT_HANDLED;
     if (action.id === "com.ekubo.wallet.v2.human-presence") {{
-        {fault}
         return polkit.Result.YES;
     }}
     if (action.id === "org.freedesktop.policykit.exec" &&
@@ -213,22 +196,6 @@ polkit.addRule(function(action, subject) {{
         return polkit.Result.YES;
     return polkit.Result.NOT_HANDLED;
 }});
-'''
-
-
-FAULT_HANDSHAKE = r'''
-from pathlib import Path
-import time
-
-# Root creates this private directory for polkitd. The synthetic owner cannot
-# forge the barrier. No key, receipt or database ever passes through this helper.
-root = Path("/run/ekubo-wallet-v2/acceptance-fault")
-(root / "entered").touch(exist_ok=False)
-deadline = time.monotonic() + 30
-while not (root / "release").exists():
-    if time.monotonic() >= deadline:
-        raise SystemExit("coordinator did not break the service transport")
-    time.sleep(0.01)
 '''
 
 
@@ -250,35 +217,15 @@ for attempt in $(seq 1 100); do
     if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner org.freedesktop.secrets | grep -q true; then break; fi
     sleep 0.1
 done
-if test "$ACCEPTANCE_MODE" = fresh; then
-    mkdir -p "$XDG_DATA_HOME/ekubo-wallet"
-    printf '%s' 'synthetic-v1-database-sentinel' > "$XDG_DATA_HOME/ekubo-wallet/wallet.db"
-    printf '%s' 'synthetic-v1-credential-sentinel' | secret-tool store --label='Disposable v1 sentinel' service org.ekubo.wallet.db username default
-else
-    /usr/lib/ekubo-wallet-v2/linux-move-fixture create
-fi
-if test "$ACCEPTANCE_MODE" = sentinel; then
-    touch "$HOME/enrolled"
-    wait_file finish
-    /usr/lib/ekubo-wallet-v2/linux-move-fixture verify
-    exit 0
-fi
+mkdir -p "$XDG_DATA_HOME/ekubo-wallet"
+printf '%s' 'synthetic-v1-database-sentinel' > "$XDG_DATA_HOME/ekubo-wallet/wallet.db"
+printf '%s' 'synthetic-v1-credential-sentinel' | secret-tool store --label='Disposable v1 sentinel' service org.ekubo.wallet.db username default
 /usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll --owner
-if test "$ACCEPTANCE_MODE" = move; then
-    /usr/lib/ekubo-wallet-v2/linux-move-fixture verify
-    /usr/lib/ekubo-wallet-v2/linux-move-client interrupt
-    touch "$HOME/move-pending"
-    wait_file move-resume
-    /usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll --resume-owner
-    /usr/lib/ekubo-wallet-v2/linux-move-client resume
-fi
 /usr/bin/python3 "$HOME/hold-owner.py" enrolled restart
 /usr/lib/ekubo-wallet-v2/ekubo-wallet-v2-enroll --resume-owner
 /usr/bin/python3 "$HOME/hold-owner.py" restarted finish
-if test "$ACCEPTANCE_MODE" = fresh; then
-    test "$(secret-tool lookup service org.ekubo.wallet.db username default)" = synthetic-v1-credential-sentinel
-    test "$(cat "$XDG_DATA_HOME/ekubo-wallet/wallet.db")" = synthetic-v1-database-sentinel
-fi
+test "$(secret-tool lookup service org.ekubo.wallet.db username default)" = synthetic-v1-credential-sentinel
+test "$(cat "$XDG_DATA_HOME/ekubo-wallet/wallet.db")" = synthetic-v1-database-sentinel
 '''
 
 
@@ -339,13 +286,7 @@ try:
             request["params"] = params
         return json.loads(str(owner.Call(json.dumps(request), timeout=30)))
     inventory_file = home / "public-inventory.json"
-    if os.environ["ACCEPTANCE_MODE"] == "move":
-        expected = json.loads((home / "move-expected.json").read_text())
-        assert call("accounts") == expected["accounts"]
-        assert call("policy", dict(wallet_id="moved-ci")) == expected["policy"]
-        assert call("legacy_move_status")["state"] == "complete"
-        inventory_file.write_text(json.dumps(expected["accounts"]))
-    elif phase == "enrolled":
+    if phase == "enrolled":
         assert call("accounts") == []
         account = call("create_account", dict(wallet_id="installed-ci"))
         assert account["id"] == "installed-ci"
@@ -553,64 +494,20 @@ with socket.socket(socket.AF_UNIX) as sock:
         raise RuntimeError('Restart did not preserve the enrolled service custody')
 
 
-def start_owner_session(owner, home, mode):
+def start_owner_session(owner, home):
     with (home / 'owner-session.log').open('w') as log:
         return subprocess.Popen([
             'runuser', '-u', owner, '--', 'env', '-i', 'PATH=/usr/bin:/bin',
             f'HOME={home}', f'USER={owner}', f'LOGNAME={owner}',
             f'XDG_DATA_HOME={home}/data', f'XDG_RUNTIME_DIR={home}/runtime',
-            f'ACCEPTANCE_MODE={mode}', 'EKUBO_INSTALLED_ACCEPTANCE=1',
+            'EKUBO_INSTALLED_ACCEPTANCE=1',
             'dbus-run-session', '--', 'bash', '-c', OWNER_SESSION,
         ], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
 
-@contextmanager
-def unmigrated_sentinel(migration):
-    if not migration:
-        yield
-        return
-    owner = f'ewv2-ci-{uuid.uuid4().hex[:12]}'
-    home = Path('/home') / owner
-    absent([home])
-    unused_accounts(owner, include_service=False)
-    process = None
-    created = False
+def run_owner_checks(owner, uid, service_uid, home):
+    process = start_owner_session(owner, home)
     try:
-        run('useradd', '--create-home', '--home-dir', str(home), '--shell', '/bin/bash', owner)
-        created = True
-        process = start_owner_session(owner, home, 'sentinel')
-        wait_marker(home, 'enrolled', process)
-        yield
-        (home / 'finish').touch()
-        if process.wait(timeout=15) != 0:
-            raise RuntimeError('Unmigrated owner source/credentials changed')
-        print('PASS: second synthetic owner retains its real legacy database and both legacy credentials')
-    except BaseException:
-        if (home / 'owner-session.log').exists():
-            print((home / 'owner-session.log').read_text(), file=sys.stderr)
-        raise
-    finally:
-        stop_session(process)
-        if created:
-            subprocess.run(['pkill', '-u', owner], check=False)
-            delete_account(owner)
-            shutil.rmtree(home)
-
-
-def run_owner_checks(owner, uid, service_uid, home, migration):
-    process = start_owner_session(owner, home, 'move' if migration else 'fresh')
-    try:
-        if migration:
-            # Complete is blocked in the real native challenge after source
-            # retirement. Kill the exact systemd unit before releasing Polkit.
-            wait_marker(FAULT_DIR, 'entered', process)
-            run('systemctl', 'kill', '--signal=KILL', f'ekubo-wallet-v2@{uid}.service')
-            (FAULT_DIR / 'release').touch()
-            # The source client verifies missing old credentials and the exact
-            # encrypted backup, then exits following the real transport error.
-            wait_marker(home, 'move-pending', process)
-            run('systemctl', 'restart', f'ekubo-wallet-v2@{uid}.service')
-            (home / 'move-resume').touch()
         wait_marker(home, 'enrolled', process)
         restart_and_compare(owner, uid, service_uid, home, process)
         (home / 'finish').touch()
@@ -620,30 +517,16 @@ def run_owner_checks(owner, uid, service_uid, home, migration):
         stop_session(process)
 
 
-def install_fault_fixture(created):
-    polkit = pwd.getpwnam('polkitd')
-    FAULT_DIR.mkdir(mode=0o700)
-    os.chown(FAULT_DIR, polkit.pw_uid, polkit.pw_gid)
-    # Parent ROOTS already owns cleanup of this directory and any handshake
-    # files created by polkitd. The program itself is root-owned and immutable
-    # to both fixture owners and to polkitd.
-    helper = LIB / 'acceptance-fault.py'
-    with helper.open('x') as output:
-        created.append(helper)
-        output.write(FAULT_HANDSHAKE)
-        os.fchmod(output.fileno(), 0o644)
-
-
-def acceptance(binary_dir, migration=False):
+def acceptance(binary_dir):
     owner = f'ewv2-ci-{uuid.uuid4().hex[:12]}'
     home = Path('/home') / owner
     rule = Path('/etc/polkit-1/rules.d') / f'00-{owner}.rules'
-    snapshots = preflight(binary_dir, owner, home, rule, migration)
+    snapshots = preflight(binary_dir, owner, home, rule)
     with hardened_runner_activation_ancestors(snapshots):
-        acceptance_fixture(binary_dir, owner, home, rule, migration)
+        acceptance_fixture(binary_dir, owner, home, rule)
 
 
-def acceptance_fixture(binary_dir, owner, home, rule, migration):
+def acceptance_fixture(binary_dir, owner, home, rule):
     created = []
     account_created = service_created = False
     uid = None
@@ -659,10 +542,6 @@ def acceptance_fixture(binary_dir, owner, home, rule, migration):
             install(REPO / 'contrib' / source, target, created)
         for name in ['ekubo-wallet-service', 'ekubo-wallet-v2-enroll']:
             install(binary_dir / name, LIB / name, created, 0o755)
-        if migration:
-            for name in ['linux-move-fixture', 'linux-move-client']:
-                install(binary_dir / 'examples' / name, LIB / name, created, 0o755)
-            install_fault_fixture(created)
         install(REPO / 'contrib/linux-service/install-profile', LIB / 'install-profile', created, 0o755)
         run('systemd-sysusers', '/usr/lib/sysusers.d/ekubo-wallet-v2.conf')
         service_created = True
@@ -671,7 +550,7 @@ def acceptance_fixture(binary_dir, owner, home, rule, migration):
             raise RuntimeError('Owner and service must have distinct non-root UIDs')
         with rule.open('x') as output:
             created.append(rule)
-            output.write(policy(owner, uid, migration))
+            output.write(policy(owner, uid))
         run('systemd-tmpfiles', '--create', '/usr/lib/tmpfiles.d/ekubo-wallet-v2.conf')
         run('systemctl', 'daemon-reload')
         run('systemctl', 'reload', 'dbus.service')
@@ -683,8 +562,7 @@ def acceptance_fixture(binary_dir, owner, home, rule, migration):
             created.append(helper)
             output.write(OWNER_LEASE)
             os.fchmod(output.fileno(), 0o644)
-        with unmigrated_sentinel(migration):
-            run_owner_checks(owner, uid, service_uid, home, migration)
+        run_owner_checks(owner, uid, service_uid, home)
         print('PASS: installed production custody, held lease, account/policy persistence, MCP reads, restart and owner file denial. Polkit consent was synthetic.')
     except BaseException:
         if (home / 'owner-session.log').exists():
@@ -755,7 +633,6 @@ def check_guards():
                 path.unlink()
     subprocess.run(['bash', '-n'], input=OWNER_SESSION, text=True, check=True)
     compile(OWNER_LEASE, 'hold-owner.py', 'exec')
-    compile(FAULT_HANDSHAKE, 'acceptance-fault.py', 'exec')
     print('PASS: runner/explicit opt-in/root/platform and pre-existing path guards; owner shell/lease syntax')
 
 
@@ -768,6 +645,6 @@ if __name__ == '__main__':
         check_guards()
     else:
         require_runner(os.environ, os.geteuid(), sys.platform,
-                       len(sys.argv) == 3 and sys.argv[1] in ['--run-disposable', '--run-migration-disposable'])
+                       len(sys.argv) == 3 and sys.argv[1] == '--run-disposable')
         signal.signal(signal.SIGTERM, interrupted)
-        acceptance(Path(sys.argv[2]).resolve(), sys.argv[1] == '--run-migration-disposable')
+        acceptance(Path(sys.argv[2]).resolve())

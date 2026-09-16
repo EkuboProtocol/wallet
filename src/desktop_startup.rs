@@ -63,8 +63,8 @@ impl DesktopStartup {
         })
     }
 
-    /// Keep first-run import quiescent. Only the normal desktop, after the move
-    /// chooser has finished, may enable the service's execution period.
+    /// Keep first-run setup quiescent. Only the normal desktop, after setup
+    /// has finished, may enable the service's execution period.
     pub(crate) fn start_service_session(
         owner: &DesktopOwner,
         runtime: &tokio::runtime::Runtime,

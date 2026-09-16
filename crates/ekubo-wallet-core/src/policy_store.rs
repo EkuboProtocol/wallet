@@ -2708,7 +2708,3 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
 #[cfg(test)]
 #[path = "policy_store_test.rs"]
 mod tests;
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[path = "legacy_move_database.rs"]
-pub(crate) mod legacy_move_database;
