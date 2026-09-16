@@ -12,7 +12,7 @@ fn snapshot(pending_reviews: usize) -> TraySnapshot {
 fn tray_identity_is_distinct_from_v1() {
     let item = StatusNotifierItem(SharedState {
         snapshot: Arc::new(RwLock::new(snapshot(0))),
-        pixmap: Arc::new(Vec::new()),
+        pixmap: Arc::new(RwLock::new(Vec::new())),
         revision: Arc::new(AtomicU32::new(1)),
     });
     assert_eq!(item.id(), "ekubo-wallet-v2");
@@ -32,7 +32,7 @@ fn dbus_menu_layout_contains_the_complete_stable_order() {
 fn disabled_review_item_does_not_queue_a_command() {
     let state = SharedState {
         snapshot: Arc::new(RwLock::new(snapshot(0))),
-        pixmap: Arc::new(Vec::new()),
+        pixmap: Arc::new(RwLock::new(Vec::new())),
         revision: Arc::new(AtomicU32::new(1)),
     };
     let menu = DbusMenu(state);

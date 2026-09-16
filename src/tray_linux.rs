@@ -154,7 +154,7 @@ fn layout(id: i32, snapshot: &TraySnapshot, requested: &[String]) -> Option<Layo
 #[derive(Clone)]
 struct SharedState {
     snapshot: Arc<RwLock<TraySnapshot>>,
-    pixmap: Arc<Vec<Pixmap>>,
+    pixmap: Arc<RwLock<Vec<Pixmap>>>,
     revision: Arc<AtomicU32>,
 }
 
@@ -218,7 +218,12 @@ impl StatusNotifierItem {
 
     #[zbus(property)]
     fn icon_pixmap(&self) -> Vec<Pixmap> {
-        self.0.pixmap.as_ref().clone()
+        self.0
+            .pixmap
+            .read()
+            .ok()
+            .map(|pixmap| pixmap.clone())
+            .unwrap_or_default()
     }
 
     #[zbus(property)]
@@ -265,7 +270,12 @@ impl StatusNotifierItem {
     fn tool_tip(&self) -> ToolTip {
         (
             String::new(),
-            self.0.pixmap.as_ref().clone(),
+            self.0
+                .pixmap
+                .read()
+                .ok()
+                .map(|pixmap| pixmap.clone())
+                .unwrap_or_default(),
             "Ekubo Wallet".to_owned(),
             tray_tooltip(&self.0.snapshot()),
         )
@@ -546,14 +556,17 @@ pub struct PlatformTray {
     updates: tokio::sync::mpsc::UnboundedSender<TraySnapshot>,
     snapshot: TraySnapshot,
     online: Arc<AtomicBool>,
+    pixmap: Arc<RwLock<Vec<Pixmap>>>,
+    dark_mode: bool,
 }
 
 impl PlatformTray {
     pub fn new(dark_mode: bool) -> Result<Self> {
         let snapshot = initial_snapshot();
+        let pixmap = Arc::new(RwLock::new(icon_pixmap(dark_mode)?));
         let state = SharedState {
             snapshot: Arc::new(RwLock::new(snapshot.clone())),
-            pixmap: Arc::new(icon_pixmap(dark_mode)?),
+            pixmap: pixmap.clone(),
             revision: Arc::new(AtomicU32::new(1)),
         };
         let (updates, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -592,13 +605,29 @@ impl PlatformTray {
                 updates,
                 snapshot,
                 online,
+                pixmap,
+                dark_mode,
             }),
             Ok(Err(error)) => Err(anyhow!(error)),
             Err(error) => Err(anyhow!("Linux tray startup did not complete: {error}")),
         }
     }
 
-    pub fn set_dark_mode(&mut self, _dark_mode: bool) {}
+    pub fn set_dark_mode(&mut self, dark_mode: bool) {
+        // Rebuild the monochrome pixmap for the new theme and poke the host
+        // so it re-reads it; like Windows, keep the old artwork when the
+        // rebuild fails instead of blanking the tray.
+        if self.dark_mode == dark_mode {
+            return;
+        }
+        if let Ok(pixmap) = icon_pixmap(dark_mode)
+            && let Ok(mut current) = self.pixmap.write()
+        {
+            *current = pixmap;
+            self.dark_mode = dark_mode;
+            let _ = self.updates.send(self.snapshot.clone());
+        }
+    }
 
     pub fn set_mcp_online(&mut self, online: bool) {
         let mut snapshot = self.snapshot.clone();
