@@ -57,8 +57,9 @@ fn assert_v1_preserved(kind: AgentKind, before: &str, after: &str) {
         let after = parse_codex_document(after).unwrap();
         assert_eq!(before["model"].as_str(), after["model"].as_str());
         // Compare values, not renderings: rewriting a table through toml_edit
-        // normalizes its quotes while leaving every value identical.
-        for key in V1_KEYS {
+        // normalizes its quotes while leaving every value identical. The
+        // shared local key is asserted per phase in the test body.
+        for key in &V1_KEYS[1..] {
             let (before, after) = (&before["mcp_servers"][key], &after["mcp_servers"][key]);
             for field in ["url", "command"] {
                 assert_eq!(
@@ -77,7 +78,7 @@ fn assert_v1_preserved(kind: AgentKind, before: &str, after: &str) {
         let before = parse_json_document(before).unwrap();
         let after = parse_json_document(after).unwrap();
         assert_eq!(before["ownerSetting"], after["ownerSetting"]);
-        for key in V1_KEYS {
+        for key in &V1_KEYS[1..] {
             assert_eq!(before[json_root(kind)][key], after[json_root(kind)][key]);
         }
     }
@@ -85,20 +86,20 @@ fn assert_v1_preserved(kind: AgentKind, before: &str, after: &str) {
 
 /// After v2 deselect or removal, the shared hosted keys are gone — v2 and 1.x
 /// write the same keys, so taking an entry out takes it out for both — while
-/// 1.x's own local entry and everything outside the managed keys survives.
+/// everything outside the managed keys survives. The shared local entry is
+/// asserted per phase in the test body: untouched by deselect, taken over on
+/// install, gone on removal.
 fn assert_v1_companions_removed(kind: AgentKind, before: &str, after: &str) {
     if matches!(kind, AgentKind::Codex | AgentKind::GrokBuild) {
         let before = parse_codex_document(before).unwrap();
         let after = parse_codex_document(after).unwrap();
         assert_eq!(before["model"].as_str(), after["model"].as_str());
-        let servers = after["mcp_servers"].as_table().unwrap();
-        assert_eq!(
-            before["mcp_servers"]["ekubo_wallet"].to_string(),
-            servers["ekubo_wallet"].to_string()
-        );
+        // An emptied table may not survive serialization at all; either way
+        // no shared key may remain.
+        let servers = after.get("mcp_servers").and_then(Item::as_table);
         for key in &V1_KEYS[1..] {
             assert!(
-                !servers.contains_key(key),
+                servers.is_none_or(|servers| !servers.contains_key(key)),
                 "{key} survived v2 deselect/removal"
             );
         }
@@ -106,14 +107,10 @@ fn assert_v1_companions_removed(kind: AgentKind, before: &str, after: &str) {
         let before = parse_json_document(before).unwrap();
         let after = parse_json_document(after).unwrap();
         assert_eq!(before["ownerSetting"], after["ownerSetting"]);
-        let servers = after[json_root(kind)].as_object().unwrap();
-        assert_eq!(
-            before[json_root(kind)]["ekubo_wallet"],
-            servers["ekubo_wallet"]
-        );
+        let servers = after[json_root(kind)].as_object();
         for key in &V1_KEYS[1..] {
             assert!(
-                !servers.contains_key(*key),
+                servers.is_none_or(|servers| !servers.contains_key(*key)),
                 "{key} survived v2 deselect/removal"
             );
         }
@@ -147,8 +144,9 @@ fn every_harness_shares_hosted_keys_with_v1_across_install_repair_and_removal() 
         let mut selection = CompanionSelection::all();
         assert!(!adapter.has_wallet_entry().unwrap());
         assert!(!adapter.in_sync(&selection).unwrap());
-        // Removal takes the shared hosted keys out with v2's own entries;
-        // only 1.x's local entry and the owner's content survive it.
+        // Removal takes the shared hosted keys out with v2's own entries,
+        // and the shared local key goes with them; only content outside
+        // the managed keys survives it.
         let removal = adapter.preview_remove().unwrap();
         assert_v1_companions_removed(kind, &before, &removal.after);
 
@@ -167,17 +165,29 @@ fn every_harness_shares_hosted_keys_with_v1_across_install_repair_and_removal() 
         } else {
             assert_v1_preserved(kind, &before, &installed);
         }
+        // Install takes the shared local key over to this build's helper.
+        let expected = installed_bridge_path()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            local_entry_command(&installed, kind),
+            Some(expected),
+            "install did not take over the shared local entry"
+        );
         assert!(!adapter.preview_install(&selection).unwrap().has_changes());
 
-        // A stale v2 bridge is repaired without taking over any 1.x entry.
+        // A stale v2 bridge path is not this wallet: repair takes the entry
+        // over explicitly rather than seeing it as installed.
         let stale = installed.replace(BRIDGE_FILE_NAME, "stale-v2-helper");
         assert_ne!(stale, installed);
         fs::write(&adapter.config_path, stale).unwrap();
-        assert!(adapter.has_wallet_entry().unwrap());
+        assert!(!adapter.has_wallet_entry().unwrap());
         assert!(!adapter.in_sync(&selection).unwrap());
         ConfigBatchInstall::install(vec![adapter.preview_install(&selection).unwrap()])
             .unwrap()
             .commit();
+        assert!(adapter.has_wallet_entry().unwrap());
         assert!(adapter.in_sync(&selection).unwrap());
         if kind == AgentKind::ClaudeDesktop {
             assert_v1_companions_removed(
@@ -200,6 +210,8 @@ fn every_harness_shares_hosted_keys_with_v1_across_install_repair_and_removal() 
             .unwrap()
             .commit();
         assert!(adapter.in_sync(&selection).unwrap());
+        // Deselecting companions never disconnects the wallet itself.
+        assert!(adapter.has_wallet_entry().unwrap());
         assert_v1_companions_removed(
             kind,
             &before,

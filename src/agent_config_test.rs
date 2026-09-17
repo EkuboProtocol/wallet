@@ -161,7 +161,7 @@ fn codex_uses_exact_stdio_shape_and_removes_http_oauth_credentials() {
     let before = r#"
 [unrelated]
 keep = true
-[mcp_servers.ekubo_wallet_v2]
+[mcp_servers.ekubo_wallet]
 url = "http://127.0.0.1:61744/mcp"
 auth = "oauth"
 bearer_token_env_var = "SECRET"
@@ -188,7 +188,7 @@ fn grok_build_uses_its_native_toml_shape_and_exact_bridge_identity() {
     let before = r#"
 [models]
 default = "grok-4.5"
-[mcp_servers.ekubo_wallet_v2]
+[mcp_servers.ekubo_wallet]
 url = "http://127.0.0.1:61744/mcp"
 headers = { Authorization = "secret" }
 "#;
@@ -245,7 +245,7 @@ fn every_json_harness_gets_exact_credential_free_stdio_shape() {
     for (_kind, root, shape, client, include_companion) in cases {
         let companions = include_companion.then(CompanionSelection::all);
         let before = format!(
-            r#"{{"keep":7,"{root}":{{"ekubo_wallet_v2":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
+            r#"{{"keep":7,"{root}":{{"ekubo_wallet":{{"type":"http","url":"http://127.0.0.1:61744/mcp","auth":"oauth","headers":{{"Authorization":"secret"}},"env":{{"TOKEN":"secret"}}}}}}}}"#
         );
         let output = merge_json(&before, root, shape, HELPER, client, companions.as_ref()).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -408,12 +408,12 @@ fn managed_diff_never_discloses_unrelated_credentials() {
     .unwrap();
     let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
     assert!(!diff.contains("do-not-print"));
-    assert!(diff.contains("mcpServers.ekubo_wallet_v2"));
+    assert!(diff.contains("mcpServers.ekubo_wallet"));
 }
 
 #[test]
 fn local_and_companion_names_are_stable() {
-    assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet_v2");
+    assert_eq!(LOCAL_SERVER_NAME, "ekubo_wallet");
     // The hosted keys are the same stable names 1.x writes: the servers did
     // not change, so neither did their keys. Only the local bridge entry is
     // product-scoped; legacy identity is by URL, never by key.
@@ -422,7 +422,7 @@ fn local_and_companion_names_are_stable() {
     assert_eq!(
         managed_keys().collect::<Vec<_>>(),
         [
-            "ekubo_wallet_v2",
+            "ekubo_wallet",
             "ekubo",
             "ekubo_aave",
             "ekubo_aerodrome",
@@ -446,7 +446,7 @@ fn removal_deletes_only_wallet_managed_entries_for_every_shape() {
     let codex = r#"
 [mcp_servers.keep]
 command = "keep"
-[mcp_servers.ekubo_wallet_v2]
+[mcp_servers.ekubo_wallet]
 command = "bridge"
 [mcp_servers.ekubo]
 url = "https://mcp.ekubo.org/mcp"
@@ -461,7 +461,7 @@ url = "https://mcp.ekubo.org/mcp"
 
     for root in ["mcpServers", "mcp"] {
         let before = format!(
-            r#"{{"keep":7,"{root}":{{"keep":{{"command":"keep"}},"ekubo_wallet_v2":{{"command":"bridge"}},"ekubo_v2":{{"url":"https://mcp.ekubo.org/mcp"}}}}}}"#
+            r#"{{"keep":7,"{root}":{{"keep":{{"command":"keep"}},"ekubo_wallet":{{"command":"bridge"}},"ekubo_v2":{{"url":"https://mcp.ekubo.org/mcp"}}}}}}"#
         );
         let removed = remove_json(&before, root).unwrap();
         let parsed: Value = serde_json::from_str(&removed).unwrap();
@@ -479,7 +479,7 @@ fn install_rejects_a_config_changed_after_its_preview() {
     let path = directory.path().join("mcp.json");
     std::fs::write(
         &path,
-        r#"{"mcpServers":{"ekubo_wallet_v2":{"command":"old"}}}"#,
+        r#"{"mcpServers":{"ekubo_wallet":{"command":"old"}}}"#,
     )
     .unwrap();
     let adapter = AgentAdapter {
@@ -500,7 +500,7 @@ fn batch_rollback_does_not_overwrite_a_later_external_edit() {
     let path = directory.path().join("mcp.json");
     std::fs::write(
         &path,
-        r#"{"mcpServers":{"ekubo_wallet_v2":{"command":"old"}}}"#,
+        r#"{"mcpServers":{"ekubo_wallet":{"command":"old"}}}"#,
     )
     .unwrap();
     let adapter = AgentAdapter {
@@ -689,7 +689,10 @@ fn a_pre_split_v1_config_is_upgraded_when_v2_is_added() {
         parsed["mcpServers"]["ekubo"]["url"],
         "https://mcp.ekubo.org/mcp/ekubo"
     );
-    assert_eq!(parsed["mcpServers"]["ekubo_wallet"]["command"], "bridge");
+    assert_eq!(
+        parsed["mcpServers"]["ekubo_wallet"]["command"],
+        installed_helper().as_str()
+    );
     assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
 }
 
@@ -698,7 +701,6 @@ fn a_pre_split_v1_config_is_upgraded_when_v2_is_added() {
 fn a_v1_only_config_requires_explicit_v2_installation() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("mcp.json");
-    let helper = installed_bridge_path().unwrap();
     let adapter = AgentAdapter {
         kind: AgentKind::Cursor,
         display_name: "Cursor",
@@ -710,11 +712,14 @@ fn a_v1_only_config_requires_explicit_v2_installation() {
     // Serialized rather than interpolated. A Windows helper path is
     // `C:\Users\…`, and splicing it into a JSON string literal emits invalid
     // escapes — `\U` is not one — so the fixture was unparseable there and the
-    // entry it is supposed to establish read as absent.
+    // entry it is supposed to establish read as absent. The 1.x entry points
+    // at 1.x's own helpers directory: sharing the key is not sharing the
+    // helper, and only an entry executing this build's helper reads as this
+    // wallet.
     let legacy = serde_json::json!({
         "mcpServers": {
             "ekubo_wallet": {
-                "command": helper.to_string_lossy(),
+                "command": "/private/ekubo-wallet/helpers/ekubo-wallet-mcp-bridge",
                 "args": ["--client", "cursor"],
             },
             "ekubo": {"type": "http", "url": "https://mcp.ekubo.org/mcp"},
@@ -731,14 +736,15 @@ fn a_v1_only_config_requires_explicit_v2_installation() {
     assert!(adapter.has_wallet_entry().unwrap());
     assert!(adapter.in_sync(&selection).unwrap());
     let installed = parse_json_document(&fs::read_to_string(&config).unwrap()).unwrap();
-    let legacy = parse_json_document(&legacy).unwrap();
-    // The 1.x local entry is untouched. The pre-split combined entry under the
-    // shared `ekubo` key is upgraded to the per-protocol URL in place —
-    // the hosted keys are 1.x's own keys, so there is no second entry to
-    // preserve alongside, exactly as a post-split 1.x sync behaves.
+    // Explicit install takes the shared local key over to this build's
+    // helper — the diff the owner confirmed — while the pre-split combined
+    // entry is upgraded to the per-protocol URL in place.
     assert_eq!(
-        installed["mcpServers"]["ekubo_wallet"],
-        legacy["mcpServers"]["ekubo_wallet"]
+        installed["mcpServers"]["ekubo_wallet"]["command"],
+        installed_bridge_path()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
     );
     assert_eq!(
         installed["mcpServers"]["ekubo"]["url"],

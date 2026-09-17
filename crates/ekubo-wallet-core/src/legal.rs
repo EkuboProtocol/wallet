@@ -296,7 +296,7 @@ GitHub Releases page instead.
 ## 7. Hosted MCP companions and agent tooling
 
 When you sync a supported agent connection from Ekubo Wallet, the wallet adds
-a local `ekubo_wallet_v2` entry to the agent's configuration. For harnesses whose
+a local `ekubo_wallet` entry to the agent's configuration. The key is shared with 1.x: installing v2 takes the entry over to this wallet's helper, which the sync preview shows for confirmation. For harnesses whose
 configuration format supports remote MCP, it also adds one credential-free
 entry for each hosted Ekubo server you have selected in **Settings → Ekubo MCP
 servers**. Ekubo runs one server per protocol, and every one of them is

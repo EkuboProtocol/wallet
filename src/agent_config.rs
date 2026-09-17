@@ -23,15 +23,17 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The key this wallet registers itself under in every agent's MCP config.
 ///
-/// Underscores, not hyphens, because the key is not private to the config
-/// file: harnesses derive the tool names the model sees from it. Codex
-/// rewrites `-` to `_` when it builds those names, so a hyphenated key
-/// reaches the model only as `ekubo_wallet__wallet_send_execution_plan`
+/// It is 1.x's key, deliberately: installing v2 replaces 1.x in a harness
+/// instead of running a duplicate wallet alongside it. Underscores, not
+/// hyphens, because the key is not private to the config file: harnesses
+/// derive the tool names the model sees from it. Codex rewrites `-` to `_`
+/// when it builds those names, so a hyphenated key reaches the model only as
+/// `ekubo_wallet__wallet_send_execution_plan`
 /// while `resources/list` still expects the unsanitized key — a name the
 /// model has then never been shown. That mismatch made the wallet's own
 /// skill and security-model resources unreachable by name. An underscore
 /// key survives the rewrite unchanged, so both spellings agree.
-pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet_v2";
+pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
 /// Every key this wallet manages in an agent's MCP configuration: its own
 /// local bridge entry, plus one entry per hosted Ekubo server.
 ///
@@ -666,10 +668,16 @@ impl AgentAdapter {
     /// update every harness the owner already connected, and must never add
     /// the wallet to one they did not.
     ///
+    /// The key is shared with 1.x, so presence alone cannot answer it: a 1.x
+    /// entry must not read as this wallet, or automatic sync would silently
+    /// take over a 1.x-connected harness. Only an entry executing this
+    /// build's helper counts. A 1.x-connected harness reads as unconnected
+    /// and is offered an explicit Sync, whose diff shows the takeover for
+    /// the owner to confirm.
+    ///
     /// It deliberately does not check the bridge path's bytes or the
     /// companion shape. A stale v2 entry still represents an installed v2
-    /// integration. A 1.x entry alone does not: launch repair or selection sync
-    /// must not silently opt a 1.x-connected harness into v2.
+    /// integration.
     pub fn has_wallet_entry(&self) -> Result<bool> {
         let Some(contents) = self.readable_config()? else {
             return Ok(false);
@@ -677,7 +685,11 @@ impl AgentAdapter {
         if validate_document(&self.config_path, &contents).is_err() {
             return Ok(false);
         }
-        Ok(local_entry_present(&contents, self.kind))
+        let Ok(expected) = installed_bridge_path() else {
+            return Ok(false);
+        };
+        Ok(local_entry_command(&contents, self.kind)
+            .is_some_and(|command| Path::new(&command) == expected))
     }
 
     /// The config file's text, or `None` when there is nothing configured:
@@ -1121,37 +1133,43 @@ fn validate_server_shape(contents: &str, validation: &ConfigValidation) -> Resul
     }
 }
 
-/// Whether the wallet's own bridge entry is in this file at all.
-///
-/// Deliberately shallow: it asks whether the key is there, not whether its
-/// command, arguments, or companions are current. That is what makes it usable
-/// as "the owner installed the wallet here", which is a different question
-/// from "this file is up to date".
-fn local_entry_present(contents: &str, kind: AgentKind) -> bool {
+/// The helper command the local entry executes, if the file has a local entry
+/// at all. Used to tell this wallet's entry apart from 1.x's under their
+/// shared key: same key, whichever helper path it names.
+fn local_entry_command(contents: &str, kind: AgentKind) -> Option<String> {
     match kind {
-        AgentKind::Codex | AgentKind::GrokBuild => parse_codex_document(contents)
-            .ok()
-            .and_then(|document| {
-                document
-                    .get("mcp_servers")
-                    .and_then(Item::as_table)
-                    .map(|servers| servers.contains_key(LOCAL_SERVER_NAME))
-            })
-            .unwrap_or(false),
+        AgentKind::Codex | AgentKind::GrokBuild => {
+            let document = parse_codex_document(contents).ok()?;
+            document
+                .get("mcp_servers")
+                .and_then(Item::as_table)
+                .and_then(|servers| servers.get(LOCAL_SERVER_NAME))
+                .and_then(|entry| entry.get("command"))
+                .and_then(Item::as_str)
+                .map(str::to_owned)
+        }
         AgentKind::ClaudeCode
         | AgentKind::ClaudeDesktop
         | AgentKind::GeminiCli
         | AgentKind::Cursor
-        | AgentKind::Opencode => parse_json_document(contents)
-            .ok()
-            .and_then(|document| {
-                document
-                    .get(json_root(kind))
-                    .and_then(Value::as_object)
-                    .map(|servers| servers.contains_key(LOCAL_SERVER_NAME))
-            })
-            .unwrap_or(false),
-        AgentKind::Other => false,
+        | AgentKind::Opencode => {
+            let document = parse_json_document(contents).ok()?;
+            document
+                .get(json_root(kind))
+                .and_then(Value::as_object)
+                .and_then(|servers| servers.get(LOCAL_SERVER_NAME))
+                .and_then(|entry| {
+                    // Opencode keeps the command as an argv array; everywhere
+                    // else it is a string.
+                    if kind == AgentKind::Opencode {
+                        entry.get("command")?.as_array()?.first()?.as_str()
+                    } else {
+                        entry.get("command")?.as_str()
+                    }
+                })
+                .map(str::to_owned)
+        }
+        AgentKind::Other => None,
     }
 }
 

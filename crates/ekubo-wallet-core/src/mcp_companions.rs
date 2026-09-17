@@ -3,7 +3,7 @@
 //! Ekubo serves one MCP endpoint per protocol. Each is credential-free, each
 //! carries only that protocol's tools, and the owner chooses which of them the
 //! wallet writes into a harness configuration alongside the local
-//! `ekubo_wallet_v2` bridge entry. Configuration keys are the same stable
+//! `ekubo_wallet` bridge entry, a key it shares with and takes over from 1.x. Configuration keys are the same stable
 //! names 1.x writes: the hosted servers did not change, so neither did their
 //! keys. A v2 write is therefore byte-identical to a 1.x write for the same
 //! selection, and v2 deselect/removal takes the shared entry out — same
@@ -227,7 +227,7 @@ impl CompanionSelection {
 
     /// Whether nothing is selected.
     ///
-    /// The wallet still writes its own `ekubo_wallet_v2` bridge entry in this
+    /// The wallet still writes its own `ekubo_wallet` bridge entry in this
     /// case — an agent that can reach the wallet but no hosted server is a
     /// coherent choice, and is what an owner who prepares plans some other way
     /// wants.
