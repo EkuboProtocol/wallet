@@ -64,3 +64,57 @@ fn verified_bootstrap_is_encoded_never_quoted() {
     assert_eq!(decode_bootstrap(&inner), bootstrap);
     assert!(!inner.contains('\''));
 }
+
+#[test]
+fn redirect_fragment_names_both_fixed_logs() {
+    let fragment = redirect_fragment(
+        std::path::Path::new(r"C:\ProgramData\EkuboWalletV2-install.out.log"),
+        std::path::Path::new(r"C:\ProgramData\EkuboWalletV2-install.err.log"),
+    );
+    // The elevated child owns its own console window, so without both
+    // redirections its failures are silent and only an exit code returns.
+    assert!(fragment.contains("-RedirectStandardOutput"));
+    assert!(fragment.contains("-RedirectStandardError"));
+    assert!(fragment.contains("EkuboWalletV2-install.out.log"));
+    assert!(fragment.contains("EkuboWalletV2-install.err.log"));
+}
+
+#[test]
+fn log_tail_is_bounded_line_aligned_and_total_on_missing_files() {
+    use std::fmt::Write as _;
+    let directory = tempfile::tempdir().expect("scratch directory");
+    let path = directory.path().join("install.err.log");
+    // Missing files yield empty text rather than a second failure, so UAC
+    // denial (no child ever ran) keeps its original message plus log paths.
+    assert_eq!(read_log_tail(&path), "");
+
+    let mut content = String::new();
+    for line in 0..200 {
+        writeln!(content, "diagnostic line {line:03} with padding xxxxxxxxxx")
+            .expect("scratch log fits in memory");
+    }
+    std::fs::write(&path, &content).unwrap();
+    let tail = read_log_tail(&path);
+    assert!(tail.len() <= 2048, "tail exceeds its bound");
+    assert!(
+        tail.starts_with("diagnostic line"),
+        "tail starts mid-line: {tail:?}"
+    );
+    assert!(
+        tail.contains("diagnostic line 199"),
+        "tail lost its newest lines"
+    );
+}
+
+#[test]
+fn elevated_failure_names_logs_even_without_tails() {
+    let error = elevated_failure(
+        SetupAction::Install,
+        anyhow::anyhow!("fresh setup was declined"),
+    );
+    let message = format!("{error:#}");
+    assert!(message.contains("fresh setup was declined"));
+    // Tested on Windows where ProgramData resolves; the paths name the only
+    // record of the elevated child's output either way.
+    assert!(message.contains("EkuboWalletV2-install.out.log"));
+}
