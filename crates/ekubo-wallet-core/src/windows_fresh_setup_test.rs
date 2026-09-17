@@ -66,20 +66,6 @@ fn verified_bootstrap_is_encoded_never_quoted() {
 }
 
 #[test]
-fn redirect_fragment_names_both_fixed_logs() {
-    let fragment = redirect_fragment(
-        std::path::Path::new(r"C:\ProgramData\EkuboWalletV2-install.out.log"),
-        std::path::Path::new(r"C:\ProgramData\EkuboWalletV2-install.err.log"),
-    );
-    // The elevated child owns its own console window, so without both
-    // redirections its failures are silent and only an exit code returns.
-    assert!(fragment.contains("-RedirectStandardOutput"));
-    assert!(fragment.contains("-RedirectStandardError"));
-    assert!(fragment.contains("EkuboWalletV2-install.out.log"));
-    assert!(fragment.contains("EkuboWalletV2-install.err.log"));
-}
-
-#[test]
 fn log_tail_is_bounded_line_aligned_and_total_on_missing_files() {
     use std::fmt::Write as _;
     let directory = tempfile::tempdir().expect("scratch directory");
@@ -116,5 +102,5 @@ fn elevated_failure_names_logs_even_without_tails() {
     assert!(message.contains("fresh setup was declined"));
     // Tested on Windows where ProgramData resolves; the paths name the only
     // record of the elevated child's output either way.
-    assert!(message.contains("EkuboWalletV2-install.out.log"));
+    assert!(message.contains("EkuboWalletV2-install.log"));
 }

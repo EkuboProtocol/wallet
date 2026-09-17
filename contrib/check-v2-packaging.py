@@ -20,6 +20,15 @@ def check_windows_auth_payload():
     for relative in ("contrib/windows-v2.nsi", ".github/workflows/release.yml",
                      "contrib/install-windows-v2.ps1", "contrib/recover-windows-v2.ps1"):
         assert "register-windows-v2-auth.ps1" in (ROOT / relative).read_text(encoding="utf-8"), relative
+    # The elevated child owns its own console window and Start-Process cannot
+    # combine -Verb RunAs with output redirection, so each setup script must
+    # start its own best-effort transcript at the matching fixed log name the
+    # Rust parent reads back on failure.
+    for relative, log in (("contrib/install-windows-v2.ps1", "EkuboWalletV2-install.log"),
+                          ("contrib/recover-windows-v2.ps1", "EkuboWalletV2-recovery.log")):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert "Start-Transcript" in text, relative
+        assert log in text, relative
 
 
 def check_arch_release():

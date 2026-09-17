@@ -614,6 +614,11 @@ try {
             if (-not $installer.WaitForExit(120000)) { throw 'Production enrollment exceeded 120 seconds.' }
             Get-Content $stdout, $stderr | Write-Output
             if ($installer.ExitCode -ne 0) { throw "Production enrollment failed: $($installer.ExitCode)" }
+            # The elevated install script records its own transcript (the
+            # launcher cannot redirect an elevated child's console); a missing
+            # transcript means elevated diagnostics are not recording.
+            $installLog = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'EkuboWalletV2-install.log'
+            if (-not (Test-Path -LiteralPath $installLog)) { throw 'Install transcript is missing; elevated diagnostics are not recording.' }
         } else { Publish $exchange 'begin.json' @{} }
         $stage = "$phase / authenticated readiness and persistence"
         $ready = Await-Report $exchange 'ready.json' $worker

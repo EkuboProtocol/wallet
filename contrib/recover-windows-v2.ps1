@@ -51,6 +51,17 @@ param([Parameter(Mandatory=$true)][string]$OwnerSid, [switch]$DiscardUnused, [sw
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 Set-StrictMode -Version Latest
+# Best-effort transcript of the elevated run. Start-Process cannot combine
+# -Verb RunAs with output redirection (mutually exclusive parameter sets),
+# so without this every failure inside the elevated window is silent and
+# only an exit code returns. Never throws: logging must not break recovery.
+# Captures stage errors only; relay bytes and keys travel through pipes,
+# never process output. Overwritten per attempt (bounded).
+try {
+    $recoveryTranscript = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'EkuboWalletV2-recovery.log'
+    Remove-Item -LiteralPath $recoveryTranscript -ErrorAction SilentlyContinue
+    Start-Transcript -Path $recoveryTranscript | Out-Null
+} catch { }
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or -not [Environment]::Is64BitProcess) { throw 'Elevated 64-bit PowerShell is required.' }
 if ($OwnerSid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw 'An ordinary owner SID is required.' }

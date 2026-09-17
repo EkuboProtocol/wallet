@@ -7,6 +7,17 @@ param(
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 Set-StrictMode -Version Latest
+# Best-effort transcript of the elevated run. Start-Process cannot combine
+# -Verb RunAs with output redirection (mutually exclusive parameter sets),
+# so without this every failure inside the elevated window is silent and
+# only an exit code returns. Never throws: logging must not break setup.
+# Captures stage errors only; relay bytes and keys travel through pipes,
+# never process output. Overwritten per attempt (bounded).
+try {
+    $installTranscript = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'EkuboWalletV2-install.log'
+    Remove-Item -LiteralPath $installTranscript -ErrorAction SilentlyContinue
+    Start-Transcript -Path $installTranscript | Out-Null
+} catch { }
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or -not [Environment]::Is64BitProcess) {
     throw 'Run the signed installer in elevated 64-bit PowerShell.'

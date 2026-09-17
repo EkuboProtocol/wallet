@@ -41,43 +41,29 @@ fn ps_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Fixed per-action install logs under ProgramData. The elevated child owns
-/// its own console window (Start-Process), so without redirection every
-/// failure inside that window is silent and the parent sees only an exit
-/// code — the exact failure mode that makes fresh-setup failures
-/// undiagnosable. These files are the only record.
+/// Fixed per-action install transcript path under ProgramData. The elevated
+/// child owns its own console window (Start-Process cannot combine `-Verb
+/// RunAs` with output redirection — mutually exclusive parameter sets), so
+/// the setup scripts start their own transcript and the parent reads its
+/// tail. Without this, every failure inside that window is silent and the
+/// parent sees only an exit code.
 ///
 /// Logged content is stage errors, SIDs, profile GUIDs, and Win32 messages.
 /// Relay bytes, keys, and owner credentials travel through pipes and native
 /// prompts, never process output, so they cannot land here. Overwritten per
-/// attempt (bounded); readable by the owner for support; never cleaned up
-/// because a failed attempt's log is precisely what the next attempt needs.
-fn install_log_paths(action: SetupAction) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
-    let base = match action {
-        SetupAction::Install => "EkuboWalletV2-install",
+/// attempt (bounded); readable by the owner for support.
+fn install_transcript_path(action: SetupAction) -> Result<std::path::PathBuf> {
+    let name = match action {
+        SetupAction::Install => "EkuboWalletV2-install.log",
         SetupAction::Resume | SetupAction::DiscardUnused | SetupAction::ResetConfirmed => {
-            "EkuboWalletV2-recovery"
+            "EkuboWalletV2-recovery.log"
         }
     };
-    let dir = folder(FOLDERID_ProgramData)?;
-    Ok((
-        dir.join(format!("{base}.out.log")),
-        dir.join(format!("{base}.err.log")),
-    ))
+    Ok(folder(FOLDERID_ProgramData)?.join(name))
 }
 
-/// The Start-Process redirection fragment binding an elevated child to the
-/// fixed logs. Pure string construction so tests pin it without elevation.
-fn redirect_fragment(out_log: &std::path::Path, err_log: &std::path::Path) -> String {
-    format!(
-        "-RedirectStandardOutput {} -RedirectStandardError {}",
-        ps_literal(&out_log.to_string_lossy()),
-        ps_literal(&err_log.to_string_lossy())
-    )
-}
-
-/// Best-effort tail of a log file for error reports. Missing or unreadable
-/// files yield empty text rather than a second failure.
+/// Best-effort tail of the transcript for error reports. A missing or
+/// unreadable transcript yields empty text rather than a second failure.
 fn read_log_tail(path: &std::path::Path) -> String {
     const MAX_BYTES: usize = 2048;
     let bytes = std::fs::read(path).unwrap_or_default();
@@ -94,19 +80,17 @@ fn read_log_tail(path: &std::path::Path) -> String {
     String::from_utf8_lossy(tail).into_owned()
 }
 
-/// Attach the elevated child's log tail to a launcher failure. Called with
-/// the action whose logs were just written; UAC denial (no child ran) yields
-/// empty tails and the message still names the log paths.
+/// Attach the elevated transcript tail to a launcher failure. Called with
+/// the action whose transcript was just written; UAC denial (no child ever
+/// ran) yields an empty tail and the message still names the log path.
 fn elevated_failure(action: SetupAction, error: anyhow::Error) -> anyhow::Error {
-    match install_log_paths(action) {
-        Ok((out_log, err_log)) => {
-            let out_tail = read_log_tail(&out_log);
-            let err_tail = read_log_tail(&err_log);
+    match install_transcript_path(action) {
+        Ok(path) => {
+            let tail = read_log_tail(&path);
             anyhow::anyhow!(
-                "{error:#}; elevated output ({}): stdout: {} stderr: {}",
-                out_log.display(),
-                out_tail.trim(),
-                err_tail.trim()
+                "{error:#}; elevated output ({}): {}",
+                path.display(),
+                tail.trim()
             )
         }
         Err(_) => error,
@@ -212,14 +196,12 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
             enroll.is_file(),
             "signed enrollment helper is not installed; fresh setup refused"
         );
-        let (out_log, err_log) = install_log_paths(action)?;
         let expression = format!(
-            "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {},{},{} {} -Wait -PassThru; exit $p.ExitCode",
+            "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {},{},{} -Wait -PassThru; exit $p.ExitCode",
             ps_literal(&enroll.to_string_lossy()),
             ps_literal("--launch-install"),
             ps_literal(owner_sid),
-            ps_literal(&endpoint.to_string()),
-            redirect_fragment(&out_log, &err_log)
+            ps_literal(&endpoint.to_string())
         );
         return elevate(expression).map_err(|error| elevated_failure(action, error));
     }
@@ -243,12 +225,10 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
             &approved,
         );
         let inner = encode_bootstrap_command(&bootstrap);
-        let (out_log, err_log) = install_log_paths(action)?;
         let expression = format!(
-            "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {} {} -Wait -PassThru; if ($null -eq $p.ExitCode) {{ exit 1 }}; exit $p.ExitCode",
+            "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {} -Wait -PassThru; if ($null -eq $p.ExitCode) {{ exit 1 }}; exit $p.ExitCode",
             ps_literal(&powershell.to_string_lossy()),
-            ps_literal(&inner),
-            redirect_fragment(&out_log, &err_log)
+            ps_literal(&inner)
         );
         return elevate(expression).map_err(|error| elevated_failure(action, error));
     }
@@ -278,12 +258,10 @@ pub fn run_elevated(owner_sid: &str, endpoint: Uuid, action: SetupAction) -> Res
         &approved,
     );
     let arguments = encode_bootstrap_command(&bootstrap);
-    let (out_log, err_log) = install_log_paths(action)?;
     let expression = format!(
-        "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {} {} -Wait -PassThru; exit $p.ExitCode",
+        "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath {} -Verb RunAs -ArgumentList {} -Wait -PassThru; exit $p.ExitCode",
         ps_literal(&powershell.to_string_lossy()),
-        ps_literal(&arguments),
-        redirect_fragment(&out_log, &err_log)
+        ps_literal(&arguments)
     );
     elevate(expression).map_err(|error| elevated_failure(action, error))
 }
