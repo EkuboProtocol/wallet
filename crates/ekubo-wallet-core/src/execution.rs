@@ -68,7 +68,7 @@ pub struct PreparedExecution {
 
 /// Display-only copy of the exact prepared envelope fields. Authorization
 /// always uses the typed [`PreparedExecution`] retained inside core.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(serde::Deserialize, Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct PreparedTransactionSummary {
     pub transaction_type: String,
     pub chain_id: String,

@@ -21,6 +21,8 @@ use fs2::FileExt;
 use keyring::Error as KeyringError;
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+#[cfg(target_os = "windows")]
+use std::fs::File;
 #[cfg(any(test, feature = "test-hooks"))]
 use std::{
     collections::HashMap,
@@ -42,8 +44,8 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// queues and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
-const KEYRING_USER: &str = "default";
+pub(crate) const KEYRING_SERVICE: &str = "org.ekubo.wallet.v2.db";
+pub(crate) const KEYRING_USER: &str = "default";
 
 #[cfg(any(test, feature = "test-hooks"))]
 static TEST_DATABASE_KEYS: LazyLock<Mutex<HashMap<PathBuf, [u8; 32]>>> =
@@ -123,7 +125,7 @@ impl DatabaseKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredPolicy {
     pub wallet_instance_id: Uuid,
     pub wallet_id: String,
@@ -137,7 +139,7 @@ pub struct StoredPolicy {
 /// proposal exists per wallet — a newer proposal replaces the previous one —
 /// and it binds the exact policy revision it was written against, so it can
 /// never apply over a policy the agent has not seen.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolicyProposal {
     pub wallet_instance_id: Uuid,
     pub wallet_id: String,
@@ -176,6 +178,9 @@ pub const MAX_PENDING_NETWORK_PROPOSALS: u64 = 32;
 
 pub struct PolicyStore {
     pub(crate) connection: Connection,
+    // Declared after Connection so SQLite closes before the no-delete pin.
+    #[cfg(target_os = "windows")]
+    _service_database: Option<File>,
 }
 
 /// Whether creating a schema also installs the compiled-in curated token list.
@@ -249,6 +254,7 @@ impl PolicyStore {
             .len()
             > 0;
         let key = load_or_create_database_key(data_dir, database_exists)?;
+        #[cfg(not(target_os = "windows"))]
         drop(database);
         let result = Self::open_with(&path, &key, SeedDefaults::Yes);
         // The work's own error is the one worth reporting. Unlocking after a
@@ -276,6 +282,8 @@ impl PolicyStore {
         key: &DatabaseKey,
         seed_defaults: SeedDefaults,
     ) -> Result<Self> {
+        #[cfg(target_os = "windows")]
+        let service_database = crate::windows_service_custody::pin_database(path)?;
         if let Some(parent) = path.parent() {
             create_private_dir(parent)?;
         }
@@ -355,10 +363,17 @@ impl PolicyStore {
                     && let Err(error) = crate::default_tokens::seed(&connection)
                 {
                     drop(connection);
-                    let _ = std::fs::remove_file(path);
+                    #[cfg(target_os = "windows")]
+                    let cleanup = reset_unseeded_database(path, service_database.as_ref());
+                    #[cfg(not(target_os = "windows"))]
+                    let cleanup = std::fs::remove_file(path);
                     return Err(error).with_context(|| {
+                        if let Err(cleanup) = cleanup {
+                            return format!("failed to clean up unseeded database: {cleanup}");
+                        }
+
                         format!(
-                            "removed the partly created policy database {} so the next start \
+                            "reset the partly created policy database {} so the next start \
                              creates a complete one",
                             path.display()
                         )
@@ -379,7 +394,11 @@ impl PolicyStore {
         // the window in which a by-path chmod could be pointed at some other
         // reachable file.
         drop(open_private_file(path)?);
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            #[cfg(target_os = "windows")]
+            _service_database: service_database,
+        })
     }
 
     /// Re-reads the schema version through this connection. The long-running
@@ -2584,7 +2603,23 @@ fn verify_integrity(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn reset_unseeded_database(path: &Path, pinned: Option<&File>) -> std::io::Result<()> {
+    if let Some(database) = pinned {
+        // Called only after closing SQLite and only when this attempt created
+        // the schema. Keep the pinned object and credential for a fresh retry.
+        database.set_len(0)?;
+        database.sync_all()
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result<DatabaseKey> {
+    #[cfg(target_os = "linux")]
+    crate::service_storage::require_data_dir(data_dir)?;
+    #[cfg(target_os = "windows")]
+    crate::windows_service_custody::require_data_dir(data_dir)?;
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(key) = registered_test_database_key(data_dir)? {
         return Ok(key);
@@ -2599,6 +2634,17 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
     }
     #[cfg(not(debug_assertions))]
     let _ = data_dir;
+
+    #[cfg(target_os = "linux")]
+    ensure!(
+        crate::service_storage::data_dir().is_some(),
+        "v2 database authority requires the installed protected service"
+    );
+    #[cfg(target_os = "windows")]
+    ensure!(
+        crate::windows_service_custody::data_dir().is_some(),
+        "v2 database authority requires the installed protected service"
+    );
 
     // `block_in_place`, not a direct call: on Linux, `keyring`'s backend
     // connects to D-Bus through `zbus`'s *blocking* API, which starts its
@@ -2619,6 +2665,11 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
                 result.context("policy database credential is invalid")
             }
             Err(KeyringError::NoEntry) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                ensure!(
+                    !matches!(&entry, crate::credential_store::Entry::Service(_)),
+                    "installed v2 database credential is missing; enrollment cannot be reset"
+                );
                 ensure!(
                     !database_exists,
                     "policy database exists but its credential-store key is missing"

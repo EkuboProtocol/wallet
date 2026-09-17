@@ -8,6 +8,27 @@
 use super::*;
 
 #[test]
+fn evidence_erasure_and_legal_acceptance_have_distinct_scopes() {
+    let scopes = [
+        OwnerAuthorizationScope::ActivityHistory,
+        OwnerAuthorizationScope::AutomationHistory,
+        OwnerAuthorizationScope::AcceptTerms,
+        OwnerAuthorizationScope::AcceptPrivacyPolicy,
+    ];
+    for scope in scopes {
+        let authorization = OwnerAuthorization::for_test(scope);
+        for other in scopes {
+            assert_eq!(authorization.require(other).is_ok(), scope == other);
+        }
+        assert!(
+            OwnerAuthorization::expired_for_test(scope)
+                .require(scope)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn reasons_read_as_one_sentence_and_carry_no_digest() {
     let reason = PresenceRequest::SignTransaction {
         wallet: "primary".into(),

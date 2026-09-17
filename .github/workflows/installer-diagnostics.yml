@@ -1,0 +1,73 @@
+name: Windows installer-only diagnostics (no Rust)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/installer-diagnostics.yml'
+      - 'contrib/windows-v2.nsi'
+      - 'contrib/package-windows-v2.ps1'
+      - 'contrib/smoke-v2-nsis.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-diagnostics-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  installer:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Reproduce package lifecycle with real ACLs in a new temporary tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $admin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Disposable runner must be elevated.' }
+          # A failed inventory read also fails this step: never assume absence.
+          $services = @([ServiceProcess.ServiceController]::GetServices() | Where-Object Name -Like 'EkuboWalletV2-*')
+          if ($services.Count -or (Test-Path HKLM:\SOFTWARE\EkuboWalletV2)) { throw 'Refusing an existing v2 machine.' }
+          $temporary = Join-Path $env:RUNNER_TEMP ('v2-lifecycle-' + [Guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $temporary | Out-Null
+          $text = Get-Content contrib/package-windows-v2.ps1 -Raw
+          $assignment = '$install = Join-Path ([Environment]::GetFolderPath(''ProgramFiles'')) ''Ekubo Wallet 2'''
+          if (($text.Split(@($assignment), [StringSplitOptions]::None)).Count -ne 2) { throw 'Fixed install assignment changed.' }
+          $unit = Join-Path $temporary 'lifecycle.ps1'
+          $path = (Join-Path $temporary 'protected-code').Replace("'", "''")
+          $text.Replace($assignment, ('$install = ''' + $path + "'")) | Set-Content -LiteralPath $unit -Encoding utf8
+          foreach ($mode in @('Before', 'After', 'Before', 'Remove')) {
+            Write-Output "TEMPORARY UNIT: $mode"
+            & "$env:WINDIR/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File $unit -Mode $mode
+            if ($LASTEXITCODE -ne 0) { throw "Temporary lifecycle $mode failed: $LASTEXITCODE" }
+          }
+      - name: Install NSIS compiler
+        run: choco install nsis --version=3.12.0 --no-progress -y
+      - name: Compile actual installer template with inert payload files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path target/release) { throw 'Refusing to overwrite actual release binaries.' }
+          New-Item -ItemType Directory target/release -Force | Out-Null
+          foreach ($name in @('ekubo-wallet-v2', 'ekubo-wallet-v2-mcp-bridge', 'ekubo-wallet-service', 'ekubo-wallet-v2-owner-auth', 'ekubo-wallet-v2-enroll')) {
+            Set-Content -LiteralPath "target/release/$name.exe" -Value 'INERT INSTALLER DIAGNOSTIC PAYLOAD - NOT A WALLET EXECUTABLE'
+          }
+          & 'C:/Program Files (x86)/NSIS/makensis.exe' /DVERSION=2.0.0 contrib/windows-v2.nsi
+          if ($LASTEXITCODE -ne 0) { throw "NSIS compile failed: $LASTEXITCODE" }
+      - name: Exercise actual silent launcher and installer hooks on disposable runner
+        shell: pwsh
+        run: pwsh -NoProfile -File contrib/smoke-v2-nsis.ps1 -Installer (Get-ChildItem target/release/*setup.exe).FullName
+      - name: Retain installer-only diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-only-diagnostics
+          path: |
+            ${{ runner.temp }}/ekubo-v2-installer-diagnostics-*/**
+            target/release/*setup.exe
+          if-no-files-found: ignore
+          retention-days: 3

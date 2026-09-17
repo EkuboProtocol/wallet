@@ -7,6 +7,7 @@ use crate::{
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
+#[cfg(not(target_os = "windows"))]
 use directories::BaseDirs;
 use fs2::FileExt;
 use rusqlite::{OptionalExtension as _, params};
@@ -247,7 +248,7 @@ pub struct WalletConfig {
     pub networks: Vec<NetworkConfig>,
 }
 
-const WALLET_CONFIGURATION_SETTING: &str = "wallet_configuration";
+pub(crate) const WALLET_CONFIGURATION_SETTING: &str = "wallet_configuration";
 
 #[derive(Clone)]
 pub struct ConfigStore {
@@ -711,21 +712,35 @@ impl ConfigStore {
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
-    if let Some(explicit) = env::var_os("EKUBO_WALLET_HOME") {
-        ensure!(!explicit.is_empty(), "EKUBO_WALLET_HOME cannot be empty");
+    #[cfg(target_os = "windows")]
+    if let Some(service) = crate::windows_service_custody::data_dir() {
+        return Ok(service.to_owned());
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(service) = crate::service_storage::data_dir() {
+        // Activated authority is bound to installer-controlled state; inherited
+        // user HOME/XDG/EKUBO_WALLET_V2_HOME values cannot redirect it.
+        return Ok(service.to_path_buf());
+    }
+    if let Some(explicit) = env::var_os("EKUBO_WALLET_V2_HOME") {
+        ensure!(!explicit.is_empty(), "EKUBO_WALLET_V2_HOME cannot be empty");
         return Ok(PathBuf::from(explicit));
     }
+    #[cfg(not(target_os = "windows"))]
     let base = BaseDirs::new().context("could not determine the user home directory")?;
     #[cfg(target_os = "macos")]
     return Ok(base
         .home_dir()
-        .join("Library/Application Support/org.ekubo.wallet"));
+        .join("Library/Application Support/org.ekubo.wallet.v2"));
     #[cfg(target_os = "windows")]
-    return Ok(base.data_local_dir().join("Ekubo/wallet"));
+    return Ok(directories::ProjectDirs::from("org", "Ekubo", "wallet-v2")
+        .context("could not determine v2 user data directory")?
+        .data_local_dir()
+        .to_owned());
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Ok(env::var_os("XDG_STATE_HOME")
         .map_or_else(|| base.home_dir().join(".local/state"), PathBuf::from)
-        .join("ekubo-wallet"))
+        .join("ekubo-wallet-v2"))
 }
 
 /// The networks a fresh configuration starts with.
@@ -1060,6 +1075,12 @@ pub fn replace_configured_network(
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    if crate::windows_service_custody::data_dir().is_some() {
+        // The installer owns provisioning. Never repair or create a caller path
+        // after service activation, even before a credential is requested.
+        return crate::windows_service_custody::require_data_dir(path);
+    }
     // Created private, rather than created and then narrowed. `create_dir_all`
     // followed by `set_permissions` leaves the directory readable for the
     // window between the two calls, which is when the wallet's own files are
@@ -1123,6 +1144,10 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
 /// link the mode is then applied to. Handing back the handle means the caller
 /// cannot reintroduce that gap: it already holds the only reference it needs.
 pub(crate) fn open_private_file(path: &Path) -> Result<File> {
+    #[cfg(target_os = "windows")]
+    if let Some(file) = crate::windows_service_custody::open_file(path) {
+        return file;
+    }
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

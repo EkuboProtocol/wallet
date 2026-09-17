@@ -6,7 +6,7 @@ use crate::{
 };
 use alloy::primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ekubo_wallet_core::core::source::RequestSource;
 use ekubo_wallet_core::{
     agent_authority::AgentExecutionAuthority,
@@ -17,13 +17,12 @@ use ekubo_wallet_core::{
         OwnAccounts, TokenMetadataMap, address_label, format_fixed_point, interpret_steps,
         plan_headline, plan_token_targets,
     },
-    automation::{Automation, AutomationState, PollFailure, PolledCall},
+    automation::{Automation, AutomationState, PollFailure},
     automation_store::{AutomationRun, AutomationStore},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{AgentKind, AppearancePreference, DesktopStore, GuidedSetupState},
-    execution::BroadcastResult,
     human_presence::{
         DappAuthorization, OwnerAuthorizationScope, PlatformHumanPresence, authorize_dapp_access,
         authorize_owner,
@@ -43,15 +42,14 @@ use ekubo_wallet_core::{
     signature_review,
     simulation::{SimulationResult, simulate_external_execution},
     token_store::{
-        ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
-        TokenProposal, TokenStore, read_portfolio,
+        ListedToken, MAX_PORTFOLIO_TOKENS, ProposalSource, StoredToken, TokenProposal, TokenStore,
+        read_portfolio,
     },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
 };
 use uuid::Uuid;
 
@@ -62,103 +60,19 @@ fn contains_configured_chain(config: &WalletConfig, chain_id: u64) -> bool {
         .any(|network| network.chain_id == chain_id)
 }
 
-/// What an automation would do if it ticked right now.
-///
-/// Display-only. It carries no plan, no simulation handle, and nothing else
-/// that could be sent: an owner reading a dry run is reading a report, and the
-/// only way anything here reaches a chain is the automation's own next tick.
-#[derive(Clone, Debug)]
-pub struct AutomationDryRun {
-    pub ran_at: DateTime<Utc>,
-    /// The block the poll observed, absent when the poll never ran.
-    pub block_number: Option<u64>,
-    /// Why the bytecode produced nothing readable: a revert, an undecodable
-    /// return value, or an endpoint that could not be reached.
-    pub failure: Option<String>,
-    /// Empty is the healthy idle tick, not an error.
-    pub calls: Vec<PolledCall>,
-    /// Absent when there were no calls to judge.
-    pub verdict: Option<AutomationDryRunVerdict>,
-}
+pub use ekubo_wallet_client::automation_report::{AutomationDryRun, AutomationDryRunVerdict};
 
-/// Whether the calls a dry run produced would actually have sent.
-///
-/// The question an owner asks of an automation is not "does the bytecode run"
-/// but "would anything come of it", and those have different answers whenever
-/// the policy moved after the automation was written.
-#[derive(Clone, Debug)]
-pub struct AutomationDryRunVerdict {
-    pub policy_revision: u64,
-    /// True only when the policy allowed every call and the simulation
-    /// succeeded — the exact condition a tick sends under.
-    pub sends_automatically: bool,
-    pub simulation_succeeded: bool,
-    pub simulation_failure: Option<String>,
-    pub findings: Vec<String>,
-}
+pub use ekubo_wallet_client::portfolio::{
+    OwnerPortfolioAccount, OwnerPortfolioNetwork, OwnerPortfolioSnapshot,
+};
 
-/// One owner account's balances across every configured network.
-#[derive(Clone, Debug)]
-pub struct OwnerPortfolioAccount {
-    pub wallet: WalletMetadata,
-    pub networks: Vec<OwnerPortfolioNetwork>,
-}
+pub use ekubo_wallet_client::token_import::OwnerTokenListImport;
 
-/// A network read is isolated so one unavailable public RPC does not hide the
-/// rest of the portfolio.
-#[derive(Clone, Debug)]
-pub struct OwnerPortfolioNetwork {
-    pub network: NetworkConfig,
-    pub result: std::result::Result<Portfolio, String>,
-}
+pub use ekubo_wallet_client::transaction_review::ReviewedTransaction;
 
-#[derive(Clone, Debug)]
-pub struct OwnerPortfolioSnapshot {
-    pub accounts: Vec<OwnerPortfolioAccount>,
-}
+pub use ekubo_wallet_client::activity::OwnerTransactionAction;
 
-#[derive(Clone, Debug)]
-pub struct OwnerTokenListImport {
-    pub source: String,
-    pub host: String,
-    pub declared_version: Option<String>,
-    pub declared_timestamp: Option<String>,
-    pub chains_selected: Vec<u64>,
-    pub skipped_non_evm: usize,
-    pub skipped_other_chain: usize,
-    pub summary: ProposalSummary,
-    pub proposals: Vec<TokenProposal>,
-}
-
-/// How one native transaction review ended.
-///
-/// `record` is the row as it stands after the review: rejected, or signed and
-/// handed to the network. `send_error` is set only when the owner approved and
-/// every endpoint refused the exact bytes — the row is still `signed`, so the
-/// activity list's "Send now" can try again.
-#[derive(Clone, Debug)]
-pub struct ReviewedTransaction {
-    pub record: PendingTransaction,
-    pub send_error: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct OwnerTransactionAction {
-    pub record: PendingTransaction,
-    pub broadcast: Option<BroadcastResult>,
-}
-
-/// A human-readable, read-only inspection of one transaction lifecycle row.
-///
-/// The document is authored from the encrypted execution plan, owner-confirmed
-/// token metadata, and (when available) the mined receipt. Receipt lookup does
-/// not mutate wallet state or grant any capability.
-#[derive(Clone, Debug)]
-pub struct OwnerTransactionInspection {
-    pub document: ReviewDocument,
-    pub receipt_loaded: bool,
-    pub receipt_error: Option<String>,
-}
+pub use ekubo_wallet_client::activity::OwnerTransactionInspection;
 
 const MAX_DISPLAYED_RECEIPT_EVENTS: usize = 32;
 
@@ -629,33 +543,7 @@ async fn transaction_inspection_document(
     Ok(ReviewDocument::from_request(request, vec![exact_plan]))
 }
 
-/// One durable owner-visible activity record. Signature requests remain in
-/// the audit trail after approval or rejection just like transactions do.
-#[derive(Clone, Debug)]
-pub enum OwnerActivityRecord {
-    Transaction(Box<PendingTransaction>),
-    Message(PendingMessage),
-    TypedData(PendingTypedData),
-}
-
-impl OwnerActivityRecord {
-    #[must_use]
-    pub const fn request_id(&self) -> Uuid {
-        match self {
-            Self::Transaction(record) => record.request_id,
-            Self::Message(record) => record.request_id,
-            Self::TypedData(record) => record.request_id,
-        }
-    }
-
-    fn created_at(&self) -> DateTime<Utc> {
-        match self {
-            Self::Transaction(record) => record.created_at,
-            Self::Message(record) => record.created_at,
-            Self::TypedData(record) => record.created_at,
-        }
-    }
-}
+pub use ekubo_wallet_client::activity::{OwnerActivityRecord, OwnerReviewQueues};
 
 /// The restricted capability cloned into authenticated MCP sessions.
 ///
@@ -898,7 +786,8 @@ impl DappApi {
     }
 }
 
-/// Owner-only operations. Only GPUI owner flows receive this value.
+/// Owner-only operations. Held by the service dispatcher and legacy local UI.
+/// Agent and dapp sessions never receive this capability.
 #[derive(Clone)]
 pub struct OwnerApi {
     config: ConfigStore,
@@ -906,20 +795,7 @@ pub struct OwnerApi {
     events: EventBus,
 }
 
-#[derive(Clone, Debug)]
-pub struct OwnerReviewQueues {
-    pub transactions: Vec<PendingTransaction>,
-    pub typed_data: Vec<PendingTypedData>,
-    pub messages: Vec<PendingMessage>,
-    pub policy_proposals: Vec<PolicyProposal>,
-    pub network_proposals: Vec<NetworkConfig>,
-    pub token_proposals: Vec<TokenProposal>,
-}
-
-pub struct OwnerAccountRemovalReview {
-    pub document: ReviewDocument,
-    pub wallet: WalletMetadata,
-}
+pub use ekubo_wallet_client::account::OwnerAccountRemovalReview;
 
 fn transaction_observation_changed(
     before: &PendingTransaction,
@@ -1234,9 +1110,8 @@ impl OwnerApi {
     /// unrecoverable rather than merely inconvenient. Its run history goes with
     /// it; the transactions those runs produced are activity records and stay
     /// where they are.
-    pub fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
-        let mut store = AutomationStore::production(self.config.data_dir())?;
-        let automation = store
+    pub async fn delete_automation(&self, automation_id: uuid::Uuid) -> Result<()> {
+        let automation = AutomationStore::production(self.config.data_dir())?
             .get(automation_id)?
             .context("that automation is no longer installed")?;
         ensure!(
@@ -1244,8 +1119,12 @@ impl OwnerApi {
             "stop this automation before deleting it"
         );
         ensure!(
-            store.remove(automation_id)?,
-            "that automation is no longer installed"
+            ekubo_wallet_core::human_presence::delete_stopped_automation(
+                self.config.data_dir(),
+                automation_id
+            )
+            .await?,
+            "that automation changed; stop it before deleting it"
         );
         self.events.publish(DomainEventKind::AutomationsChanged {
             wallet_id: automation.wallet_id.clone(),
@@ -1717,12 +1596,8 @@ impl OwnerApi {
     /// than history, and one of them holds the only copy of an envelope the
     /// chain may still mine. Nothing on chain changes and no policy loosens;
     /// this forgets the local record and nothing else.
-    pub fn clear_activity_history(&self) -> Result<usize> {
-        let data_dir = self.config.data_dir();
-        let mut removed = PendingStore::production(data_dir)?.clear_terminal_history(None)?;
-        removed += MessageStore::production(data_dir)?.clear_history(None)?;
-        removed += TypedDataStore::production(data_dir)?.clear_history(None)?;
-        Ok(removed)
+    pub async fn clear_activity_history(&self) -> Result<usize> {
+        ekubo_wallet_core::human_presence::clear_activity_history(self.config.data_dir()).await
     }
 
     pub fn transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
@@ -1898,7 +1773,7 @@ impl OwnerApi {
         }
         Ok(OwnerTransactionAction {
             record,
-            broadcast: Some(broadcast),
+            broadcast: Some(broadcast.into()),
         })
     }
 
@@ -1950,7 +1825,7 @@ impl OwnerApi {
         }
         Ok(OwnerTransactionAction {
             record,
-            broadcast: Some(broadcast),
+            broadcast: Some(broadcast.into()),
         })
     }
 
@@ -2043,12 +1918,12 @@ impl OwnerApi {
                 .context("wallet has no installed policy")
         };
         let tokens = TokenStore::production(self.config.data_dir())?;
-        let legal = LegalStore::production(self.config.data_dir())?;
+        let mut legal = LegalStore::production(self.config.data_dir())?;
         let result = approve_transaction(
             &self.config,
             pending,
             tokens,
-            &legal,
+            &mut legal,
             &read_policy,
             request,
             presenter,
@@ -2215,21 +2090,21 @@ impl OwnerApi {
         Ok(summaries)
     }
 
-    /// Generate and persist missing summaries from immutable call data and
+    /// Prepare missing summary inputs from immutable call data and
     /// local decoding only. Pending and historical records use the same path.
     /// No simulation, receipt, RPC, or current blockchain state is an input.
-    pub fn transaction_previews(
+    pub fn transaction_preview_inputs(
         &self,
         transactions: &[&PendingTransaction],
-    ) -> Result<BTreeMap<Uuid, String>> {
-        let mut summaries = self.saved_transaction_summaries(transactions)?;
+    ) -> Result<Vec<ekubo_wallet_core::preview_evidence::PreviewInput>> {
+        let summaries = self.saved_transaction_summaries(transactions)?;
         let transactions = transactions
             .iter()
             .copied()
             .filter(|record| !summaries.contains_key(&record.request_id))
             .collect::<Vec<_>>();
         if transactions.is_empty() {
-            return Ok(summaries);
+            return Ok(Vec::new());
         }
         let own_accounts = self
             .config
@@ -2288,12 +2163,7 @@ impl OwnerApi {
                             || address_label(step.transaction.to, &own_accounts),
                             |entry| trusted_token_label_from(step.transaction.to, entry),
                         );
-                        let mut summary = crate::preview::call_summary(
-                            interpretation,
-                            target,
-                            native_value_label(&step.transaction.value, network),
-                        );
-                        summary.evidence = Some(ekubo_wallet_preview::slots::CallEvidence {
+                        let evidence = ekubo_wallet_core::preview_evidence::CallEvidence {
                             chain_id: step.transaction.chain_id.to_string(),
                             from: step.transaction.from.to_checksum(None),
                             to: step.transaction.to.to_checksum(None),
@@ -2324,36 +2194,50 @@ impl OwnerApi {
                             abi: interpretation
                                 .candidates
                                 .iter()
-                                .map(|candidate| ekubo_wallet_preview::slots::AbiCandidate {
-                                    signature: candidate.signature.clone(),
-                                    contract_match: candidate.contract_match,
-                                    arguments: candidate.arguments.clone(),
+                                .map(|candidate| {
+                                    ekubo_wallet_core::preview_evidence::AbiCandidate {
+                                        signature: candidate.signature.clone(),
+                                        contract_match: candidate.contract_match,
+                                        arguments: candidate.arguments.clone(),
+                                    }
                                 })
                                 .collect(),
-                        });
-                        summary
+                        };
+                        ekubo_wallet_core::preview_evidence::PreviewCall {
+                            description: interpretation.description.clone(),
+                            details: interpretation.details.clone(),
+                            warnings: interpretation.warnings.clone(),
+                            target,
+                            native_value: native_value_label(&step.transaction.value, network),
+                            evidence,
+                        }
                     })
                     .collect();
-                plans.push((
-                    pending.request_id,
-                    ekubo_wallet_preview::PlanDocument {
-                        simulation: None,
-                        calls,
-                    },
-                ));
+                plans.push(ekubo_wallet_core::preview_evidence::PreviewInput {
+                    request_id: pending.request_id,
+                    wallet_instance_id: pending.wallet_instance_id,
+                    plan_digest: format!("{:#x}", pending.execution_plan.digest()),
+                    calls,
+                });
             }
         }
-        let generated = crate::preview::previews(plans);
+        Ok(plans)
+    }
+
+    /// Persist bounded untrusted display text. Re-read service-held identity;
+    /// never accept a caller's plan or alter approval/policy/lifecycle state.
+    pub fn save_advisory_summary(
+        &self,
+        summary: &ekubo_wallet_core::preview_evidence::AdvisorySummary,
+    ) -> Result<String> {
         let mut store = PendingStore::production(self.config.data_dir())?;
-        for record in transactions {
-            if let Some(preview) = generated.get(&record.request_id)
-                && !preview.summary.trim().is_empty()
-            {
-                let text = store.save_transaction_summary(record, &preview.summary)?;
-                summaries.insert(record.request_id, text);
-            }
-        }
-        Ok(summaries)
+        let record = store.get(summary.request_id)?;
+        anyhow::ensure!(
+            record.wallet_instance_id == summary.wallet_instance_id
+                && format!("{:#x}", record.execution_plan.digest()) == summary.plan_digest,
+            "advisory summary transaction identity changed"
+        );
+        store.save_transaction_summary(&record, &summary.summary)
     }
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
@@ -2482,12 +2366,12 @@ impl OwnerApi {
         ensure_reviewed_digest(reviewed_digest, &request.digest)?;
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
-        let policies = PolicyStore::production(self.config.data_dir())?;
-        let legal = LegalStore::production(self.config.data_dir())?;
+        let mut policies = PolicyStore::production(self.config.data_dir())?;
+        let mut legal = LegalStore::production(self.config.data_dir())?;
         let signed = sign_reviewed_message(
             &self.config,
-            &policies,
-            &legal,
+            &mut policies,
+            &mut legal,
             &mut store,
             &request,
             &wallet,
@@ -2516,12 +2400,12 @@ impl OwnerApi {
         ensure_reviewed_digest(reviewed_digest, &request.digest)?;
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
-        let policies = PolicyStore::production(self.config.data_dir())?;
-        let legal = LegalStore::production(self.config.data_dir())?;
+        let mut policies = PolicyStore::production(self.config.data_dir())?;
+        let mut legal = LegalStore::production(self.config.data_dir())?;
         let signed = sign_reviewed_typed_data(
             &self.config,
-            &policies,
-            &legal,
+            &mut policies,
+            &mut legal,
             &mut store,
             &request,
             &wallet,
@@ -2752,8 +2636,13 @@ impl OwnerApi {
         (document.text(), document.digest())
     }
 
-    pub fn accept_legal(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
-        LegalStore::production(self.config.data_dir())?.record_acceptance(document, reviewed_digest)
+    pub async fn accept_legal(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
+        ekubo_wallet_core::human_presence::accept_legal(
+            self.config.data_dir(),
+            document,
+            reviewed_digest,
+        )
+        .await
     }
 }
 
@@ -2770,58 +2659,7 @@ fn ensure_reviewed_digest(reviewed: &str, current: &str) -> Result<()> {
     Ok(())
 }
 
-pub const PRIVATE_KEY_REVEAL_DURATION: Duration = Duration::from_secs(30);
-
-pub struct ExportLease {
-    value: Mutex<zeroize::Zeroizing<String>>,
-    expires_at: Instant,
-}
-
-impl ExportLease {
-    fn new(value: zeroize::Zeroizing<String>) -> Self {
-        Self::new_for_duration(value, PRIVATE_KEY_REVEAL_DURATION)
-    }
-
-    fn new_for_duration(value: zeroize::Zeroizing<String>, duration: Duration) -> Self {
-        Self {
-            value: Mutex::new(value),
-            expires_at: Instant::now() + duration,
-        }
-    }
-
-    #[must_use]
-    pub fn concealed(&self) -> bool {
-        self.value.lock().map_or(true, |mut value| {
-            if Instant::now() >= self.expires_at {
-                use zeroize::Zeroize as _;
-                value.zeroize();
-            }
-            value.is_empty()
-        })
-    }
-
-    /// How much longer the key stays visible. A reveal that vanishes without
-    /// warning reads as a bug; a countdown makes the deadline the user's to
-    /// plan around.
-    #[must_use]
-    pub fn remaining(&self) -> Duration {
-        if self.concealed() {
-            return Duration::ZERO;
-        }
-        self.expires_at.saturating_duration_since(Instant::now())
-    }
-
-    #[must_use]
-    pub fn visible_value(&self) -> Option<zeroize::Zeroizing<String>> {
-        self.value.lock().ok().and_then(|mut value| {
-            if Instant::now() >= self.expires_at {
-                use zeroize::Zeroize as _;
-                value.zeroize();
-            }
-            (!value.is_empty()).then(|| zeroize::Zeroizing::new(value.to_string()))
-        })
-    }
-}
+pub use ekubo_wallet_client::export_lease::{ExportLease, PRIVATE_KEY_REVEAL_DURATION};
 
 pub struct ApplicationAuthority {
     owner: OwnerApi,

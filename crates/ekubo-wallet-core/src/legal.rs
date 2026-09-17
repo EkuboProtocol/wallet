@@ -264,10 +264,10 @@ all.
 
 To tell you when the copy you are running is out of date, this software sends
 an unauthenticated HTTPS GET to
-`https://api.github.com/repos/EkuboProtocol/wallet/releases/latest`,
-and uses only the version tag in the answer. Signed builds can additionally
-read update metadata from
-`https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json`
+`https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json`,
+and uses only the version tag in the answer when it names product
+`org.ekubo.wallet.v2`, channel `v2`, and a stable v2 release. Signed builds can additionally
+verify and install the platform artifact named by that same signed metadata
 after that version check reports a newer release. The metadata names the
 platform artifact and carries its signature. Nothing of yours is sent: no
 wallet address, key, credential, cookie, balance, policy, or transaction, and
@@ -296,7 +296,7 @@ GitHub Releases page instead.
 ## 7. Hosted MCP companions and agent tooling
 
 When you sync a supported agent connection from Ekubo Wallet, the wallet adds
-a local `ekubo_wallet` entry to the agent's configuration. For harnesses whose
+a local `ekubo_wallet` entry to the agent's configuration. The key is shared with 1.x: installing v2 takes the entry over to this wallet's helper, which the sync preview shows for confirmation. For harnesses whose
 configuration format supports remote MCP, it also adds one credential-free
 entry for each hosted Ekubo server you have selected in **Settings → Ekubo MCP
 servers**. Ekubo runs one server per protocol, and every one of them is
@@ -434,7 +434,7 @@ pub struct AcceptanceRecord {
 }
 
 /// Acceptance state of one document, as reported to the desktop and MCP.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DocumentStatus {
     /// Whether the current revision of the document has been accepted.
     pub accepted: bool,
@@ -446,7 +446,7 @@ pub struct DocumentStatus {
     pub superseded_digest: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct LegalStatus {
     /// Whether signing is currently allowed by legal acceptance state.
     pub signing_allowed: bool,
@@ -499,7 +499,16 @@ impl LegalStore {
     /// Record acceptance of the current revision of one document. The digest
     /// argument must match the current text, so a caller can only record what
     /// it actually displayed.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn record_acceptance(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
+        self.record_acceptance_authenticated(document, reviewed_digest)
+    }
+
+    pub(crate) fn record_acceptance_authenticated(
+        &self,
+        document: LegalDocument,
+        reviewed_digest: &str,
+    ) -> Result<()> {
         ensure!(
             matches!(
                 document,

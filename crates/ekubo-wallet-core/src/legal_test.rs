@@ -116,12 +116,14 @@ described in section 6, this software makes no network\nrequests."
 fn privacy_policy_discloses_release_checks_and_updates() {
     let policy = privacy_policy();
     assert!(policy.contains("## 6. Release checks and software updates"));
-    assert!(policy.contains("https://api.github.com/repos/EkuboProtocol/wallet/releases/latest"));
-    assert!(
-        policy.contains(
-            "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json"
-        )
-    );
+    assert!(policy.contains(
+        "https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json"
+    ));
+    assert!(policy.contains("`org.ekubo.wallet.v2`"));
+    assert!(policy.contains("channel `v2`"));
+    assert!(!policy.contains("releases/latest"));
+    assert!(!policy.contains("latest.json"));
+    assert!(!policy.contains("api.github.com"));
     assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
     assert!(policy.contains("does not persist the release-listing\nresponse or version tag"));
     // What triggers it, because "when you run a command" is the difference

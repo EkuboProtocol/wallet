@@ -23,10 +23,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The key this wallet registers itself under in every agent's MCP config.
 ///
-/// Underscores, not hyphens, because the key is not private to the config
-/// file: harnesses derive the tool names the model sees from it. Codex
-/// rewrites `-` to `_` when it builds those names, so a hyphenated key
-/// reaches the model only as `ekubo_wallet__wallet_send_execution_plan`
+/// It is 1.x's key, deliberately: installing v2 replaces 1.x in a harness
+/// instead of running a duplicate wallet alongside it. Underscores, not
+/// hyphens, because the key is not private to the config file: harnesses
+/// derive the tool names the model sees from it. Codex rewrites `-` to `_`
+/// when it builds those names, so a hyphenated key reaches the model only as
+/// `ekubo_wallet__wallet_send_execution_plan`
 /// while `resources/list` still expects the unsanitized key — a name the
 /// model has then never been shown. That mismatch made the wallet's own
 /// skill and security-model resources unreachable by name. An underscore
@@ -36,9 +38,12 @@ pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
 /// local bridge entry, plus one entry per hosted Ekubo server.
 ///
 /// It is the removal and diff list, not the write list — a companion the owner
-/// has switched off is still ours to take back out, and the pre-split `ekubo`
-/// key is in here because Ekubo's own server kept it. Everything outside this
-/// list belongs to the harness and is never touched.
+/// has switched off is still ours to take back out. Only the 1.x *local* key
+/// is deliberately absent: both products may use the same harness file, but
+/// only v2 may touch `ekubo_wallet_v2`. The hosted companion keys are the
+/// same stable names 1.x writes, so a v2 write is byte-identical to a 1.x
+/// write and v2 deselect/removal takes the shared entry out. Everything
+/// outside this list belongs to the harness and is never touched.
 fn managed_keys() -> impl Iterator<Item = &'static str> {
     std::iter::once(LOCAL_SERVER_NAME)
         .chain(COMPANION_SERVERS.iter().map(|server| server.config_key))
@@ -46,7 +51,7 @@ fn managed_keys() -> impl Iterator<Item = &'static str> {
 
 /// Every helper image this wallet has ever installed starts with this, so a
 /// single prefix identifies both the file to keep and the debris to collect.
-const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-mcp-bridge";
+const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-v2-mcp-bridge";
 /// The one filename a harness is ever configured to execute.
 ///
 /// It carries no version. An agent config written once therefore keeps
@@ -55,14 +60,14 @@ const BRIDGE_NAME_PREFIX: &str = "ekubo-wallet-mcp-bridge";
 /// Earlier releases installed `…-<version>` instead, which invalidated every
 /// managed config on each update and made the user re-enable each agent.
 #[cfg(windows)]
-const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge.exe";
+const BRIDGE_FILE_NAME: &str = "ekubo-wallet-v2-mcp-bridge.exe";
 #[cfg(not(windows))]
-const BRIDGE_FILE_NAME: &str = "ekubo-wallet-mcp-bridge";
+const BRIDGE_FILE_NAME: &str = "ekubo-wallet-v2-mcp-bridge";
 
 /// Whether this process is the one entitled to write the shared helper.
 ///
-/// The helper path is shared by every wallet build and every wallet process on
-/// a machine, and the only process that may own it is the one answering
+/// The helper path is shared by every v2 build and v2 process on a machine,
+/// separately from 1.x, and the only process that may own it is the one answering
 /// `mcp.sock` — the holder of the single-instance lock. That is a property of
 /// the process, not of any view or data directory, so it is recorded once here
 /// rather than threaded through the callers.
@@ -88,6 +93,8 @@ pub fn holds_helper_write_authority() -> bool {
 }
 
 fn helpers_dir() -> Result<PathBuf> {
+    // default_data_dir is the v2 product root. Never install into the 1.x
+    // helpers directory: released 1.x builds collect helpers by name prefix.
     Ok(ekubo_wallet_core::config::default_data_dir()?.join("helpers"))
 }
 
@@ -155,7 +162,7 @@ fn installed_image_matches(installed: &Path, packaged: &[u8]) -> Result<bool> {
 /// survive an update untouched. Replacing it is still a rename, so a bridge
 /// already running out of the old bytes keeps its own image and no harness
 /// ever sees a half-written helper. Two wallet versions sharing a data
-/// directory therefore share one helper — whichever launched last owns it,
+/// directory within v2 therefore share one helper — whichever launched last owns it,
 /// which is the same bridge the running wallet answers.
 pub fn install_bridge_helper() -> Result<PathBuf> {
     ensure!(
@@ -224,7 +231,7 @@ fn reassert_is_due(last: &mut Option<Instant>, now: Instant) -> bool {
 
 /// Restore this build's helper at the shared path when a bridge connects.
 ///
-/// The helper lives at one fixed path shared by every wallet build on this
+/// The helper lives at one fixed path shared by every v2 wallet build on this
 /// machine, and [`install_bridge_helper`] claims it once, at launch. That
 /// leaves a gap the user cannot get out of: anything writing another build's
 /// bytes there afterwards goes unnoticed by the wallet already running, so
@@ -550,6 +557,8 @@ impl ConfigPreview {
 }
 
 fn config_lock_path(path: &Path) -> Result<PathBuf> {
+    // This is a document lock, not a product lock. Keep the released 1.x
+    // sidecar name so v1 and v2 serialize edits to their shared harness files.
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -659,10 +668,16 @@ impl AgentAdapter {
     /// update every harness the owner already connected, and must never add
     /// the wallet to one they did not.
     ///
+    /// The key is shared with 1.x, so presence alone cannot answer it: a 1.x
+    /// entry must not read as this wallet, or automatic sync would silently
+    /// take over a 1.x-connected harness. Only an entry executing this
+    /// build's helper counts. A 1.x-connected harness reads as unconnected
+    /// and is offered an explicit Sync, whose diff shows the takeover for
+    /// the owner to confirm.
+    ///
     /// It deliberately does not check the bridge path's bytes or the
-    /// companion shape. A config left by an older release names the same fixed
-    /// helper path and the pre-split `ekubo` URL; that is a wallet the owner
-    /// installed, and answering `false` would strand it.
+    /// companion shape. A stale v2 entry still represents an installed v2
+    /// integration.
     pub fn has_wallet_entry(&self) -> Result<bool> {
         let Some(contents) = self.readable_config()? else {
             return Ok(false);
@@ -670,7 +685,11 @@ impl AgentAdapter {
         if validate_document(&self.config_path, &contents).is_err() {
             return Ok(false);
         }
-        Ok(local_entry_present(&contents, self.kind))
+        let Ok(expected) = installed_bridge_path() else {
+            return Ok(false);
+        };
+        Ok(local_entry_command(&contents, self.kind)
+            .is_some_and(|command| Path::new(&command) == expected))
     }
 
     /// The config file's text, or `None` when there is nothing configured:
@@ -870,8 +889,7 @@ fn merge_json(
             remote_json_server(shape, server.url),
         );
     }
-    // Everything the owner did not select comes out, including the pre-split
-    // `ekubo` entry when Ekubo's own server is off. `None` removes them all:
+    // Every v2 companion the owner did not select comes out. `None` removes them all:
     // that is Claude Desktop, whose remote MCP services are account-level
     // custom connectors managed in Claude's UI rather than entries in this
     // file, so an obsolete remote JSON entry here is cleaned up.
@@ -1115,37 +1133,43 @@ fn validate_server_shape(contents: &str, validation: &ConfigValidation) -> Resul
     }
 }
 
-/// Whether the wallet's own bridge entry is in this file at all.
-///
-/// Deliberately shallow: it asks whether the key is there, not whether its
-/// command, arguments, or companions are current. That is what makes it usable
-/// as "the owner installed the wallet here", which is a different question
-/// from "this file is up to date".
-fn local_entry_present(contents: &str, kind: AgentKind) -> bool {
+/// The helper command the local entry executes, if the file has a local entry
+/// at all. Used to tell this wallet's entry apart from 1.x's under their
+/// shared key: same key, whichever helper path it names.
+fn local_entry_command(contents: &str, kind: AgentKind) -> Option<String> {
     match kind {
-        AgentKind::Codex | AgentKind::GrokBuild => parse_codex_document(contents)
-            .ok()
-            .and_then(|document| {
-                document
-                    .get("mcp_servers")
-                    .and_then(Item::as_table)
-                    .map(|servers| servers.contains_key(LOCAL_SERVER_NAME))
-            })
-            .unwrap_or(false),
+        AgentKind::Codex | AgentKind::GrokBuild => {
+            let document = parse_codex_document(contents).ok()?;
+            document
+                .get("mcp_servers")
+                .and_then(Item::as_table)
+                .and_then(|servers| servers.get(LOCAL_SERVER_NAME))
+                .and_then(|entry| entry.get("command"))
+                .and_then(Item::as_str)
+                .map(str::to_owned)
+        }
         AgentKind::ClaudeCode
         | AgentKind::ClaudeDesktop
         | AgentKind::GeminiCli
         | AgentKind::Cursor
-        | AgentKind::Opencode => parse_json_document(contents)
-            .ok()
-            .and_then(|document| {
-                document
-                    .get(json_root(kind))
-                    .and_then(Value::as_object)
-                    .map(|servers| servers.contains_key(LOCAL_SERVER_NAME))
-            })
-            .unwrap_or(false),
-        AgentKind::Other => false,
+        | AgentKind::Opencode => {
+            let document = parse_json_document(contents).ok()?;
+            document
+                .get(json_root(kind))
+                .and_then(Value::as_object)
+                .and_then(|servers| servers.get(LOCAL_SERVER_NAME))
+                .and_then(|entry| {
+                    // Opencode keeps the command as an argv array; everywhere
+                    // else it is a string.
+                    if kind == AgentKind::Opencode {
+                        entry.get("command")?.as_array()?.first()?.as_str()
+                    } else {
+                        entry.get("command")?.as_str()
+                    }
+                })
+                .map(str::to_owned)
+        }
+        AgentKind::Other => None,
     }
 }
 
@@ -1321,3 +1345,7 @@ fn validate_json_companions(
 #[cfg(test)]
 #[path = "agent_config_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_config_coexistence_test.rs"]
+mod coexistence_tests;

@@ -1,0 +1,317 @@
+//! Desktop-side Linux owner transport. This never opens wallet storage.
+
+use crate::owner_connection::{OwnerConnection, OwnerTransport};
+use crate::owner_protocol::OBJECT_PATH;
+use anyhow::{Context as _, Result, ensure};
+use futures::StreamExt as _;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use zbus::{Connection, Proxy, fdo::DBusProxy, names::OwnedUniqueName};
+
+#[derive(Clone)]
+pub struct LinuxOwnerTransport {
+    proxy: Proxy<'static>,
+    service: OwnedUniqueName,
+    process: u32,
+    uid: u32,
+    lifetime: Arc<ConnectionLifetime>,
+}
+
+// The root owns child admission and shutdown. Children never own the root and
+// closing a child cannot cancel another review. Keep admission locked across
+// authentication so root shutdown also drains children being opened.
+struct ConnectionLifetime {
+    state: tokio::sync::Mutex<LifetimeState>,
+    bus: Connection,
+    runtime: tokio::runtime::Handle,
+}
+
+#[derive(Default)]
+struct LifetimeState {
+    closed: bool,
+    child: bool,
+    children: Vec<Weak<ConnectionLifetime>>,
+}
+
+impl Drop for ConnectionLifetime {
+    fn drop(&mut self) {
+        let state = self.state.get_mut();
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        let children = std::mem::take(&mut state.children);
+        let bus = self.bus.clone();
+        self.runtime.spawn(async move {
+            for child in children.into_iter().filter_map(|child| child.upgrade()) {
+                let mut state = child.state.lock().await;
+                state.closed = true;
+                let _ = child.bus.clone().close().await;
+            }
+            let _ = bus.close().await;
+        });
+    }
+}
+
+impl OwnerConnection<LinuxOwnerTransport> {
+    /// Authenticate the installed service using protected installer metadata
+    /// and the real system bus. No caller-provided UID, bus address, or service
+    /// name is accepted at this boundary.
+    pub async fn connect() -> Result<Self> {
+        let identity = ekubo_wallet_core::service_storage::installed_service_identity()?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            Ok(Self::from_transport(connect_custody(&identity).await?))
+        })
+        .await
+        .context("wallet service connection timed out")?
+    }
+
+    /// A separately closable peer to this exact service, without activation or
+    /// another custody relay. Use for a long operation whose cancellation must
+    /// disconnect D-Bus without closing the desktop's main session.
+    pub async fn independent_connection(&self) -> Result<Self> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let bus = zbus::connection::Builder::unix_stream(
+                ekubo_wallet_core::service_storage::system_bus_stream().await?,
+            )
+            .build()
+            .await?;
+            self.independent_on_bus(bus).await
+        })
+        .await
+        .context("independent owner connection timed out")?
+    }
+
+    async fn independent_on_bus(&self, bus: Connection) -> Result<Self> {
+        let mut root = self.transport.lifetime.state.lock().await;
+        ensure!(
+            !root.closed && !root.child,
+            "desktop connection is closed or is not a root"
+        );
+        let transport = LinuxOwnerTransport::authenticate(
+            bus,
+            self.transport.service.as_str(),
+            self.transport.uid,
+        )
+        .await?;
+        ensure!(
+            transport.process == self.transport.process,
+            "wallet service process changed"
+        );
+        transport.lifetime.state.lock().await.child = true;
+        root.children.retain(|child| child.strong_count() > 0);
+        root.children.push(Arc::downgrade(&transport.lifetime));
+        Ok(Self::from_transport(transport))
+    }
+
+    #[cfg(test)]
+    async fn on_bus(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
+        Ok(Self::from_transport(
+            LinuxOwnerTransport::authenticate(bus, name, expected_uid).await?,
+        ))
+    }
+}
+
+impl LinuxOwnerTransport {
+    async fn activate(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
+        let registry = DBusProxy::new(&bus).await?;
+        if !registry.name_has_owner(name.try_into()?).await? {
+            let reply = registry.start_service_by_name(name.try_into()?, 0).await?;
+            let _ = zbus::fdo::StartServiceReply::try_from(reply)?;
+        }
+        // Activation only establishes availability. Resolve and authenticate
+        // the actual unique owner before touching the login keyring. Existing
+        // transports never activate again after an interrupted operation.
+        Self::authenticate(bus, name, expected_uid).await
+    }
+
+    async fn authenticate(bus: Connection, name: &str, expected_uid: u32) -> Result<Self> {
+        let registry = DBusProxy::new(&bus).await?;
+        let service = registry.get_name_owner(name.try_into()?).await?;
+        let actual_uid = registry
+            .get_connection_unix_user(service.clone().into())
+            .await?;
+        ensure!(
+            actual_uid == expected_uid,
+            "wallet endpoint does not belong to the installed service"
+        );
+        // Address the verified unique name, never the replaceable well-known
+        // name. A restart requires a new explicitly authenticated connection.
+        let process = registry
+            .get_connection_unix_process_id(service.clone().into())
+            .await?;
+        let proxy = Proxy::new_owned(
+            bus.clone(),
+            service.clone(),
+            OBJECT_PATH,
+            "org.ekubo.Wallet2.Owner1",
+        )
+        .await?;
+        Ok(Self {
+            proxy,
+            service,
+            process,
+            uid: actual_uid,
+            lifetime: Arc::new(ConnectionLifetime {
+                state: tokio::sync::Mutex::new(LifetimeState::default()),
+                bus,
+                runtime: tokio::runtime::Handle::try_current()?,
+            }),
+        })
+    }
+
+    async fn unlock(
+        &self,
+        wrapped: &ekubo_wallet_core::custody_envelope::WrappedDataKey,
+    ) -> Result<()> {
+        let proxy = Proxy::new(
+            self.proxy.connection(),
+            self.service.as_str(),
+            crate::owner_protocol::CUSTODY_OBJECT_PATH,
+            "org.ekubo.Wallet2.Custody1",
+        )
+        .await?;
+        let reply = proxy.call_method("Unlock", &(wrapped.as_bytes(),)).await?;
+        ensure!(
+            reply.header().sender() == Some(self.service.inner()),
+            "custody reply came from an unexpected service"
+        );
+        Ok(reply.body().deserialize::<()>()?)
+    }
+}
+
+impl crate::owner_connection::sealed::Sealed for LinuxOwnerTransport {}
+
+impl OwnerTransport for LinuxOwnerTransport {
+    async fn exchange(&self, request: &str) -> Result<zeroize::Zeroizing<String>> {
+        ensure!(
+            !self.lifetime.state.lock().await.closed,
+            "desktop connection is closed; restart Ekubo Wallet 2"
+        );
+        let message = self.proxy.call_method("Call", &(request,)).await?;
+        ensure!(
+            message.header().sender() == Some(self.service.inner()),
+            "owner response came from an unexpected service"
+        );
+        Ok(zeroize::Zeroizing::new(
+            message.body().deserialize::<String>()?,
+        ))
+    }
+
+    /// Keep automatic execution active for this desktop connection. Spawn this
+    /// once for the application lifetime; closing the connection ends the lease.
+    /// Cancelling just this method's future does not disconnect a D-Bus peer.
+    async fn hold(&self, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut started = self.proxy.receive_signal("DesktopSessionReady").await?;
+        let request = (nonce.as_str(),);
+        let call = self.proxy.call_method("HoldDesktopSession", &request);
+        tokio::pin!(call);
+        let mut ready = Some(ready);
+        loop {
+            tokio::select! {
+                biased;
+                response = &mut call => {
+                    let response = response?;
+                    ensure!(response.header().sender() == Some(self.service.inner()), "desktop session response came from an unexpected service");
+                    return Ok(response.body().deserialize()?);
+                }
+                signal = started.next(), if ready.is_some() => {
+                    let signal = signal.context("desktop readiness signal stream ended")?;
+                    ensure!(signal.header().sender() == Some(self.service.inner()), "desktop readiness came from an unexpected service");
+                    let (acknowledged,): (String,) = signal.body().deserialize()?;
+                    if acknowledged == nonce {
+                        let _ = ready.take().expect("readiness is pending").send(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close this connection, including all clones and pending owner requests.
+    /// The application must do this on Quit to release its desktop session.
+    async fn close(&self) -> Result<()> {
+        // Even when a caller cancels this wait, drain the actual peers. A second
+        // close waits on the same state lock until the first drain completes.
+        let transport = self.clone();
+        self.lifetime
+            .runtime
+            .spawn(async move { transport.close_connections().await })
+            .await
+            .context("owner connection shutdown task failed")?
+    }
+}
+
+impl LinuxOwnerTransport {
+    async fn close_connections(&self) -> Result<()> {
+        let mut state = self.lifetime.state.lock().await;
+        if state.closed {
+            return Ok(());
+        }
+        state.closed = true;
+        let children = std::mem::take(&mut state.children);
+        let mut failure = None;
+        for child in children.into_iter().filter_map(|child| child.upgrade()) {
+            let mut child_state = child.state.lock().await;
+            if !child_state.closed {
+                child_state.closed = true;
+                if let Err(error) = child.bus.clone().close().await {
+                    failure = Some(error);
+                }
+            }
+        }
+        let closed = self.lifetime.bus.clone().close().await;
+        closed?;
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+}
+
+async fn connect_custody(
+    identity: &ekubo_wallet_core::service_storage::InstalledServiceIdentity,
+) -> Result<LinuxOwnerTransport> {
+    let bus = zbus::connection::Builder::unix_stream(
+        ekubo_wallet_core::service_storage::system_bus_stream().await?,
+    )
+    .build()
+    .await?;
+    let transport = LinuxOwnerTransport::activate(
+        bus,
+        &format!("org.ekubo.Wallet2.Owner.u{}", identity.owner_uid()),
+        identity.service_uid(),
+    )
+    .await?;
+    // The login keyring is not touched until the service identity is pinned.
+    let profile = identity.profile_id();
+    let wrapped =
+        tokio::task::spawn_blocking(move || ekubo_wallet_core::custody_relay::load(profile))
+            .await??;
+    transport.unlock(&wrapped).await?;
+    Ok(transport)
+}
+
+/// An installed service failure never falls back to the desktop's local socket.
+/// The agent receives an MCP stream, without an owner client or desktop lease.
+pub async fn try_connect_agent_stream() -> Result<Option<tokio::net::UnixStream>> {
+    let Some(identity) = ekubo_wallet_core::service_storage::find_installed_service_identity()?
+    else {
+        return Ok(None);
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let custody = connect_custody(&identity).await?;
+        let stream =
+            ekubo_wallet_core::service_storage::agent_stream(&identity, custody.process).await?;
+        custody.close().await?;
+        Ok(Some(stream))
+    })
+    .await
+    .context("MCP service connection timed out")?
+}
+
+pub type OwnerClient = OwnerConnection<LinuxOwnerTransport>;
+
+#[cfg(test)]
+#[path = "owner_client_test.rs"]
+mod tests;

@@ -21,7 +21,8 @@ def check_initialize(initialized: dict, expected_version: str) -> None:
 
     if initialized.get("id") != "package-initialize":
         fail("initialize response did not preserve its request ID")
-    if server.get("name") != "ekubo-wallet-mcp-bridge":
+    # Both offline protocol versions identify the separately installed v2 bridge.
+    if server.get("name") != "ekubo-wallet-v2-mcp-bridge":
         fail("initialize response has the wrong server name")
     if server.get("version") != expected_version:
         fail(
@@ -82,7 +83,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="ekubo-packaged-bridge-") as data_dir:
         environment = os.environ.copy()
-        environment["EKUBO_WALLET_HOME"] = data_dir
+        environment["EKUBO_WALLET_V2_HOME"] = data_dir
         try:
             completed = subprocess.run(
                 [binary, "--client", "codex"],

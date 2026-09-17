@@ -40,10 +40,10 @@ use thiserror::Error;
 use zbus_polkit::policykit1::AuthorityProxy;
 
 /// The action the owner-authentication backend asks polkit to authorize.
-pub const ACTION_ID: &str = "com.ekubo.wallet.human-presence";
+pub const ACTION_ID: &str = "com.ekubo.wallet.v2.human-presence";
 
 /// The file name polkit expects in [`ACTIONS_DIR`].
-pub const POLICY_FILE_NAME: &str = "com.ekubo.wallet.policy";
+pub const POLICY_FILE_NAME: &str = "com.ekubo.wallet.v2.policy";
 
 /// Where polkit reads action definitions from. Root-owned on every
 /// distribution; there is no per-user location.
@@ -52,7 +52,8 @@ pub const ACTIONS_DIR: &str = "/usr/share/polkit-1/actions";
 /// The definition this build ships, byte for byte. It is what `install(1)`
 /// receives over standard input, so what lands in [`ACTIONS_DIR`] is exactly
 /// this and nothing a same-user process could put in a file first.
-pub const POLICY_DOCUMENT: &str = include_str!("../../../contrib/polkit/com.ekubo.wallet.policy");
+pub const POLICY_DOCUMENT: &str =
+    include_str!("../../../contrib/polkit/com.ekubo.wallet.v2.policy");
 
 /// Absolute on every distribution; a bare name would be resolved by pkexec
 /// through a `PATH` this process does not control.

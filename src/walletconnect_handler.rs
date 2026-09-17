@@ -120,7 +120,10 @@ pub async fn run(
         submitted_batches: Mutex::new(BTreeSet::new()),
         settled: Cell::new(false),
     };
-    let session = Session::connect(&relay, start.pairing, wallet_metadata(), &handler).await?;
+    let session = tokio::select! {
+        result = Session::connect(&relay, start.pairing, wallet_metadata(), &handler) => result?,
+        () = start.shutdown.cancelled() => return Ok(()),
+    };
     let result = session.run(start.shutdown.cancelled()).await;
     if let Ok(mut manager) = manager.lock() {
         if let Err(error) = &result {

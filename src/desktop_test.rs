@@ -1395,8 +1395,8 @@ fn token_editor_allows_an_omitted_full_name() {
     assert_eq!(token.unwrap().name, None);
 }
 
-#[test]
-fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
+#[tokio::test]
+async fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let token = StoredToken {
         chain_id: "1".into(),
         address: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".into(),
@@ -1411,8 +1411,13 @@ fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let mut offsets = Vec::new();
     let loaded = collect_token_inventory(|limit, offset| {
         offsets.push(offset);
-        Ok(source.iter().skip(offset).take(limit).cloned().collect())
+        let page = source.iter().skip(offset).take(limit).cloned().collect();
+        async move {
+            tokio::task::yield_now().await;
+            Ok(page)
+        }
     })
+    .await
     .unwrap();
 
     assert_eq!(loaded.len(), 17_286);
@@ -2268,14 +2273,17 @@ fn removing_an_account_puts_the_danger_on_the_button_that_destroys_the_key() {
     // Account removal inverts that: approving destroys a key that cannot be
     // recovered, and the red used to sit on the button that keeps it.
     let removal = review_decision_labels(Some(&ActiveReviewCompletion::AccountRemoval {
-        wallet: WalletMetadata {
-            instance_id: uuid::Uuid::nil(),
-            id: "primary".into(),
-            address: alloy::primitives::Address::ZERO,
-            created_at: chrono::Utc::now(),
-            source: ekubo_wallet_core::config::WalletSource::Created,
-            exported_at: None,
-        },
+        reviewed: Box::new(crate::authority::OwnerAccountRemovalReview {
+            wallet: WalletMetadata {
+                instance_id: uuid::Uuid::nil(),
+                id: "primary".into(),
+                address: alloy::primitives::Address::ZERO,
+                created_at: chrono::Utc::now(),
+                source: ekubo_wallet_core::config::WalletSource::Created,
+                exported_at: None,
+            },
+            document: connection_document(None, &[]),
+        }),
     }));
     assert!(removal.approve_is_destructive);
     assert_eq!(removal.approve, "Authenticate & remove");
@@ -2344,23 +2352,16 @@ fn a_dapp_connection_cannot_be_approved_before_an_account_is_chosen() {
     // A connection can go on to propose transactions that policy signs
     // without a second review, so "which account" is not a question with a
     // sensible default.
-    let (response, _receiver) = oneshot::channel();
-    assert!(!review_selection_is_complete(Some(
-        &ActiveReviewCompletion::WalletConnect {
-            choices: Vec::new(),
-            selected_account: None,
-            response,
-        }
-    )));
-
-    let (response, _receiver) = oneshot::channel();
-    assert!(review_selection_is_complete(Some(
-        &ActiveReviewCompletion::WalletConnect {
-            choices: Vec::new(),
-            selected_account: Some(0),
-            response,
-        }
-    )));
+    let (mut review, _receiver) = connection_review(&["primary"], &[]);
+    assert!(!review_selection_is_complete(review.completion.as_ref()));
+    let Some(ActiveReviewCompletion::WalletConnect {
+        selected_account, ..
+    }) = review.completion.as_mut()
+    else {
+        panic!("expected a connection review");
+    };
+    *selected_account = Some(0);
+    assert!(review_selection_is_complete(review.completion.as_ref()));
 
     // Every other review answers its own question by existing.
     assert!(review_selection_is_complete(None));
@@ -2408,13 +2409,19 @@ fn connection_review(
             document: connection_document(Some(id), warnings),
         })
         .collect();
+    let prompt = DesktopDappPrompt::local(crate::walletconnect::ProposalPrompt {
+        session_id: uuid::Uuid::new_v4(),
+        unselected_document: connection_document(None, warnings),
+        choices,
+        response,
+    });
     let review = ActiveReview::new(
-        connection_document(None, warnings),
+        prompt.unselected_document,
         None,
         Some(ActiveReviewCompletion::WalletConnect {
-            choices,
+            choices: prompt.choices,
             selected_account: None,
-            response,
+            response: prompt.response,
         }),
     );
     (review, receiver)
@@ -3523,4 +3530,41 @@ fn walletconnect_progress_distinguishes_transport_from_waiting_for_the_dapp() {
     assert!(
         walletconnect_pairing_status(Some(&SessionStatus::Reconnecting)).contains("Reconnecting")
     );
+}
+
+struct SessionClosureProbe {
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    fail: bool,
+}
+impl ekubo_wallet_client::desktop_session::SessionTransport for SessionClosureProbe {
+    async fn hold(&self, ready: tokio::sync::oneshot::Sender<()>) -> Result<()> {
+        let _ = ready.send(());
+        std::future::pending().await
+    }
+    async fn close(&self) -> Result<()> {
+        tokio::task::yield_now().await;
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        anyhow::ensure!(!self.fail, "synthetic close failure");
+        Ok(())
+    }
+}
+
+#[test]
+fn desktop_shutdown_awaits_service_transport_closure_and_reports_failure() {
+    for fail in [false, true] {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let session = runtime.block_on(async {
+            let session =
+                ekubo_wallet_client::desktop_session::DesktopSession::start(SessionClosureProbe {
+                    closed: closed.clone(),
+                    fail,
+                });
+            session.ready().await.unwrap();
+            session
+        });
+        let result = close_service_session(runtime.handle(), Some(session));
+        assert_eq!(result.is_err(), fail);
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }

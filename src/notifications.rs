@@ -5,7 +5,20 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
-const MACOS_BUNDLE_IDENTIFIER: &str = "org.ekubo.wallet";
+const MACOS_BUNDLE_IDENTIFIER: &str = "org.ekubo.wallet.v2";
+
+/// Product identity for notifications, including startup and update failures.
+/// Windows registration is installer-owned; this builder writes no OS settings.
+#[must_use]
+pub fn platform_notification() -> notify_rust::Notification {
+    let mut notification = notify_rust::Notification::new();
+    notification.appname("Ekubo Wallet");
+    #[cfg(windows)]
+    notification.app_id("org.ekubo.wallet.v2");
+    #[cfg(target_os = "linux")]
+    notification.hint(notify_rust::Hint::DesktopEntry("ekubo-wallet-v2".into()));
+    notification
+}
 
 /// Select the wallet as the notification sender before notify-rust performs
 /// its macOS fallback lookup. That fallback asks `AppleScript` to find an app
@@ -354,8 +367,7 @@ impl NotificationService for PlatformNotificationService {
     fn show(&self, notification: WalletNotification) {
         let clicked = self.clicked.clone();
         std::thread::spawn(move || {
-            let handle = notify_rust::Notification::new()
-                .appname("Ekubo Wallet")
+            let handle = platform_notification()
                 .summary(&notification.title)
                 .body(&notification.body)
                 // XDG servers only promise an activation signal for actions

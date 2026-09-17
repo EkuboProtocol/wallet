@@ -3,7 +3,12 @@
 //! Ekubo serves one MCP endpoint per protocol. Each is credential-free, each
 //! carries only that protocol's tools, and the owner chooses which of them the
 //! wallet writes into a harness configuration alongside the local
-//! `ekubo_wallet` bridge entry.
+//! `ekubo_wallet` bridge entry, a key it shares with and takes over from 1.x. Configuration keys are the same stable
+//! names 1.x writes: the hosted servers did not change, so neither did their
+//! keys. A v2 write is therefore byte-identical to a 1.x write for the same
+//! selection, and v2 deselect/removal takes the shared entry out — same
+//! owner, same harness file, last writer wins, exactly as two 1.x builds
+//! would behave toward each other.
 //!
 //! Nothing here signs, authorizes, or holds a secret. It is a fixed table of
 //! public URLs plus the owner's selection over it, kept in the kernel because
@@ -128,16 +133,15 @@ pub const TOTAL_TOOL_COUNT: usize = 84;
 /// longer writes it: an agent given this *and* the per-protocol servers would
 /// carry every tool twice.
 ///
-/// Nothing has to recognize it to retarget one. Ekubo's own server kept the
-/// `ekubo` key, so the ordinary managed upsert overwrites a pre-split entry
-/// with `/mcp/ekubo` in place. [`is_legacy_companion`] names the URL for the
-/// tests that pin that, and for anything that needs to tell a stale entry from
-/// a current one without re-deriving the string.
+/// A 1.x entry using this URL is preserved by v2. [`is_legacy_companion`]
+/// identifies the endpoint without granting ownership of its config entry.
 pub const LEGACY_COMPANION_URL: &str = "https://mcp.ekubo.org/mcp";
 
-/// The one config key that predates the split, and still names Ekubo's own
-/// protocol so an owner's existing entry is updated in place rather than
-/// replaced by a differently named one.
+/// The 1.x config key that predates the split. It names the same entry v2
+/// itself writes now, so legacy identity is by URL only
+/// ([`is_legacy_companion`]), never by key: v2 sync upgrades a pre-split
+/// combined-endpoint entry to the per-protocol URL in place, exactly as a
+/// post-split 1.x sync does.
 pub const LEGACY_COMPANION_KEY: &str = "ekubo";
 
 #[must_use]

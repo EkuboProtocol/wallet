@@ -1,0 +1,70 @@
+//! Headless authority runtime for the privileged service boundary.
+//!
+//! The desktop and service temporarily compile the same implementation files
+//! while the desktop API is moved onto authenticated IPC. This crate has no GUI
+//! dependency. Merely using this runtime is NOT an isolation boundary: the host
+//! must establish its protected OS identity and storage before opening authority.
+
+pub use ekubo_wallet_core::*;
+
+pub use ekubo_wallet_client::framing;
+pub mod custody_bootstrap;
+#[path = "../../../src/dapp_identity.rs"]
+pub mod dapp_identity;
+pub mod dapp_reviews;
+pub mod dapp_runtime;
+mod desktop_sessions;
+#[path = "../../../src/gui_review.rs"]
+mod gui_review;
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+mod linux_custody_rpc;
+#[cfg(target_os = "linux")]
+mod linux_owner_rpc;
+#[cfg(target_os = "linux")]
+pub mod linux_provisioning;
+#[path = "../../../src/mcp_transport.rs"]
+mod mcp_transport;
+mod owner_activity_batch;
+pub mod owner_rpc;
+#[cfg(any(target_os = "windows", test))]
+mod owner_stream_rpc;
+mod preview_transfer;
+pub mod runtime;
+#[cfg(any(target_os = "windows", test))]
+mod service_host;
+mod transaction_previews;
+mod transaction_reviews;
+#[path = "../../../src/walletconnect.rs"]
+pub mod walletconnect;
+#[path = "../../../src/walletconnect_handler.rs"]
+mod walletconnect_handler;
+#[path = "../../../src/walletconnect_review.rs"]
+mod walletconnect_review;
+#[cfg(target_os = "windows")]
+pub mod windows;
+#[cfg(target_os = "windows")]
+pub mod windows_owner_rpc;
+#[cfg(target_os = "windows")]
+pub mod windows_provisioning;
+
+#[path = "../../../src/authority.rs"]
+pub mod authority;
+#[path = "../../../src/automation_runtime.rs"]
+pub mod automation_runtime;
+#[path = "../../../src/batch_read.rs"]
+pub mod batch_read;
+#[path = "../../../bridge_protocol.rs"]
+pub mod bridge_protocol;
+#[path = "../../../src/events.rs"]
+pub mod events;
+#[path = "../../../src/mcp.rs"]
+pub mod mcp;
+#[path = "../../../src/owner_snapshot.rs"]
+mod owner_snapshot;
+#[path = "../../../src/release_check.rs"]
+pub mod release_check;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");

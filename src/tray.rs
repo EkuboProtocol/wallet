@@ -313,16 +313,76 @@ fn scaled_tray_artwork(image: &image::RgbaImage) -> image::RgbaImage {
 }
 
 #[cfg(windows)]
-fn wallet_icon(_dark_mode: bool) -> Result<Icon> {
+fn wallet_icon(dark_mode: bool) -> Result<Icon> {
     const SIDE: u32 = 32;
-    let image = image::load_from_memory_with_format(
-        include_bytes!("../assets/app-icon-512.png"),
-        image::ImageFormat::Png,
-    )
-    .context("failed to decode the application icon")?
-    .into_rgba8();
-    let image = image::imageops::resize(&image, SIDE, SIDE, image::imageops::FilterType::Lanczos3);
+    // Monochrome mark picked for the theme, not the full-color application
+    // icon: a purple gradient reads as a blob at sixteen pixels.
+    let encoded = if dark_mode {
+        include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
+    } else {
+        include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice()
+    };
+    let image = image::load_from_memory_with_format(encoded, image::ImageFormat::Png)
+        .context("failed to decode the tray artwork")?
+        .into_rgba8();
+    let image = fitted_tray_artwork(&image, SIDE);
     Icon::from_rgba(image.into_raw(), SIDE, SIDE).context("failed to construct tray icon pixels")
+}
+
+/// Fit the wide monochrome mark onto a square transparent canvas without
+/// distorting its aspect ratio, so the tray keeps exact-square pixels.
+/// Resizes in premultiplied space: naive RGBA interpolation would bleed the
+/// transparent-black background into the mark's edges as gray fringe.
+#[cfg(windows)]
+fn fitted_tray_artwork(image: &image::RgbaImage, side: u32) -> image::RgbaImage {
+    let (width, height) = image.dimensions();
+    let divisor = width.max(height).max(1);
+    let fitted_width = (width * side / divisor).max(1);
+    let fitted_height = (height * side / divisor).max(1);
+    let mut premultiplied = image::RgbaImage::new(width, height);
+    for (dst, src) in premultiplied.pixels_mut().zip(image.pixels()) {
+        let [red, green, blue, alpha] = src.0;
+        let scale = u32::from(alpha);
+        let premultiply =
+            |channel: u8| u8::try_from(u32::from(channel) * scale / 255).unwrap_or(u8::MAX);
+        dst.0 = [
+            premultiply(red),
+            premultiply(green),
+            premultiply(blue),
+            alpha,
+        ];
+    }
+    let fitted = image::imageops::resize(
+        &premultiplied,
+        fitted_width,
+        fitted_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut straight = image::RgbaImage::new(fitted_width, fitted_height);
+    for (dst, src) in straight.pixels_mut().zip(fitted.pixels()) {
+        let [red, green, blue, alpha] = src.0;
+        dst.0 = if alpha == 0 {
+            [0, 0, 0, 0]
+        } else {
+            let unpremultiply = |channel: u8| {
+                u8::try_from(u32::from(channel) * 255 / u32::from(alpha)).unwrap_or(u8::MAX)
+            };
+            [
+                unpremultiply(red),
+                unpremultiply(green),
+                unpremultiply(blue),
+                alpha,
+            ]
+        };
+    }
+    let mut canvas = image::RgbaImage::new(side, side);
+    image::imageops::overlay(
+        &mut canvas,
+        &straight,
+        i64::from((side - fitted_width) / 2),
+        i64::from((side - fitted_height) / 2),
+    );
+    canvas
 }
 
 #[cfg(any(target_os = "linux", test))]

@@ -154,7 +154,7 @@ fn layout(id: i32, snapshot: &TraySnapshot, requested: &[String]) -> Option<Layo
 #[derive(Clone)]
 struct SharedState {
     snapshot: Arc<RwLock<TraySnapshot>>,
-    pixmap: Arc<Vec<Pixmap>>,
+    pixmap: Arc<RwLock<Vec<Pixmap>>>,
     revision: Arc<AtomicU32>,
 }
 
@@ -193,7 +193,7 @@ impl StatusNotifierItem {
 
     #[zbus(property)]
     fn id(&self) -> &str {
-        "ekubo-wallet"
+        "ekubo-wallet-v2"
     }
 
     #[zbus(property)]
@@ -218,7 +218,12 @@ impl StatusNotifierItem {
 
     #[zbus(property)]
     fn icon_pixmap(&self) -> Vec<Pixmap> {
-        self.0.pixmap.as_ref().clone()
+        self.0
+            .pixmap
+            .read()
+            .ok()
+            .map(|pixmap| pixmap.clone())
+            .unwrap_or_default()
     }
 
     #[zbus(property)]
@@ -265,7 +270,12 @@ impl StatusNotifierItem {
     fn tool_tip(&self) -> ToolTip {
         (
             String::new(),
-            self.0.pixmap.as_ref().clone(),
+            self.0
+                .pixmap
+                .read()
+                .ok()
+                .map(|pixmap| pixmap.clone())
+                .unwrap_or_default(),
             "Ekubo Wallet".to_owned(),
             tray_tooltip(&self.0.snapshot()),
         )
@@ -415,15 +425,19 @@ fn initial_snapshot() -> TraySnapshot {
     }
 }
 
-fn icon_pixmap() -> Result<Vec<Pixmap>> {
+fn icon_pixmap(dark_mode: bool) -> Result<Vec<Pixmap>> {
     const SIDE: u32 = 32;
-    let image = image::load_from_memory_with_format(
-        include_bytes!("../assets/app-icon-512.png"),
-        image::ImageFormat::Png,
-    )
-    .context("failed to decode the Linux tray artwork")?
-    .into_rgba8();
-    let image = image::imageops::resize(&image, SIDE, SIDE, image::imageops::FilterType::Lanczos3);
+    // Monochrome mark picked for the theme, not the full-color application
+    // icon: a purple gradient reads as a blob at sixteen pixels.
+    let encoded = if dark_mode {
+        include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
+    } else {
+        include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice()
+    };
+    let image = image::load_from_memory_with_format(encoded, image::ImageFormat::Png)
+        .context("failed to decode the Linux tray artwork")?
+        .into_rgba8();
+    let image = fitted_tray_artwork(&image, SIDE);
     let mut argb = Vec::with_capacity((SIDE * SIDE * 4) as usize);
     for pixel in image.pixels() {
         let [red, green, blue, alpha] = pixel.0;
@@ -431,6 +445,61 @@ fn icon_pixmap() -> Result<Vec<Pixmap>> {
     }
     let side = i32::try_from(SIDE).expect("tray icon side fits i32");
     Ok(vec![(side, side, argb)])
+}
+
+/// Fit the wide monochrome mark onto a square transparent canvas without
+/// distorting its aspect ratio, so the tray keeps exact-square pixels.
+/// Resizes in premultiplied space: naive RGBA interpolation would bleed the
+/// transparent-black background into the mark's edges as gray fringe.
+fn fitted_tray_artwork(image: &image::RgbaImage, side: u32) -> image::RgbaImage {
+    let (width, height) = image.dimensions();
+    let divisor = width.max(height).max(1);
+    let fitted_width = (width * side / divisor).max(1);
+    let fitted_height = (height * side / divisor).max(1);
+    let mut premultiplied = image::RgbaImage::new(width, height);
+    for (dst, src) in premultiplied.pixels_mut().zip(image.pixels()) {
+        let [red, green, blue, alpha] = src.0;
+        let scale = u32::from(alpha);
+        let premultiply =
+            |channel: u8| u8::try_from(u32::from(channel) * scale / 255).unwrap_or(u8::MAX);
+        dst.0 = [
+            premultiply(red),
+            premultiply(green),
+            premultiply(blue),
+            alpha,
+        ];
+    }
+    let fitted = image::imageops::resize(
+        &premultiplied,
+        fitted_width,
+        fitted_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut straight = image::RgbaImage::new(fitted_width, fitted_height);
+    for (dst, src) in straight.pixels_mut().zip(fitted.pixels()) {
+        let [red, green, blue, alpha] = src.0;
+        dst.0 = if alpha == 0 {
+            [0, 0, 0, 0]
+        } else {
+            let unpremultiply = |channel: u8| {
+                u8::try_from(u32::from(channel) * 255 / u32::from(alpha)).unwrap_or(u8::MAX)
+            };
+            [
+                unpremultiply(red),
+                unpremultiply(green),
+                unpremultiply(blue),
+                alpha,
+            ]
+        };
+    }
+    let mut canvas = image::RgbaImage::new(side, side);
+    image::imageops::overlay(
+        &mut canvas,
+        &straight,
+        i64::from((side - fitted_width) / 2),
+        i64::from((side - fitted_height) / 2),
+    );
+    canvas
 }
 
 async fn serve(
@@ -487,14 +556,17 @@ pub struct PlatformTray {
     updates: tokio::sync::mpsc::UnboundedSender<TraySnapshot>,
     snapshot: TraySnapshot,
     online: Arc<AtomicBool>,
+    pixmap: Arc<RwLock<Vec<Pixmap>>>,
+    dark_mode: bool,
 }
 
 impl PlatformTray {
-    pub fn new(_dark_mode: bool) -> Result<Self> {
+    pub fn new(dark_mode: bool) -> Result<Self> {
         let snapshot = initial_snapshot();
+        let pixmap = Arc::new(RwLock::new(icon_pixmap(dark_mode)?));
         let state = SharedState {
             snapshot: Arc::new(RwLock::new(snapshot.clone())),
-            pixmap: Arc::new(icon_pixmap()?),
+            pixmap: pixmap.clone(),
             revision: Arc::new(AtomicU32::new(1)),
         };
         let (updates, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -533,13 +605,29 @@ impl PlatformTray {
                 updates,
                 snapshot,
                 online,
+                pixmap,
+                dark_mode,
             }),
             Ok(Err(error)) => Err(anyhow!(error)),
             Err(error) => Err(anyhow!("Linux tray startup did not complete: {error}")),
         }
     }
 
-    pub fn set_dark_mode(&mut self, _dark_mode: bool) {}
+    pub fn set_dark_mode(&mut self, dark_mode: bool) {
+        // Rebuild the monochrome pixmap for the new theme and poke the host
+        // so it re-reads it; like Windows, keep the old artwork when the
+        // rebuild fails instead of blanking the tray.
+        if self.dark_mode == dark_mode {
+            return;
+        }
+        if let Ok(pixmap) = icon_pixmap(dark_mode)
+            && let Ok(mut current) = self.pixmap.write()
+        {
+            *current = pixmap;
+            self.dark_mode = dark_mode;
+            let _ = self.updates.send(self.snapshot.clone());
+        }
+    }
 
     pub fn set_mcp_online(&mut self, online: bool) {
         let mut snapshot = self.snapshot.clone();

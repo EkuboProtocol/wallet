@@ -5,6 +5,26 @@ use ekubo_wallet_core::{
     rpc::{ReceiptDetails, ReceiptLog},
 };
 
+#[tokio::test]
+async fn legal_acceptance_rejects_stale_and_informational_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = OwnerApi::for_test(directory.path()).unwrap();
+    assert!(
+        owner
+            .accept_legal(LegalDocument::TermsOfService, "0xdeadbeef")
+            .await
+            .is_err()
+    );
+    let document = LegalDocument::ApplicationLicense;
+    assert!(
+        owner
+            .accept_legal(document, &document.digest())
+            .await
+            .is_err()
+    );
+    assert!(!owner.legal_status().unwrap().signing_allowed);
+}
+
 #[test]
 fn owner_management_can_find_disabled_configured_chains() {
     let directory = tempfile::tempdir().unwrap();
@@ -100,24 +120,6 @@ fn trusted_token_label_renders_the_address_in_eip55_checksum_case() {
         trusted_token_label(token, &metadata),
         format!("USDC ({checksummed})")
     );
-}
-
-#[test]
-fn export_lease_counts_down_to_zero_and_stays_there() {
-    let lease = ExportLease::new_for_duration(
-        zeroize::Zeroizing::new("secret".to_owned()),
-        Duration::from_millis(200),
-    );
-    let remaining = lease.remaining();
-    assert!(remaining > Duration::ZERO && remaining <= Duration::from_millis(200));
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !lease.concealed() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    // A concealed lease reports no time left rather than a duration the
-    // countdown would render as a key that is still on screen.
-    assert!(lease.concealed());
-    assert_eq!(lease.remaining(), Duration::ZERO);
 }
 
 #[tokio::test]
@@ -286,11 +288,24 @@ fn summaries_are_generated_for_history_and_reused_without_current_chain_context(
     let mut store = PendingStore::new(database);
     let pending = store.create("primary", "ethereum", &plan, None, 1).unwrap();
     let history = store.reject(pending.request_id).unwrap();
-    let summaries = owner.transaction_previews(&[&history]).unwrap();
-    assert!(
-        summaries[&history.request_id].contains("1 ETH"),
-        "{summaries:?}"
-    );
+    let inputs = owner.transaction_preview_inputs(&[&history]).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0].calls[0].native_value.contains("1 ETH"));
+    let mut advisory = ekubo_wallet_core::preview_evidence::AdvisorySummary {
+        request_id: history.request_id,
+        wallet_instance_id: history.wallet_instance_id,
+        plan_digest: inputs[0].plan_digest.clone(),
+        summary: "Send 1 ETH".into(),
+    };
+    advisory.plan_digest = "wrong".into();
+    assert!(owner.save_advisory_summary(&advisory).is_err());
+    advisory.plan_digest = inputs[0].plan_digest.clone();
+    advisory.wallet_instance_id = Uuid::new_v4();
+    assert!(owner.save_advisory_summary(&advisory).is_err());
+    advisory.wallet_instance_id = history.wallet_instance_id;
+    owner.save_advisory_summary(&advisory).unwrap();
+    assert_eq!(store.get(history.request_id).unwrap(), history);
+    let summaries = owner.saved_transaction_summaries(&[&history]).unwrap();
     drop(owner);
     let reopened = OwnerApi::for_test(directory.path()).unwrap();
     reopened
@@ -304,8 +319,10 @@ fn summaries_are_generated_for_history_and_reused_without_current_chain_context(
         reopened.saved_transaction_summaries(&[&history]).unwrap(),
         summaries
     );
-    assert_eq!(
-        reopened.transaction_previews(&[&history]).unwrap(),
-        summaries
+    assert!(
+        reopened
+            .transaction_preview_inputs(&[&history])
+            .unwrap()
+            .is_empty()
     );
 }

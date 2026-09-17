@@ -37,7 +37,7 @@ fn embed_windows_resources() {
         format!("VERSION_PATCH={}", env!("CARGO_PKG_VERSION_PATCH")),
         format!(r#"VERSION_STRING="{}""#, env!("CARGO_PKG_VERSION")),
     ];
-    embed_resource::compile_for("assets/windows/app.rc", ["ekubo-wallet"], &macros)
+    embed_resource::compile_for("assets/windows/app.rc", ["ekubo-wallet-v2"], &macros)
         .manifest_required()
         .expect("failed to embed the Windows application identity");
 }

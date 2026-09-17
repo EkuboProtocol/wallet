@@ -1,5 +1,6 @@
 //! Real stdio/socket regressions: no wallet database, keys or transactions.
-#![cfg(unix)]
+// This process harness injects a local socket, which is the macOS backend.
+#![cfg(target_os = "macos")]
 
 use serde_json::{Value, json};
 use std::{
@@ -26,9 +27,9 @@ struct Harness {
 
 impl Harness {
     fn start(home: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-mcp-bridge"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ekubo-wallet-v2-mcp-bridge"))
             .args(["--client", "codex"])
-            .env("EKUBO_WALLET_HOME", home)
+            .env("EKUBO_WALLET_V2_HOME", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -177,7 +178,7 @@ fn slow_startup_keeps_the_same_handshake_and_announces_real_tools() {
     let mut harness = Harness::start(home.path());
     assert_eq!(
         harness.receive()["result"]["serverInfo"]["name"],
-        "ekubo-wallet-mcp-bridge"
+        "ekubo-wallet-v2-mcp-bridge"
     );
     harness.initialized();
     harness.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
@@ -298,13 +299,31 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
         let (first, _) = listener.accept().unwrap();
         let (mut reader, writer) = initialize(first, Duration::ZERO, false);
         assert_eq!(read(&mut reader)["method"], "notifications/initialized");
-        // Keep the write half open so EOF cannot win the race: the bridge
-        // must handle its own failed write instead of exiting through `?`.
-        reader.get_ref().shutdown(Shutdown::Read).unwrap();
         ready_tx.send(()).unwrap();
+        // Darwin does not promise EPIPE at the peer after shutdown(Read): a
+        // small write may succeed and leave both peers waiting forever. Wait
+        // until the oversized request is actually being written, then close
+        // the transport. Its unread remainder exceeds the socket buffer, so
+        // write_all cannot have completed. The bridge is inside client_frame
+        // and must handle the write failure before it can poll upstream EOF.
+        let mut prefix = [0; 1024];
+        reader.read_exact(&mut prefix).unwrap();
+        assert!(std::str::from_utf8(&prefix).unwrap().contains("arguments"));
+        writer.shutdown(Shutdown::Both).unwrap();
+        drop(reader);
+        drop(writer);
         let (second, _) = listener.accept().unwrap();
         let (mut reader, mut writer2) = initialize(second, Duration::ZERO, true);
-        ready_tx.send(()).unwrap();
+        // Finishing our handshake writes does not mean the bridge has polled
+        // them yet. A tools/list probe can still be answered from its cache.
+        // This upstream notification is forwarded only after it accepts the
+        // reconnected session, providing a deterministic readiness barrier.
+        write(
+            &mut writer2,
+            &json!({"jsonrpc":"2.0","method":"notifications/message","params":{
+                "level":"info","data":"test reconnect ready"
+            }}),
+        );
         let request = read(&mut reader);
         assert_eq!(
             request["id"], "after-reconnect",
@@ -316,13 +335,12 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
         );
         let mut eof = String::new();
         assert_eq!(reader.read_line(&mut eof).unwrap(), 0);
-        drop(writer);
     });
     let mut harness = Harness::start(home.path());
     harness.receive();
     harness.initialized();
     ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    harness.send(&json!({"jsonrpc":"2.0","id":"interrupted","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}));
+    harness.send(&json!({"jsonrpc":"2.0","id":"interrupted","method":"tools/call","params":{"name":"wallet_test","arguments":{"padding":"x".repeat(8 * 1024 * 1024)}}}));
     let failure = harness.receive();
     assert_eq!(failure["id"], "interrupted");
     assert!(
@@ -331,7 +349,9 @@ fn broken_write_fails_the_request_without_replay_and_reconnects() {
             .unwrap()
             .contains("may have executed")
     );
-    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ready = harness.receive();
+    assert_eq!(ready["method"], "notifications/message");
+    assert_eq!(ready["params"]["data"], "test reconnect ready");
     harness.send(&json!({"jsonrpc":"2.0","id":"after-reconnect","method":"tools/list"}));
     assert_eq!(harness.receive()["result"], catalog());
     harness.finish();

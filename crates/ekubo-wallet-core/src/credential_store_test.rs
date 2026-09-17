@@ -135,28 +135,48 @@ fn start_keyring(home: &Path) -> Process {
 }
 
 fn exercise_restart(home: &Path) {
-    use crate::{
-        custody::{KeyStore as _, OsKeyStore, PrivateKeyMaterial},
-        policy_store::PolicyStore,
-    };
+    use crate::policy_store::PolicyStore;
 
     // Initial unavailability must not poison every future entry construction.
     assert!(super::entry(SERVICE, USER).is_err());
+    let relay_profile = uuid::Uuid::new_v4();
+    assert!(crate::custody_relay::load(relay_profile).is_err());
     let database = home.join("wallet-data");
     assert!(PolicyStore::production(&database).is_err());
     let daemon = start_keyring(home);
-    PolicyStore::production(&database)
-        .unwrap()
-        .assert_schema_current()
-        .unwrap();
-    let instance = uuid::Uuid::new_v4();
-    let key = PrivateKeyMaterial::from_hex(&"11".repeat(32)).unwrap();
-    OsKeyStore.insert_new(instance, &key).unwrap();
+    let relay = super::entry(crate::custody_relay::SERVICE, &relay_profile.to_string()).unwrap();
+    assert!(matches!(&relay, super::Entry::Platform(_)));
+    assert!(crate::custody_relay::load(relay_profile).is_err());
+    // The desktop relay accepts only a wrapped data key, never a legacy raw key.
+    relay.set_secret(&[0x22; 32]).unwrap();
+    assert!(crate::custody_relay::load(relay_profile).is_err());
+    let binding = crate::custody_envelope::CustodyBinding::new(
+        "linux:uid:1000",
+        "linux:uid:2000",
+        relay_profile,
+        uuid::Uuid::new_v4(),
+    )
+    .unwrap();
+    let (_, wrapped) =
+        crate::custody_envelope::WrappingKey::from_material(zeroize::Zeroizing::new([0x33; 32]))
+            .enroll(binding)
+            .unwrap();
+    relay.set_secret(wrapped.as_bytes()).unwrap();
+    assert_eq!(
+        crate::custody_relay::load(relay_profile)
+            .unwrap()
+            .as_bytes(),
+        wrapped.as_bytes()
+    );
+    // The owner process holds only ciphertext. A healthy keyring must not
+    // enable the removed desktop-local production storage path.
+    assert!(PolicyStore::production(&database).is_err());
     let old = super::entry(SERVICE, USER).unwrap();
     assert!(matches!(old.get_secret(), Err(keyring::Error::NoEntry)));
     old.set_secret(SECRET).unwrap();
     assert_eq!(old.get_secret().unwrap(), SECRET);
     drop(daemon);
+    assert!(crate::custody_relay::load(relay_profile).is_err());
     let _restarted = start_keyring(home);
     // Prove this really invalidated the old session, then show that the
     // wallet's next operation recovers without recreating or replacing keys.
@@ -165,15 +185,28 @@ fn exercise_restart(home: &Path) {
         "old Secret Service session unexpectedly survived restart"
     );
     let fresh = super::entry(SERVICE, USER).unwrap();
+    assert_eq!(
+        crate::custody_relay::load(relay_profile)
+            .unwrap()
+            .as_bytes(),
+        wrapped.as_bytes()
+    );
     assert_eq!(fresh.get_secret().unwrap(), SECRET);
-    // Exercise both production call sites, not just the entry factory: MCP
-    // startup must reopen its existing database, and custody must still read
-    // the same account key after the daemon loses its sessions.
-    PolicyStore::production(&database)
+    // The production relay load above reconstructs its platform entry after
+    // restart without replacing the envelope. Installed service activation is
+    // covered separately by the disposable system-bus acceptance harness.
+    assert!(PolicyStore::production(&database).is_err());
+    assert!(matches!(
+        super::entry("org.ekubo.wallet.v2.db", "default")
+            .unwrap()
+            .get_secret(),
+        Err(keyring::Error::NoEntry)
+    ));
+    super::entry(crate::custody_relay::SERVICE, &relay_profile.to_string())
         .unwrap()
-        .assert_schema_current()
+        .delete_credential()
         .unwrap();
-    assert_eq!(OsKeyStore.load(instance).unwrap().address(), key.address());
+    assert!(crate::custody_relay::load(relay_profile).is_err());
     fresh.delete_credential().unwrap();
     assert!(matches!(fresh.get_secret(), Err(keyring::Error::NoEntry)));
 }

@@ -11,7 +11,7 @@ fn update(version: &str, url: &str) -> Update {
     Update {
         config: cargo_packager_updater::Config::default(),
         body: None,
-        current_version: "1.0.0".into(),
+        current_version: "2.0.0-0".into(),
         version: version.into(),
         date: None,
         target: std::env::consts::OS.into(),
@@ -39,6 +39,8 @@ fn manifest(version: &str, url: &str, signature: &str, digest: &str) -> Vec<u8> 
     let target = cargo_packager_updater::target().expect("a supported test target");
     serde_json::to_vec(&serde_json::json!({
         "version": version,
+        "product": UPDATE_PRODUCT,
+        "channel": UPDATE_CHANNEL,
         "platforms": {
             (target): {
                 "url": url,
@@ -72,10 +74,10 @@ fn encoded_signature(key: &minisign::SecretKey, bytes: &[u8]) -> String {
 }
 
 #[test]
-fn updater_uses_only_the_stable_release_manifest_and_no_private_material() {
+fn updater_uses_only_the_v2_release_manifest_and_no_private_material() {
     assert_eq!(
         UPDATE_MANIFEST_URL,
-        "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json"
+        "https://github.com/EkuboProtocol/wallet/releases/download/v2-channel/latest-v2.json"
     );
     assert!(!UPDATE_MANIFEST_URL.contains("prerelease"));
     let source = include_str!("update_trust.rs");
@@ -89,6 +91,68 @@ fn cargo_packager_signature_envelope_is_verified_before_parsing() {
     let signature = STANDARD.encode(FIXTURE_SIGNATURE);
     verify_packager_signature(b"test", &signature, &public_key).unwrap();
     assert!(verify_packager_signature(b"Test", &signature, &public_key).is_err());
+}
+
+#[test]
+fn even_validly_signed_metadata_cannot_cross_product_channel_or_major() {
+    let minisign::KeyPair { pk, sk } = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+    let public_key = encoded_public_key(&pk);
+    let valid = manifest(
+        "2.1.0",
+        "https://example.test/update",
+        "sig",
+        &"a".repeat(64),
+    );
+    verify_product_channel(&valid).unwrap();
+    for (field, replacement) in [
+        ("product", Some("org.ekubo.wallet")),
+        ("channel", Some("stable")),
+        ("product", None),
+        ("channel", None),
+        ("version", Some("1.99.0")),
+        ("version", Some("3.0.0")),
+    ] {
+        let mut value: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+        if let Some(replacement) = replacement {
+            value[field] = replacement.into();
+        } else {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let signature = encoded_signature(&sk, &bytes);
+        verify_packager_signature(&bytes, &signature, &public_key).unwrap();
+        assert!(
+            verify_product_channel(&bytes).is_err(),
+            "{field}: {replacement:?}"
+        );
+        assert!(
+            update_matches_signed_manifest(&update("2.1.0", "https://example.test/update"), &bytes)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn prerelease_v2_manifest_is_not_installable() {
+    let stable = manifest(
+        "2.1.0",
+        "https://example.test/update",
+        "sig",
+        &"a".repeat(64),
+    );
+    verify_product_channel(&stable).unwrap();
+    for version in ["2.1.0-rc.1", "2.1.0-0", "2.0.0-beta.1+build"] {
+        let prerelease = manifest(
+            version,
+            "https://example.test/update",
+            "sig",
+            &"a".repeat(64),
+        );
+        assert!(
+            verify_product_channel(&prerelease).is_err(),
+            "{version} must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -164,7 +228,7 @@ fn appimage_version_verification_reads_compressed_blocks_and_rejects_version_rep
         filesystem
             .push_file(
                 Cursor::new(binary),
-                "usr/bin/ekubo-wallet",
+                "usr/bin/ekubo-wallet-v2",
                 NodeHeader::default(),
             )
             .unwrap();
@@ -211,7 +275,7 @@ fn macos_archive(version: &str) -> Vec<u8> {
         archive
             .append_data(
                 &mut header,
-                "Ekubo Wallet.app/Contents/MacOS/ekubo-wallet",
+                "Ekubo Wallet 2.app/Contents/MacOS/ekubo-wallet-v2",
                 Cursor::new(binary.as_bytes()),
             )
             .unwrap();
@@ -273,8 +337,8 @@ fn fully_signed_metadata_cannot_claim_an_old_macos_package_is_new() {
 #[test]
 fn macos_updater_replaces_a_disposable_application_bundle() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
-    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    let app = directory.path().join("Ekubo Wallet 2.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet-v2");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"old\0EKUBO-WALLET-PACKAGE-VERSION:1.0.4\0").unwrap();
 
@@ -293,8 +357,8 @@ fn macos_updater_replaces_a_disposable_application_bundle() {
 #[test]
 fn failed_macos_swap_leaves_the_installed_application_untouched() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
-    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    let app = directory.path().join("Ekubo Wallet 2.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet-v2");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"known-working-wallet").unwrap();
 
@@ -322,8 +386,8 @@ fn an_update_leaves_the_bundle_every_bookmark_points_at() {
     use std::os::unix::fs::MetadataExt as _;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
-    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    let app = directory.path().join("Ekubo Wallet 2.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet-v2");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"old\0EKUBO-WALLET-PACKAGE-VERSION:1.0.4\0").unwrap();
     let pinned = std::fs::metadata(&app).unwrap().ino();
@@ -361,8 +425,8 @@ fn an_unwritable_bundle_is_refused_by_either_exchange() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
-    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    let app = directory.path().join("Ekubo Wallet 2.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet-v2");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"known-working-wallet").unwrap();
     std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -403,8 +467,8 @@ fn an_unwritable_bundle_is_refused_by_either_exchange() {
 #[test]
 fn an_archive_holding_anything_beside_contents_is_refused() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
-    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    let app = directory.path().join("Ekubo Wallet 2.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet-v2");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"known-working-wallet").unwrap();
 
@@ -415,10 +479,13 @@ fn an_archive_holding_anything_beside_contents_is_refused() {
         let mut archive = tar::Builder::new(encoder);
         for (path, body) in [
             (
-                "Ekubo Wallet.app/Contents/MacOS/ekubo-wallet",
+                "Ekubo Wallet 2.app/Contents/MacOS/ekubo-wallet-v2",
                 "prefix\0EKUBO-WALLET-PACKAGE-VERSION:2.0.0\0suffix",
             ),
-            ("Ekubo Wallet.app/Icon\r", "a custom icon, beside Contents"),
+            (
+                "Ekubo Wallet 2.app/Icon\r",
+                "a custom icon, beside Contents",
+            ),
         ] {
             let mut header = tar::Header::new_gnu();
             header.set_size(body.len() as u64);
@@ -441,16 +508,16 @@ fn an_archive_holding_anything_beside_contents_is_refused() {
 #[test]
 fn a_contents_directory_replaced_by_a_symlink_is_refused() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
+    let app = directory.path().join("Ekubo Wallet 2.app");
     let elsewhere = directory.path().join("elsewhere");
     std::fs::create_dir_all(elsewhere.join("MacOS")).unwrap();
-    std::fs::write(elsewhere.join("MacOS/ekubo-wallet"), b"not this one").unwrap();
+    std::fs::write(elsewhere.join("MacOS/ekubo-wallet-v2"), b"not this one").unwrap();
     std::fs::create_dir_all(&app).unwrap();
     std::os::unix::fs::symlink(&elsewhere, app.join("Contents")).unwrap();
 
     assert!(install_macos_application(&app, &macos_archive("2.0.0")).is_err());
     assert_eq!(
-        std::fs::read(elsewhere.join("MacOS/ekubo-wallet")).unwrap(),
+        std::fs::read(elsewhere.join("MacOS/ekubo-wallet-v2")).unwrap(),
         b"not this one"
     );
 }
@@ -459,8 +526,8 @@ fn a_contents_directory_replaced_by_a_symlink_is_refused() {
 #[test]
 fn malformed_macos_archive_cannot_move_the_installed_application() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let app = directory.path().join("Ekubo Wallet.app");
-    let binary = app.join("Contents/MacOS/ekubo-wallet");
+    let app = directory.path().join("Ekubo Wallet 2.app");
+    let binary = app.join("Contents/MacOS/ekubo-wallet-v2");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(&binary, b"known-working-wallet").unwrap();
 

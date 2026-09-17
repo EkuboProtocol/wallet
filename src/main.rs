@@ -22,7 +22,7 @@ fn main() {
     if let Err(error) = result {
         let message = format!("Ekubo Wallet could not start: {error:#}");
         eprintln!("{message}");
-        let _ = notify_rust::Notification::new()
+        let _ = ekubo_wallet::notifications::platform_notification()
             .summary("Ekubo Wallet could not start")
             .body(&message)
             .show();

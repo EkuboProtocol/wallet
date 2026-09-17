@@ -16,6 +16,7 @@
 
 use super::*;
 use crate::authority::OwnerApi;
+use crate::walletconnect::WalletConnectManager;
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 
 /// Serializes the render tests against each other.
@@ -86,15 +87,20 @@ fn wallet(
         apply_interface_palette(cx);
         OwnerApi::for_test(directory.path()).expect("throwaway owner")
     });
+    let initial = runtime
+        .block_on(InitialDesktopState::capture(
+            &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+        ))
+        .unwrap();
     let (review_presenter, _reviews) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, _proposals) = ProposalPresenter::channel();
     let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
     let window = cx.add_window(|_, cx| {
         WalletWindow::new(
-            owner,
+            owner.clone(),
+            initial,
             review_presenter,
-            walletconnect,
-            walletconnect_presenter,
+            DesktopDapps::local(owner, walletconnect, walletconnect_presenter),
             Rc::new(RefCell::new(None)),
             Arc::new(Mutex::new(None)),
             directory.path(),
@@ -230,8 +236,8 @@ fn release(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
 
 /// Wait for whatever snapshot read is in flight to land.
 ///
-/// `DesktopSnapshot::capture` runs on a blocking thread this scheduler does not
-/// drive, so a test that acts while one is in flight is racing it.
+/// Snapshot capture performs local reads on blocking workers this scheduler
+/// does not drive, so a test that acts while a read is in flight is racing it.
 fn settle_snapshot(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
     for _ in 0..200 {
         cx.run_until_parked();
@@ -3296,14 +3302,17 @@ fn every_review_kind_lays_out_its_decision_row(cx: &mut gpui::TestAppContext) {
     // worth laying out rather than reasoning about.
     for completion in [
         ActiveReviewCompletion::AccountRemoval {
-            wallet: WalletMetadata {
-                instance_id: uuid::Uuid::nil(),
-                id: "primary".into(),
-                address: alloy::primitives::Address::ZERO,
-                created_at: chrono::Utc::now(),
-                source: ekubo_wallet_core::config::WalletSource::Created,
-                exported_at: None,
-            },
+            reviewed: Box::new(crate::authority::OwnerAccountRemovalReview {
+                wallet: WalletMetadata {
+                    instance_id: uuid::Uuid::nil(),
+                    id: "primary".into(),
+                    address: alloy::primitives::Address::ZERO,
+                    created_at: chrono::Utc::now(),
+                    source: ekubo_wallet_core::config::WalletSource::Created,
+                    exported_at: None,
+                },
+                document: review_document(),
+            }),
         },
         ActiveReviewCompletion::Message {
             request_id: uuid::Uuid::new_v4(),
@@ -3474,16 +3483,26 @@ fn screenshots() {
         apply_interface_palette(cx);
         OwnerApi::for_test(temp.path()).expect("owner")
     });
+    let initial = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(InitialDesktopState::capture(
+            &crate::desktop_owner::DesktopOwner::from(owner.clone()),
+        ))
+        .unwrap();
     let (review_presenter, _reviews) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, _proposals) = ProposalPresenter::channel();
     let window = cx
         .open_window(VIEWPORT, |_, cx| {
             cx.new(|cx| {
                 WalletWindow::new(
-                    owner,
+                    owner.clone(),
+                    initial,
                     review_presenter,
-                    Arc::new(Mutex::new(WalletConnectManager::default())),
-                    walletconnect_presenter,
+                    DesktopDapps::local(
+                        owner,
+                        Arc::new(Mutex::new(WalletConnectManager::default())),
+                        walletconnect_presenter,
+                    ),
                     Rc::new(RefCell::new(None)),
                     Arc::new(Mutex::new(None)),
                     temp.path(),
@@ -4762,6 +4781,651 @@ fn summary_batches_preserve_saved_text_and_cover_history(cx: &mut gpui::TestAppC
         let summaries = &wallet.snapshot().unwrap().transaction_previews;
         assert_eq!(summaries[&HEADLINE_ROW], "Send 1 ETH");
         assert_eq!(summaries[&history_id], "Approve USDC");
+    });
+    release(cx, &view);
+}
+
+fn seed_policy_loading_accounts(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    cx.update_entity(view, |wallet, _| {
+        let accounts = ["primary", "savings"].map(|id| WalletMetadata {
+            instance_id: uuid::Uuid::new_v4(),
+            id: id.into(),
+            address: alloy::primitives::Address::from([if id == "primary" { 1 } else { 2 }; 20]),
+            created_at: chrono::Utc::now(),
+            source: ekubo_wallet_core::config::WalletSource::Created,
+            exported_at: None,
+        });
+        fixture_owner(&wallet.owner)
+            .config()
+            .update_for_test(|config| {
+                config.wallets.extend(accounts.clone());
+                Ok(())
+            })
+            .unwrap();
+        let mut store = ekubo_wallet_core::policy_store::PolicyStore::production(
+            fixture_owner(&wallet.owner).config().data_dir(),
+        )
+        .unwrap();
+        for account in accounts {
+            store.register_wallet_without_policy(&account).unwrap();
+        }
+    });
+}
+
+fn settle_policy_loading(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| wallet.policy_loading.is_none()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("policy read did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_policy_loading_keeps_the_latest_account_selection(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            wallet.attach_window(window, cx);
+            wallet.set_route(Route::Policies);
+            wallet.open_policy_editor("primary", window, cx);
+            // Both reads are issued before the foreground can accept either
+            // completion. Returning to the route must not revive the first.
+            wallet.set_route(Route::Accounts);
+            assert!(wallet.policy_loading.is_none());
+            wallet.set_route(Route::Policies);
+            wallet.open_policy_editor("savings", window, cx);
+            assert!(wallet.notification_navigation_blocked());
+        });
+    })
+    .unwrap();
+    settle_policy_loading(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(
+            wallet.policy_action_error.is_none(),
+            "{:?}",
+            wallet.policy_action_error
+        );
+        assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "savings");
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_policy_loading_preserves_a_newer_draft(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            wallet.attach_window(window, cx);
+            wallet.set_route(Route::Policies);
+            wallet.finish_policy_editor("primary", Ok(Vec::new()), window, cx);
+            wallet.open_policy_editor("savings", window, cx);
+            wallet
+                .policy_json_input
+                .as_ref()
+                .unwrap()
+                .update(cx, |input, cx| {
+                    input.set_value("the owner continued editing", window, cx);
+                });
+        });
+    })
+    .unwrap();
+    settle_policy_loading(&view, cx);
+    cx.read_entity(&view, |wallet, cx| {
+        assert_eq!(
+            wallet.policy_json_input.as_ref().unwrap().read(cx).value(),
+            "the owner continued editing"
+        );
+        assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "primary");
+    });
+    release(cx, &view);
+}
+
+fn settle_owner_decisions(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| {
+            !wallet.policy_installing
+                && !wallet.network_proposal_busy
+                && wallet.activity_busy.is_empty()
+        }) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("owner decision did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_discard_does_not_reopen_a_record_after_navigation(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    let request_id = uuid::Uuid::new_v4();
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.set_route(Route::Activity);
+        wallet.discard_unsent_transaction(request_id, cx);
+        assert!(wallet.activity_busy.contains(&request_id));
+        wallet.set_route(Route::Accounts);
+    });
+    settle_owner_decisions(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.route, Route::Accounts);
+        assert!(wallet.selected_record.is_none());
+        // A nonexistent synthetic request fails at core. The result belongs
+        // to its row, even though the owner has moved to a different page.
+        assert!(wallet.activity_feedback[&request_id].error);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_policy_rejection_does_not_replace_a_newer_selection(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            let proposal = PolicyProposal {
+                wallet_instance_id: uuid::Uuid::new_v4(),
+                wallet_id: "primary".into(),
+                wallet_address: alloy::primitives::Address::from([1; 20]),
+                source_revision: 1,
+                policy: WalletPolicy::deny_all(),
+                rationale: "synthetic stale proposal".into(),
+                created_at: chrono::Utc::now(),
+            };
+            wallet.set_route(Route::Policies);
+            wallet.reject_policy_proposal(&proposal, cx);
+            wallet.release_window_state(cx);
+            assert!(
+                wallet.policy_installing,
+                "closing inputs must not enable a second mutation"
+            );
+            wallet.attach_window(window, cx);
+            wallet.open_policy_editor("savings", window, cx);
+        });
+    })
+    .unwrap();
+    settle_owner_decisions(&view, cx);
+    settle_policy_loading(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(
+            wallet.policy_action_error.is_none(),
+            "the old rejection must not label the new editor"
+        );
+        assert_eq!(wallet.policy_editor.as_ref().unwrap().wallet_id, "savings");
+    });
+    release(cx, &view);
+}
+
+fn settle_review_preparation(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| !wallet.review_flow.is_in_progress()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("review operation did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_account_removal_retains_the_review_and_rechecks_before_authorization(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.replace_root(cx, |window, cx| Root::new(view.clone(), window, cx));
+        view.update(cx, |wallet, cx| {
+            wallet.begin_account_removal("primary".into(), cx);
+            assert!(wallet.review_flow.is_in_progress());
+            wallet.begin_account_removal("savings".into(), cx);
+            assert!(wallet.account_action_errors.contains_key("savings"));
+        });
+    })
+    .unwrap();
+    settle_review_preparation(&view, cx);
+    cx.update_entity(&view, |wallet, cx| {
+        let active = wallet.active_review.as_mut().unwrap();
+        let Some(ActiveReviewCompletion::AccountRemoval { reviewed }) = &active.completion else {
+            panic!("account-removal review was not preserved");
+        };
+        assert_eq!(reviewed.wallet.id, "primary");
+        assert_eq!(active.state.document().identity, reviewed.document.identity);
+        // Only synthetic public metadata exists. Removing it makes the held
+        // review stale, so the approval path must fail before native custody.
+        fixture_owner(&wallet.owner)
+            .config()
+            .update_for_test(|config| {
+                config.wallets.retain(|account| account.id != "primary");
+                Ok(())
+            })
+            .unwrap();
+        let generation = active.state.generation();
+        active.state.mark_viewed_to_end(generation);
+        active.state.select(generation, ReviewDecision::Approve);
+        wallet.send_review_command(generation, GuiReviewCommand::Approve, cx);
+    });
+    settle_review_preparation(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(wallet.active_review.is_none());
+        assert!(wallet.account_action_errors["primary"].contains("Could not remove account"));
+        assert!(fixture_owner(&wallet.owner).account("savings").is_ok());
+    });
+    release(cx, &view);
+}
+
+fn settle_legal_acceptance(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| !wallet.legal_accepting) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("legal acceptance did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_legal_acceptance_keeps_the_gate_until_both_documents_are_accepted(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    for document in [LegalDocument::TermsOfService, LegalDocument::PrivacyPolicy] {
+        cx.update_entity(&view, |wallet, cx| {
+            assert!(wallet.legal_gate);
+            assert_eq!(wallet.legal_review.as_ref().unwrap().document, document);
+            wallet.accept_legal(cx);
+            assert!(
+                !wallet.legal_accepting,
+                "unread documents must not be accepted"
+            );
+            wallet.legal_review.as_mut().unwrap().viewed_to_end = true;
+            wallet.accept_legal(cx);
+            assert!(wallet.legal_accepting);
+            assert!(wallet.legal_gate, "a pending write is not acceptance");
+        });
+        settle_legal_acceptance(&view, cx);
+    }
+    cx.read_entity(&view, |wallet, _| {
+        assert!(!wallet.legal_gate);
+        assert!(wallet.legal_review.is_none());
+        let status = fixture_owner(&wallet.owner).legal_status().unwrap();
+        assert!(status.terms_of_service.accepted && status.privacy_policy.accepted);
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_legal_acceptance_failure_keeps_the_review_open(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, _window) = wallet(cx);
+    cx.update_entity(&view, |wallet, cx| {
+        let review = wallet.legal_review.as_mut().unwrap();
+        review.digest = "stale document".into();
+        review.viewed_to_end = true;
+        wallet.accept_legal(cx);
+    });
+    settle_legal_acceptance(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert!(wallet.legal_gate);
+        let review = wallet.legal_review.as_ref().unwrap();
+        assert_eq!(review.document, LegalDocument::TermsOfService);
+        assert!(
+            review
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Could not accept document")
+        );
+        assert!(
+            !fixture_owner(&wallet.owner)
+                .legal_status()
+                .unwrap()
+                .terms_of_service
+                .accepted
+        );
+    });
+    release(cx, &view);
+}
+
+fn settle_setting_saves(view: &Entity<WalletWindow>, cx: &mut gpui::TestAppContext) {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(view, |wallet, _| {
+            !wallet.appearance_saves.in_flight && !wallet.testnet_saves.in_flight
+        }) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("settings writes did not finish");
+}
+
+#[gpui::test]
+fn asynchronous_settings_preserve_the_latest_choice_in_storage_and_ui(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet.set_appearance_preference(AppearancePreference::Dark, window, cx);
+            wallet.set_appearance_preference(AppearancePreference::Light, window, cx);
+            wallet.set_appearance_preference(AppearancePreference::System, window, cx);
+            wallet.set_testnet_mode(true, cx);
+            wallet.set_testnet_mode(false, cx);
+            assert!(wallet.appearance_saves.in_flight && wallet.testnet_saves.in_flight);
+        });
+    })
+    .unwrap();
+    settle_setting_saves(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.appearance_preference, AppearancePreference::System);
+        assert_eq!(
+            fixture_owner(&wallet.owner)
+                .appearance_preference()
+                .unwrap(),
+            AppearancePreference::System
+        );
+        assert!(!wallet.testnet_mode);
+        assert!(!fixture_owner(&wallet.owner).testnet_mode().unwrap());
+        assert!(!wallet.route_errors.contains_key(&Route::Settings));
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_appearance_save_finishes_after_the_window_closes(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |wallet, cx| {
+            wallet.set_appearance_preference(AppearancePreference::Dark, window, cx);
+            wallet.set_appearance_preference(AppearancePreference::Light, window, cx);
+        });
+        window.remove_window();
+    })
+    .unwrap();
+    settle_setting_saves(&view, cx);
+    cx.read_entity(&view, |wallet, _| {
+        assert_eq!(wallet.appearance_preference, AppearancePreference::Light);
+        assert_eq!(
+            fixture_owner(&wallet.owner)
+                .appearance_preference()
+                .unwrap(),
+            AppearancePreference::Light
+        );
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_guided_setup_load_preserves_stored_progress_and_saves_new_observations(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    seed_policy_loading_accounts(&view, cx);
+    cx.update_entity(&view, |wallet, cx| {
+        fixture_owner(&wallet.owner)
+            .set_guided_setup(&GuidedSetupState {
+                completed: [SetupTask::InstallAgent.key().to_owned()].into(),
+            })
+            .unwrap();
+        let mut snapshot = quiet_snapshot();
+        snapshot.accounts = Ok(vec![
+            fixture_owner(&wallet.owner).account("primary").unwrap(),
+        ]);
+        wallet.desktop_snapshot = Some(Arc::new(snapshot));
+        wallet.guided_setup = GuidedSetup::unloaded();
+        wallet.refresh_guided_setup(cx);
+        wallet.refresh_guided_setup(cx);
+        assert!(wallet.guided_setup_loading);
+        assert!(
+            !wallet.guided_setup.is_loaded(),
+            "the checklist must wait for stored history"
+        );
+    });
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(&view, |wallet, _| {
+            !wallet.guided_setup_loading && !wallet.guided_setup_saves.in_flight
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    cx.read_entity(&view, |wallet, _| {
+        assert!(!wallet.guided_setup_loading && !wallet.guided_setup_saves.in_flight);
+        assert!(wallet.guided_setup.is_complete(SetupTask::InstallAgent));
+        assert!(wallet.guided_setup.is_complete(SetupTask::CreateAccount));
+        let stored = fixture_owner(&wallet.owner).guided_setup().unwrap();
+        assert!(stored.completed.contains(SetupTask::InstallAgent.key()));
+        assert!(stored.completed.contains(SetupTask::CreateAccount.key()));
+    });
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn pairing_registration_keeps_the_existing_cancel_control_available(cx: &mut gpui::TestAppContext) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cx.update_entity(&view, |wallet, _| {
+        wallet.set_route(Route::WalletConnect);
+        wallet.walletconnect_starting = Some(cancel.clone());
+    });
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &["cancel-walletconnect", "walletconnect-pairing-status"],
+    );
+    assert!(bounds.iter().all(Option::is_some));
+    cx.update_entity(&view, WalletWindow::cancel_walletconnect_pairing);
+    assert!(cancel.is_cancelled());
+    assert!(cx.read_entity(&view, |wallet, _| wallet.walletconnect_starting.is_some()));
+    // Stay busy until registration acknowledges cancellation, so a second press
+    // cannot consume the same clipboard link while the first RPC is unresolved.
+    let bounds = measure(
+        cx,
+        window,
+        &view,
+        &["cancel-walletconnect", "walletconnect-pairing-status"],
+    );
+    assert!(bounds.iter().all(Option::is_some));
+    release(cx, &view);
+}
+
+#[gpui::test]
+fn asynchronous_dapp_disconnect_removes_only_its_session_and_preserves_read_failures(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    let manager = Arc::new(Mutex::new(WalletConnectManager::default()));
+    let uri = |topic: &str| {
+        format!(
+            "wc:{}@2?relay-protocol=irn&symKey={}",
+            topic.repeat(32),
+            "22".repeat(32)
+        )
+    };
+    let (first, first_summary) = manager.lock().unwrap().begin_uri(&uri("11")).unwrap();
+    let (_second, second_summary) = manager.lock().unwrap().begin_uri(&uri("33")).unwrap();
+    let (presenter, _incoming) = ProposalPresenter::channel();
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.walletconnect = DesktopDapps::local(
+            fixture_owner(&wallet.owner).clone(),
+            manager.clone(),
+            presenter,
+        );
+        wallet.set_walletconnect_sessions(manager.lock().unwrap().sessions());
+        wallet.walletconnect_connecting = Some(first_summary.id);
+        wallet.update_walletconnect_sessions(
+            wallet.walletconnect_sessions_generation,
+            Err(anyhow::anyhow!("transport disconnected")),
+        );
+        assert_eq!(wallet.walletconnect_sessions.len(), 2);
+        assert_eq!(wallet.walletconnect_connecting, Some(first_summary.id));
+        assert!(wallet.walletconnect_sessions_error.is_some());
+        wallet.update_walletconnect_sessions(
+            wallet.walletconnect_sessions_generation,
+            Ok(manager.lock().unwrap().sessions()),
+        );
+        assert!(wallet.walletconnect_sessions_error.is_none());
+        wallet.disconnect_walletconnect(first_summary.id, cx);
+        wallet.disconnect_walletconnect(first_summary.id, cx);
+        assert_eq!(wallet.walletconnect_disconnecting.len(), 1);
+    });
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read_entity(&view, |wallet, _| {
+            wallet.walletconnect_disconnecting.is_empty()
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(first.shutdown.is_cancelled());
+    cx.read_entity(&view, |wallet, _| {
+        assert!(wallet.walletconnect_disconnecting.is_empty());
+        assert!(wallet.walletconnect_connecting.is_none());
+        assert_eq!(wallet.walletconnect_sessions.len(), 1);
+        assert_eq!(wallet.walletconnect_sessions[0].id, second_summary.id);
+        assert!(!wallet.route_errors.contains_key(&Route::WalletConnect));
+    });
+    cx.update_entity(&view, |wallet, _| {
+        let stale = wallet.walletconnect_sessions_generation.wrapping_sub(1);
+        wallet.update_walletconnect_sessions(stale, Ok(vec![first_summary, second_summary]));
+        assert_eq!(wallet.walletconnect_sessions.len(), 1);
+        wallet.update_walletconnect_sessions(stale, Err(anyhow::anyhow!("old failed read")));
+        assert!(wallet.walletconnect_sessions_error.is_none());
+    });
+    release(cx, &view);
+}
+
+fn dapp_prompt_for_retirement() -> (
+    DesktopDappPrompt,
+    oneshot::Receiver<crate::walletconnect::ProposalCommand>,
+) {
+    let document = ReviewDocument::from_request(
+        ApprovalRequest::new(ApprovalKind::PolicyException, "Dapp", "Select an account"),
+        vec![],
+    );
+    let (response, receiver) = oneshot::channel();
+    let prompt = crate::walletconnect::ProposalPrompt {
+        session_id: uuid::Uuid::new_v4(),
+        unselected_document: document.clone(),
+        choices: vec![crate::walletconnect::ProposalChoice {
+            account: WalletMetadata {
+                id: "primary".into(),
+                instance_id: uuid::Uuid::new_v4(),
+                address: alloy::primitives::Address::from([1; 20]),
+                created_at: chrono::Utc::now(),
+                source: crate::config::WalletSource::Created,
+                exported_at: None,
+            },
+            document,
+            scope: walletconnect_session::ApprovedScope {
+                address: alloy::primitives::Address::from([1; 20]).to_checksum(None),
+                chains: vec!["eip155:1".into()],
+                methods: vec!["eth_accounts".into()],
+                grants: vec![],
+                events: vec![],
+            },
+        }],
+        response,
+    };
+    (DesktopDappPrompt::local(prompt), receiver)
+}
+
+#[gpui::test]
+fn expired_dapp_reviews_retire_without_reopening_the_wallet_and_advance_the_queue(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, window) = wallet(cx);
+    settle(cx, &view);
+    let (first, first_response) = dapp_prompt_for_retirement();
+    let (second, second_response) = dapp_prompt_for_retirement();
+    let second_identity = second.unselected_document.identity.clone();
+    let (third, third_response) = dapp_prompt_for_retirement();
+    cx.update_entity(&view, |wallet, cx| {
+        assert!(wallet.receive_dapp_proposal_update(
+            DappProposalUpdate::Changed(vec![first, second, third]),
+            cx
+        ));
+        assert!(wallet.active_review.is_some());
+        assert_eq!(wallet.queued_reviews.pending.len(), 2);
+    });
+    drop(first_response);
+    drop(third_response);
+    cx.update_entity(&view, |wallet, cx| {
+        assert!(!wallet.receive_dapp_proposal_update(DappProposalUpdate::Changed(vec![]), cx));
+        let active = wallet.active_review.as_ref().unwrap();
+        assert_eq!(active.state.document().identity, second_identity);
+        assert!(!active.selection_is_complete());
+        assert!(wallet.queued_reviews.pending.is_empty());
+    });
+    drop(second_response);
+    cx.update_entity(&view, |wallet, cx| {
+        assert!(!wallet.receive_dapp_proposal_update(
+            DappProposalUpdate::Failed("Review feed disconnected".into()),
+            cx
+        ));
+        assert!(wallet.active_review.is_none());
+        assert!(wallet.walletconnect_reviews_error.is_some());
+    });
+    assert!(measure(cx, window, &view, &["walletconnect-reviews-error"])[0].is_some());
+    release(cx, &view);
+}
+
+// Fixture storage access stays explicit and test-only. The production window
+// must never unwrap a service owner into local wallet authority.
+fn fixture_owner(owner: &crate::desktop_owner::DesktopOwner) -> &OwnerApi {
+    match owner {
+        crate::desktop_owner::DesktopOwner::Local(owner) => owner,
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        crate::desktop_owner::DesktopOwner::Service(_) => {
+            panic!("expected synthetic local fixture")
+        }
+    }
+}
+
+#[gpui::test]
+fn stale_transaction_inspection_cannot_replace_a_newer_read_or_repopulate_cleared_history(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_directory, view, _window) = wallet(cx);
+    settle(cx, &view);
+    let replaced = uuid::Uuid::new_v4();
+    let cleared = uuid::Uuid::new_v4();
+    let older = uuid::Uuid::new_v4();
+    let newer = uuid::Uuid::new_v4();
+    cx.update_entity(&view, |wallet, cx| {
+        wallet.activity_inspections.insert(replaced, ActivityInspectionState::Loading(newer));
+        wallet.activity_inspections.insert(cleared, ActivityInspectionState::Loading(older));
+        wallet.activity_inspections.remove(&cleared);
+        for request_id in [replaced, cleared] {
+            wallet.finish_transaction_inspection(request_id, older, Err(anyhow::anyhow!("old response")), cx);
+        }
+        assert!(matches!(wallet.activity_inspections.get(&replaced),
+            Some(ActivityInspectionState::Loading(current)) if *current == newer));
+        assert!(!wallet.activity_inspections.contains_key(&cleared));
+        wallet.finish_transaction_inspection(replaced, newer, Err(anyhow::anyhow!("current response")), cx);
+        assert!(matches!(wallet.activity_inspections.get(&replaced),
+            Some(ActivityInspectionState::Failed(message)) if message.contains("current response")));
     });
     release(cx, &view);
 }
