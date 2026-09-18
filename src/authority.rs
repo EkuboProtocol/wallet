@@ -47,6 +47,7 @@ use ekubo_wallet_core::{
         TokenProposal, TokenStore, read_portfolio,
     },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
+    typed_data_request::valid_until_expired,
 };
 use std::{
     collections::BTreeMap,
@@ -2514,6 +2515,19 @@ impl OwnerApi {
         let mut store = TypedDataStore::production(self.config.data_dir())?;
         let request = store.get(request_id)?;
         ensure_reviewed_digest(reviewed_digest, &request.digest)?;
+        // The producer's exclusive cutoff is enforced at signing time as
+        // well as at release: an approval that arrived after expiry signs
+        // nothing.
+        let cutoff = request
+            .valid_until
+            .as_deref()
+            .map(str::parse::<u64>)
+            .transpose()
+            .context("queued typed-data cutoff is invalid")?;
+        ensure!(
+            !valid_until_expired(cutoff, Utc::now().timestamp()),
+            "this typed-data request passed its signing cutoff; queue a fresh request"
+        );
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
         let policies = PolicyStore::production(self.config.data_dir())?;

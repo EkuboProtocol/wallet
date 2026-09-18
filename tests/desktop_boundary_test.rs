@@ -19,7 +19,7 @@ fn release_has_no_terminal_or_stdio_dependency_surface() {
 }
 
 #[test]
-fn mcp_has_no_owner_capability_or_local_file_transport() {
+fn mcp_has_no_owner_capability() {
     let source = fs::read_to_string(root().join("src/mcp.rs")).unwrap();
     for forbidden in [
         "OwnerApi",
@@ -43,10 +43,23 @@ fn mcp_has_no_owner_capability_or_local_file_transport() {
             "MCP module contains owner surface {forbidden}"
         );
     }
+}
+
+#[test]
+fn file_artifact_reads_stay_bounded_and_indistinguishable() {
+    // ERC-8410 permits `file:` artifact references, and the wallet accepts
+    // them — so this test pins the controls that keep a local-producer
+    // convenience from becoming a general file-reading primitive for any
+    // relay that can reach the wallet: integrity block and byte count
+    // required before any read, one bounded read, length-then-digest before
+    // parsing, and a single content-free error for every failure mode.
     let resolver =
         fs::read_to_string(root().join("crates/ekubo-wallet-core/src/plan_fetch.rs")).unwrap();
+    assert!(resolver.contains("fetch_file_verified"));
+    assert!(resolver.contains("named by a file URL\""));
+    assert!(resolver.contains("could not be resolved"));
+    assert!(resolver.contains("indistinguishable"));
     assert!(!resolver.contains("read_local_file"));
-    assert!(!resolver.contains("ArtifactSource::LocalFile"));
 }
 
 #[test]
