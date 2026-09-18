@@ -47,8 +47,10 @@ changes no policy, network, or token, and refuses a request the user already
 decided. An envelope already broadcast is `wallet_attempt_cancel` instead, which
 is the unrelated on-chain operation of outbidding it at its own nonce.
 
-Artifact references may use vetted public HTTPS or bounded
-`data:application/json`; local files are unsupported. Temporary forks are
+Artifact references may use vetted public HTTPS, bounded
+`data:application/json`, or bounded local `file:` URLs naming an absolute path
+with an empty host or `localhost` (integrity block and byte count required;
+every file failure reports one indistinguishable error). Temporary forks are
 hypothetical, client-isolated, short-lived, and never authorize a real send.
 Create one only with `wallet_create_fork`.
 

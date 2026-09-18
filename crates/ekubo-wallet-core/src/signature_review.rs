@@ -24,6 +24,7 @@ use crate::typed_data::{
     PendingTypedData, PermitApproval, interpret_permit_approvals, parse_typed_data,
 };
 use alloy::primitives::{Address, U256};
+use chrono::{DateTime, Utc};
 use std::str::FromStr as _;
 
 /// What a payload's permit interpretation came to.
@@ -74,6 +75,26 @@ impl PermitInterpretation {
     }
 }
 
+/// Human reading of an ERC-8410 signing cutoff: the raw Unix seconds plus
+/// the UTC time they name, so a reviewer is never asked to approve against
+/// a number they cannot place. Unparseable input is shown raw rather than
+/// hidden: the cutoff still binds at signing and release.
+fn cutoff_description(cutoff: &str) -> String {
+    match cutoff.parse::<u64>() {
+        Ok(seconds) => match i64::try_from(seconds)
+            .ok()
+            .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
+        {
+            Some(when) => format!(
+                "{cutoff} ({} UTC); the wallet will not sign at or after this time",
+                when.format("%Y-%m-%d %H:%M:%S"),
+            ),
+            None => format!("{cutoff} (Unix seconds)"),
+        },
+        Err(_) => cutoff.to_owned(),
+    }
+}
+
 /// Build the reviewer's document for an EIP-712 typed-data signature.
 ///
 /// `token_metadata` comes from the owner-confirmed token database and nothing
@@ -94,15 +115,18 @@ pub fn typed_data_review_document(
     )
     .fact("Wallet", request.wallet_id.clone())
     .fact("Signer", request.wallet_address.to_checksum(None))
-    .fact("Chain", request.chain_id.clone())
-    .fact(
+    .fact("Chain", request.chain_id.clone());
+    if let Some(cutoff) = request.valid_until.as_deref() {
+        summary = summary.fact("Signing cutoff", cutoff_description(cutoff));
+    }
+    summary = summary.fact(
         "Requester",
         request
             .requester
             .clone()
             .unwrap_or_else(|| "Unknown requester".into()),
-    )
-    .digest(request.digest.clone());
+    );
+    summary = summary.digest(request.digest.clone());
     summary.id = request.request_id;
 
     summary = summary.section_kind(ApprovalSectionKind::Effects, "What signing this grants");

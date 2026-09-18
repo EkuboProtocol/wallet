@@ -73,4 +73,13 @@ review. By default, transaction notifications name the account and network but
 never show the request identifier or contain approval actions.
 
 Public HTTPS and bounded `data:application/json` artifacts are supported.
-Local-file artifacts are not.
+Local-file (`file:`) artifacts are supported under the ERC-8410 file-transport
+rules: an absolute path with an empty host or `localhost`, integrity block
+and byte count required before any read, one read bounded by the artifact
+size cap, length-then-digest verification before parsing, no network access,
+and a single content-free error for missing, oversized, mismatched, and
+unreadable files. A file path is caller-chosen text, never publisher
+provenance: it is shown as the local machine at most, and policy source
+matching treats it as unattributed. Consumers that do not want the posture
+reject `file:` envelopes; nothing about verification makes a plan or
+signature request trustworthy.
