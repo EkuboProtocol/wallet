@@ -6,6 +6,7 @@ on:
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/build-release-artifacts.yml"
+      - ".github/workflows/gpui-provenance.yml"
       - ".github/workflows/release-policy.yml"
       - "scripts/check-action-pins.py"
   push:
@@ -14,6 +15,7 @@ on:
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/build-release-artifacts.yml"
+      - ".github/workflows/gpui-provenance.yml"
       - ".github/workflows/release-policy.yml"
       - "scripts/check-action-pins.py"
 

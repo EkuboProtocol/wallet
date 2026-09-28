@@ -1,0 +1,43 @@
+name: GPUI provenance
+
+# The gpui-pre crates are Zed snapshots that the gpui-component maintainers,
+# not Zed, publish to crates.io. Any change that can move a locked GPUI crate
+# must show that its published sources are the reviewed upstream commits.
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".cargo/**"
+      - "crates/gpui-tokio/**"
+      - "scripts/check-gpui-provenance.py"
+      - "scripts/check_gpui_provenance_test.py"
+      - ".github/workflows/gpui-provenance.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".cargo/**"
+      - "crates/gpui-tokio/**"
+      - "scripts/check-gpui-provenance.py"
+      - "scripts/check_gpui_provenance_test.py"
+      - ".github/workflows/gpui-provenance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    name: Compare locked GPUI crates with upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test that tampering fails the check
+        run: python3 scripts/check_gpui_provenance_test.py
+
+      - name: Compare with Zed, zed-industries/reqwest, and gpui-component
+        run: python3 scripts/check-gpui-provenance.py

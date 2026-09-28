@@ -313,9 +313,13 @@ local MCP IPC listener directly.
 
 GPUI comes from the `gpui-pre-*` crates.io snapshots of Zed, which the
 gpui-component maintainers publish rather than Zed. Exact version pins and the
-lockfile confine a compromised publisher to an explicit bump. Every bump must
-compare the published sources against the Zed revision recorded in
-`package.metadata.gpui-revisions` before it lands.
+lockfile confine a compromised publisher to an explicit bump. The GPUI
+provenance workflow runs `scripts/check-gpui-provenance.py` on every change to
+the manifest or lockfile. The script compares each locked crate, file by file,
+with the upstream commits recorded in `package.metadata.gpui-revisions`: Zed,
+the zed-industries/reqwest commit named by `gpui-pre-reqwest`, and the
+gpui-component release. It accepts only three mechanical `gpui-pre` rewrites,
+reproduces each from Zed's source, and pins the added macro facade by hash.
 
 ## Local platform and lifecycle
 
