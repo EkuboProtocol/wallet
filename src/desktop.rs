@@ -59,7 +59,10 @@ use gpui_component::{
     dialog::{Dialog, DialogButtonProps, DialogFooter},
     form::{field, v_form},
     h_flex,
-    input::{Input, InputContentType, InputEvent, InputState},
+    input::{
+        Editor, EditorState, Input, InputContentType, InputEvent, InputState, Textarea,
+        TextareaState,
+    },
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     menu::DropdownMenu as _,
     scroll::{ScrollableElement as _, ScrollbarHandle},
@@ -243,6 +246,14 @@ enum OverflowScrollHandle {
 }
 
 impl ScrollbarHandle for OverflowScrollHandle {
+    fn viewport_bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+        match self {
+            Self::Continuous(handle) => handle.viewport_bounds(),
+            Self::Uniform(handle) => handle.viewport_bounds(),
+            Self::Variable(handle) => handle.viewport_bounds(),
+        }
+    }
+
     fn offset(&self) -> gpui::Point<gpui::Pixels> {
         match self {
             Self::Continuous(handle) => handle.offset(),
@@ -561,6 +572,14 @@ fn app_input(state: &Entity<InputState>, cx: &App) -> Input {
     // 44px interaction target; the surface override matches the Figma field
     // fill while leaving the component's focus border intact.
     Input::new(state).large().bg(cx.theme().secondary)
+}
+
+fn app_textarea(state: &Entity<TextareaState>, cx: &App) -> Textarea {
+    Textarea::new(state).large().bg(cx.theme().secondary)
+}
+
+fn app_editor(state: &Entity<EditorState>, cx: &App) -> Editor {
+    Editor::new(state).bg(cx.theme().secondary)
 }
 
 fn field_error(
@@ -2989,7 +3008,7 @@ pub struct WalletWindow {
     network_aliases_input: Option<Entity<InputState>>,
     network_chain_id_input: Option<Entity<InputState>>,
     network_finality_confirmations_input: Option<Entity<InputState>>,
-    network_rpc_urls_input: Option<Entity<InputState>>,
+    network_rpc_urls_input: Option<Entity<TextareaState>>,
     network_native_name_input: Option<Entity<InputState>>,
     network_native_symbol_input: Option<Entity<InputState>>,
     network_native_decimals_input: Option<Entity<InputState>>,
@@ -3003,7 +3022,7 @@ pub struct WalletWindow {
     activity_detail_scroll_handle: ScrollHandle,
     activity_detail_overflow_indicator: ScrollOverflowIndicator,
     activity_detail_record: Cell<Option<uuid::Uuid>>,
-    policy_json_input: Option<Entity<InputState>>,
+    policy_json_input: Option<Entity<EditorState>>,
     policy_editor: Option<PolicyEditor>,
     policy_account_id: Option<String>,
     policy_installing: bool,
@@ -6143,6 +6162,19 @@ fn replace_input_value(
     }
 }
 
+fn replace_textarea_value(
+    input: Option<&Entity<TextareaState>>,
+    value: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(input) = input {
+        input.update(cx, |input, cx| {
+            input.set_value(value.into(), window, cx);
+        });
+    }
+}
+
 /// One endpoint per line, which is the only readable shape for a field that
 /// routinely holds three or four URLs. It is also why the field it fills has
 /// to be a multi-line input: see `RPC_URLS_PLACEHOLDER`.
@@ -7318,14 +7350,11 @@ impl WalletWindow {
         }
         if self.network_rpc_urls_input.is_none() {
             self.network_rpc_urls_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    // `rows` alone leaves the field single-line, and a
-                    // single-line input shapes its text with `shape_line`,
-                    // which panics on a newline instead of degrading. Both
-                    // this placeholder and the value the editor seeds from an
-                    // existing network span lines, so opening the network
-                    // editor aborted the process without this.
-                    .multi_line(true)
+                // A single-line input shapes its text with `shape_line`, which
+                // panics on a newline instead of degrading. Both this
+                // placeholder and the value the editor seeds from an existing
+                // network span lines, so this must stay a textarea.
+                TextareaState::new(window, cx)
                     .rows(5)
                     .placeholder(RPC_URLS_PLACEHOLDER)
             }));
@@ -7358,8 +7387,8 @@ impl WalletWindow {
         }
         if self.policy_json_input.is_none() {
             self.policy_json_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor("json")
+                EditorState::new(window, cx)
+                    .language("json")
                     // A folded object leaves a line that looks like an empty
                     // document rather than a closed one, and a policy read as
                     // empty is a policy read as permitting nothing. The
@@ -7373,7 +7402,6 @@ impl WalletWindow {
                     // panel's own frame where it is; scrolling the surrounding
                     // container instead took both of those away with the text.
                     .soft_wrap(false)
-                    .rows(20)
                     .placeholder("Select an account to inspect and edit its policy")
             }));
         }
@@ -10197,7 +10225,6 @@ impl WalletWindow {
             self.network_display_name_input.as_ref(),
             self.network_aliases_input.as_ref(),
             self.network_chain_id_input.as_ref(),
-            self.network_rpc_urls_input.as_ref(),
             self.network_native_name_input.as_ref(),
             self.network_native_symbol_input.as_ref(),
             self.network_native_decimals_input.as_ref(),
@@ -10206,6 +10233,7 @@ impl WalletWindow {
         ] {
             replace_input_value(input, "", window, cx);
         }
+        replace_textarea_value(self.network_rpc_urls_input.as_ref(), "", window, cx);
         self.network_editor_open = true;
         self.network_editor_scroll_handle = ScrollHandle::new();
         self.network_editor_overflow_indicator
@@ -10266,10 +10294,7 @@ impl WalletWindow {
     /// Lay the network editor into the dialog the component library hands it.
     ///
     /// Named rather than written inline in the `open_dialog` builder so a
-    /// render test can draw the dialog itself. It cannot open one: `Root`
-    /// installs a macOS hit-test forwarder over the platform window, which a
-    /// test window does not have, so a test that opened the dialog the way a
-    /// click does would abort before it drew anything.
+    /// render test can open the same dialog without a click.
     fn build_network_editor_dialog(
         dialog: Dialog,
         view: &WeakEntity<Self>,
@@ -10420,7 +10445,7 @@ impl WalletWindow {
             window,
             cx,
         );
-        replace_input_value(
+        replace_textarea_value(
             self.network_rpc_urls_input.as_ref(),
             rpc_urls_for_editor(&network.rpc_urls),
             window,
@@ -15267,7 +15292,7 @@ impl WalletWindow {
                             .w_full()
                             .h(rems(9.0))
                             .child(
-                                app_input(rpc_urls, cx)
+                                app_textarea(rpc_urls, cx)
                                     .aria_label("RPC endpoints")
                                     .w_full()
                                     .h_full()
@@ -19650,7 +19675,7 @@ impl WalletWindow {
                                     .min_h_0()
                                     .flex_1()
                                     .child(
-                                        app_input(input, cx)
+                                        app_editor(input, cx)
                                             .aria_label("Policy JSON")
                                             .font_family(MONO_FONT_FAMILY)
                                             .size_full()
@@ -20257,37 +20282,6 @@ impl Render for WalletWindow {
     }
 }
 
-/// Hosts the component library's overlay layers outside `WalletWindow`.
-/// Dialog builders may read the wallet entity while this separate entity is
-/// rendering, avoiding both an omitted layer and a re-entrant entity read.
-struct ComponentLayerHost {
-    content: AnyView,
-}
-
-impl ComponentLayerHost {
-    fn new(content: impl Into<AnyView>) -> Self {
-        Self {
-            content: content.into(),
-        }
-    }
-}
-
-impl Render for ComponentLayerHost {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
-
-        div()
-            .relative()
-            .size_full()
-            .child(self.content.clone())
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
-    }
-}
-
 type WalletWindowSlot = Rc<RefCell<Option<WindowHandle<Root>>>>;
 #[cfg(target_os = "macos")]
 type DockReopenTarget = Rc<RefCell<Option<(Entity<WalletWindow>, WalletWindowSlot)>>>;
@@ -20554,8 +20548,10 @@ fn show_wallet_window(
         },
         |window, cx| {
             window.set_window_title(&wallet_window_title());
-            let layer_host = cx.new(|_| ComponentLayerHost::new(wallet_content));
-            cx.new(|cx| Root::new(layer_host, window, cx))
+            // gpui-component mounts its dialog, sheet, and notification
+            // layers as a `Root` plugin: a separate entity rendered above the
+            // wallet, so dialog builders may read the wallet entity.
+            cx.new(|cx| Root::new(wallet_content, window, cx))
         },
     )?;
     window_handle.update(cx, |_, window, _| window.activate_window())?;

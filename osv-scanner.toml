@@ -33,15 +33,17 @@ id = "RUSTSEC-2026-0192"
 ignoreUntil = 2027-02-15
 reason = "Informational unmaintained notice for transitive ttf-parser; migrate the font stack before this exception expires."
 
-# deps.dev cannot resolve license metadata for these pinned Git packages, but
-# their exact Cargo manifests declare Apache-2.0. Keep that evidence explicit
-# and expiring instead of allowing every package with UNKNOWN metadata.
+# deps.dev had not yet indexed these exact crates.io snapshots when they were
+# pinned, although earlier versions of the same crates resolve to Apache-2.0
+# there and their published manifests declare Apache-2.0. Keep that evidence
+# explicit and short-lived instead of allowing every package with UNKNOWN
+# metadata; drop it once deps.dev reports the pinned versions.
 [[PackageOverrides]]
-name = "collections|derive_refineable|gpui-component(-assets|-macros)?|gpui_(apple|linux|macos|macros|platform|shared_string|tokio|util|web|wgpu|windows)|http_client|perf|refineable|sum_tree|util_macros"
+name = "gpui-base|gpui-component(-macros)?|gpui-kit-assets|gpui-pre(-[a-z-]+)?"
 nameIsRegex = true
 license.override = ["Apache-2.0"]
-effectiveUntil = 2027-02-15
-reason = "The exact pinned Git package manifest declares Apache-2.0; deps.dev has no matching package-version record."
+effectiveUntil = 2026-11-30
+reason = "The exact pinned crates.io manifest declares Apache-2.0; deps.dev has no matching package-version record yet."
 
 # OSV-Scanner's allowlist accepts SPDX license identifiers but not standalone
 # exception identifiers. LLVM-exception only relaxes Apache-2.0's conditions,

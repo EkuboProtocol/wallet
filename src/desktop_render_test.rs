@@ -89,19 +89,30 @@ fn wallet(
     let (review_presenter, _reviews) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, _proposals) = ProposalPresenter::channel();
     let walletconnect = Arc::new(Mutex::new(WalletConnectManager::default()));
-    let window = cx.add_window(|_, cx| {
-        WalletWindow::new(
-            owner,
-            review_presenter,
-            walletconnect,
-            walletconnect_presenter,
-            Rc::new(RefCell::new(None)),
-            Arc::new(Mutex::new(None)),
-            directory.path(),
-            cx,
-        )
+    // Wrapped in `Root` as the application wraps it: gpui-component's dialog,
+    // sheet, and notification layers live in a `Root` plugin, and a dialog
+    // cannot render in a window without one.
+    let window = cx.add_window(|window, cx| {
+        let wallet = cx.new(|cx| {
+            WalletWindow::new(
+                owner,
+                review_presenter,
+                walletconnect,
+                walletconnect_presenter,
+                Rc::new(RefCell::new(None)),
+                Arc::new(Mutex::new(None)),
+                directory.path(),
+                cx,
+            )
+        });
+        Root::new(wallet, window, cx)
     });
-    let view = window.root(cx).expect("root view");
+    let view = window
+        .update(cx, |root, _, _| {
+            root.view().clone().downcast::<WalletWindow>()
+        })
+        .expect("window must be open")
+        .expect("root view");
     // The constructor starts two lookups on the tokio thread whose answers
     // depend on the machine and land whenever that thread gets to them:
     // agent detection, and on Linux the polkit probe. Either one changes the
@@ -273,10 +284,10 @@ fn measure(
 ///
 /// The chrome's widths and heights are relative now, and a laid-out bound is
 /// still absolute, so an assertion comparing the two has to convert one of
-/// them. It asks the window rather than assuming 16: these tests open a bare
-/// `WalletWindow` rather than the `Root` the application wraps it in, and
-/// `Root` is what copies `theme.font_size` onto the window's rem — so if
-/// either of those ever changes, this follows instead of quietly passing.
+/// them. It asks the window rather than assuming 16: `Root`'s component
+/// plugin is what copies `theme.font_size` onto the window's rem, and only
+/// when the window's own root draws — so if either of those ever changes,
+/// this follows instead of quietly passing.
 fn resolved(
     cx: &mut gpui::TestAppContext,
     window: gpui::AnyWindowHandle,
@@ -1522,28 +1533,6 @@ struct NetworkEditorLayout {
     content: gpui::Pixels,
 }
 
-/// Draws the add/edit network dialog the way `Root` would.
-///
-/// `overlay(false)` is the one departure, and it is not about layout: the
-/// overlay's mouse handling reads the window's `Root`, which a test window has
-/// none of. The backdrop it drops is behind the dialog and the size of the
-/// window either way.
-struct NetworkEditorDialogTestView {
-    wallet: Entity<WalletWindow>,
-}
-
-impl Render for NetworkEditorDialogTestView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        WalletWindow::build_network_editor_dialog(
-            Dialog::new(cx),
-            &self.wallet.downgrade(),
-            window,
-            cx,
-        )
-        .overlay(false)
-    }
-}
-
 /// Draw the add/edit network dialog in a window of the given size.
 fn draw_network_editor(
     cx: &mut gpui::TestAppContext,
@@ -1555,25 +1544,22 @@ fn draw_network_editor(
     // inputs are built on the wallet's first render, and the dialog renders
     // nothing without them.
     draw(cx, window, view);
-    let dialog_view = cx.new(|_| NetworkEditorDialogTestView {
-        wallet: view.clone(),
-    });
     let mut visual = gpui::VisualTestContext::from_window(window, cx);
     // The dialog sizes itself against `window.viewport_size()`, so the window
     // has to actually be this size — drawing into a space of the size is a
     // different claim, and not the one the dialog reads.
     visual.simulate_resize(viewport);
-    visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
-        gpui::AnyView::from(dialog_view.clone()).into_any_element()
+    // Opened the way a click opens it, so the frame measured below is the
+    // window's own: the dialog in the component library's `Root` layer, above
+    // the wallet.
+    let wallet = view.downgrade();
+    visual.update(|window, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
+            WalletWindow::build_network_editor_dialog(dialog, &wallet, window, cx)
+        });
     });
+    visual.run_until_parked();
 
-    // Read the frame that was just drawn, before parking — the same order
-    // `measure_at` uses, and for the same reason. Parking first lets anything
-    // still pending repaint the window from its own root, which has no dialog
-    // in it; the bounds recorded for the dialog are replaced by that frame's,
-    // and the form reads as never laid out. Whether a repaint happened to be
-    // pending is what decided this test, and under a loaded machine it usually
-    // was.
     let form = visual
         .debug_bounds("network-editor-body")
         .expect("the network editor form must be laid out");
@@ -1589,8 +1575,8 @@ fn draw_network_editor(
             .content_size()
             .height
     });
+    visual.update(gpui_component::WindowExt::close_all_dialogs);
     visual.run_until_parked();
-    drop(dialog_view);
     NetworkEditorLayout {
         form,
         pane,
