@@ -12,6 +12,7 @@ failures = []
 for workflow in [
     pathlib.Path(".github/workflows/ci.yml"),
     pathlib.Path(".github/workflows/build-release-artifacts.yml"),
+    pathlib.Path(".github/workflows/gpui-provenance.yml"),
     pathlib.Path(".github/workflows/release.yml"),
     pathlib.Path(".github/workflows/release-policy.yml"),
 ]:

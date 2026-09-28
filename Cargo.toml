@@ -123,8 +123,11 @@ files = { "contrib/polkit/com.ekubo.wallet.policy" = "/usr/share/polkit-1/action
 
 [package.metadata.gpui-revisions]
 # The Zed commit the pinned gpui-pre snapshot was cut from, as named in the
-# gpui-pre crate description, and the gpui-component commit of its release.
+# gpui-pre crate description; the zed-industries/reqwest commit named in the
+# gpui-pre-reqwest description; and the gpui-component commit of its release.
+# scripts/check-gpui-provenance.py compares the locked crates with them.
 zed = "1a28cff4b409169bac058bca40dfbfeb7621d19b"
+zed-reqwest = "c15662463bda39148ba154100dd44d3fba5873a4"
 gpui-component = "0c830f4d257e69fdd17200650533ab4ca9a40cc0"
 
 # Unoptimized MSVC frames for the deeply generic alloy, rmcp, and schemars call

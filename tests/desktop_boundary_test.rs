@@ -194,7 +194,7 @@ fn gpui_revisions_and_desktop_database_identity_are_pinned() {
         .parse::<toml_edit::DocumentMut>()
         .unwrap();
     let packages = lock["package"].as_array_of_tables().unwrap();
-    for metadata_key in ["zed", "gpui-component"] {
+    for metadata_key in ["zed", "zed-reqwest", "gpui-component"] {
         let revision = manifest["package"]["metadata"]["gpui-revisions"][metadata_key]
             .as_str()
             .unwrap();
