@@ -32,7 +32,10 @@ package and silently skips every test in `ekubo-wallet-core` — the
 security kernel. Tests there once referenced functions that had already
 been deleted and the gate still reported success.
 
-The `main` workflow repeats these checks across its platform matrix. The Python
+The Tests workflow runs these checks on every pull request with the Linux test
+suite, and across the Linux, macOS, and Windows matrix on `main`, on manual
+dispatch, on pull requests labeled `full-ci`, and on pull requests that touch a
+`Cargo.toml`, `Cargo.lock`, `.cargo/`, or the toolchain. The Python
 scripts require Python 3.11 or newer. Regenerate `THIRD_PARTY_LICENSES.md` with
 `contrib/generate-third-party-licenses.py` whenever dependencies change; the
 gate fails if it is stale. CI pins OSV-Scanner and uses it as the sole

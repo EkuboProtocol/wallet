@@ -1,58 +1,62 @@
 name: Tests
 
 on:
-  # pull_request:
-  #   # These paths are not consumed or validated by any job below. Embedded
-  #   # MCP/legal Markdown is intentionally absent: changing it rebuilds and
-  #   # tests the application.
-  #   paths-ignore:
-  #     - ".agents/**"
-  #     - ".gitattributes"
-  #     - ".github/apple/**"
-  #     - ".github/dependabot.yml"
-  #     - ".github/workflows/release.yml"
-  #     - ".github/workflows/build-release-artifacts.yml"
-  #     - ".gitignore"
-  #     - "AGENTS.md"
-  #     - "README.md"
-  #     - "contrib/polkit/**"
-  #     - "contrib/rehearse-macos-signing.sh"
-  #     - "contrib/rpc-probe/**"
-  #     - "contrib/vendor-default-tokens.py"
-  #     - "crates/ekubo-wallet-core/clearsign/README.md"
-  #     - "docs/approval-ux.md"
-  #     - "docs/architecture.md"
-  #     - "docs/releasing.md"
-  #     - "docs/security-boundary.md"
-  #     - "docs/storage.md"
-  #     - "examples/abi-decoding.json"
-  #     - "examples/policy.json"
-  #     - "schemas/**"
-  # push:
-  #   branches: [main]
-  #   paths-ignore:
-  #     - ".agents/**"
-  #     - ".gitattributes"
-  #     - ".github/apple/**"
-  #     - ".github/dependabot.yml"
-  #     - ".github/workflows/release.yml"
-  #     - ".github/workflows/build-release-artifacts.yml"
-  #     - ".gitignore"
-  #     - "AGENTS.md"
-  #     - "README.md"
-  #     - "contrib/polkit/**"
-  #     - "contrib/rehearse-macos-signing.sh"
-  #     - "contrib/rpc-probe/**"
-  #     - "contrib/vendor-default-tokens.py"
-  #     - "crates/ekubo-wallet-core/clearsign/README.md"
-  #     - "docs/approval-ux.md"
-  #     - "docs/architecture.md"
-  #     - "docs/releasing.md"
-  #     - "docs/security-boundary.md"
-  #     - "docs/storage.md"
-  #     - "examples/abi-decoding.json"
-  #     - "examples/policy.json"
-  #     - "schemas/**"
+  pull_request:
+    # These paths are not consumed or validated by any job below. Embedded
+    # MCP/legal Markdown is intentionally absent: changing it rebuilds and
+    # tests the application.
+    paths-ignore:
+      - ".agents/**"
+      - ".gitattributes"
+      - ".github/apple/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/build-release-artifacts.yml"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "README.md"
+      - "contrib/polkit/**"
+      - "contrib/rehearse-macos-signing.sh"
+      - "contrib/rpc-probe/**"
+      - "contrib/vendor-default-tokens.py"
+      - "crates/ekubo-wallet-core/clearsign/README.md"
+      - "docs/approval-ux.md"
+      - "docs/architecture.md"
+      - "docs/releasing.md"
+      - "docs/security-boundary.md"
+      - "docs/storage.md"
+      - "examples/abi-decoding.json"
+      - "examples/policy.json"
+      - "schemas/**"
+  push:
+    branches: [main]
+    paths-ignore:
+      - ".agents/**"
+      - ".gitattributes"
+      - ".github/apple/**"
+      - ".github/dependabot.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/build-release-artifacts.yml"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "README.md"
+      - "contrib/polkit/**"
+      - "contrib/rehearse-macos-signing.sh"
+      - "contrib/rpc-probe/**"
+      - "contrib/vendor-default-tokens.py"
+      - "crates/ekubo-wallet-core/clearsign/README.md"
+      - "docs/approval-ux.md"
+      - "docs/architecture.md"
+      - "docs/releasing.md"
+      - "docs/security-boundary.md"
+      - "docs/storage.md"
+      - "examples/abi-decoding.json"
+      - "examples/policy.json"
+      - "schemas/**"
+  # New advisories land against an unchanged lockfile, so scan main weekly
+  # rather than only when it moves.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -73,8 +77,53 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
+  # Windows and macOS take one to two hours of wall clock between them, which
+  # is too slow to gate every pull request. They run on main, on manual runs, on
+  # pull requests labeled `full-ci` (from the next push; dispatch the workflow on
+  # the branch for an immediate run), and on pull requests that change the
+  # dependency graph or toolchain, where platform-specific breakage (a Windows
+  # lockfile edge, a macOS-only crate) actually comes from. Everything else runs
+  # lints, OSV, execution plans, and the complete Linux suite.
+  scope:
+    name: Select test platforms
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select platforms
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          FULL_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          full=true
+          if [ "$EVENT" = schedule ]; then
+            full=false
+          elif [ "$EVENT" = pull_request ] && [ "$FULL_CI_LABEL" != true ]; then
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+            if ! grep -Eq '(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^\.cargo/|^\.github/workflows/ci\.yml$' <<<"$files"; then
+              full=false
+            fi
+          fi
+          # GPUI makes each desktop test binary large. Linking several of them
+          # concurrently can exhaust the Linux hosted runner and crash
+          # rust-lld with SIGBUS, so keep link concurrency deliberately low.
+          linux='{"runner":"ubuntu-24.04","test_jobs":1,"test_debug":0}'
+          others='{"runner":"macos-15","test_jobs":4,"test_debug":2},{"runner":"windows-2025","test_jobs":1,"test_debug":0}'
+          if [ "$full" = true ]; then
+            echo "matrix={\"include\":[$linux,$others]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"include\":[$linux]}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Full platform matrix: $full" >> "$GITHUB_STEP_SUMMARY"
+
   execution-plan:
     name: Execution plan (no_std and JavaScript)
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -101,22 +150,10 @@ jobs:
           node crates/erc8410-wasm/smoke-test.cjs
   test:
     name: Test (${{ matrix.runner }})
+    needs: scope
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # GPUI makes each desktop test binary large. Linking several of them
-          # concurrently can exhaust the Linux hosted runner and crash
-          # rust-lld with SIGBUS, so keep link concurrency deliberately low.
-          - runner: ubuntu-24.04
-            test_jobs: 1
-            test_debug: 0
-          - runner: macos-15
-            test_jobs: 4
-            test_debug: 2
-          - runner: windows-2025
-            test_jobs: 1
-            test_debug: 0
+      matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -179,6 +216,7 @@ jobs:
 
   lint:
     name: Formatting and lints
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
