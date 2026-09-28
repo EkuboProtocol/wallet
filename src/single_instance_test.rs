@@ -24,8 +24,17 @@ fn a_second_instance_activates_the_first() {
     assert!(matches!(first, InstanceOutcome::Primary(_)));
     let second = SingleInstance::acquire(directory.path(), sender).unwrap();
     assert!(matches!(second, InstanceOutcome::ActivatedExisting));
-    // The channel is a cancellable future now, so the bounded wait is a
-    // `timeout` on a runtime the test owns rather than `recv_timeout`.
+    wait_for_activation(&mut receiver);
+    // Dropped explicitly, before the temporary directory goes: the primary owns
+    // a listener thread and a lock file inside it, and tearing the directory
+    // out from under them first is its own source of noise.
+    drop(first);
+    drop(second);
+}
+
+/// The channel is a cancellable future, so the bounded wait is a `timeout` on
+/// a runtime the test owns rather than `recv_timeout`.
+fn wait_for_activation(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<()>) {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -36,9 +45,46 @@ fn a_second_instance_activates_the_first() {
                 .expect("the primary instance must be told a second one tried to start")
         })
         .expect("the activation channel must stay open while the primary holds the lock");
-    // Dropped explicitly, before the temporary directory goes: the primary owns
-    // a listener thread and a lock file inside it, and tearing the directory
-    // out from under them first is its own source of noise.
+}
+
+/// The primary accepts and hangs up without reading. A launch that meets that
+/// hang-up has still activated it and must not report a failure.
+///
+/// This listener accepts as fast as it can, rather than on the real 75 ms
+/// poll, to put the hang-up right against the connect as often as possible.
+/// With the old `activate` write after connecting, that is the `EPIPE` macOS
+/// CI hit on the update handoff.
+#[test]
+fn activation_survives_a_primary_that_hangs_up_at_once() {
+    use std::os::unix::net::UnixListener;
+
+    const LAUNCHES: usize = 500;
+    let directory = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(directory.path().join("activate.sock")).unwrap();
+    let primary = std::thread::spawn(move || {
+        for _ in 0..LAUNCHES {
+            drop(listener.accept().expect("the launch connects"));
+        }
+    });
+    for launch in 0..LAUNCHES {
+        activate_existing(directory.path())
+            .unwrap_or_else(|error| panic!("launch {launch} failed to activate: {error:#}"));
+    }
+    primary.join().unwrap();
+}
+
+/// The update handoff and every repeated launch go through this path, so it
+/// must deliver an activation every time, not just the first.
+#[test]
+fn every_repeated_launch_activates_the_primary() {
+    let directory = tempfile::tempdir().unwrap();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let first = SingleInstance::acquire(directory.path(), sender.clone()).unwrap();
+    assert!(matches!(first, InstanceOutcome::Primary(_)));
+    for _ in 0..25 {
+        let second = SingleInstance::acquire(directory.path(), sender.clone()).unwrap();
+        assert!(matches!(second, InstanceOutcome::ActivatedExisting));
+        wait_for_activation(&mut receiver);
+    }
     drop(first);
-    drop(second);
 }

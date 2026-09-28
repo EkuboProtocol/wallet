@@ -69,6 +69,7 @@ impl SingleInstance {
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(75));
                         }
+                        Err(error) if one_connection_failed(&error) => {}
                         Err(_) => break,
                     }
                 }
@@ -104,6 +105,7 @@ impl SingleInstance {
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(75));
                         }
+                        Err(error) if one_connection_failed(&error) => {}
                         Err(_) => break,
                     }
                 }
@@ -117,19 +119,35 @@ impl SingleInstance {
     }
 }
 
+/// An accept that failed for one client, not for the listener. Neither is a
+/// reason to stop listening: that would leave every later launch connecting
+/// to a primary that never raises its window again.
+fn one_connection_failed(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
+/// Connecting is the whole activation: the primary fires on accept and drops
+/// the stream unread, which is also what every earlier release does.
+///
+/// There used to be an `activate` payload written after connecting. Nothing
+/// ever read it, and when the primary accepted and hung up between the connect
+/// and the write, the write failed with `EPIPE` — reporting a failed launch for
+/// an activation that had already been delivered. macOS lost that race often
+/// enough to redden CI.
 #[cfg(unix)]
 fn activate_existing(data_dir: &Path) -> Result<()> {
-    use std::io::Write as _;
     use std::os::unix::net::UnixStream;
 
     let path = data_dir.join("activate.sock");
     let mut last_error = None;
     for _ in 0..20 {
         match UnixStream::connect(&path) {
-            Ok(mut stream) => {
-                stream.write_all(b"activate")?;
-                return Ok(());
-            }
+            // A queued connection survives this end closing, so the primary
+            // still accepts it, and still activates, after we have gone.
+            Ok(_stream) => return Ok(()),
             Err(error) => {
                 last_error = Some(error);
                 std::thread::sleep(Duration::from_millis(50));
@@ -142,15 +160,36 @@ fn activate_existing(data_dir: &Path) -> Result<()> {
     ))
 }
 
+/// How long a second launch holds its pipe open for the primary to accept it.
+///
+/// The primary polls on a 75 ms cycle; this only bounds how long a launch
+/// waits on a primary that is alive enough to hold the lock but not accepting.
 #[cfg(not(unix))]
-fn activate_existing(_data_dir: &Path) -> Result<()> {
-    use interprocess::local_socket::{GenericNamespaced, Stream, prelude::*};
-    use std::io::Write as _;
+const ACTIVATION_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let pipe_name = activation_pipe_name(_data_dir);
+/// Same protocol as Unix — connecting is the activation — but a named pipe
+/// does not queue a connection the way a socket does. A client that has
+/// already closed when the primary gets to `accept` leaves a dead instance
+/// that interprocess discards without handing it out, so the activation would
+/// silently vanish. Hold the pipe until the primary hangs up on it; a hang-up
+/// reads as end of file.
+#[cfg(not(unix))]
+fn activate_existing(data_dir: &Path) -> Result<()> {
+    use interprocess::local_socket::{GenericNamespaced, Stream, prelude::*};
+    use std::io::Read as _;
+
+    let pipe_name = activation_pipe_name(data_dir);
     let name = pipe_name.to_ns_name::<GenericNamespaced>()?;
     let mut stream = Stream::connect(name).context("the running wallet could not be activated")?;
-    stream.write_all(b"activate")?;
+    let (hung_up, accepted) = std::sync::mpsc::channel();
+    // A thread rather than a read timeout, which a named pipe does not offer.
+    // If the wait runs out, the thread is left blocked and goes with the
+    // process, which is about to exit anyway.
+    std::thread::spawn(move || {
+        let _ = stream.read(&mut [0; 1]);
+        let _ = hung_up.send(());
+    });
+    let _ = accepted.recv_timeout(ACTIVATION_HANDOFF_TIMEOUT);
     Ok(())
 }
 
