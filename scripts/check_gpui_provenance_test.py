@@ -127,6 +127,34 @@ class ProvenanceTest(unittest.TestCase):
             ["crates/gpui-tokio: src/lib.rs differs from Zed's gpui_tokio.rs below its header"],
         )
 
+    def test_gpui_crates_from_outside_crates_io_fail(self):
+        lock = [
+            {"name": "gpui-pre", "version": "0.3.7", "source": CHECK["CRATES_IO"]},
+            {"name": "gpui_tokio", "version": "0.1.0"},
+            {"name": "serde", "version": "1.0.0", "source": "git+https://example.com/serde"},
+        ]
+        self.assertEqual(CHECK["check_sources"](lock, self.zed), [])
+        lock += [
+            {"name": "gpui-pre-util", "version": "0.3.7", "source": "git+https://example.com/zed#abc"},
+            {"name": "gpui-component", "version": "0.7.0"},
+        ]
+        self.assertEqual(
+            CHECK["check_sources"](lock, self.zed),
+            [
+                "gpui-pre-util 0.3.7: locked from git+https://example.com/zed#abc, not crates.io",
+                "gpui-component 0.7.0: locked from a path, not crates.io",
+            ],
+        )
+
+    def test_cargo_config_source_overrides_fail(self):
+        self.write(".cargo/config.toml", '[env]\nRUST_MIN_STACK = "1"\n')
+        self.assertEqual(CHECK["check_sources"]([], self.zed), [])
+        self.write(".cargo/config.toml", 'paths = ["../gpui"]\n[source.crates-io]\nreplace-with = "vendored"\n')
+        self.assertEqual(
+            CHECK["check_sources"]([], self.zed),
+            [".cargo/config.toml: sets source, paths, which can replace crate sources"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

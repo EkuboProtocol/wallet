@@ -7,7 +7,8 @@ on:
   pull_request:
     paths:
       - "Cargo.lock"
-      - "Cargo.toml"
+      - "**/Cargo.toml"
+      - ".cargo/**"
       - "crates/gpui-tokio/**"
       - "scripts/check-gpui-provenance.py"
       - "scripts/check_gpui_provenance_test.py"
@@ -16,7 +17,8 @@ on:
     branches: [main]
     paths:
       - "Cargo.lock"
-      - "Cargo.toml"
+      - "**/Cargo.toml"
+      - ".cargo/**"
       - "crates/gpui-tokio/**"
       - "scripts/check-gpui-provenance.py"
       - "scripts/check_gpui_provenance_test.py"

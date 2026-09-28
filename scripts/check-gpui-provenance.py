@@ -14,7 +14,9 @@ the upstream commit recorded in `package.metadata.gpui-revisions`:
 - gpui-component's crates against gpui-component at its release commit.
 
 It also checks that the vendored `crates/gpui-tokio` is Zed's `gpui_tokio`
-under a provenance header.
+under a provenance header, and that nothing can build a GPUI crate from
+anywhere else: every other locked `gpui*` package must come from crates.io,
+and the repository's Cargo configuration must not replace or override sources.
 
 Every published file must match its source. Source files that a crate does not
 ship are ignored, because an omitted file cannot put code into the build. The
@@ -36,6 +38,13 @@ import tomllib
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
+# The only locked `gpui*` package built from this repository.
+VENDORED_TOKIO = "gpui_tokio"
+# Cargo configuration that builds a locked crate from other sources. `paths`
+# and `[source]` replacement leave Cargo.lock unchanged, so the lock checks
+# below cannot see them.
+SOURCE_OVERRIDES = ("source", "paths", "patch")
 ZED = "https://github.com/zed-industries/zed"
 ZED_REQWEST = "https://github.com/zed-industries/reqwest"
 GPUI_COMPONENT = "https://github.com/longbridge/gpui-component"
@@ -291,17 +300,35 @@ def check_vendored_tokio(zed, revision, crate=ROOT / "crates/gpui-tokio"):
     return problems
 
 
+def check_sources(lock, root=ROOT):
+    """Every locked GPUI crate except the vendored one comes from crates.io."""
+    problems = []
+    for package in lock:
+        name, source = package["name"], package.get("source")
+        if name.startswith("gpui") and source != CRATES_IO and not (name == VENDORED_TOKIO and source is None):
+            problems.append(f"{name} {package['version']}: locked from {source or 'a path'}, not crates.io")
+    for config in (root / ".cargo/config.toml", root / ".cargo/config"):
+        if config.is_file():
+            overrides = [key for key in SOURCE_OVERRIDES if key in tomllib.loads(config.read_text())]
+            if overrides:
+                problems.append(f"{config.relative_to(root)}: sets {', '.join(overrides)}, which can replace crate sources")
+    return problems
+
+
 def main():
     revisions = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["metadata"]["gpui-revisions"]
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
     if any(p["name"] == "gpui-kit" for p in lock):
         sys.exit("gpui-kit is locked, which activates the gpui-pre-macros facade; review it first")
-    locked = [
-        Crate(p) for p in lock if p["name"].startswith("gpui") and p.get("source", "").startswith("registry+")
-    ]
+    problems = check_sources(lock)
+    if problems:
+        sys.exit("\n".join(problems))
+    locked = [Crate(p) for p in lock if p["name"].startswith("gpui") and p.get("source") == CRATES_IO]
     reqwest = [c for c in locked if c.name == "gpui-pre-reqwest"]
     snapshots = [c for c in locked if c.name.startswith("gpui-pre") and c not in reqwest]
     component = [c for c in locked if not c.name.startswith("gpui-pre")]
+    if len(reqwest) != 1 or not snapshots or not component:
+        sys.exit("expected gpui-pre snapshots, one gpui-pre-reqwest, and gpui-component crates in Cargo.lock")
     with tempfile.TemporaryDirectory() as temporary:
         temporary = pathlib.Path(temporary)
         zed, problems = check_zed(temporary, revisions["zed"], snapshots)
