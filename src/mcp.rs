@@ -43,7 +43,7 @@ use rmcp::{
     model::{
         Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
         ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-        ServerInfo,
+        ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -4349,8 +4349,8 @@ impl ServerHandler for WalletMcpServer {
         Self::sanitized_tool_router().call(tcc).await
     }
 
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
