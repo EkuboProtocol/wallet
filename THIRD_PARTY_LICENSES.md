@@ -105,8 +105,8 @@ SOFTWARE.
 - parity-scale-codec-derive 3.7.5 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/parity-scale-codec
 - perf 0.1.0
 - refineable 0.1.0
-- rmcp 3.2.0 — https://github.com/modelcontextprotocol/rust-sdk/
-- rmcp-macros 3.2.0 — https://github.com/modelcontextprotocol/rust-sdk/
+- rmcp 3.4.1 — https://github.com/modelcontextprotocol/rust-sdk/
+- rmcp-macros 3.5.0 — https://github.com/modelcontextprotocol/rust-sdk/
 - safetensors 0.3.3 — https://github.com/huggingface/safetensors
 - safetensors 0.7.0 — https://github.com/huggingface/safetensors
 - scheduler 0.1.0
@@ -140,7 +140,7 @@ SOFTWARE.
 ## Apache-2.0 OR ISC OR MIT
 
 - hyper-rustls 0.27.9 — https://github.com/rustls/hyper-rustls
-- rustls 0.23.43 — https://github.com/rustls/rustls
+- rustls 0.23.45 — https://github.com/rustls/rustls
 - rustls-native-certs 0.8.4 — https://github.com/rustls/rustls-native-certs
 - rustls-pemfile 2.2.0 — https://github.com/rustls/pemfile
 
@@ -210,7 +210,7 @@ SOFTWARE.
 - link-section 0.19.3 — Matt Mastracci <matthew@mastracci.com> — https://github.com/mmastrac/linktime
 - linktime-proc-macro 0.2.3 — Matt Mastracci <matthew@mastracci.com> — https://github.com/mmastrac/linktime
 - md5 0.8.1 — Daniel McKenna <danielmckenna93@gmail.com>, Ivan Ukhov <ivan.ukhov@gmail.com>, Kamal Ahmad <shibe@openmailbox.org>, Konstantin Stepanov <milezv@gmail.com>, Lukas Kalbertodt <lukas.kalbertodt@gmail.com>, Nathan Musoke <nathan.musoke@gmail.com>, Scott Mabin <scott@mabez.dev>, Tony Arcieri <bascule@gmail.com>, Wim de With <register@dewith.io>, Yosef Dinerstein <yosefdi@gmail.com> — https://github.com/stainless-steel/md5
-- muda 0.19.3 — https://github.com/tauri-apps/muda
+- muda 0.20.0 — https://github.com/tauri-apps/muda
 - no_std_io2 0.9.4 — https://github.com/wcampbell0x2a/no-std-io2
 - nohash-hasher 0.2.0 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/nohash-hasher
 - ntapi 0.4.3 — MSxDOS <melcodos@gmail.com> — https://github.com/MSxDOS/ntapi
@@ -257,7 +257,7 @@ SOFTWARE.
 - usvg 0.46.0 — https://github.com/linebender/resvg
 - utf8_iter 1.0.4 — Henri Sivonen <hsivonen@hsivonen.fi> — https://github.com/hsivonen/utf8_iter
 - uuid 0.8.2 — Ashley Mannix<ashleymannix@live.com.au>, Christopher Armstrong, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com> — https://github.com/uuid-rs/uuid
-- uuid 1.26.0 — Ashley Mannix<ashleymannix@live.com.au>, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com> — https://github.com/uuid-rs/uuid
+- uuid 1.26.1 — Ashley Mannix<ashleymannix@live.com.au>, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com> — https://github.com/uuid-rs/uuid
 - value-bag 1.13.2 — Ashley Mannix <ashleymannix@live.com.au> — https://github.com/sval-rs/value-bag
 - value-bag-serde1 1.13.2 — Ashley Mannix <ashleymannix@live.com.au>
 - value-bag-sval2 1.13.2 — Ashley Mannix <ashleymannix@live.com.au>
@@ -389,16 +389,16 @@ SOFTWARE.
 - libloading 0.7.4 — Simonas Kazlauskas <libloading@kazlauskas.me> — https://github.com/nagisa/rust_libloading/
 - libloading 0.8.9 — Simonas Kazlauskas <libloading@kazlauskas.me> — https://github.com/nagisa/rust_libloading/
 - libloading 0.9.0 — Simonas Kazlauskas <libloading@kazlauskas.me> — https://github.com/nagisa/rust_libloading/
-- rustls-webpki 0.103.13 — https://github.com/rustls/webpki
+- rustls-webpki 0.103.15 — https://github.com/rustls/webpki
 - untrusted 0.9.0 — Brian Smith <brian@briansmith.org> — https://github.com/briansmith/untrusted
 
 ## ISC AND (Apache-2.0 OR ISC)
 
-- aws-lc-rs 1.17.3 — AWS-LibCrypto — https://github.com/aws/aws-lc-rs
+- aws-lc-rs 1.18.1 — AWS-LibCrypto — https://github.com/aws/aws-lc-rs
 
 ## ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)
 
-- aws-lc-sys 0.43.0 — AWS-LC — https://github.com/aws/aws-lc-rs
+- aws-lc-sys 0.45.0 — AWS-LC — https://github.com/aws/aws-lc-rs
 
 ## LGPL-2.1
 
@@ -534,6 +534,7 @@ SOFTWARE.
 - memoffset 0.9.1 — Gilad Naaman <gilad.naaman@gmail.com> — https://github.com/Gilnaa/memoffset
 - mime_guess 2.0.5 — Austin Bonander <austin.bonander@gmail.com> — https://github.com/abonander/mime_guess
 - minisign-verify 0.2.5 — Frank Denis <github@pureftpd.org> — https://github.com/jedisct1/rust-minisign-verify
+- minisign-verify 0.3.0 — Frank Denis <github@pureftpd.org> — https://github.com/jedisct1/rust-minisign-verify
 - mio 1.2.2 — Carl Lerche <me@carllerche.com>, Thomas de Zeeuw <thomasdezeeuw@gmail.com>, Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/mio
 - moddef 0.3.0 — https://github.com/sigurd4/moddef
 - new_debug_unreachable 1.0.6 — Matt Brubeck <mbrubeck@limpet.net>, Jonathan Reem <jonathan.reem@gmail.com> — https://github.com/mbrubeck/rust-debug-unreachable
@@ -718,45 +719,46 @@ SOFTWARE.
 - ahash 0.8.12 — Tom Kaitchuck <Tom.Kaitchuck@gmail.com> — https://github.com/tkaitchuck/ahash
 - aligned 0.4.3 — https://github.com/rust-embedded-community/aligned
 - allocator-api2 0.2.21 — Zakarum <zaq.dev@icloud.com> — https://github.com/zakarumych/allocator-api2
-- alloy 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-chains 0.2.36 — Alloy Contributors — https://github.com/alloy-rs/chains
-- alloy-consensus 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-consensus-any 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-contract 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-consensus 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-consensus-any 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-contract 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-core 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-dyn-abi 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-dyn-abi 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-eip2124 0.2.0 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip2930 0.2.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7702 0.6.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7928 0.4.5 — Ishika Choudhury <ishikac720@gmail.com>, Soubhik Singha Mahapatra <soubhiksinghamahapatra@gmail.com> — https://github.com/alloy-rs/eips
-- alloy-eips 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-ens 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-genesis 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-json-abi 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-json-rpc 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-network 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-network-primitives 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-eip8141 0.1.1 — Alloy Contributors — https://github.com/alloy-rs/eips
+- alloy-eips 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-ens 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-genesis 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-json-abi 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-json-rpc 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-network 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-network-primitives 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-primitives 0.6.4 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-primitives 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-provider 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-primitives 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-provider 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-rlp 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
 - alloy-rlp-derive 0.3.16 — Alloy Contributors — https://github.com/alloy-rs/rlp
-- alloy-rpc-client 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-rpc-types 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-rpc-types-any 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-rpc-types-eth 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-serde 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-signer 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-signer-local 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-sol-macro 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-macro-expander 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-macro-input 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-type-parser 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-sol-types 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
-- alloy-transport 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-transport-http 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
-- alloy-trie 0.9.5 — rkrasiuk <rokrassyuk@gmail.com>, gakonst <me@gakonst.com>, DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/alloy-rs/trie
-- alloy-tx-macros 2.4.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-client 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-types 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-types-any 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-rpc-types-eth 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-serde 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-signer 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-signer-local 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-sol-macro 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro-expander 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-macro-input 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-type-parser 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-sol-types 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
+- alloy-transport 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-transport-http 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-trie 0.9.7 — rkrasiuk <rokrassyuk@gmail.com>, gakonst <me@gakonst.com>, DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/alloy-rs/trie
+- alloy-tx-macros 2.5.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - android_system_properties 0.1.5 — Nicolas Silva <nical@fastmail.com> — https://github.com/nical/android_system_properties
 - annotate-snippets 0.12.16 — https://github.com/rust-lang/annotate-snippets-rs
 - anstyle 1.0.14 — https://github.com/rust-cli/anstyle.git
@@ -795,7 +797,7 @@ SOFTWARE.
 - async-recursion 1.1.1 — Robert Usher <266585+dcchut@users.noreply.github.com> — https://github.com/dcchut/async-recursion
 - async-trait 0.1.92 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/async-trait
 - auto_impl 1.3.0 — Ashley Mannix <ashleymannix@live.com.au>, Lukas Kalbertodt <lukas.kalbertodt@gmail.com> — https://github.com/auto-impl-rs/auto_impl/
-- backhand 0.25.2 — wcampbell <wcampbell1995@gmail.com> — https://github.com/wcampbell0x2a/backhand
+- backhand 0.25.4 — wcampbell <wcampbell1995@gmail.com> — https://github.com/wcampbell0x2a/backhand
 - backtrace 0.3.76 — The Rust Project Developers — https://github.com/rust-lang/backtrace-rs
 - base64 0.13.1 — Alice Maz <alice@alicemaz.com>, Marshall Pierce <marshall@mpierce.org> — https://github.com/marshallpierce/rust-base64
 - base64 0.22.1 — Marshall Pierce <marshall@mpierce.org> — https://github.com/marshallpierce/rust-base64
@@ -931,6 +933,7 @@ SOFTWARE.
 - directories 6.0.0 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/soc/directories-rs
 - dirs 5.0.1 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/soc/dirs-rs
 - dirs 6.0.0 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/soc/dirs-rs
+- dirs 7.0.0 — Simon Ochsenreither <simon@ochsenreither.de> — https://codeberg.org/dirs/dirs-rs
 - dirs-sys 0.4.1 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/dirs-dev/dirs-sys-rs
 - dirs-sys 0.5.0 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/dirs-dev/dirs-sys-rs
 - displaydoc 0.2.7 — Jane Lusby <jlusby@yaah.dev> — https://github.com/yaahc/displaydoc
@@ -1044,7 +1047,7 @@ SOFTWARE.
 - jni-sys-macros 0.4.1 — Robert Bragg <robert@sixbynine.org> — https://github.com/jni-rs/jni-sys
 - jobserver 0.1.35 — Alex Crichton <alex@alexcrichton.com> — https://github.com/rust-lang/jobserver-rs
 - js-sys 0.3.105 — The wasm-bindgen Developers — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
-- keyboard-types 0.7.0 — Pyfisch <pyfisch@posteo.org> — https://github.com/pyfisch/keyboard-types
+- keyboard-types 0.8.3 — Pyfisch <pyfisch@posteo.org> — https://github.com/rust-windowing/keyboard-types
 - keyring 4.2.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/keyring-rs
 - keyring-core 1.0.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/keyring-core.git
 - khronos-egl 6.0.0 — Timothée Haudebourg <author@haudebourg.net>, Sean Kerr <sean@metatomic.io> — https://github.com/timothee-haudebourg/khronos-egl
@@ -1147,7 +1150,7 @@ SOFTWARE.
 - quinn-proto 0.11.16 — https://github.com/quinn-rs/quinn
 - quinn-udp 0.5.15 — https://github.com/quinn-rs/quinn
 - quote 1.0.47 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/quote
-- rand 0.10.2 — The Rand Project Developers, The Rust Project Developers — https://github.com/rust-random/rand
+- rand 0.10.3 — The Rand Project Developers, The Rust Project Developers — https://github.com/rust-random/rand
 - rand 0.8.7 — The Rand Project Developers, The Rust Project Developers — https://github.com/rust-random/rand
 - rand 0.9.5 — The Rand Project Developers, The Rust Project Developers — https://github.com/rust-random/rand
 - rand_chacha 0.3.1 — The Rand Project Developers, The Rust Project Developers, The CryptoCorrosion Contributors — https://github.com/rust-random/rand
@@ -1175,7 +1178,7 @@ SOFTWARE.
 - regex-syntax 0.8.11 — The Rust Project Developers, Andrew Gallant <jamslam@gmail.com> — https://github.com/rust-lang/regex
 - renderdoc-sys 1.1.0 — Eyal Kalderon <ebkalderon@gmail.com> — https://github.com/ebkalderon/renderdoc-rs
 - reqwest 0.12.28 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/reqwest
-- reqwest 0.13.4 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/reqwest
+- reqwest 0.13.5 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/reqwest
 - rlp 0.5.2 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/parity-common
 - ropey 2.0.0-beta.1 — Nathan Vegdahl <cessen@cessen.com> — https://github.com/cessen/ropey
 - roxmltree 0.20.0 — Yevhenii Reizner <razrfalcon@gmail.com> — https://github.com/RazrFalcon/roxmltree
@@ -1244,7 +1247,7 @@ SOFTWARE.
 - syn 1.0.109 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
 - syn 2.0.119 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
 - syn 3.0.3 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/syn
-- syn-solidity 1.7.2 — Alloy Contributors — https://github.com/alloy-rs/core
+- syn-solidity 1.7.3 — Alloy Contributors — https://github.com/alloy-rs/core
 - sys-locale 0.3.2 — 1Password — https://github.com/1Password/sys-locale
 - system-configuration 0.6.1 — Mullvad VPN — https://github.com/mullvad/system-configuration-rs
 - system-configuration-sys 0.6.0 — Mullvad VPN — https://github.com/mullvad/system-configuration-rs
@@ -1255,9 +1258,9 @@ SOFTWARE.
 - tempfile 3.27.0 — Steven Allen <steven@stebalien.com>, The Rust Project Developers, Ashley Mannix <ashleymannix@live.com.au>, Jason White <me@jasonwhite.io> — https://github.com/Stebalien/tempfile
 - tendril 0.4.3 — Keegan McAllister <mcallister.keegan@gmail.com>, Simon Sapin <simon.sapin@exyr.org>, Chris Morgan <me@chrismorgan.info> — https://github.com/servo/tendril
 - thiserror 1.0.69 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/thiserror
-- thiserror 2.0.20 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/thiserror
+- thiserror 2.0.21 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/thiserror
 - thiserror-impl 1.0.69 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/thiserror
-- thiserror-impl 2.0.20 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/thiserror
+- thiserror-impl 2.0.21 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/thiserror
 - thread_local 1.1.10 — Amanieu d'Antras <amanieu@gmail.com> — https://github.com/Amanieu/thread_local-rs
 - threadpool 1.8.1 — The Rust Project Developers, Corey Farwell <coreyf@rwell.org>, Stefan Schindler <dns2utf8@estada.ch> — https://github.com/rust-threadpool/rust-threadpool
 - time 0.3.55 — Jacob Pratt <open-source@jhpratt.dev>, Time contributors — https://github.com/time-rs/time
@@ -1271,7 +1274,7 @@ SOFTWARE.
 - toml_edit 0.19.15 — Andronik Ordian <write@reusable.software>, Ed Page <eopage@gmail.com> — https://github.com/toml-rs/toml
 - toml_edit 0.20.7 — Andronik Ordian <write@reusable.software>, Ed Page <eopage@gmail.com> — https://github.com/toml-rs/toml
 - toml_edit 0.22.27 — https://github.com/toml-rs/toml
-- toml_edit 0.25.13+spec-1.1.0 — https://github.com/toml-rs/toml
+- toml_edit 0.25.15+spec-1.1.0 — https://github.com/toml-rs/toml
 - toml_parser 1.1.3+spec-1.1.0 — https://github.com/toml-rs/toml
 - toml_write 0.1.2 — https://github.com/toml-rs/toml
 - toml_writer 1.1.2+spec-1.1.0 — https://github.com/toml-rs/toml
@@ -1279,7 +1282,7 @@ SOFTWARE.
 - tracel-llvm 20.1.4-7 — Tracel Technologies Inc. — https://github.com/tracel-ai/tracel-llvm/tree/main/crates/tracel-llvm
 - tracel-llvm-bundler 20.1.4-7 — Tracel Technologies Inc. — https://github.com/tracel-ai/tracel-llvm/tree/main/crates/tracel-llvm-bundler
 - tracel-tblgen-rs 20.1.4-7 — Tracel Technologies Inc., Daan Vanoverloop, Yota Toyama, Edgar Luque — https://github.com/tracel-ai/tracel-llvm/tree/main/crates/tracel-tblgen-rs
-- tray-icon 0.24.2 — https://github.com/tauri-apps/tray-icon
+- tray-icon 0.25.1 — https://github.com/tauri-apps/tray-icon
 - triomphe 0.1.16 — Manish Goregaokar <manishsmail@gmail.com>, The Servo Project Developers — https://github.com/Manishearth/triomphe
 - ttf-parser 0.25.1 — Caleb Maclennan <caleb@alerque.com>, Laurenz Stampfl <laurenz.stampfl@gmail.com>, Yevhenii Reizner <razrfalcon@gmail.com>, خالد حسني (Khaled Hosny) <khaled@aliftype.com> — https://github.com/harfbuzz/ttf-parser
 - tungstenite 0.30.0 — Alexey Galakhov, Daniel Abramov — https://github.com/snapview/tungstenite-rs
@@ -1408,7 +1411,7 @@ SOFTWARE.
 - x11rb-protocol 0.13.2 — Uli Schlachter <psychon@znc.in>, Eduardo Sánchez Muñoz <eduardosm-dev@e64.io>, notgull <jtnunley01@gmail.com> — https://github.com/psychon/x11rb
 - xattr 1.6.1 — Steven Allen <steven@stebalien.com> — https://github.com/Stebalien/xattr
 - xml5ever 0.18.1 — The xml5ever project developers — https://github.com/servo/html5ever
-- zbus-secret-service-keyring-store 1.0.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/zbus-secret-service-keyring-store.git
+- zbus-secret-service-keyring-store 1.0.1 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/zbus-secret-service-keyring-store.git
 - zed-font-kit 0.14.1-zed — Patrick Walton <pcwalton@mimiga.net> — https://github.com/servo/font-kit
 - zed-reqwest 0.12.15-zed — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/reqwest
 - zstd-safe 5.0.2+zstd.1.5.2 — Alexandre Bury <alexandre.bury@gmail.com> — https://github.com/gyscos/zstd-rs
@@ -1533,44 +1536,45 @@ SOFTWARE.
 - accesskit_unix 0.22.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - accesskit_windows 0.34.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloc-stdlib 0.2.2: BSD-3-Clause — BSD 3-Clause License: https://opensource.org/license/bsd-3-clause
-- alloy 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-consensus 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-consensus-any 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-contract 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-consensus 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-consensus-any 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-contract 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-core 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-dyn-abi 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-dyn-abi 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2124 0.2.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip2930 0.2.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7702 0.6.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7928 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-eips 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-ens 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-genesis 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-json-abi 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-json-rpc 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-network 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-network-primitives 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-eip8141 0.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-eips 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-ens 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-genesis 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-json-abi 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-json-rpc 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-network 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-network-primitives 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-primitives 0.6.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-primitives 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-provider 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-primitives 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-provider 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-rlp-derive 0.3.16: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-client 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-types 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-types-any 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-rpc-types-eth 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-serde 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-signer 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-signer-local 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro-expander 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-macro-input 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-type-parser 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-sol-types 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-transport 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-transport-http 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- alloy-tx-macros 2.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- backhand 0.25.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-client 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-types 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-types-any 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-rpc-types-eth 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-serde 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-signer 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-signer-local 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro-expander 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-macro-input 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-type-parser 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-sol-types 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-transport 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-transport-http 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-tx-macros 2.5.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- backhand 0.25.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - bitcoin-consensus-encoding 1.1.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-internals 0.6.0: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
 - bitcoin-io 0.1.101: CC0-1.0 — CC0 1.0 Universal: https://creativecommons.org/publicdomain/zero/1.0/legalcode
@@ -1685,8 +1689,8 @@ SOFTWARE.
 - r-efi 5.3.0: MIT OR Apache-2.0 OR LGPL-2.1-or-later — MIT License: https://opensource.org/license/mit
 - r-efi 6.0.0: MIT OR Apache-2.0 OR LGPL-2.1-or-later — MIT License: https://opensource.org/license/mit
 - rlp 0.5.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- rmcp 3.2.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
-- rmcp-macros 3.2.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- rmcp 3.4.1: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- rmcp-macros 3.5.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - ruint 1.20.0: MIT — MIT License: https://opensource.org/license/mit
 - ruint-macro 1.2.1: MIT — MIT License: https://opensource.org/license/mit
 - rust-i18n-macro 4.2.1: MIT — MIT License: https://opensource.org/license/mit
@@ -1701,7 +1705,7 @@ SOFTWARE.
 - spirv 0.4.0+sdk-1.4.341.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - starknet-types-core 1.0.0: MIT — MIT License: https://opensource.org/license/mit
 - svg_fmt 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- syn-solidity 1.7.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- syn-solidity 1.7.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - taffy 0.13.0: MIT — MIT License: https://opensource.org/license/mit
 - torch-sys 0.22.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - tracel-llvm 20.1.4-7: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1753,7 +1757,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: adler2 2.0.1, allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.92, atk 0.18.2, atk-sys 0.18.2, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, cairo-rs 0.18.5, cairo-sys-rs 0.18.2, concurrent-queue 2.5.0, const-hex 1.19.1, constcat 0.6.1, ctor 0.2.9, ctor 1.0.13, cudarc 0.19.9, curve25519-dalek-derive 0.1.1, dary_heap 0.3.9, deku 0.20.3, deku_derive 0.20.3, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, enumn 0.1.14, erased-serde 0.4.10, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, flume 0.12.0, futures-lite 2.6.1, futures-utils-wasm 0.1.0, gdk 0.18.2, gdk-pixbuf 0.18.5, gdk-pixbuf-sys 0.18.0, gdk-sys 0.18.2, gio 0.18.4, gio-sys 0.18.1, glib 0.18.5, glib-macros 0.18.5, glib-sys 0.18.1, glow 0.17.0, gobject-sys 0.18.0, group 0.13.0, gtk 0.18.2, gtk-sys 0.18.2, gtk3-macros 0.18.2, hermit-abi 0.5.2, inventory 0.3.24, itoa 1.0.18, khronos-egl 6.0.0, link-section 0.19.3, linktime-proc-macro 0.2.3, linux-raw-sys 0.12.1, macro-string 0.2.0, monostate 0.1.18, monostate-impl 0.1.18, nybbles 0.4.8, once_cell 1.21.4, oneshot 0.2.1, ordered-stream 0.2.0, pango 0.18.3, pango-sys 0.18.0, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, portable-atomic-util 0.2.7, prettyplease 0.2.37, proc-macro-crate 1.3.1, proc-macro-crate 2.0.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, raw-window-metal 1.1.0, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 1.1.0, rustc-hash 2.1.3, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, seq-macro 0.3.6, serde 1.0.229, serde-saphyr 0.0.29, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_repr 0.1.21, simd_cesu8 1.2.0, smol 2.0.2, smol_str 0.3.6, syn 1.0.109, syn 2.0.119, syn 3.0.3, system-deps 6.2.2, tch 0.22.0, thiserror 1.0.69, thiserror 2.0.20, thiserror-impl 1.0.69, thiserror-impl 2.0.20, tinyvec 1.12.0, typed-path 0.12.3, typeid 1.0.3, unicode-ident 1.0.24, unindent 0.2.4, utf-8 0.7.6, waker-fn 1.2.0, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wasm-streams 0.4.2, wasm_thread 0.3.3, winnow 0.5.40, winnow 0.7.15, winnow 1.0.4, wit-bindgen 0.57.1, x11 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zbus_polkit 5.1.0, zed-font-kit 0.14.1-zed, zmij 1.0.23, zvariant_utils 4.1.0
+## License text for: adler2 2.0.1, allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.7, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.92, atk 0.18.2, atk-sys 0.18.2, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, cairo-rs 0.18.5, cairo-sys-rs 0.18.2, concurrent-queue 2.5.0, const-hex 1.19.1, constcat 0.6.1, ctor 0.2.9, ctor 1.0.13, cudarc 0.19.9, curve25519-dalek-derive 0.1.1, dary_heap 0.3.9, deku 0.20.3, deku_derive 0.20.3, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, enumn 0.1.14, erased-serde 0.4.10, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, flume 0.12.0, futures-lite 2.6.1, futures-utils-wasm 0.1.0, gdk 0.18.2, gdk-pixbuf 0.18.5, gdk-pixbuf-sys 0.18.0, gdk-sys 0.18.2, gio 0.18.4, gio-sys 0.18.1, glib 0.18.5, glib-macros 0.18.5, glib-sys 0.18.1, glow 0.17.0, gobject-sys 0.18.0, group 0.13.0, gtk 0.18.2, gtk-sys 0.18.2, gtk3-macros 0.18.2, hermit-abi 0.5.2, inventory 0.3.24, itoa 1.0.18, khronos-egl 6.0.0, link-section 0.19.3, linktime-proc-macro 0.2.3, linux-raw-sys 0.12.1, macro-string 0.2.0, monostate 0.1.18, monostate-impl 0.1.18, nybbles 0.4.8, once_cell 1.21.4, oneshot 0.2.1, ordered-stream 0.2.0, pango 0.18.3, pango-sys 0.18.0, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, portable-atomic-util 0.2.7, prettyplease 0.2.37, proc-macro-crate 1.3.1, proc-macro-crate 2.0.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, raw-window-metal 1.1.0, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 1.1.0, rustc-hash 2.1.3, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, seq-macro 0.3.6, serde 1.0.229, serde-saphyr 0.0.29, serde_bytes 0.11.19, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_repr 0.1.21, simd_cesu8 1.2.0, smol 2.0.2, smol_str 0.3.6, syn 1.0.109, syn 2.0.119, syn 3.0.3, system-deps 6.2.2, tch 0.22.0, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, tinyvec 1.12.0, typed-path 0.12.3, typeid 1.0.3, unicode-ident 1.0.24, unindent 0.2.4, utf-8 0.7.6, waker-fn 1.2.0, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wasm-streams 0.4.2, wasm_thread 0.3.3, winnow 0.5.40, winnow 0.7.15, winnow 1.0.4, wit-bindgen 0.57.1, x11 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zbus_polkit 5.1.0, zed-font-kit 0.14.1-zed, zmij 1.0.23, zvariant_utils 4.1.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -1978,7 +1982,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: annotate-snippets 0.12.16, anstyle 1.0.14, serde_spanned 0.6.9, serde_spanned 1.1.1, toml 0.8.23, toml 1.1.4+spec-1.1.0, toml_datetime 0.6.11, toml_datetime 1.1.1+spec-1.1.0, toml_edit 0.19.15, toml_edit 0.20.7, toml_edit 0.22.27, toml_edit 0.25.13+spec-1.1.0, toml_parser 1.1.3+spec-1.1.0, toml_write 0.1.2, toml_writer 1.1.2+spec-1.1.0
+## License text for: annotate-snippets 0.12.16, anstyle 1.0.14, serde_spanned 0.6.9, serde_spanned 1.1.1, toml 0.8.23, toml 1.1.4+spec-1.1.0, toml_datetime 0.6.11, toml_datetime 1.1.1+spec-1.1.0, toml_edit 0.19.15, toml_edit 0.20.7, toml_edit 0.22.27, toml_edit 0.25.15+spec-1.1.0, toml_parser 1.1.3+spec-1.1.0, toml_write 0.1.2, toml_writer 1.1.2+spec-1.1.0
 
 ```text
 Copyright (c) Individual contributors
@@ -2002,7 +2006,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: apple-native-keyring-store 1.0.1, keyring 4.2.0, keyring-core 1.0.0, windows-native-keyring-store 1.1.0, zbus-secret-service-keyring-store 1.0.0
+## License text for: apple-native-keyring-store 1.0.1, keyring 4.2.0, keyring-core 1.0.0, windows-native-keyring-store 1.1.0, zbus-secret-service-keyring-store 1.0.1
 
 ```text
 Copyright (c) 2016 keyring Developers
@@ -2689,7 +2693,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: aws-lc-rs 1.17.3
+## License text for: aws-lc-rs 1.18.1
 
 ```text
 SPDX-License-Identifier: ISC AND (Apache-2.0 OR ISC)
@@ -2896,7 +2900,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## License text for: aws-lc-sys 0.43.0
+## License text for: aws-lc-sys 0.45.0
 
 ```text
 AWS Libcrypto (AWS-LC)
@@ -6869,7 +6873,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: dirs 5.0.1, dirs 6.0.0, dirs-sys 0.4.1, dirs-sys 0.5.0
+## License text for: dirs 5.0.1, dirs 6.0.0, dirs 7.0.0, dirs-sys 0.4.1, dirs-sys 0.5.0
 
 ```text
 Copyright (c) 2018-2019 dirs-rs contributors
@@ -10484,7 +10488,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## License text for: hyper-rustls 0.27.9, rustls 0.23.43
+## License text for: hyper-rustls 0.27.9, rustls 0.23.45
 
 ```text
 ISC License (ISC)
@@ -10984,7 +10988,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: keyboard-types 0.7.0
+## License text for: keyboard-types 0.8.3
 
 ```text
 Copyright (c) 2017 Pyfisch
@@ -12118,7 +12122,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: minisign-verify 0.2.5
+## License text for: minisign-verify 0.2.5, minisign-verify 0.3.0
 
 ```text
 Copyright (c) 2019-2025 Frank Denis
@@ -12293,7 +12297,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## License text for: muda 0.19.3, tray-icon 0.24.2
+## License text for: muda 0.20.0, tray-icon 0.25.1
 
 ```text
 MIT License
@@ -13527,7 +13531,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: rand 0.10.2, rand 0.8.7, rand 0.9.5, rand_chacha 0.3.1, rand_chacha 0.9.0, rand_core 0.6.4, rand_core 0.9.5, rand_xorshift 0.4.0
+## License text for: rand 0.10.3, rand 0.8.7, rand 0.9.5, rand_chacha 0.3.1, rand_chacha 0.9.0, rand_core 0.6.4, rand_core 0.9.5, rand_xorshift 0.4.0
 
 ```text
 Copyright 2018 Developers of the Rand project
@@ -13953,7 +13957,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## License text for: reqwest 0.13.4
+## License text for: reqwest 0.13.5
 
 ```text
 Copyright (c) 2016-2026 Sean McArthur
@@ -14555,7 +14559,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: rustls-webpki 0.103.13
+## License text for: rustls-webpki 0.103.15
 
 ```text
 Except as otherwise noted, this project is licensed under the following
@@ -17573,7 +17577,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: uuid 0.8.2, uuid 1.26.0
+## License text for: uuid 0.8.2, uuid 1.26.1
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
