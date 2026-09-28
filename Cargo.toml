@@ -19,18 +19,11 @@ members = [
     "crates/ekubo-wallet-preview-wasm",
     "crates/mcp-bridge",
     "crates/walletconnect-session",
-    "crates/ztracing-compat",
+    "crates/gpui-tokio",
 ]
 
 [workspace.package]
 version = "1.8.4"
-
-# GPUI is Apache-2.0, but its pinned workspace dependency named `ztracing`
-# is GPL-3.0-or-later. The wallet only needs that crate's tracing facade, so
-# resolve it to our small Apache-2.0 compatibility crate instead of linking
-# GPL code into the desktop application.
-[patch."https://github.com/zed-industries/zed"]
-ztracing = { path = "crates/ztracing-compat" }
 
 [[bin]]
 name = "ekubo-wallet"
@@ -49,11 +42,14 @@ chrono = { version = "0.4.42", features = ["serde"] }
 directories = "6.0.0"
 fs2 = "0.4.3"
 futures = "0.3.31"
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "26cc9366abb27ccedce386ac99a615a8fa7018da", features = ["tree-sitter"] }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "26cc9366abb27ccedce386ac99a615a8fa7018da" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
-gpui_tokio = { git = "https://github.com/zed-industries/zed" }
+# GPUI comes from the `gpui-pre-*` crates.io snapshots of Zed that
+# gpui-component is built against. Every snapshot may change GPUI's API, so
+# gpui-pre, gpui-component, and gpui-kit-assets move together and stay exact.
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui-component = { version = "=0.7.0", features = ["tree-sitter"] }
+gpui-kit-assets = "=0.7.0"
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "wayland", "x11"] }
+gpui_tokio = { path = "crates/gpui-tokio" }
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 num-bigint = "0.5.1"
@@ -79,7 +75,7 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Allow development checks with Command Line Tools alone. Signed release CI
 # may precompile the same pinned Metal shaders using full Xcode.
-gpui_macos = { git = "https://github.com/zed-industries/zed", features = ["runtime_shaders"] }
+gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7", features = ["runtime_shaders"] }
 objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder"] }
 objc2-foundation = { version = "0.3.1", default-features = false, features = ["NSString"] }
@@ -103,10 +99,10 @@ zbus = { version = "5.18.0", default-features = false, features = ["tokio"] }
 # The fake platform behind `TestAppContext`, so the desktop's routes and
 # overlays can be laid out and painted in a test with no display attached.
 # Dev-dependencies do not apply to `cargo build --release`.
-gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.7", features = ["test-support"] }
 # The offscreen Metal renderer behind `capture_screenshot`, so the interface
 # can be rasterised and looked at on a machine with no display attached.
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["test-support"] }
 
 [package.metadata.packager]
 product-name = "Ekubo Wallet"
@@ -126,8 +122,10 @@ icons = ["assets/app-icon-512.png"]
 files = { "contrib/polkit/com.ekubo.wallet.policy" = "/usr/share/polkit-1/actions/com.ekubo.wallet.policy" }
 
 [package.metadata.gpui-revisions]
-zed = "52b2927a1bac46be5d50ad341ac00b665e13764b"
-gpui-component = "26cc9366abb27ccedce386ac99a615a8fa7018da"
+# The Zed commit the pinned gpui-pre snapshot was cut from, as named in the
+# gpui-pre crate description, and the gpui-component commit of its release.
+zed = "1a28cff4b409169bac058bca40dfbfeb7621d19b"
+gpui-component = "0c830f4d257e69fdd17200650533ab4ca9a40cc0"
 
 # Unoptimized MSVC frames for the deeply generic alloy, rmcp, and schemars call
 # chains are large enough to overflow Windows test-thread stacks even at a
