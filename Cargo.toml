@@ -83,14 +83,14 @@ gpui_macos = { git = "https://github.com/zed-industries/zed", features = ["runti
 objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder"] }
 objc2-foundation = { version = "0.3.1", default-features = false, features = ["NSString"] }
-tray-icon = "0.25.1"
+tray-icon = "0.26.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.18.0", default-features = false, features = ["tokio"] }
 
 [target.'cfg(windows)'.dependencies]
 interprocess = "2.4.3"
-tray-icon = "0.25.1"
+tray-icon = "0.26.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [build-dependencies]
