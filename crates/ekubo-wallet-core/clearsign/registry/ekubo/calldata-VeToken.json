@@ -434,7 +434,7 @@
         "fields": [{ "path": "veId", "label": "Stake ID", "format": "raw", "visible": "always" }]
       },
       "burn(uint256 veId)": {
-        "intent": "Burn empty vote-escrow NFT",
+        "intent": "Burn vote-escrow NFT (does not withdraw stake)",
         "interpolatedIntent": "Burn vote-escrow NFT {veId}",
         "fields": [{ "path": "veId", "label": "Stake ID", "format": "raw", "visible": "always" }]
       },

@@ -57,7 +57,7 @@
             "visible": "always"
           },
           { "path": "amount", "label": "Specified amount", "format": "raw", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           { "path": "sqrtRatioLimit", "label": "Price limit", "format": "raw", "visible": "optional" },
           { "path": "skipAhead", "label": "Skip ahead", "format": "raw", "visible": "optional" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
@@ -96,7 +96,7 @@
             "visible": "always"
           },
           { "path": "amount", "label": "Specified amount", "format": "raw", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           { "path": "sqrtRatioLimit", "label": "Price limit", "format": "raw", "visible": "optional" },
           { "path": "skipAhead", "label": "Skip ahead", "format": "raw", "visible": "optional" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
@@ -121,7 +121,7 @@
             "visible": "always"
           },
           { "path": "params", "label": "Packed swap params", "format": "raw", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Swap on Ekubo"
@@ -151,7 +151,7 @@
             "visible": "always"
           },
           { "path": "params", "label": "Packed swap params", "format": "raw", "visible": "always" },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
         "interpolatedIntent": "Swap, send to {recipient}"
@@ -172,7 +172,7 @@
             "format": "raw",
             "visible": "always"
           },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           {
             "path": "node.poolKey.token0",
             "label": "Pool token 0",
@@ -384,7 +384,7 @@
             "format": "raw",
             "visible": "always"
           },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           {
             "path": "s.route.[].poolKey.token0",
             "label": "Route token 0",
@@ -422,7 +422,7 @@
             "format": "raw",
             "visible": "always"
           },
-          { "path": "calculatedAmountThreshold", "label": "Amount threshold", "format": "raw", "visible": "always" },
+          { "path": "calculatedAmountThreshold", "label": "Amount threshold (min out / −max in, base units)", "format": "raw", "visible": "always" },
           {
             "path": "swaps.[].route.[].poolKey.token0",
             "label": "Route token 0",
