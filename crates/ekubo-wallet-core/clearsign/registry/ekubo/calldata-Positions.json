@@ -7,6 +7,7 @@
         { "chainId": 1, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
         { "chainId": 4326, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
         { "chainId": 4663, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
+        { "chainId": 8453, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
         { "chainId": 42161, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
         { "chainId": 46630, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
         { "chainId": 421614, "address": "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D" },
@@ -25,14 +26,14 @@
             "path": "maxAmount0",
             "label": "Maximum token 0",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token0" },
+            "params": { "tokenPath": "poolKey.token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           {
             "path": "maxAmount1",
             "label": "Maximum token 1",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token1" },
+            "params": { "tokenPath": "poolKey.token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
@@ -49,14 +50,14 @@
             "path": "maxAmount0",
             "label": "Maximum token 0",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token0" },
+            "params": { "tokenPath": "poolKey.token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           {
             "path": "maxAmount1",
             "label": "Maximum token 1",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token1" },
+            "params": { "tokenPath": "poolKey.token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
@@ -74,14 +75,14 @@
             "path": "maxAmount0",
             "label": "Maximum token 0",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token0" },
+            "params": { "tokenPath": "poolKey.token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           {
             "path": "maxAmount1",
             "label": "Maximum token 1",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token1" },
+            "params": { "tokenPath": "poolKey.token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
@@ -147,7 +148,7 @@
         "interpolatedIntent": "Collect fees {id}"
       },
       "withdraw(uint256 id, (address token0, address token1, bytes32 config) poolKey, int32 tickLower, int32 tickUpper, uint128 liquidity)": {
-        "intent": "Withdraw liquidity",
+        "intent": "Withdraw liquidity and fees",
         "fields": [
           { "path": "id", "label": "Position ID", "format": "raw", "visible": "always" },
           { "path": "liquidity", "label": "Liquidity", "format": "raw", "visible": "always" },
@@ -169,7 +170,7 @@
           { "path": "tickUpper", "label": "Upper tick", "format": "raw", "visible": "always" },
           { "path": "poolKey.config", "label": "Pool config", "format": "raw", "visible": "optional" }
         ],
-        "interpolatedIntent": "Withdraw position {id}"
+        "interpolatedIntent": "Withdraw position {id} and fees"
       },
       "withdraw(uint256 id, (address token0, address token1, bytes32 config) poolKey, int32 tickLower, int32 tickUpper, uint128 liquidity, address recipient, bool withFees)": {
         "intent": "Withdraw liquidity",
@@ -227,7 +228,7 @@
         "interpolatedIntent": "Initialize pool if needed"
       },
       "burn(uint256 id)": {
-        "intent": "Burn position NFT",
+        "intent": "Burn position NFT (does not withdraw liquidity)",
         "fields": [{ "path": "id", "label": "Position ID", "format": "raw", "visible": "always" }],
         "interpolatedIntent": "Burn position NFT {id}"
       },
@@ -389,9 +390,9 @@
         "intent": "Withdraw protocol fees",
         "fields": [
           { "path": "token0", "label": "Token 0", "format": "addressName", "params": { "types": ["token"] }, "visible": "always" },
-          { "path": "amount0", "label": "Amount 0", "format": "tokenAmount", "params": { "tokenPath": "token0" }, "visible": "always" },
+          { "path": "amount0", "label": "Amount 0", "format": "tokenAmount", "params": { "tokenPath": "token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" }, "visible": "always" },
           { "path": "token1", "label": "Token 1", "format": "addressName", "params": { "types": ["token"] }, "visible": "always" },
-          { "path": "amount1", "label": "Amount 1", "format": "tokenAmount", "params": { "tokenPath": "token1" }, "visible": "always" },
+          { "path": "amount1", "label": "Amount 1", "format": "tokenAmount", "params": { "tokenPath": "token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" }, "visible": "always" },
           {
             "path": "recipient",
             "label": "Recipient",

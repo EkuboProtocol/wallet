@@ -25,14 +25,14 @@
             "path": "maxAmount0",
             "label": "Maximum token 0",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token0" },
+            "params": { "tokenPath": "poolKey.token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           {
             "path": "maxAmount1",
             "label": "Maximum token 1",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token1" },
+            "params": { "tokenPath": "poolKey.token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
@@ -254,14 +254,14 @@
             "path": "maxAmount0",
             "label": "Maximum token 0",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token0" },
+            "params": { "tokenPath": "poolKey.token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           {
             "path": "maxAmount1",
             "label": "Maximum token 1",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token1" },
+            "params": { "tokenPath": "poolKey.token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
@@ -292,14 +292,14 @@
             "path": "maxAmount0",
             "label": "Maximum token 0",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token0" },
+            "params": { "tokenPath": "poolKey.token0", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           {
             "path": "maxAmount1",
             "label": "Maximum token 1",
             "format": "tokenAmount",
-            "params": { "tokenPath": "poolKey.token1" },
+            "params": { "tokenPath": "poolKey.token1", "nativeCurrencyAddress": "0x0000000000000000000000000000000000000000" },
             "visible": "always"
           },
           { "path": "minLiquidity", "label": "Minimum liquidity", "format": "raw", "visible": "always" },
@@ -330,7 +330,7 @@
         "fields": [{ "path": "salt", "label": "Salt", "format": "raw", "visible": "always" }]
       },
       "burn(uint256 id)": {
-        "intent": "Burn Ve33 position NFT",
+        "intent": "Burn Ve33 position NFT (does not withdraw liquidity)",
         "interpolatedIntent": "Burn Ve33 position NFT {id}",
         "fields": [{ "path": "id", "label": "Position ID", "format": "raw", "visible": "always" }]
       },
