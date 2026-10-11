@@ -1754,7 +1754,7 @@ fn version_twelve_history_is_preserved_and_can_be_backfilled() {
         .create("primary", "ethereum", &plan(), None, 1)
         .unwrap();
     let history = store.reject(request.request_id).unwrap();
-    store.database.connection.execute_batch("ALTER TABLE pending_transactions DROP COLUMN transaction_summary; UPDATE schema_metadata SET version = 12").unwrap();
+    store.database.connection.execute_batch("ALTER TABLE pending_transactions DROP COLUMN transaction_summary; ALTER TABLE pending_typed_data DROP COLUMN valid_until; UPDATE schema_metadata SET version = 12").unwrap();
     drop(store);
     let database = PolicyStore::open(
         &directory.path().join("policies.db"),

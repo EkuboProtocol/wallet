@@ -3,7 +3,7 @@ pub use ekubo_wallet_core::{
     automation_store, clear_signing, config, core, custody, desktop_store, execution, fork,
     human_presence, input_validation, legal, message, orchestrator, pending, plan_fetch,
     policy_store, reconcile, rpc, sanitize, simulation, simulation_store, token_list, token_store,
-    typed_data,
+    typed_data, typed_data_request,
 };
 
 pub mod agent_config;

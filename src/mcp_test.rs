@@ -970,6 +970,7 @@ fn every_tool_that_resolves_a_reference_is_annotated_open_world() {
             "wallet_import_token_list",
             "wallet_propose_tokens",
             "wallet_send_execution_plan",
+            "wallet_sign_typed_data",
             "wallet_simulate_execution_plan",
         ]
         .into_iter()
@@ -1777,10 +1778,13 @@ async fn signing_tools_fail_closed_until_legal_acceptance() {
     };
     assert!(error.message.contains("Legal"));
 
-    let result = server.wallet_sign_typed_data(Parameters(SignTypedDataInput {
-        wallet_id: "primary".into(),
-        typed_data: permit_payload(),
-    }));
+    let result = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: Some(permit_payload()),
+            reference: None,
+        }))
+        .await;
     let Err(error) = result else {
         panic!("typed-data signing unexpectedly bypassed the legal acceptance gate");
     };
@@ -1977,8 +1981,8 @@ fn order_payload() -> serde_json::Value {
     })
 }
 
-#[test]
-fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
+#[tokio::test]
+async fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
     let (_directory, server) = server();
     accept_legal(&server);
     // The wallet policy is allow-all, but a payload that is not a
@@ -1986,8 +1990,10 @@ fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
     let Json(output) = server
         .wallet_sign_typed_data(Parameters(SignTypedDataInput {
             wallet_id: "primary".into(),
-            typed_data: order_payload(),
+            typed_data: Some(order_payload()),
+            reference: None,
         }))
+        .await
         .unwrap();
     assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
     assert_eq!(output.chain_id, "1");
@@ -2005,8 +2011,10 @@ fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
     let Json(duplicate) = server
         .wallet_sign_typed_data(Parameters(SignTypedDataInput {
             wallet_id: "primary".into(),
-            typed_data: order_payload(),
+            typed_data: Some(order_payload()),
+            reference: None,
         }))
+        .await
         .unwrap();
     assert_eq!(duplicate.request_id, output.request_id);
 
@@ -2017,14 +2025,16 @@ fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
         server
             .wallet_sign_typed_data(Parameters(SignTypedDataInput {
                 wallet_id: "primary".into(),
-                typed_data: foreign,
+                typed_data: Some(foreign),
+                reference: None,
             }))
+            .await
             .is_err()
     );
 }
 
-#[test]
-fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
+#[tokio::test]
+async fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
     let (_directory, server) = server();
     accept_legal(&server);
     // The wallet is on the allow-all policy, which authorizes approvals to
@@ -2034,8 +2044,10 @@ fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
     let Json(output) = server
         .wallet_sign_typed_data(Parameters(SignTypedDataInput {
             wallet_id: "primary".into(),
-            typed_data: permit_payload(),
+            typed_data: Some(permit_payload()),
+            reference: None,
         }))
+        .await
         .unwrap();
     assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
     assert!(output.signature.is_none());
@@ -2816,15 +2828,241 @@ fn withdrawing_a_message_the_owner_already_decided_names_the_live_status() {
     assert!(error.message.contains("Rejected"), "{}", error.message);
 }
 
-#[test]
-fn withdrawing_a_queued_typed_data_request_clears_it() {
+fn signature_request_payload(signer: &str, valid_until: Option<&str>) -> serde_json::Value {
+    let mut request = serde_json::json!({
+        "schema_version": "1",
+        "kind": "typed_data_signature_request",
+        "signer": signer,
+        "typed_data": {
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "Permit": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "spender", "type": "address"},
+                    {"name": "value", "type": "uint256"},
+                    {"name": "nonce", "type": "uint256"},
+                    {"name": "deadline", "type": "uint256"}
+                ]
+            },
+            "primaryType": "Permit",
+            "domain": {
+                "name": "Test Token",
+                "version": "1",
+                "chainId": "1",
+                "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            },
+            "message": {
+                "owner": "0x1111111111111111111111111111111111111111",
+                "spender": "0x2222222222222222222222222222222222222222",
+                "value": "1000000",
+                "nonce": "0",
+                "deadline": "1900000000"
+            }
+        }
+    });
+    if let Some(cutoff) = valid_until {
+        request["valid_until"] = serde_json::json!(cutoff);
+    }
+    request
+}
+
+fn signature_request_envelope(url: String, body: &[u8]) -> ArtifactReference {
+    use crate::plan_fetch::{ArtifactIntegrity, ArtifactType};
+    ArtifactReference {
+        kind: "artifact_reference".into(),
+        artifact_type: ArtifactType::TypedDataSignatureRequest,
+        url,
+        integrity: Some(ArtifactIntegrity {
+            algorithm: "keccak256".into(),
+            value: format!("0x{:x}", alloy::primitives::keccak256(body)),
+        }),
+        bytes: Some(body.len() as u64),
+        instruction: None,
+    }
+}
+
+fn data_envelope(payload: &serde_json::Value) -> ArtifactReference {
+    use base64::Engine as _;
+    let body = serde_json::to_vec(payload).unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
+    signature_request_envelope(format!("data:application/json;base64,{encoded}"), &body)
+}
+
+#[tokio::test]
+async fn typed_data_file_reference_queues_the_named_payload() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let payload = signature_request_payload(
+        "0x1111111111111111111111111111111111111111",
+        Some("2000000000"),
+    );
+    let body = serde_json::to_vec(&payload).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &body).unwrap();
+    let envelope = signature_request_envelope(format!("file://{}", file.path().display()), &body);
+    let Json(output) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: None,
+            reference: Some(envelope),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
+    assert_eq!(output.chain_id, "1");
+    assert_eq!(output.valid_until.as_deref(), Some("2000000000"));
+    assert!(output.signature.is_none());
+    // Authorization binds to the request digest, not the signing digest.
+    let signing: alloy::primitives::B256 = output.digest.parse().unwrap();
+    let signer: alloy::primitives::Address = "0x1111111111111111111111111111111111111111"
+        .parse()
+        .unwrap();
+    let expected =
+        crate::typed_data_request::request_digest(&signer, &signing, Some(2_000_000_000), None);
+    assert_eq!(
+        output.request_digest.as_deref(),
+        Some(format!("{expected:#x}").as_str())
+    );
+}
+
+#[tokio::test]
+async fn typed_data_data_uri_reference_queues_the_named_payload() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let payload = signature_request_payload("0x1111111111111111111111111111111111111111", None);
+    let Json(output) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: None,
+            reference: Some(data_envelope(&payload)),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
+    assert_eq!(output.valid_until, None);
+    assert!(output.request_digest.is_some());
+}
+
+#[tokio::test]
+async fn typed_data_reference_with_foreign_signer_is_rejected() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let payload = signature_request_payload(
+        "0x2222222222222222222222222222222222222222",
+        Some("2000000000"),
+    );
+    let Err(error) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: None,
+            reference: Some(data_envelope(&payload)),
+        }))
+        .await
+    else {
+        panic!("expected the request to be rejected");
+    };
+    assert!(error.message.contains("signer"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn typed_data_reference_past_its_cutoff_is_rejected() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let payload = signature_request_payload(
+        "0x1111111111111111111111111111111111111111",
+        Some("1000000000"),
+    );
+    let body = serde_json::to_vec(&payload).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &body).unwrap();
+    let envelope = signature_request_envelope(format!("file://{}", file.path().display()), &body);
+    let Err(error) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: None,
+            reference: Some(envelope),
+        }))
+        .await
+    else {
+        panic!("expected the request to be rejected");
+    };
+    assert!(error.message.contains("cutoff"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn typed_data_reference_with_tampered_bytes_is_rejected() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let payload = signature_request_payload(
+        "0x1111111111111111111111111111111111111111",
+        Some("2000000000"),
+    );
+    let body = serde_json::to_vec(&payload).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), b"{\"tampered\":true}").unwrap();
+    let envelope = signature_request_envelope(format!("file://{}", file.path().display()), &body);
+    let Err(error) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: None,
+            reference: Some(envelope),
+        }))
+        .await
+    else {
+        panic!("expected the request to be rejected");
+    };
+    assert!(
+        error.message.contains("could not be resolved"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("tampered"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn typed_data_signing_takes_exactly_one_of_payload_and_reference() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let payload = signature_request_payload(
+        "0x1111111111111111111111111111111111111111",
+        Some("2000000000"),
+    );
+    let envelope = data_envelope(&payload);
+    for input in [
+        SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: None,
+            reference: None,
+        },
+        SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: Some(permit_payload()),
+            reference: Some(envelope),
+        },
+    ] {
+        let Err(error) = server.wallet_sign_typed_data(Parameters(input)).await else {
+            panic!("expected the request to be rejected");
+        };
+        assert!(error.message.contains("exactly one"), "{}", error.message);
+    }
+}
+
+#[tokio::test]
+async fn withdrawing_a_queued_typed_data_request_clears_it() {
     let (_directory, server) = server();
     accept_legal(&server);
     let Json(queued) = server
         .wallet_sign_typed_data(Parameters(SignTypedDataInput {
             wallet_id: "primary".into(),
-            typed_data: permit_payload(),
+            typed_data: Some(permit_payload()),
+            reference: None,
         }))
+        .await
         .unwrap();
 
     let Json(withdrawn) = server

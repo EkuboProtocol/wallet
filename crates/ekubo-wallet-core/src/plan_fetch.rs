@@ -2,13 +2,14 @@
 //! tool arguments.
 //!
 //! Producers such as the Ekubo MCP server return one `artifact_reference`
-//! envelope per stored wallet payload: the `https` URL where the body is
+//! envelope per stored wallet payload: the URL where the body is
 //! stored and an integrity block (keccak256 of its exact bytes plus their
 //! count). The agent between the producer
 //! and this wallet relays the envelope verbatim as a single `reference`
-//! argument instead of re-emitting kilobytes of calldata. Three artifact
+//! argument instead of re-emitting kilobytes of calldata. Four artifact
 //! kinds travel this way: execution plans, read-call bundles (exact
-//! `wallet_batch_eth_call` argument bodies), and curated token lists. This
+//! `wallet_batch_eth_call` argument bodies), curated token lists, and
+//! typed-data signature requests. This
 //! wallet fetches the body
 //! itself, transparently decompresses standard HTTP content encodings,
 //! verifies the digest and byte count over the resulting canonical JSON, and
@@ -16,6 +17,16 @@
 //! from having a URL, and an inline body is still expressible as a `data:`
 //! URI that never touches the network — there the bytes are the reference,
 //! so integrity is verified only when supplied.
+//!
+//! A same-machine producer (for example a local MCP server) may name the body
+//! with a `file:` URI instead: an absolute path with an empty host or
+//! `localhost`, read once within a bound, and verified against the envelope's
+//! integrity block and byte count exactly like a network body. The URL fully
+//! specifies the bytes with no out-of-band agreement, at the cost the
+//! specification states plainly: the wallet reads inside its own boundary on
+//! the relay's naming, so every file failure — missing, oversized,
+//! mismatched, or unreadable — reports one indistinguishable error that
+//! carries no part of the file's contents.
 //!
 //! The `https` fetches are this process's only outbound requests that are not
 //! a configured chain RPC, so admission is deliberately narrow: `https` on the
@@ -43,6 +54,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::io::AsyncReadExt as _;
 use url::{Host, Url};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -135,6 +147,7 @@ pub enum ArtifactType {
     ExecutionPlan,
     ReadCalls,
     TokenList,
+    TypedDataSignatureRequest,
 }
 
 impl ArtifactType {
@@ -143,6 +156,7 @@ impl ArtifactType {
             Self::ExecutionPlan => "execution plan",
             Self::ReadCalls => "read-call bundle",
             Self::TokenList => "token list",
+            Self::TypedDataSignatureRequest => "typed-data signature request",
         }
     }
 
@@ -158,6 +172,7 @@ impl ArtifactType {
         match self {
             Self::ExecutionPlan | Self::ReadCalls => MAX_SERIALIZED_PLAN_BYTES,
             Self::TokenList => crate::token_list::MAX_TOKEN_LIST_BYTES,
+            Self::TypedDataSignatureRequest => crate::typed_data::MAX_TYPED_DATA_BYTES,
         }
     }
 
@@ -166,6 +181,7 @@ impl ArtifactType {
             Self::ExecutionPlan => "execution_plan",
             Self::ReadCalls => "read_calls",
             Self::TokenList => "token_list",
+            Self::TypedDataSignatureRequest => "typed_data_signature_request",
         }
     }
 
@@ -176,6 +192,9 @@ impl ArtifactType {
             }
             Self::ReadCalls => "re-run the producer's tool for a fresh bundle and reference",
             Self::TokenList => "re-run the producer's tool for a fresh list and reference",
+            Self::TypedDataSignatureRequest => {
+                "re-run the producer's tool for a fresh signature request and reference"
+            }
         }
     }
 
@@ -187,6 +206,7 @@ impl ArtifactType {
             // to confirm, so the consequence is about what they would be
             // shown, not about anything that could be signed.
             Self::TokenList => "none of its names may be suggested",
+            Self::TypedDataSignatureRequest => "it must not be signed or released",
         }
     }
 }
@@ -221,8 +241,9 @@ pub struct ArtifactReference {
     /// Must be `artifact_reference`.
     pub kind: String,
     pub artifact_type: ArtifactType,
-    /// Public `https` URL of the stored body or a bounded
-    /// `data:application/json[;base64]` URI carrying it inline.
+    /// Where the stored body lives: a public `https` URL, a `file` URI with
+    /// an empty host or `localhost` naming an absolute path on this machine,
+    /// or a bounded `data:application/json[;base64]` URI carrying it inline.
     pub url: String,
     #[serde(default)]
     pub integrity: Option<ArtifactIntegrity>,
@@ -252,12 +273,14 @@ pub fn artifact_reference_object_schema(
 /// The `https` host is the vetted, pinned name admission checked, so showing
 /// it to the user is showing a TLS-verified fact.
 ///
-/// Local files are deliberately absent: a path is caller-chosen text, not
-/// publisher provenance, and desktop MCP clients have no filesystem transport.
+/// A local file is deliberately not provenance: a path is caller-chosen text,
+/// not a statement about who published anything, so it is never shown as an
+/// origin beyond the local machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtifactSource {
     Https { host: String },
     InlineDataUri,
+    LocalFile,
 }
 
 impl fmt::Display for ArtifactSource {
@@ -265,6 +288,7 @@ impl fmt::Display for ArtifactSource {
         match self {
             Self::Https { host } => formatter.write_str(host),
             Self::InlineDataUri => formatter.write_str("inline data URI"),
+            Self::LocalFile => formatter.write_str("local file"),
         }
     }
 }
@@ -303,6 +327,26 @@ pub async fn resolve_token_list_reference(
     let fetched = fetch_reference(reference, ArtifactType::TokenList, policy).await?;
     let list = crate::token_list::parse_token_list(&fetched.bytes)?;
     Ok((list, fetched.source))
+}
+
+/// Fetch, verify, and validate one referenced ERC-8410 typed-data signature
+/// request, and report where its bytes came from.
+///
+/// The returned request carries the exact EIP-712 payload, its signing
+/// digest, and the wallet request digest authorization binds to. Like a plan,
+/// it authorizes nothing on its own: the caller still queues it for explicit
+/// human review and enforces the signer's identity and the release cutoff.
+pub async fn resolve_typed_data_signature_request_reference(
+    reference: &ArtifactReference,
+    policy: FetchPolicy,
+) -> Result<(
+    crate::typed_data_request::ValidatedSignatureRequest,
+    ArtifactSource,
+)> {
+    let fetched =
+        fetch_reference(reference, ArtifactType::TypedDataSignatureRequest, policy).await?;
+    let request = crate::typed_data_request::parse_signature_request_bytes(&fetched.bytes)?;
+    Ok((request, fetched.source))
 }
 
 /// Fetch and parse a curated token list published at a plain `https` URL, and
@@ -360,7 +404,8 @@ pub async fn fetch_token_list_url(
     Ok((list, host))
 }
 
-/// Fetch one referenced body — remote `https` or local `data:` URI — and
+/// Fetch one referenced body — remote `https`, local `file:`, or inline
+/// `data:` URI — and
 /// verify it against the digest and byte count its producer published,
 /// without interpreting the bytes. HTTP content encoding is a transport
 /// detail: reqwest decompresses it first, the body cap is enforced on those
@@ -413,6 +458,16 @@ pub async fn fetch_reference(
             decode_data_uri(&reference.url, expected_type)?,
             ArtifactSource::InlineDataUri,
         )
+    } else if reference.url.starts_with("file:") {
+        // A body that lives on this machine's filesystem must be verifiable
+        // for the same reason a network body must be: the silent
+        // skip-verification path of the old optional digest is gone. Every
+        // way the read can fail reports one indistinguishable error, because
+        // each envelope would otherwise be a yes-or-no question about the
+        // host's files, answered through this process's observable behavior.
+        require_verifiable(reference, noun, "named by a file URL", "")?;
+        let bytes = fetch_file_verified(reference, expected_type, max_bytes).await?;
+        (bytes, ArtifactSource::LocalFile)
     } else {
         // A body that travels over the network must be verifiable: the
         // silent skip-verification path of the old optional digest is gone.
@@ -455,6 +510,116 @@ fn require_verifiable(
         "{noun} references {how} must carry their exact byte count{hint}"
     );
     Ok(())
+}
+
+/// Read one `file:` body and check it against the envelope's byte count and
+/// digest before parsing, reporting every failure — missing, oversized,
+/// mismatched, or unreadable — as the same error.
+///
+/// Length is checked before the digest because it is the cheaper refutation,
+/// and both before parsing because a parser is a larger attack surface than
+/// a comparison, exactly as for the other transports. What differs is only
+/// how much the caller is told: nothing that distinguishes the cases, and no
+/// part of the file's contents.
+async fn fetch_file_verified(
+    reference: &ArtifactReference,
+    artifact_type: ArtifactType,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let failure = || file_failure(artifact_type);
+    let body = fetch_file(&reference.url, artifact_type.noun(), max_bytes)
+        .await
+        .map_err(|_| failure())?;
+    if reference
+        .bytes
+        .is_some_and(|promised| body.len() as u64 != promised)
+    {
+        bail!(failure());
+    }
+    if let Some(integrity) = &reference.integrity {
+        let matched = digest_check(&body, &integrity.value).is_ok_and(|(matched, _, _)| matched);
+        ensure!(matched, failure());
+    }
+    Ok(body)
+}
+
+/// The single error every `file:` failure reports. Kept free of paths,
+/// operating-system reasons, lengths, and digests alike.
+fn file_failure(artifact_type: ArtifactType) -> anyhow::Error {
+    anyhow!(
+        "{} file reference could not be resolved: it is missing, oversized, unreadable, or \
+         differs from what its integrity block promises, so {}",
+        artifact_type.noun(),
+        artifact_type.mismatch_consequence()
+    )
+}
+
+/// Read the bytes a `file:` URL names: an absolute path with an empty host or
+/// `localhost`, bounded by the artifact's body cap during reading, with no
+/// network access. A stalled read (a FIFO, a device) fails on the same total
+/// timeout the network transport uses.
+async fn fetch_file(url: &str, noun: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    // Held for the whole read: a caller who names FIFOs could otherwise hold
+    // arbitrarily many blocking reads open at once.
+    let _permit = FETCH_SLOTS
+        .acquire()
+        .await
+        .context("the outbound fetch limiter was closed")?;
+    let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
+    ensure!(
+        parsed.scheme() == "file",
+        "{noun} file URL must use the file scheme"
+    );
+    ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "{noun} file URLs must not carry credentials"
+    );
+    ensure!(
+        parsed.query().is_none(),
+        "{noun} file URLs must not carry a query string"
+    );
+    ensure!(
+        parsed.fragment().is_none(),
+        "{noun} file URLs must not carry a fragment"
+    );
+    match parsed.host() {
+        // `Url::parse` lowercases the host, so this matches every spelling of
+        // `localhost` and nothing else.
+        None | Some(Host::Domain("localhost")) => {}
+        Some(_) => bail!("{noun} file URLs must have an empty host or localhost"),
+    }
+    let path = parsed
+        .to_file_path()
+        .map_err(|()| anyhow!("{noun} file URL does not name an absolute path"))?;
+    ensure!(
+        path.is_absolute(),
+        "{noun} file URL does not name an absolute path"
+    );
+    let read = async {
+        let mut file = tokio::fs::File::open(&path)
+            .await
+            .with_context(|| format!("{noun} file could not be opened"))?;
+        let mut body = Vec::new();
+        let mut chunk = vec![0_u8; 8_192];
+        loop {
+            let read = file
+                .read(&mut chunk)
+                .await
+                .with_context(|| format!("{noun} file could not be read"))?;
+            if read == 0 {
+                break;
+            }
+            ensure!(
+                body.len() + read <= max_bytes,
+                "{noun} body exceeds {max_bytes} bytes"
+            );
+            body.extend_from_slice(&chunk[..read]);
+        }
+        Ok(body)
+    };
+    tokio::time::timeout(TOTAL_TIMEOUT, read)
+        .await
+        .with_context(|| format!("{noun} file read timed out"))?
 }
 
 /// Decode `data:application/json[;base64],…` without touching the network.
