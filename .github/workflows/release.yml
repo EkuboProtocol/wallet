@@ -110,7 +110,7 @@ jobs:
           done
           printf 'commit_sha=%s\n' "$build_sha" >> "$GITHUB_OUTPUT"
       - name: Re-upload verified inputs for isolated signing jobs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verified-unsigned-inputs
           path: unsigned/**
@@ -184,7 +184,7 @@ jobs:
       - if: always()
         shell: bash
         run: security delete-keychain "$RELEASE_KEYCHAIN" >/dev/null 2>&1 || true; rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/AuthKey.p8"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-macos
           path: dist/**
@@ -257,7 +257,7 @@ jobs:
           } else {
             throw 'AZURE_TRUSTED_SIGNING_ENABLED must be exactly true or false'
           }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-windows
           path: dist/**
@@ -285,7 +285,7 @@ jobs:
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
         run: for file in dist/*.AppImage dist/*.deb; do cargo packager signer sign "$file"; done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-linux
           path: dist/**
