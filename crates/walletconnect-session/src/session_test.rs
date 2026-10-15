@@ -245,7 +245,6 @@ fn a_proposal_nobody_could_read_is_refused_rather_than_trimmed() {
         "{refusal}"
     );
 
-    // What a real dapp sends is nowhere near it.
     let ordinary = proposal(
         vec![(
             "eip155",
@@ -425,9 +424,6 @@ fn a_bare_namespace_key_keeps_its_chains_list() {
 
 #[test]
 fn settling_narrows_to_the_approved_scope_and_can_never_widen_it() {
-    // The dapp asks for four chains and three methods; the person approved two
-    // chains and two methods. Nothing outside the scope may appear in what is
-    // sent back, or the dapp would believe it had permissions nobody granted.
     let proposal = proposal(
         vec![(
             "eip155",
@@ -478,8 +474,6 @@ fn a_namespace_outside_eip155_is_never_settled() {
 
 #[test]
 fn a_proposal_naming_nothing_recognizable_still_settles_a_usable_session() {
-    // Without the fallback the namespaces would be empty and the dapp would
-    // have no account to talk to, even though the person approved a session.
     let settled = settled_namespaces(&proposal(vec![], vec![]), &scope());
     let entry = settled.get(EIP155).expect("a fallback namespace");
     assert_eq!(entry.accounts.len(), 2);
@@ -532,7 +526,6 @@ fn the_deadline_is_the_same_deadline_for_every_method() {
     assert!(lapsed(100, 101));
     assert!(!lapsed(100, 99));
 
-    // And the scope check agrees, at the same boundary.
     let expired = Utc::now().timestamp();
     let (code, message) = check_in_scope(&scope(), &request("personal_sign", "eip155:1"), expired)
         .expect_err("a session at its deadline still served a request");
@@ -576,8 +569,6 @@ fn a_pairings_own_deadline_outlives_the_moment_the_uri_was_pasted() {
     assert!(lapsed.contains("expired"), "{lapsed}");
     assert!(lapsed.contains("connect again"), "{lapsed}");
 
-    // The deadline itself is past it, matching how a settled session's own
-    // deadline is read.
     assert!(pairing_refusal(Some(now), now).is_some());
 }
 
@@ -610,14 +601,10 @@ fn a_peer_cannot_evict_an_answered_id() {
     let capacity = u64::try_from(MAX_ANSWERED_IDS).unwrap();
     let high = u64::MAX - capacity * 2;
 
-    // The session has been busy: the cache is one short of full, and every id
-    // in it is numerically above the one the dapp is about to use.
     for offset in 0..capacity - 1 {
         assert!(remember(&mut answered, high + offset));
     }
 
-    // The request the dapp actually made, with an ordinary low id, arriving
-    // last of everything so far.
     let replayed = 1_000_u64;
     assert!(remember(&mut answered, replayed));
 

@@ -28,8 +28,6 @@ fn a_request_and_a_response_are_told_apart() {
 
 #[test]
 fn a_request_without_params_is_still_a_request() {
-    // `wc_sessionPing` is sent with an empty object, and a peer that omits the
-    // field entirely means the same thing.
     let message: IncomingMessage =
         serde_json::from_value(json!({ "id": 7, "jsonrpc": "2.0", "method": "wc_sessionPing" }))
             .unwrap();
@@ -41,9 +39,6 @@ fn a_request_without_params_is_still_a_request() {
 
 #[test]
 fn a_proposal_from_a_newer_sdk_still_parses() {
-    // Unknown fields at every level. Refusing the message over one of them
-    // would break pairing against dapps on a newer SDK, and nothing unknown is
-    // ever acted on.
     let proposal: SessionProposeParams = serde_json::from_value(json!({
         "relays": [{ "protocol": "irn" }],
         "proposer": {
@@ -64,8 +59,6 @@ fn a_proposal_from_a_newer_sdk_still_parses() {
 
 #[test]
 fn a_proposal_with_no_metadata_at_all_still_parses() {
-    // Every metadata field defaults, because a dapp is free to send none of
-    // them and the review has to be able to say "not stated" rather than fail.
     let proposal: SessionProposeParams = serde_json::from_value(json!({
         "proposer": { "publicKey": "cd".repeat(32) },
     }))
@@ -120,7 +113,6 @@ fn a_relay_object_omits_data_when_there_is_none() {
 
 #[test]
 fn request_ids_look_like_recent_microsecond_timestamps() {
-    // Some peers sanity-check the shape; a counter starting at 1 fails that.
     let id = request_id(1_700_000_000_000, 7);
     assert_eq!(id, 1_700_000_000_000_007);
     assert_ne!(request_id(1_700_000_000_000, 1), id);

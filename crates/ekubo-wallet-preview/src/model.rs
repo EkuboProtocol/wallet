@@ -256,9 +256,6 @@ impl<B: Backend> PreviewModel<B> {
             .word_head
             .forward(state.clone())
             .mask_fill(blocked_words, f64::NEG_INFINITY);
-        // Copy scores: how well each decoder step matches each encoder
-        // position, scaled the way attention logits are so the two halves of
-        // the joint distribution stay comparable.
         let queries = self.copy_query.forward(state);
         let scale = SCALE;
         let copies = queries.matmul(memory.swap_dims(1, 2)) / scale;

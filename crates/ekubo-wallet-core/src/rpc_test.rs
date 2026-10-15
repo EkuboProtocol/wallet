@@ -290,8 +290,6 @@ async fn the_failure_names_every_endpoint_it_tried() {
     ] {
         assert!(!error.contains(secret), "{secret} survived in {error}");
     }
-    // The reason each one failed, not merely its name: a wrong chain and a
-    // refused connection call for different fixes.
     assert!(
         error.contains("RPC reports chain 999, not 7"),
         "unexpected: {error}"
@@ -352,7 +350,6 @@ fn a_receipt_the_lifecycle_cannot_store_is_the_endpoints_failure() {
     assert!(storable_receipt_fields(u64::MAX, 21_000).is_err());
     assert!(storable_receipt_fields(21_000_000, u64::MAX).is_err());
 
-    // The boundary itself is storable; one past it is not.
     let highest = u64::try_from(i64::MAX).unwrap();
     assert!(storable_receipt_fields(highest, highest).is_ok());
     assert!(storable_receipt_fields(highest + 1, 0).is_err());
@@ -434,7 +431,6 @@ async fn a_receipt_for_another_transaction_is_not_an_answer() {
     );
     assert!(error.contains("rather than the requested"), "{error}");
 
-    // The honest case still works, so the check is not simply refusing.
     let (honest, _handle) = receipt_stub(7, asked_about);
     let network = network_with(7, vec![honest]);
     let receipt = transaction_receipt(&network, &format!("{asked_about:#x}"))

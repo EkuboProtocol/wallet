@@ -307,7 +307,6 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
             tokio::spawn(async move {
                 let mut buffer = Vec::new();
                 loop {
-                    // Read one HTTP request: headers, then Content-Length body.
                     let header_end = loop {
                         if let Some(position) =
                             buffer.windows(4).position(|window| window == b"\r\n\r\n")
@@ -608,7 +607,6 @@ async fn a_reorged_receipt_rolls_back_and_keeps_the_automatic_signing_slot() {
     }));
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
 
-    // A different canonical block identity replaces the provisional one.
     chain.receipt_block_hash_byte.store(0xcc, Ordering::SeqCst);
     let moved = server.reconcile_pending(&request).await.unwrap();
     assert_eq!(moved.status, ExecutionStatus::Submitted);
@@ -618,8 +616,6 @@ async fn a_reorged_receipt_rolls_back_and_keeps_the_automatic_signing_slot() {
     );
     assert_eq!(moved.finalized, Some(false));
 
-    // The receipt then disappears entirely: reconciliation restores the
-    // broadcast lifecycle instead of preserving a false success.
     chain.hide_receipts.store(true, Ordering::SeqCst);
     let rolled_back = server.reconcile_pending(&request).await.unwrap();
     assert_eq!(rolled_back.status, ExecutionStatus::SubmissionPending);
@@ -713,8 +709,6 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
     assert_eq!(signed_record.status, PendingStatus::Signed);
     assert!(signed_record.review_digest.is_some(), "review digest bound");
 
-    // Agent leg again: resubmitting by request id broadcasts the exact stored
-    // bytes and settles the record.
     let output = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
@@ -900,8 +894,6 @@ async fn approving_sends_the_signed_bytes_without_waiting_to_be_asked_again() {
         reviewed.record.status
     );
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
-    // And the agent that queued it, coming back later, is told the state
-    // rather than sending anything a second time.
     let status = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
@@ -921,10 +913,6 @@ async fn approving_sends_the_signed_bytes_without_waiting_to_be_asked_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_submission_somebody_else_claimed_is_reported_rather_than_repeated() {
-    // The desktop, the MCP server, and a WalletConnect session reach the same
-    // database without sharing a lock, so the submission lease is what decides
-    // between them. Losing it means the bytes are already going out, which is
-    // the intended outcome and not a failure to show the reviewer.
     let (address, chain) = start_stub().await;
     let (directory, server, wallet) =
         pipeline_server(address, &WalletPolicy::require_approval_for_everything());
@@ -949,7 +937,6 @@ async fn a_submission_somebody_else_claimed_is_reported_rather_than_repeated() {
         chain.mined.lock().unwrap().is_empty(),
         "the lease holder sends, and nothing sends twice"
     );
-    // The agent asking about it now gets the in-flight state, not an error.
     let status = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
@@ -1257,9 +1244,6 @@ async fn must_review_and_a_failed_simulation_still_honors_fail() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn must_review_is_refused_on_a_request_that_is_already_signed() {
-    // A `request_id` submits bytes a human already approved. There is no
-    // decision left for a review to change, and quietly accepting the flag
-    // would let an agent believe it had asked for one.
     let (address, _chain) = start_stub().await;
     let (_directory, server, _wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
 
@@ -1318,7 +1302,6 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
         .0;
     assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
 
-    // The recorded simulation was consumed by the send.
     let error = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),

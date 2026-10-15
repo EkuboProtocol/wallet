@@ -75,7 +75,6 @@ fn a_transaction_past_the_timeout_stops_the_automation_and_names_it() {
         reason.contains(&sent.request_id.to_string()),
         "the owner has to be able to find the transaction: {reason}"
     );
-    // Recoverable by hand rather than silently retried, so the reason says how.
     assert!(reason.contains("relink"), "{reason}");
 }
 

@@ -130,8 +130,6 @@ impl Fixtures {
             })
             .collect();
         for address in referenced {
-            // Deterministic in the address, so the same token reads the same
-            // way everywhere in one plan.
             let seed = address
                 .as_slice()
                 .iter()
@@ -244,9 +242,6 @@ fn synth_many(
 /// An unsigned magnitude, log-scaled, with the sentinels a wallet must read.
 fn synth_uint(bits: usize, rng: &mut impl Rng) -> U256 {
     if bits >= 128 && rng.random_range(0..12) == 0 {
-        // The unlimited-allowance sentinels. `approval_summary` treats
-        // anything at or above `type(uint128).max` as unlimited, and the
-        // review has to say so, so the corpus carries all three in use.
         let sentinel = [
             U256::MAX,
             U256::MAX >> 1,
@@ -327,7 +322,6 @@ fn synthesize_standard_kind(
             calldata.extend_from_slice(&DynSolValue::Uint(amount, 256).abi_encode());
         }
         2 => {
-            // A revocation: the same selector with a zero ceiling.
             calldata.extend_from_slice(&[0x09, 0x5e, 0xa7, 0xb3]);
             calldata.extend_from_slice(&DynSolValue::Address(spender).abi_encode());
             calldata.extend_from_slice(&DynSolValue::Uint(U256::ZERO, 256).abi_encode());
@@ -397,8 +391,6 @@ fn interpret_one(
         },
         revert_decode: None,
     };
-    // The same two-pass token resolution the orchestrator performs: ask what
-    // the plan names, resolve exactly those, then interpret.
     let referenced = futures::executor::block_on(
         ekubo_wallet_core::approval_summary::plan_token_targets(std::slice::from_ref(&step)),
     );

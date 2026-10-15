@@ -1,16 +1,3 @@
-// Probe every candidate endpoint for the requests this wallet actually makes.
-//
-//   bun contrib/rpc-probe/probe.mjs <dir> [--limit N] [--chain ID] [--resume]
-//
-// Reads <dir>/candidates.json, appends one JSON object per endpoint to
-// <dir>/probe-results.jsonl. Re-running with --resume skips endpoints already
-// in that file, so a survey of several thousand endpoints can be interrupted.
-//
-// The battery is deliberately the wallet's own request set rather than a
-// generic health check. An endpoint that answers eth_chainId and nothing else
-// is useless here: simulation-gated signing needs eth_simulateV1 pinned to a
-// block, with state overrides, and the balance and code reads that set it up.
-
 import { readFileSync, appendFileSync, existsSync, readFileSync as read } from "node:fs";
 import { join } from "node:path";
 
@@ -27,17 +14,12 @@ const skipRateLimit = flags.includes("--no-rate-limit");
 
 const OUT = join(dir, "probe-results.jsonl");
 
-// One request may not exceed this; a public endpoint that needs longer than
-// this for eth_chainId is not a fallback worth ranking.
 const REQUEST_TIMEOUT_MS = 8000;
-// eth_simulateV1 is the expensive one and some honest endpoints are slow at it.
 const SIMULATE_TIMEOUT_MS = 20000;
 const GLOBAL_CONCURRENCY = 96;
 const PER_HOST_CONCURRENCY = 2;
 
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
-// The Calibur delegation designator this wallet installs when it simulates an
-// atomic batch. Its exact shape is what makes the override probe meaningful.
 const CALIBUR = "0x000000005c84F8Fd50b21CAC312528A64437030e";
 const PROBE_ADDRESS = "0x000000000000000000000000000000000000dEaD";
 const USER_AGENT = "ekubo-wallet-rpc-probe/1.0 (+https://github.com/EkuboProtocol/wallet)";
@@ -132,9 +114,6 @@ function isRateLimited(response) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// A public endpoint refusing a burst says nothing about whether it implements
-// a method. Backing off and asking once more is the difference between
-// measuring capability and measuring how fast this survey ran.
 async function rpcPatient(url, method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
   let response = await rpc(url, method, params, timeoutMs);
   for (let attempt = 0; attempt < 2 && isRateLimited(response); attempt += 1) {
@@ -144,9 +123,6 @@ async function rpcPatient(url, method, params, timeoutMs = REQUEST_TIMEOUT_MS) {
   return response;
 }
 
-// The wallet reads a handful of values at once, but firing all of them at a
-// rate-limited endpoint measures the survey rather than the endpoint, so the
-// battery runs in small groups.
 async function inGroups(size, thunks) {
   const results = [];
   for (let index = 0; index < thunks.length; index += size) {
@@ -179,9 +155,6 @@ async function rpcBatch(url, calls) {
 
 const hex = (value) => `0x${value.toString(16)}`;
 
-// The wallet's own eth_simulateV1 payload: one block per replayed plan, the
-// 7702 designator installed by a state override, transfers traced, validation
-// off. Anything that answers this answers what simulation-gated signing sends.
 function simulatePayload({ withOverride, blocks, chainId }) {
   const call = {
     from: PROBE_ADDRESS,
@@ -216,8 +189,6 @@ function simulateOutcome(response) {
   }
   const message = (response.rpcError?.message ?? response.error ?? "").toLowerCase();
   const code = response.rpcError?.code;
-  // -32601 is the standard "method not found"; several gateways instead answer
-  // with a plain 4xx or a prose message, so the text is checked too.
   const unsupported =
     code === -32601 ||
     code === -32004 ||
@@ -235,9 +206,6 @@ function simulateOutcome(response) {
   };
 }
 
-// A burst tells us what a wallet doing four or five reads at once will meet.
-// Public endpoints commonly allow a low steady rate and reject bursts, and a
-// fallback that fails the moment the wallet parallelises is not a fallback.
 async function measureBurst(url) {
   const size = 10;
   const started = performance.now();
@@ -306,8 +274,6 @@ async function probe(job) {
       ]),
   ]);
   record.methods = {
-    // Pinned reads at the head block are how simulation sets itself up; an
-    // endpoint that only answers "latest" breaks that path.
     getBalancePinned: balance.ok,
     getCodePinned: code.ok,
     getTransactionCount: nonce.ok,
@@ -325,9 +291,6 @@ async function probe(job) {
       rpcPatient(job.url, "eth_estimateGas", [
         { from: PROBE_ADDRESS, to: PROBE_ADDRESS, value: "0x0" },
       ]),
-    // Deliberately malformed: a node that has the method answers "invalid
-    // RLP", one that does not answers "method not found". Nothing is
-    // broadcast either way.
     () => rpcPatient(job.url, "eth_sendRawTransaction", ["0x"]),
   ]);
   record.methods.feeHistory = feeHistory.ok;
@@ -370,8 +333,6 @@ async function probe(job) {
     { method: "eth_blockNumber", params: [] },
   ]);
 
-  // Historical depth: the transaction view diffs the balance across a mined
-  // block, which needs the parent block's state; deeper history is a bonus.
   if (head > 4096) {
     const [recent, deep] = await inGroups(2, [
       () => rpcPatient(job.url, "eth_getBalance", [PROBE_ADDRESS, hex(head - 1)]),
@@ -380,9 +341,6 @@ async function probe(job) {
     record.historicalState = { parentBlock: recent.ok, deep4096: deep.ok };
   }
 
-  // The capability that decides whether this wallet can sign at all: one
-  // block, pinned to the head, with the 7702 designator installed by a state
-  // override. That is exactly what a one-shot simulation sends.
   const signing = await rpcPatient(
     job.url,
     "eth_simulateV1",
@@ -392,10 +350,6 @@ async function probe(job) {
   record.simulate = simulateOutcome(signing);
 
   if (record.simulate.supported) {
-    // A second block is fork replay, and several chains answer the one-block
-    // form while rejecting the two-block one ("unknown ancestor", "failed to
-    // get parent header"). That costs forks, not signing, so it is recorded
-    // separately instead of disqualifying the endpoint.
     const fork = await rpcPatient(
       job.url,
       "eth_simulateV1",
@@ -404,9 +358,6 @@ async function probe(job) {
     );
     record.simulateFork = simulateOutcome(fork);
   } else {
-    // Narrow down which part it refused, because "no eth_simulateV1 at all",
-    // "no state overrides", and "no pinned block" are different defects and
-    // only the first is hopeless.
     const plain = await rpcPatient(
       job.url,
       "eth_simulateV1",
@@ -439,9 +390,6 @@ async function probe(job) {
   return record;
 }
 
-// Endpoints are shuffled by host so the run does not hammer one provider's
-// hundred chains back to back, and a per-host gate keeps concurrency polite
-// even when it does.
 const hostGates = new Map();
 async function withHostGate(url, work) {
   const host = new URL(url).hostname;

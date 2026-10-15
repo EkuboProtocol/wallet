@@ -23,8 +23,6 @@ fn absent_weights_are_reported_rather_than_panicking() {
         Ok(_) => assert!(present(), "a model loaded, so weights must be present"),
         Err(LoadError::Absent) => assert!(!present()),
         Err(LoadError::Mismatched(reason)) => {
-            // Expected while a retrain is outstanding; the dedicated test
-            // below is what checks the refusal is well formed.
             assert!(reason.contains("retrain"), "{reason}");
         }
     }

@@ -125,8 +125,6 @@ fn a_narrow_column_refuses_a_newer_harness_rather_than_storing_something_else() 
         write(AgentKind::GrokBuild).is_err(),
         "the constraint refuses rather than silently storing something else"
     );
-    // Refused, so the row keeps the last label it accepted rather than being
-    // left half-written.
     let stored: Option<String> = store
         .connection
         .query_row(

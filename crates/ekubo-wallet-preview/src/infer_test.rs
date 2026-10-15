@@ -62,8 +62,6 @@ fn a_batch_answers_one_preview_per_plan_in_order() {
     ];
     let previews = engine().legacy_preview_all(&documents);
     assert_eq!(previews.len(), 3);
-    // The middle plan decoded to nothing, so it keeps the honest answer even
-    // though its neighbours went through the model.
     assert_eq!(previews[1].class, TransactionClass::Unrecognized);
     assert!(previews[1].summary.is_empty());
 }

@@ -94,9 +94,6 @@ def license_files_for(package):
     # contents, which is itself as likely to guess wrong.
     if " AND " in normalized_expression(package):
         return candidates
-    # No `AND`: one file is enough. Prefer the crate's own declared file --
-    # it is the crate's own claim about which text applies -- over whichever
-    # the glob's shortest-name tiebreak happened to find.
     if declared is not None and declared in candidates:
         return [declared]
     return candidates[:1]

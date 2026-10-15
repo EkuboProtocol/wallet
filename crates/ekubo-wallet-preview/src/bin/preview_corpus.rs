@@ -194,8 +194,6 @@ fn build(
     match Shape::sample(rng) {
         Shape::Single => {}
         Shape::ApproveThen => {
-            // The approval precedes the action it exists for, so it is
-            // inserted ahead of the call this example is about.
             if let Some(summary) = corpus::synthesize_approval(fixtures, rng) {
                 built.insert(0, (summary, None));
             }
@@ -232,9 +230,6 @@ fn build(
     let mut protocols = Vec::new();
     for (summary, keyed) in built {
         summaries.push(summary);
-        // A call with no descriptor behind it is keyed by the empty string,
-        // which the label table reads as "no intent" and falls back to
-        // classifying from the decoded text.
         let (format, protocol) = keyed.map_or_else(
             || (String::new(), String::new()),
             |(descriptor, canonical, protocol)| (format!("{descriptor}::{canonical}"), protocol),

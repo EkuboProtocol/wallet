@@ -367,8 +367,6 @@ fn an_unwritable_bundle_is_refused_by_either_exchange() {
     std::fs::write(&binary, b"known-working-wallet").unwrap();
     std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    // Root ignores the mode bits entirely, which would make this assert
-    // nothing at all rather than fail.
     let probe = app.join(".writable");
     if std::fs::write(&probe, b"").is_ok() {
         let _ = std::fs::remove_file(&probe);

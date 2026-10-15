@@ -347,7 +347,6 @@ fn a_stale_observer_cannot_release_a_lease_that_was_reclaimed() {
         )
         .unwrap();
 
-    // What reconciliation observes, outside any lock.
     let observed = store.claim_for_submission(signed.request_id).unwrap();
 
     // What happens in the meantime: the lease is released and taken again
@@ -376,7 +375,6 @@ fn a_stale_observer_cannot_release_a_lease_that_was_reclaimed() {
         PendingStatus::Submitting
     );
 
-    // The holder of the live lease still gets its envelope on the wire.
     assert_eq!(
         store
             .mark_broadcast(signed.request_id, hash, live.generation)
@@ -416,7 +414,6 @@ fn settlement_records_what_the_transaction_actually_cost() {
         .finalize(signed.request_id, true, 123, Some(&fee))
         .unwrap();
     assert_eq!(settled.mined_fee.as_ref(), Some(&fee));
-    // Survives a reload: the fee is persisted, not just returned.
     assert_eq!(store.get(signed.request_id).unwrap().mined_fee, Some(fee));
 }
 
@@ -492,7 +489,6 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
     let broadcast = store
         .mark_broadcast(first.request_id, first_hash, leased.generation)
         .unwrap();
-    // A verdict reached from a snapshot older than the row does not apply.
     assert!(
         store
             .mark_replaced(first.request_id, leased.generation)
@@ -504,8 +500,6 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
         .unwrap();
     assert_eq!(replaced.status, PendingStatus::Replaced);
 
-    // No rebroadcast and no second replacement: this envelope is done
-    // being sent, and the verdict is not something to re-derive.
     assert!(store.claim_broadcast_retry(first.request_id).is_err());
     assert!(
         store
@@ -513,11 +507,6 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
             .is_err()
     );
 
-    // But a receipt still settles it. `replaced` is inferred from a
-    // consumed nonce and a missing receipt, which is also what a node
-    // whose receipt index lags its nonce reports about a transaction that
-    // did mine — so the verdict has to be correctable, or one transient
-    // gap says "replaced" forever about funds that moved.
     assert_eq!(
         store
             .finalize(first.request_id, true, 123, None)
@@ -526,7 +515,6 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
         PendingStatus::Confirmed
     );
 
-    // The wallet+chain in-flight slot is free for the next transaction.
     assert!(
         store
             .record_automatic_signed(
@@ -774,7 +762,6 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
     assert!(store.mark_cancelled(request_id, 124, None).is_err());
     assert!(store.finalize(request_id, true, 124, None).is_err());
 
-    // Terminal: the wallet+chain in-flight slot is free again.
     broadcast_original(&mut store);
 }
 
@@ -808,7 +795,6 @@ fn the_in_flight_slot_is_queryable_and_unsent_signatures_can_be_discarded() {
     assert_eq!(discarded.status, PendingStatus::Cancelled);
     assert!(store.in_flight("primary", "1").unwrap().is_none());
 
-    // Anything that may have reached the network is refused.
     let request_id = broadcast_original(&mut store);
     assert!(store.discard_unsent(request_id).is_err());
     assert!(store.in_flight("primary", "1").unwrap().is_some());
@@ -955,8 +941,6 @@ fn duplicate_pending_plan_reuses_request_and_queue_is_bounded() {
     let first = store
         .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
         .unwrap();
-    // Provenance round-trips: the vetted producer host survives storage
-    // so the approval screen can display it.
     assert_eq!(first.plan_source.as_deref(), Some("mcp.ekubo.org"));
     let duplicate = store
         .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
@@ -1053,15 +1037,11 @@ fn a_plan_source_separates_what_was_proved_from_what_was_claimed() {
     for claimed in [
         "WalletConnect: Ekubo (ekubo.org)",
         "WalletConnect: an unnamed dapp",
-        // A dapp naming itself after somewhere else is still legible as a
-        // claim, which is the whole job of the prefix.
         "WalletConnect: ekubo.org (claim-rewards.xyz)",
     ] {
         validate_plan_source(Some(claimed)).unwrap_or_else(|error| panic!("{claimed}: {error}"));
     }
 
-    // What the prefix does not buy: a claim that could redraw the screen it is
-    // displayed on, or one that says nothing at all.
     for refused in [
         "WalletConnect: ",
         "WalletConnect: \u{202e}gro.obuke",
@@ -1075,7 +1055,6 @@ fn a_plan_source_separates_what_was_proved_from_what_was_claimed() {
         );
     }
 
-    // The cap is on bytes, because that is what the column holds.
     let long = format!("WalletConnect: {}", "e".repeat(MAX_PLAN_SOURCE_BYTES));
     assert!(validate_plan_source(Some(&long)).is_err());
 }
@@ -1150,8 +1129,6 @@ fn a_mismatched_envelope_and_hash_never_reach_the_database() {
         .to_string();
     assert!(error.contains("do not hash to"), "{error}");
 
-    // Nothing was written, so the in-flight slot is still free and the honest
-    // pair goes in.
     let signed = store
         .record_automatic_signed(
             "primary",
@@ -1226,15 +1203,12 @@ fn a_broadcast_hash_naming_another_transaction_is_refused_on_read() {
         PendingStatus::Broadcast
     );
 
-    // The writer refuses an unrelated hash outright.
     let leased = store.claim_for_submission(signed.request_id);
     assert!(
         leased.is_err(),
         "a broadcast row is not claimable for submission again"
     );
 
-    // So plant it the way an altered database would, and confirm the read is
-    // what catches it rather than reconciliation acting on it.
     let other =
         B256::from_str("0x4444444444444444444444444444444444444444444444444444444444444444")
             .unwrap();
@@ -1416,7 +1390,6 @@ fn clearing_history_leaves_every_row_that_can_still_reach_the_chain() {
         )
         .unwrap();
 
-    // Another wallet's history is not this one's to clear.
     assert_eq!(store.clear_terminal_history(Some("secondary")).unwrap(), 0);
     assert_eq!(store.list(None, 10).unwrap().len(), 3);
 
@@ -1500,7 +1473,6 @@ fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
         .unwrap();
     assert_eq!(terminal, MAX_TERMINAL_HISTORY_PER_WALLET + 5);
 
-    // The next insert reclaims the excess.
     store
         .create("primary", "ethereum", &plan_with_value("9"), None, 1)
         .unwrap();

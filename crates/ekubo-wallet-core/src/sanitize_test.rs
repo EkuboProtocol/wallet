@@ -16,7 +16,6 @@ fn control_and_bidirectional_characters_never_survive() {
     assert_eq!(terminal_safe_line("x\u{2066}y\u{2069}z"), "x y z");
     assert_eq!(terminal_safe_multiline("a\u{202e}b\nc"), "a b\nc");
     assert_eq!(stripped_capped("E\u{202e}TH\u{7f}", 8), "ETH");
-    // The Arabic letter mark is a bidi control like the rest.
     assert_eq!(terminal_safe_line("a\u{061c}b"), "a b");
 }
 
@@ -30,7 +29,6 @@ fn zero_width_characters_never_survive() {
     assert_eq!(stripped_capped("USD\u{feff}C", 16), "USDC");
     assert_eq!(stripped_capped("USD\u{2060}C", 16), "USDC");
     assert_eq!(stripped_capped("USD\u{200d}C", 16), "USDC");
-    // Tag characters encode whole ASCII strings invisibly.
     assert_eq!(stripped_capped("USDC\u{e0041}\u{e0042}", 16), "USDC");
     assert_eq!(terminal_safe_line("a\u{200b}b"), "a b");
 }
@@ -73,8 +71,6 @@ fn unicode_line_separators_do_not_survive_a_one_line_value() {
         "first\nsecond third"
     );
 
-    // Neither is a control character, which is the whole reason they were
-    // missed; pin that so the predicate is not "simplified" back later.
     assert!(!'\u{2028}'.is_control());
     assert!(!'\u{2029}'.is_control());
 }
@@ -85,15 +81,15 @@ fn unicode_line_separators_do_not_survive_a_one_line_value() {
 #[test]
 fn the_invisible_set_covers_the_glyph_changers_too() {
     for character in [
-        '\u{034f}',  // combining grapheme joiner
-        '\u{2065}',  // unassigned, inside the format block
-        '\u{206a}',  // deprecated: inhibit symmetric swapping
-        '\u{206f}',  // deprecated: nominal digit shapes
-        '\u{fe00}',  // variation selector-1
-        '\u{fe0f}',  // variation selector-16, the emoji presentation selector
-        '\u{fff9}',  // interlinear annotation anchor
-        '\u{fffb}',  // interlinear annotation terminator
-        '\u{e0100}', // variation selector-17
+        '\u{034f}',
+        '\u{2065}', // unassigned, inside the format block
+        '\u{206a}',
+        '\u{206f}',
+        '\u{fe00}',
+        '\u{fe0f}',
+        '\u{fff9}',
+        '\u{fffb}',
+        '\u{e0100}',
     ] {
         assert!(
             is_invisible_format(character),
@@ -103,10 +99,6 @@ fn the_invisible_set_covers_the_glyph_changers_too() {
         assert!(is_disallowed(character));
     }
 
-    // A variation selector can give a familiar label an unfamiliar face
-    // without adding a visible character, so the label a person recognises and
-    // the bytes that were stored are no longer the same thing.
     assert_eq!(terminal_safe_line("USDC\u{fe0f}"), "USDC ");
-    // And a grapheme joiner splits a run that still reads as one word.
     assert_eq!(terminal_safe_line("US\u{034f}DC"), "US DC");
 }

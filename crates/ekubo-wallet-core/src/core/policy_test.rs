@@ -541,11 +541,6 @@ fn diffs_are_position_aware_because_order_is_authority() {
         {"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}},
         {"effect": "allow", "chain_id": {"eq": "1"}}
     ]}));
-    // Reordering is a permission change, not a no-op: moving the deny above
-    // the allow is what decides which one a matching call hits first. Neither
-    // rule was edited, so the move is reported as the deny arriving ahead of
-    // the allow and leaving the position it used to hold, rather than as a
-    // rewrite of both positions.
     let diff = diff_policies(&current, &proposed);
     assert_eq!(diff.len(), 2, "{diff:?}");
     assert!(diff[0].starts_with("- rule 1: starts denying"), "{diff:?}");
@@ -608,8 +603,6 @@ fn editing_a_rule_in_place_stays_one_changed_line() {
         {"effect": "allow", "chain_id": {"eq": "8453"}}
     ]}));
 
-    // Pairing a removal with an addition inside the same unaligned run is what
-    // keeps this from decaying into "rule 2 removed" plus "rule 2 added".
     let diff = diff_policies(&current, &proposed);
     assert_eq!(diff.len(), 1, "{diff:?}");
     assert!(diff[0].starts_with("~ rule 2 changed: "), "{diff:?}");
@@ -767,8 +760,6 @@ fn constraining_the_source_only_ever_narrows_a_rule() {
     assert!(is_tightening(&broad, &narrowed));
     assert!(!is_tightening(&narrowed, &broad));
 
-    // And narrowing further within the channel is a tightening again, while
-    // relaxing the same field is not.
     let one_host = policy(json!({"version": 1, "rules": [
         {
             "effect": "allow",
@@ -798,8 +789,6 @@ fn a_source_narrowed_rule_under_a_broader_one_is_unreachable() {
     ]}));
     assert!(refused.is_err(), "an unreachable deny was admitted");
 
-    // The other order is fine: the narrow rule decides first and the broad
-    // one still has everything else to answer for.
     WalletPolicy::parse(json!({"version": 1, "rules": [
         {
             "effect": "deny",

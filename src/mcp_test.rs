@@ -406,8 +406,6 @@ fn tool_schemas_contain_no_boolean_schemas() {
             serde_json::Value::Object(map) => {
                 for (key, child) in map {
                     let child_path = format!("{path}.{key}");
-                    // additionalProperties is exempt: boolean forms are
-                    // universal there and clients accept them.
                     let schema_position = matches!(key.as_str(), "items" | "contains" | "not")
                         || path.ends_with(".properties")
                         || path.ends_with(".$defs")
@@ -470,12 +468,6 @@ fn tool_schemas_contain_no_boolean_schemas() {
 
 #[test]
 fn tool_schemas_contain_no_recursive_refs() {
-    // Some MCP clients (Muse Spark among them) reject tools/list outright
-    // when any served schema is recursive ("Recursive JSON schemas are not
-    // currently supported"). Recursive request/response types therefore
-    // advertise shallow object envelopes at tool sites — the complete
-    // recursive schemas stay on dedicated resources, and deserialization
-    // remains the admission check.
     fn resolve_pointer<'a>(
         root: &'a serde_json::Value,
         pointer: &str,
@@ -927,9 +919,6 @@ fn simulating_a_plan_is_not_annotated_read_only() {
     let tool = router.get("wallet_simulate_execution_plan").unwrap();
     let annotations = tool.annotations.as_ref().unwrap();
     assert_eq!(annotations.read_only_hint, Some(false));
-    // The writes are additions to in-process registries that expire, so
-    // nothing here is destructive, and a repeat records a second simulation
-    // rather than nothing.
     assert_eq!(annotations.destructive_hint, Some(false));
     assert_eq!(annotations.idempotent_hint, Some(false));
     assert_eq!(annotations.open_world_hint, Some(true));
@@ -1069,8 +1058,6 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
             aliases: vec!["untrusted-testnet".into()],
             chain_id: "999999".into(),
             testnet: true,
-            // Nothing listens here, so reaching it at all fails slowly and
-            // with a connection error rather than the conflict below.
             rpc_urls: vec!["http://127.0.0.1:9".parse().unwrap()],
             rpc_strategy: None,
             finality_confirmations: 12,
@@ -1401,10 +1388,6 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
     let description = simulate.description.clone().unwrap_or_default();
     assert!(description.contains("not a reason to stop"));
 
-    // And on the result itself, in band, at the moment the agent decides
-    // what to do next: instructions and descriptions are read once, but
-    // the denial arrives mid-task.
-    // A call no rule covers is the ordinary route to approval.
     let next_step = policy_denial_next_step(
         crate::core::policy::PolicyOutcome::RequiresApproval,
         uuid::Uuid::nil(),
@@ -1699,8 +1682,6 @@ fn a_send_names_exactly_one_of_plan_simulation_and_request() {
             .simulation_id
             .is_some()
     );
-    // The tool rejects zero or several of them; the schema itself accepts
-    // each field independently, which is what the count check is for.
     let none = with(serde_json::json!({})).unwrap();
     assert!(none.reference.is_none() && none.simulation_id.is_none() && none.request_id.is_none());
     let with_reference = with(serde_json::json!({
@@ -1855,11 +1836,9 @@ fn message_signing_always_queues_and_never_signs_inline() {
             .contains("open review")
     );
 
-    // A duplicate message reuses the pending request.
     let Json(duplicate) = sign_message(&server, "gm").unwrap();
     assert_eq!(duplicate.request_id, output.request_id);
 
-    // Waiting on it returns the same pending state with a re-poll nudge.
     let Json(waited) = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -2001,7 +1980,6 @@ fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
             .contains("open review")
     );
 
-    // A duplicate payload reuses the pending request.
     let Json(duplicate) = server
         .wallet_sign_typed_data(Parameters(SignTypedDataInput {
             wallet_id: "primary".into(),
@@ -2010,7 +1988,6 @@ fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
         .unwrap();
     assert_eq!(duplicate.request_id, output.request_id);
 
-    // A chain the server does not know is rejected outright.
     let mut foreign = order_payload();
     foreign["domain"]["chainId"] = serde_json::json!(999_999);
     assert!(
@@ -2040,7 +2017,6 @@ fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
     assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
     assert!(output.signature.is_none());
     assert!(output.approved_at.is_none());
-    // The approvals it grants are still decoded, as review information.
     let approvals = output.permit_approvals.as_deref().unwrap();
     assert_eq!(approvals.len(), 1);
     assert_eq!(approvals[0].kind, "erc2612_permit");
@@ -2060,7 +2036,6 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     let mut events = server.events.subscribe();
     let proposed = serde_json::to_value(WalletPolicy::require_approval_for_everything()).unwrap();
 
-    // The wrong source revision is rejected with re-read guidance.
     let stale = server.wallet_propose_policy(Parameters(ProposePolicyInput {
         wallet_id: "primary".into(),
         source_revision: 7,
@@ -2114,7 +2089,6 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
         "same change, updated rationale"
     );
 
-    // An invalid document is rejected with authoring guidance.
     drop(policies);
     let invalid = server.wallet_propose_policy(Parameters(ProposePolicyInput {
         wallet_id: "primary".into(),
@@ -2217,14 +2191,10 @@ fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
 
 #[test]
 fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
-    // The wallet builds no calldata, so an agent asked to swap or provide
-    // liquidity with no plan producer connected needs somewhere to go.
     assert!(SERVER_INSTRUCTIONS.contains("https://mcp.ekubo.org"));
     assert!(SERVER_INSTRUCTIONS.contains("swapping"));
     assert!(SERVER_INSTRUCTIONS.contains("liquidity"));
     assert!(SERVER_INSTRUCTIONS.contains("yield"));
-    // ...and the same sentence has to deny it any privileged standing,
-    // because nothing in this process treats a plan's origin as special.
     assert!(SERVER_INSTRUCTIONS.contains("grant those servers no extra trust"));
     // One endpoint per protocol, and the all-protocol one beside them: an
     // agent told only about `/mcp` would have no way to name the server that
@@ -2608,9 +2578,6 @@ fn withdrawing_a_queued_request_clears_it_and_repeats_harmlessly() {
         "{instruction}"
     );
 
-    // A retry of a call that already worked asked for a state the row is
-    // already in, so it succeeds rather than making the agent decide whether
-    // its own earlier success counts.
     let Json(again) = withdraw(&server, request_id).unwrap();
     assert_eq!(again.status, ExecutionStatus::Cancelled);
 }
@@ -2665,9 +2632,6 @@ fn losing_the_race_to_the_owner_is_an_error_that_names_the_live_status() {
     let Err(error) = withdraw(&server, request_id) else {
         panic!("a decided request must not withdraw");
     };
-    // The agent has to be able to tell "nothing happened" from "the opposite
-    // of what I wanted happened", so the refusal carries the live status and
-    // the two tools that settle what became of the bytes.
     assert!(error.message.contains("Rejected"), "{}", error.message);
     assert!(
         error.message.contains("wallet_get_execution_status"),
@@ -2790,8 +2754,6 @@ fn withdrawing_a_queued_message_clears_it_and_tells_the_owner_why() {
         .collect::<Vec<_>>();
     assert_eq!(stages, vec![SignatureStage::Withdrawn]);
 
-    // The same message queues fresh rather than deduplicating into the row
-    // that is no longer waiting for anyone.
     let Json(again) = sign_message(&server, "gm").unwrap();
     assert_ne!(again.request_id, queued.request_id);
 }
@@ -2879,7 +2841,6 @@ fn withdrawing_a_policy_proposal_removes_the_question_and_not_the_policy() {
     assert_eq!(after.0.revision, before.0.revision);
     assert_eq!(after.0.policy, before.0.policy);
 
-    // And a second call finds nothing pending rather than reporting success.
     assert!(
         server
             .wallet_withdraw_policy_proposal(Parameters(WalletProposalInput {
@@ -2943,9 +2904,6 @@ fn withdrawing_a_network_proposal_removes_the_question_and_not_a_network() {
     let (_directory, server) = server();
     accept_legal(&server);
     let configured_before = server.config.load().unwrap().networks.len();
-    // Written straight into the store: `wallet_propose_network` resolves the
-    // endpoint's host over the network, and what is under test here is
-    // withdrawal rather than which endpoints are admissible.
     let profile = ekubo_wallet_core::config::NetworkConfig {
         chain_id: 999_999,
         name: "untrusted".into(),

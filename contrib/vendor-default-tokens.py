@@ -40,11 +40,6 @@ import pathlib
 import sys
 import urllib.request
 
-# `tokens.json` is the complete generated document the Ekubo token database
-# consumes: the hand-maintained `curated-tokens.json` seed plus every remote
-# source merged in. The curated file alone is ~170 EVM rows, which covers the
-# majors and nothing else; a wallet that displays a symbol for one token in a
-# pair and a bare address for the other has not really helped a reviewer.
 SOURCE_URL = (
     "https://raw.githubusercontent.com/EkuboProtocol/default-tokens/"
     "refs/heads/main/tokens.json"
@@ -64,9 +59,6 @@ VENDORED = (
     / "default-tokens.json"
 )
 
-# The name recorded as the source of every seeded row. It reaches the token
-# review and search screens, so it reads as a provenance claim rather than a
-# file name.
 LIST_NAME = "Default tokens"
 
 
@@ -129,8 +121,6 @@ def normalize(upstream: bytes, url: str = SOURCE_URL) -> dict:
         tokens.append(
             {
                 "chain_id": chain_id,
-                # Lowercased because the `tokens` table stores and CHECKs the
-                # lowercase form, so the vendored bytes match what is inserted.
                 "address": address.lower(),
                 "symbol": symbol,
                 "name": name or None,
@@ -138,8 +128,6 @@ def normalize(upstream: bytes, url: str = SOURCE_URL) -> dict:
             }
         )
 
-    # Sorted so a refresh produces a diff of what actually changed rather than
-    # a reordering of everything.
     tokens.sort(key=lambda token: (token["chain_id"], token["address"]))
 
     duplicates = len(tokens) - len({(t["chain_id"], t["address"]) for t in tokens})

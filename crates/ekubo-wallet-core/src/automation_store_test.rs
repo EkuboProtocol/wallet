@@ -76,7 +76,6 @@ fn a_policy_revision_that_moved_unlinks_rather_than_running() {
         .unwrap()
         .automation;
 
-    // Same revision: it runs.
     let due = store.due(wallet.instance_id, 1, at(12, 0)).unwrap();
     assert_eq!(due.ready.len(), 1);
     assert!(due.unlinked.is_empty());
@@ -97,8 +96,6 @@ fn a_policy_revision_that_moved_unlinks_rather_than_running() {
         unlinked.stopped_reason
     );
 
-    // And it stays stopped on later ticks, including a tick that arrives back
-    // at the revision it was installed under.
     let due = store.due(wallet.instance_id, 1, at(14, 0)).unwrap();
     assert!(due.ready.is_empty());
     assert!(due.unlinked.is_empty());
@@ -258,8 +255,6 @@ fn a_skipped_tick_consumes_the_schedule_without_forgiving_failures() {
         )
         .unwrap();
 
-    // The tick is consumed, so the schedule moves on rather than retrying
-    // immediately...
     assert!(
         store
             .due(wallet.instance_id, 1, at(12, 30))
@@ -372,9 +367,6 @@ fn replacing_bytecode_resets_the_history_that_described_the_old_bytecode() {
         .unwrap()
         .automation;
 
-    // New bytecode, so the counters describing the old bytecode's failures
-    // would be a lie, and the automation runs again under the revision the
-    // caller named.
     assert_eq!(replaced.id, installed.id);
     assert_eq!(replaced.state, AutomationState::Enabled);
     assert_eq!(replaced.consecutive_failures, 0);
@@ -462,8 +454,6 @@ fn every_tick_is_recorded_including_the_quiet_ones() {
     assert_eq!(runs[0].outcome, RunOutcome::Skipped);
     assert_eq!(runs[1].outcome, RunOutcome::Sent);
     assert_eq!(runs[2].outcome, RunOutcome::Idle);
-    // And the run that produced a transaction names it, which is the whole
-    // point of keeping the log.
     assert_eq!(runs[1].request_id, Some(sent));
     assert_eq!(runs[1].calls, 2);
     assert!(runs[0].request_id.is_none());
@@ -477,7 +467,6 @@ fn the_run_log_is_bounded_and_drops_the_oldest_first() {
         .install(&wallet, "chatty", &definition("v1", "* * * * * *"), 1)
         .unwrap()
         .automation;
-    // One over the cap, each a minute apart so the ordering is unambiguous.
     for index in 0..=MAX_RUNS_PER_AUTOMATION {
         let minute = u32::try_from(index % 60).unwrap();
         let hour = u32::try_from(index / 60).unwrap();
@@ -498,8 +487,6 @@ fn the_run_log_is_bounded_and_drops_the_oldest_first() {
         .runs(installed.id, MAX_RUNS_PER_AUTOMATION * 2)
         .unwrap();
     assert_eq!(runs.len(), MAX_RUNS_PER_AUTOMATION);
-    // A per-second schedule would otherwise grow a log nobody reads, and the
-    // rows worth keeping are the recent ones.
     assert_eq!(runs[0].detail, format!("run {MAX_RUNS_PER_AUTOMATION}"));
     assert!(!runs.iter().any(|run| run.detail == "run 0"));
 }

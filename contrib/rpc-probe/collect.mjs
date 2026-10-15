@@ -1,14 +1,3 @@
-// Collect every public HTTPS JSON-RPC endpoint chainlist.org knows about.
-//
-// chainlist.org renders two sources: the ethereum-lists/chains registry
-// (chainid.network/chains.json) and its own curated extras, which carry the
-// tracking disclosure the site shows next to each endpoint. Both are merged
-// here so the prober sees one candidate list per chain.
-//
-//   bun contrib/rpc-probe/collect.mjs <out-dir>
-//
-// Writes <out-dir>/candidates.json. Network access required.
-
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -80,9 +69,6 @@ function usable(url) {
   }
 }
 
-// Trailing slashes and duplicate spellings of the same endpoint would each be
-// probed separately and could both land in one chain's fallback list, which
-// would make the list shorter than it looks.
 function canonical(url) {
   const parsed = new URL(url);
   parsed.hash = "";
@@ -159,8 +145,6 @@ function addEndpoint(chainId, url, tracking, source) {
   const entry = chainEntry(chainId);
   const existing = entry.endpoints.get(key);
   if (existing) {
-    // chainlist's tracking disclosure is better evidence than the registry's
-    // silence, so it wins when both list the same endpoint.
     if (tracking && (!existing.tracking || existing.tracking === "unknown")) {
       existing.tracking = tracking;
     }
@@ -172,8 +156,6 @@ function addEndpoint(chainId, url, tracking, source) {
 
 for (const chain of chains) {
   if (typeof chain.chainId !== "number") continue;
-  // A chain that never reached mainnet, or was replaced by another, is not
-  // something a wallet should offer to sign on.
   const deprecated = Boolean(chain.status && chain.status !== "active") || Boolean(chain.parent?.type === "shard");
   const entry = chainEntry(chain.chainId);
   entry.meta = {

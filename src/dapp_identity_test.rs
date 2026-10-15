@@ -26,8 +26,6 @@ fn the_headline_leads_with_something_checkable() {
     let named = DappIdentity::of(&metadata("Example", "https://example.com"));
     assert_eq!(named.headline(), "Example (example.com)");
 
-    // A name is whatever the dapp typed; the host is the part a person can
-    // compare against their address bar, so it survives when the name does not.
     let anonymous = DappIdentity::of(&metadata("", "https://example.com"));
     assert_eq!(anonymous.headline(), "example.com");
 
@@ -103,8 +101,6 @@ fn a_name_spelling_a_domain_it_does_not_serve_from_is_the_headline_warning() {
 fn a_name_that_matches_its_own_site_says_nothing() {
     for (name, url) in [
         ("app.example.com", "https://app.example.com"),
-        // A subdomain of the site it names, and the reverse, are both the
-        // same site as far as this is concerned.
         ("example.com", "https://app.example.com"),
         ("app.example.com", "https://example.com"),
     ] {
@@ -148,7 +144,6 @@ fn icons_from_somewhere_else_are_mentioned_and_never_fetched() {
         "https://example.com/logo.png".to_owned(),
     ];
     let identity = DappIdentity::of(&with_icons);
-    // Deduplicated, and the site's own host is not called foreign.
     assert_eq!(identity.icon_hosts, ["cdn.elsewhere.net", "example.com"]);
     let caution = identity
         .cautions
@@ -183,8 +178,6 @@ fn a_proposal_cannot_fill_the_review_with_icon_hosts() {
         .unwrap_or_else(|| panic!("{:?}", identity.cautions));
     assert!(counted.contains("500"), "{counted}");
 
-    // The foreign-icons caution is bounded too, and says so rather than
-    // reading as a complete list of eight.
     let foreign = identity
         .cautions
         .iter()

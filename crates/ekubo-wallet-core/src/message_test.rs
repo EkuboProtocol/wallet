@@ -41,12 +41,10 @@ fn digest_matches_known_eip191_vectors() {
         format!("{:#x}", message_digest(b"Hello World")),
         "0xa1de988600a42c4b4ab089b619297c17d53cffae5d5120d82d8a92d0bb3b78f2"
     );
-    // The empty message still carries a length prefix of "0".
     assert_eq!(
         format!("{:#x}", message_digest(b"")),
         "0x5f35dce98ba4fba25530a026ed80b2cecdaa31091ba4958b99b52ea1d068adad"
     );
-    // Multi-byte UTF-8: the prefix counts bytes, not characters.
     assert_eq!(
         format!("{:#x}", message_digest("é".as_bytes())),
         format!("{:#x}", message_digest(&[0xc3, 0xa9]))
@@ -202,9 +200,6 @@ fn a_siwe_message_has_one_reading_or_none() {
     );
     assert!(parse_siwe(&repeated).is_none());
 
-    // Out of order is the same ambiguity: ERC-4361 fixes the sequence, so
-    // a message that does not follow it is one two parsers may disagree
-    // about.
     let reordered = format!(
         "{}\nRequest ID: abc\nExpiration Time: 2026-08-04T17:25:24Z",
         siwe_payload()
@@ -218,7 +213,6 @@ fn a_siwe_message_has_one_reading_or_none() {
     );
     assert!(parse_siwe(&after_resources).is_none());
 
-    // The ordered form is unaffected.
     let ordered = format!(
         "{}\nExpiration Time: 2026-08-04T17:25:24Z\nNot Before: 2026-08-01T00:00:00Z\nRequest \
              ID: abc",
@@ -246,18 +240,13 @@ fn parses_optional_siwe_fields_and_resources() {
 #[test]
 fn near_miss_messages_are_not_recognized_as_siwe() {
     assert!(parse_siwe("gm").is_none());
-    // Missing the blank line after the address.
     assert!(parse_siwe(&siwe_payload().replace("1111\n\n", "1111\n")).is_none());
-    // Not an address.
     assert!(
         parse_siwe(&siwe_payload().replace("0x1111111111111111111111111111111111111111", "me"))
             .is_none()
     );
-    // Unknown version.
     assert!(parse_siwe(&siwe_payload().replace("Version: 1", "Version: 2")).is_none());
-    // Non-numeric chain.
     assert!(parse_siwe(&siwe_payload().replace("Chain ID: 1", "Chain ID: mainnet")).is_none());
-    // An unexpected trailing field.
     assert!(parse_siwe(&format!("{}\nAlso: everything", siwe_payload())).is_none());
 }
 
@@ -338,7 +327,6 @@ fn lifecycle_persists_exact_bytes_and_signature() {
     assert_eq!(request.chain_id.as_deref(), Some("1"));
     assert_eq!(request.digest, format!("{:#x}", message_digest(&message)));
 
-    // The identical message reuses the pending request.
     let duplicate = store
         .create("primary", Some("1"), &message, MessageEncoding::Text, None)
         .unwrap();
@@ -566,11 +554,6 @@ fn a_tampered_message_row_never_binds_a_signature_to_other_bytes() {
 
 #[test]
 fn two_dapps_asking_for_the_same_bytes_get_two_decisions() {
-    // Deduplication exists so an agent re-asking does not queue twice. Keyed
-    // on wallet, chain, and digest alone, it also merged two *different*
-    // dapps' identical requests into one row -- so one approval served both,
-    // whichever was in front of the person named the row, and either could
-    // reject or consume the other's request.
     let (_directory, mut store) = store();
     let first = store
         .create(
@@ -606,9 +589,6 @@ fn two_dapps_asking_for_the_same_bytes_get_two_decisions() {
     assert_eq!(other.requester.as_deref(), Some("evil.example"));
     assert_eq!(store.awaiting_approval(None).unwrap().len(), 2);
 
-    // An unnamed asker is still deduplicated against another unnamed one: two
-    // MCP agents are indistinguishable, and the queue is a list of decisions a
-    // person has to make.
     let agent = store
         .create("primary", Some("1"), b"gm", MessageEncoding::Text, None)
         .unwrap();
@@ -640,7 +620,6 @@ fn invisible_characters_are_escaped_in_the_message_a_person_reads() {
         "and neither survives raw: {escaped}"
     );
 
-    // Ordinary text is untouched, so the escaping stays readable.
     assert_eq!(escape_for_display("send 10 ETH"), "send 10 ETH");
 }
 

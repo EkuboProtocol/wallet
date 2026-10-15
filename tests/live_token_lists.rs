@@ -48,7 +48,6 @@ async fn imports_ethereum_mainnet_from_the_uniswap_default_list() {
         list.tokens.iter().all(|token| token.chain_id == 1),
         "the filter must not let another chain through"
     );
-    // A well-known row, to catch a list that parsed into the wrong fields.
     let usdc = list
         .tokens
         .iter()
@@ -56,7 +55,6 @@ async fn imports_ethereum_mainnet_from_the_uniswap_default_list() {
         .expect("mainnet USDC is on the default list");
     assert_eq!(usdc.decimals, 6);
 
-    // The rest of the list is a selection, not a loss, and says so.
     assert!(
         list.skipped_other_chain > 0,
         "a multi-chain list should report the chains it did not take"
@@ -84,7 +82,6 @@ async fn the_whole_default_list_fits_one_import() {
         "an unfiltered import should carry more than mainnet"
     );
     assert_eq!(list.skipped_other_chain, 0);
-    // The non-EVM rows are still dropped and counted, filter or no filter.
     assert!(list.skipped_non_evm > 0);
 }
 

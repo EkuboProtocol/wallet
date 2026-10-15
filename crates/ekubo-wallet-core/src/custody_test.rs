@@ -642,7 +642,6 @@ async fn an_export_reveals_only_the_key_that_was_reviewed() {
     );
     assert!(error.contains("was replaced"), "{error}");
 
-    // And the disclosure is not attributed to the wallet that took the name.
     assert!(
         service
             .config
@@ -671,8 +670,6 @@ async fn an_unchanged_wallet_exports_as_before() {
             .is_some()
     );
 
-    // A caller naming an address this id does not hold is refused, which is
-    // the same refusal from the other direction.
     let stranger = service.export("primary", Address::repeat_byte(0x99)).await;
     assert!(stranger.is_err());
 }

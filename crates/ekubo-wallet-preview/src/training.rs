@@ -95,8 +95,6 @@ pub fn encode(labeled: &Labeled, vocabulary: usize) -> Option<Encoded> {
         .iter()
         .map(|token| vocab::slot_index(*token).is_some())
         .collect();
-    // Where each slot reference sits in the input, which is what a copy
-    // target has to name.
     let positions: BTreeMap<usize, usize> = input
         .iter()
         .enumerate()
@@ -268,8 +266,6 @@ pub fn loss<B: Backend>(
 
     let logits = model.decode(memory, &batch.pad, &batch.copyable, batch.prefix.clone());
     let [size, steps, width] = logits.dims();
-    // Padding in the target is written as PAD, and the loss is told to ignore
-    // it, so a short summary in a batch of long ones costs nothing.
     let summary_loss = CrossEntropyLossConfig::new()
         .with_pad_tokens(Some(vec![vocab::PAD as usize]))
         .init(device)
@@ -298,10 +294,6 @@ pub fn class_weights(examples: &[Encoded]) -> Vec<f32> {
             if *count == 0 {
                 1.0
             } else {
-                // Square-rooted rather than raw inverse frequency: the raw
-                // ratio here is 75x, which would make sixty-eight borrow
-                // examples outweigh five thousand withdrawals and teach the
-                // model to shout "borrow" at everything.
                 (mean / ratio(*count, 1)).sqrt().clamp(0.25, 4.0)
             }
         })
@@ -426,9 +418,6 @@ pub fn shuffle_batches(planned: &mut [(Shape, Vec<usize>)], rng: &mut impl rand:
 /// count that somehow exceeded it produces a large weight rather than a wrong
 /// one.
 fn ratio(numerator: usize, denominator: usize) -> f32 {
-    // u16 rather than u32 because every count here is a corpus population, and
-    // saturating a class count at 65535 changes a weight by a fraction of a
-    // percent while keeping the conversion exact.
     let numerator = f32::from(u16::try_from(numerator).unwrap_or(u16::MAX));
     let denominator = f32::from(u16::try_from(denominator.max(1)).unwrap_or(u16::MAX));
     numerator / denominator

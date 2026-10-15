@@ -22,28 +22,21 @@ const ALREADY_KNOWN: &[&str] = &[
 
 #[test]
 fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
-    // A quiet market: the incumbent's bumped fees decide both fields.
     let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 100, 10).unwrap();
     assert_eq!(max_fee, 900);
     assert_eq!(priority, 90);
 
-    // A hot market: current estimates already clear the floor.
     let (max_fee, priority) = cancellation_fees((800, 80), (800, 80), 2_000, 200).unwrap();
     assert_eq!(max_fee, 2_000);
     assert_eq!(priority, 200);
 
-    // Repricing outbids the newest incumbent but keeps the original as the
-    // immutable cap anchor.
     let (max_fee, priority) = cancellation_fees((800, 80), (1_600, 160), 100, 10).unwrap();
     assert_eq!(max_fee, 1_800);
     assert_eq!(priority, 180);
 
-    // The bump rounds up so a tiny fee still strictly increases.
     assert_eq!(bumped_fee(1), 2);
     assert_eq!(bumped_fee(0), 0);
 
-    // The pair stays EIP-1559-consistent when the priority floor passes
-    // the market maximum fee.
     let (max_fee, priority) = cancellation_fees((100, 100), (100, 100), 50, 5).unwrap();
     assert_eq!(priority, 113);
     assert!(max_fee >= priority);
@@ -58,9 +51,6 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
     assert_eq!(max_fee, 3_200, "four times the fee the owner committed to");
     assert_eq!(priority, 3_200);
 
-    // Clamped rather than refused, so the envelope still replaces the one it
-    // is cancelling. Refusing would let the same endpoint deny cancellation
-    // by reporting a large enough number.
     assert!(max_fee >= 900 && priority >= 90);
 }
 
@@ -514,7 +504,6 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
     use alloy::primitives::{Address, Bytes};
 
     let wallet = Address::repeat_byte(0x11);
-    // Letters, so its lowercase and checksum spellings differ.
     let other = Address::repeat_byte(0xab);
     let designator = |address: Address| {
         let mut bytes = vec![0xef, 0x01, 0x00];
@@ -533,8 +522,6 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
         "an account already delegated to Calibur must not pay for a second authorization"
     );
 
-    // Simulated against no delegation, but the account acquired one in the
-    // meantime. The batch would replace an implementation nobody reviewed.
     let error = format!(
         "{:#}",
         authorization_for_send(&designator(other), wallet, None)
@@ -543,7 +530,6 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
     assert!(error.contains("delegation changed"), "{error}");
     assert!(error.contains("Simulate the plan again"), "{error}");
 
-    // And the reverse: reviewed as replacing `other`, but it is gone now.
     let error = format!(
         "{:#}",
         authorization_for_send(&empty, wallet, Some(&format!("{other:#x}")))
@@ -560,7 +546,6 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
     assert!(
         authorization_for_send(&designator(other), wallet, Some(&other.to_checksum(None))).unwrap()
     );
-    // A record that is not an address at all matches nothing.
     let error = format!(
         "{:#}",
         authorization_for_send(&designator(other), wallet, Some("not-an-address"))

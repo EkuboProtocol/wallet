@@ -60,8 +60,6 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
     store.put_network_proposal(&profile).unwrap();
     assert_eq!(store.count_network_proposals().unwrap(), 1);
 
-    // An agent that changed its mind has not left two decisions to make,
-    // so the newer suggestion for a chain replaces the older one.
     let superseded = profile.clone();
     profile.rpc_urls = vec!["https://second.example.invalid/rpc".parse().unwrap()];
     store.put_network_proposal(&profile).unwrap();
@@ -76,8 +74,6 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
         "https://second.example.invalid/rpc"
     );
 
-    // A suggestion is not a network. Nothing here reaches the
-    // configuration; the queue is the whole of its effect.
     assert_eq!(store.network_proposals().unwrap().len(), 1);
     // The queue now holds the *second* profile, so discarding the first —
     // the one an owner might still be looking at — must remove nothing.
@@ -396,8 +392,6 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
         )
         .expect("the migration created the automations table");
     assert_eq!(table, "automations");
-    // And the column the run log depends on: clearing history hides rows, so
-    // an automation-produced transaction stays openable.
     let hidden: i64 = store
         .connection
         .query_row(
@@ -433,9 +427,6 @@ fn an_older_schema_is_migrated_forward_and_keeps_its_rows() {
             .revision,
         1
     );
-    // And the column that holds roughly what a token is worth. Every token
-    // that predates it has no recorded value, which is exactly what a null
-    // says, so this addition needs no backfill either.
     let priced: i64 = store
         .connection
         .query_row(
@@ -529,8 +520,6 @@ fn seeding_approximate_values_never_overwrites_one_the_owner_recorded() {
 
 #[test]
 fn a_schema_too_old_to_have_a_migration_is_refused() {
-    // A gap in the path is not something to guess across: there is no step to
-    // 2, so the database is left exactly as it was found.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
     write_unknown_schema(&path, &key(12), 2);
@@ -550,8 +539,6 @@ fn any_other_schema_is_refused_and_left_untouched() {
     // cannot reach by migration is refused, and the refusal writes nothing.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
-    // A version far beyond anything this build could migrate to, so the test
-    // keeps meaning "foreign" as the schema moves forward.
     write_unknown_schema(&path, &key(11), 99);
     let before = std::fs::read(&path).unwrap();
 
@@ -565,8 +552,6 @@ fn any_other_schema_is_refused_and_left_untouched() {
 
 #[test]
 fn a_schema_from_a_newer_build_is_refused() {
-    // Fails closed rather than being written through a stale
-    // understanding of its shape.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
     {
@@ -592,7 +577,6 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
         schema_version(&store.connection).unwrap(),
         Some(SCHEMA_VERSION)
     );
-    // Every table the build expects exists at creation.
     for table in [
         "wallet_policies",
         "pending_transactions",
@@ -668,9 +652,6 @@ fn fresh_schema_has_no_mcp_oauth_authority_and_only_harness_attribution() {
 
 #[test]
 fn schema_change_underneath_a_live_connection_is_refused() {
-    // A long-running wallet process re-checks the version on every request. If
-    // the file changes underneath it, requests fail instead of writing through
-    // an unknown shape.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
     let store = PolicyStore::open(&path, &key(3)).unwrap();
@@ -693,7 +674,6 @@ fn stores_only_current_policy_with_optimistic_revision() {
         .unwrap();
     assert_eq!(first.revision, 1);
     let next = WalletPolicy::require_approval_for_everything();
-    // A write that did not read the revision it is replacing is refused.
     assert!(store.put("primary", &next, None).is_err());
     // So is one that replaces a revision with itself: a policy identical to
     // the installed one is not a change, and storing it as one would cancel
@@ -730,7 +710,6 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
         )
         .unwrap();
 
-    // A proposal against a revision the agent has not read fails.
     assert!(
         store
             .put_proposal(
@@ -741,7 +720,6 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
             )
             .is_err()
     );
-    // Rationale is required.
     assert!(
         store
             .put_proposal(
@@ -770,12 +748,10 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
             "narrower follow-up proposal",
         )
         .unwrap();
-    // The latest proposal prevails: one row per wallet.
     let stored = store.proposal("primary").unwrap().unwrap();
     assert_eq!(stored.rationale, replacement.rationale);
     assert_eq!(store.list_proposals().unwrap().len(), 1);
 
-    // Applying with the bound revision succeeds exactly once.
     let applied = store
         .put("primary", &stored.policy, Some(stored.source_revision))
         .unwrap();
@@ -824,8 +800,6 @@ fn a_proposal_replaced_during_review_is_refused_not_discarded() {
         .unwrap();
     assert!(store.consume_proposal(&reviewed).is_err());
 
-    // Nothing was applied and nothing was consumed: the newer proposal is
-    // still there to be reviewed on its own terms.
     assert_eq!(
         store.get("primary").unwrap().unwrap().revision,
         active.revision
@@ -833,7 +807,6 @@ fn a_proposal_replaced_during_review_is_refused_not_discarded() {
     let pending = store.proposal("primary").unwrap().unwrap();
     assert_eq!(pending.rationale, "arrived while the screen was up");
 
-    // And the ordinary path still applies and consumes in one step.
     let applied = store.consume_proposal(&pending).unwrap();
     assert_eq!(applied.revision, active.revision + 1);
     assert!(store.proposal("primary").unwrap().is_none());
@@ -960,7 +933,6 @@ fn a_proposal_that_changes_nothing_is_refused_where_the_agent_can_still_read_why
         .unwrap_err()
         .to_string();
     assert!(error.contains("identical to the active policy"), "{error}");
-    // Phrased for the agent that has to do something about it.
     assert!(error.contains("propose a policy"), "{error}");
     // Nothing was stored, so nothing is waiting for the owner to review.
     assert!(store.proposal("primary").unwrap().is_none());
@@ -1053,27 +1025,27 @@ fn only_real_decision_states_are_storable() {
     };
 
     for (chain, (status, approval_required, decided_at)) in (1..).zip([
-        ("awaiting_approval", 1, None), // queued; nobody has decided
-        ("rejected", 1, Some(200)),     // the owner said no
-        ("signed", 1, Some(300)),       // the owner said yes
-        ("signed", 0, None),            // automatic; nobody decided
-        ("confirmed", 0, None),         // automatic, mined
-        ("confirmed", 1, Some(400)),    // approved, mined
-        ("cancelled", 1, Some(500)),    // approved, later discarded
-        ("cancelled", 1, None),         // queued, dropped with its policy
-        ("cancelled", 0, None),         // automatic, discarded before sending
-        ("cancelling", 1, Some(600)),   // approved, being cancelled on chain
+        ("awaiting_approval", 1, None),
+        ("rejected", 1, Some(200)), // the owner said no
+        ("signed", 1, Some(300)),   // the owner said yes
+        ("signed", 0, None),
+        ("confirmed", 0, None),
+        ("confirmed", 1, Some(400)),
+        ("cancelled", 1, Some(500)),
+        ("cancelled", 1, None), // queued, dropped with its policy
+        ("cancelled", 0, None), // automatic, discarded before sending
+        ("cancelling", 1, Some(600)),
     ]) {
         insert(chain, status, approval_required, decided_at)
             .unwrap_or_else(|error| panic!("{status}/{approval_required} was refused: {error}"));
     }
 
     for (chain, (status, approval_required, decided_at)) in (100..).zip([
-        ("awaiting_approval", 1, Some(100)), // decided while still queued
-        ("rejected", 1, None),               // rejected without a moment
-        ("signed", 0, Some(300)),            // automatic, yet somebody decided
-        ("confirmed", 1, None),              // needed approval, never recorded one
-        ("broadcast", 1, None),              // the same, further along
+        ("awaiting_approval", 1, Some(100)),
+        ("rejected", 1, None),
+        ("signed", 0, Some(300)),
+        ("confirmed", 1, None), // needed approval, never recorded one
+        ("broadcast", 1, None),
     ]) {
         assert!(
             insert(chain, status, approval_required, decided_at).is_err(),
@@ -1195,8 +1167,6 @@ mod database_lock_tests {
             "a lock reached through a link is a lock on somebody else's inode"
         );
 
-        // And an ordinary path still opens, so the refusal is of links rather
-        // than of locking.
         let real = directory.path().join("real.lock");
         crate::config::open_private_file(&real).expect("a real path locks as before");
     }
@@ -1435,7 +1405,6 @@ fn widening_the_harness_vocabulary_moves_no_rows_and_keeps_every_index() {
     let store = PolicyStore::open(&path, &key(32)).unwrap();
     store.assert_schema_current().unwrap();
 
-    // Nothing moved.
     assert_eq!(index_definitions(&store.connection), indexes_before);
     let rows_after: i64 = store
         .connection
@@ -1462,7 +1431,6 @@ fn widening_the_harness_vocabulary_moves_no_rows_and_keeps_every_index() {
         .unwrap();
     assert_eq!(foreign_keys, 1, "the foreign key survived");
 
-    // And the constraint now admits what it refused.
     let narrow: i64 = store
         .connection
         .query_row(
@@ -1612,7 +1580,6 @@ fn widening_the_signature_constraints_moves_no_rows_and_keeps_every_index() {
     let store = PolicyStore::open(&path, &key(33)).unwrap();
     store.assert_schema_current().unwrap();
 
-    // Nothing moved.
     assert_eq!(index_definitions(&store.connection), indexes_before);
     let rows_after: i64 = store
         .connection

@@ -54,7 +54,6 @@ fn main() -> Result<(), String> {
             examples.push(example);
         }
     }
-    // Shuffle reproducibly so a sample is not just the corpus's first formats.
     examples.shuffle(&mut rand::rngs::StdRng::seed_from_u64(20_260_909));
     if args.count > 0 {
         examples.truncate(args.count);

@@ -35,9 +35,6 @@ fn surrounding_whitespace_from_a_paste_is_tolerated() {
 
 #[test]
 fn unknown_query_parameters_are_ignored_rather_than_refused() {
-    // `methods` is real and this wallet does not use it; the rest stands in
-    // for whatever a later revision adds. Refusing them would break pairing
-    // against newer dapps and buy nothing, since nothing unknown is acted on.
     let uri = format!(
         "wc:{TOPIC}@2?relay-protocol=irn&symKey={SYM_KEY}&methods=[wc_sessionPropose]&somethingNew=1"
     );

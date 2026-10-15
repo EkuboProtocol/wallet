@@ -376,8 +376,6 @@ async fn simulate_on_fork(
     (result, updated)
 }
 
-// --- the per-chain battery -------------------------------------------------
-
 async fn batch_reads_are_pinned_and_decoded(network: &NetworkConfig) {
     let input = BatchEthCallInput {
         chain_id: network.chain_id.to_string(),
@@ -445,7 +443,6 @@ async fn batch_reads_are_pinned_and_decoded(network: &NetworkConfig) {
         "Multicall3 must report the chain this network claims"
     );
 
-    // An explicit caller forces the individual-call path on the same chain.
     let mut individual = input;
     individual.from = Some(sender().to_checksum(None));
     let output = retrying("individual batch read", || {
@@ -627,38 +624,31 @@ async fn a_fork_carries_state_between_dependent_plans(
     let (mut store, session) = open_fork(network).await;
     let parent = session.parent.number;
 
-    // Nothing is applied yet, so the fork agrees with the chain.
     assert_eq!(
         permit2_allowance(network, Some(&session.preface()), spender()).await,
         U256::ZERO
     );
 
-    // Step 1 writes an allowance that does not exist on chain.
     let first = approve_plan(chain_id, spender(), 111_000);
     let (result, session) = simulate_on_fork(network, &mut store, &session, &first).await;
     let fork = result.fork.expect("a fork simulation reports its fork");
     assert!(fork.hypothetical);
     assert_eq!(fork.applied_plans, 1);
     assert_eq!(fork.parent_block_number, parent.to_string());
-    // The plan ran in the first block after the pinned parent.
     assert_eq!(fork.simulated_block_number, (parent + 1).to_string());
     assert_eq!(result.block_number, parent.to_string());
 
-    // The whole point of the feature: a read through the fork observes state
-    // the simulated plan produced.
     assert_eq!(
         permit2_allowance(network, Some(&session.preface()), spender()).await,
         U256::from(111_000),
         "a fork read must observe the applied plan on chain {chain_id}"
     );
-    // ...and the same read without the fork still sees the real chain.
     assert_eq!(
         permit2_allowance(network, None, spender()).await,
         U256::ZERO,
         "a fork must never leak into real chain state on chain {chain_id}"
     );
 
-    // Step 2 depends on step 1's world and is applied on top of it.
     let second = approve_plan(chain_id, spender(), 222_000);
     let (result, session) = simulate_on_fork(network, &mut store, &session, &second).await;
     let fork = result.fork.expect("a fork simulation reports its fork");
@@ -734,7 +724,6 @@ async fn a_fork_carries_state_between_dependent_plans(
             "replaying a batch installs the canonical Calibur designator"
         );
     } else {
-        // With no batch in the fork, the wallet's real code is reported.
         assert!(status.delegated_implementation.is_none());
     }
 
@@ -820,8 +809,6 @@ async fn simulation_survives_dead_endpoints_ahead_of_a_working_one() {
         return;
     };
     let working = network.rpc_urls.clone();
-    // Port 1 on loopback refuses immediately, so this measures failover rather
-    // than a stack of timeouts.
     network.rpc_urls =
         std::iter::repeat_n("http://127.0.0.1:1/".parse().expect("dead endpoint URL"), 2)
             .chain(working.iter().take(1).cloned())

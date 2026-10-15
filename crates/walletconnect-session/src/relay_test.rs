@@ -36,7 +36,6 @@ fn the_token_audience_is_the_relay_without_its_query_string() {
     )
     .unwrap();
     assert_eq!(payload["aud"], "wss://relay.example.org");
-    // The relay's own parameters survive alongside the ones added here.
     assert_eq!(query.get("region").map(String::as_str), Some("eu"));
 }
 
@@ -52,15 +51,11 @@ fn relay_call_ids_are_timestamps_rather_than_a_counter() {
         u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap() * 1000 + 1_000_000;
     assert!(first > 1_700_000_000_000_000, "{first}");
     assert!(first < now_micros, "{first}");
-    // Two calls in the same millisecond still get different ids, or the second
-    // one's answer would wake the first one's caller.
     assert_ne!(first, second);
 }
 
 #[tokio::test]
 async fn a_plaintext_relay_is_refused_rather_than_downgraded_to() {
-    // The URL carries a bearer token and every topic this wallet subscribes
-    // to. Over `ws:` both are readable by anything on the path.
     let identity = ClientIdentity::generate().unwrap();
     let error = RelayConnection::connect(&config("ws://relay.example.org"), &identity)
         .await
@@ -238,8 +233,6 @@ fn a_message_on_a_topic_nobody_subscribed_to_is_acknowledged_and_dropped() {
         &outgoing,
     );
     assert!(incoming_rx.try_recv().is_err());
-    // Acknowledged all the same: it will not become deliverable on a second
-    // attempt, and an unacknowledged message is redelivered forever.
     assert!(
         outgoing_rx
             .try_recv()

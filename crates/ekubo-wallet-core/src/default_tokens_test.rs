@@ -16,9 +16,6 @@ fn the_vendored_list_parses() {
         "vendored list holds only {} tokens; the snapshot looks truncated",
         parsed.tokens.len()
     );
-    // Every row was normalized to an EVM address by the vendoring script, so
-    // the parser should have had nothing to drop. A non-zero count here means
-    // the file was refreshed by something other than that script.
     assert_eq!(parsed.skipped_non_evm, 0);
 }
 
@@ -35,9 +32,6 @@ fn the_vendored_snapshot_accounts_for_every_upstream_row() {
 
 #[test]
 fn the_vendored_list_carries_no_logo_urls() {
-    // Cheapest possible guard on the thing the wallet has no way to display
-    // and no reason to ship: if a refresh ever stops stripping them, the file
-    // grows by tens of kilobytes of URLs silently.
     assert!(!EMBEDDED.contains("logo_url"));
     assert!(!EMBEDDED.contains("logoURI"));
 }

@@ -20,18 +20,14 @@ fn a_member_the_type_does_not_declare_is_refused() {
     assert!(error.contains("\"note\""), "{error}");
     assert!(error.contains("not signed"), "{error}");
 
-    // A member shadowing a declared one is the same problem wearing the
-    // right name, and is caught by the type not declaring it.
     let mut shadowed = permit_payload();
     shadowed["message"]["Deadline"] = json!(1);
     assert!(parse_typed_data(&shadowed).is_err());
 
-    // The domain is checked the same way.
     let mut domain = permit_payload();
     domain["domain"]["salt"] = json!("0x01");
     assert!(parse_typed_data(&domain).is_err());
 
-    // And an untouched payload still parses.
     assert!(parse_typed_data(&permit_payload()).is_ok());
 }
 
@@ -50,8 +46,6 @@ fn the_domain_declaration_has_to_be_the_one_the_domain_implies() {
     assert!(error.contains("EIP712Domain"), "{error}");
     assert!(error.contains("not signed"), "{error}");
 
-    // A member the domain does not carry. Nothing hashes it, and the reviewer
-    // reads it as a field of the payload.
     let mut absent = permit_payload();
     absent["types"]["EIP712Domain"]
         .as_array_mut()
@@ -59,7 +53,6 @@ fn the_domain_declaration_has_to_be_the_one_the_domain_implies() {
         .push(json!({"name": "salt", "type": "bytes32"}));
     assert!(parse_typed_data(&absent).is_err());
 
-    // The same member twice, which the hash counts once.
     let mut repeated = permit_payload();
     repeated["types"]["EIP712Domain"]
         .as_array_mut()
@@ -67,8 +60,6 @@ fn the_domain_declaration_has_to_be_the_one_the_domain_implies() {
         .push(json!({"name": "name", "type": "string"}));
     assert!(parse_typed_data(&repeated).is_err());
 
-    // Out of the standard's order, so two payloads hashing identically read
-    // as different documents.
     let mut reordered = permit_payload();
     reordered["types"]["EIP712Domain"]
         .as_array_mut()
@@ -76,7 +67,6 @@ fn the_domain_declaration_has_to_be_the_one_the_domain_implies() {
         .reverse();
     assert!(parse_typed_data(&reordered).is_err());
 
-    // A domain missing a field its declaration still names.
     let mut narrowed = permit_payload();
     narrowed["domain"]
         .as_object_mut()
@@ -170,7 +160,6 @@ fn lifecycle_persists_exact_payload_and_signature() {
     assert_eq!(request.status, TypedDataStatus::AwaitingApproval);
     assert_eq!(request.typed_data, payload);
 
-    // The identical payload reuses the pending request.
     let duplicate = store
         .create("primary", chain_id, &payload, digest, None)
         .unwrap();
@@ -309,7 +298,6 @@ fn clearing_history_keeps_requests_still_awaiting_a_decision() {
         .unwrap();
     store.reject(rejected.request_id).unwrap();
 
-    // Another wallet's clearing leaves this one's rows exactly where they are.
     assert_eq!(store.clear_history(Some("secondary")).unwrap(), 0);
     assert_eq!(store.list(None, 10).unwrap().len(), 3);
 
@@ -553,7 +541,6 @@ fn a_nested_member_the_type_does_not_declare_is_refused() {
     assert!(error.contains("message.details"), "{error}");
     assert!(error.contains("not signed"), "{error}");
 
-    // An array of structs is the same gap once per element.
     let mut in_array = nested_payload();
     in_array["message"]["legs"][0]["note"] = json!("harmless");
     let error = parse_typed_data(&in_array).unwrap_err().to_string();
@@ -626,7 +613,6 @@ fn every_part_of_a_reviewed_payload_is_covered_by_the_signature() {
         "\"label\"",
     );
 
-    // A type nothing reaches from the primary type.
     refused(
         serde_json::json!({
             "types": {
