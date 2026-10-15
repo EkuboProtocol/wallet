@@ -92,7 +92,6 @@ fn a_recorded_simulation_id_is_always_usable_when_it_is_returned() {
             store.take(recorded.simulation_id, now).is_ok(),
             "record returned an id it had already evicted"
         );
-        // Put it back so the cap keeps being exercised.
         record(&mut store, &index.to_string(), now);
     }
 }
@@ -143,7 +142,6 @@ fn one_wallet_cannot_evict_another_wallets_simulations() {
         now,
     );
 
-    // A busy wallet fills its own per-wallet allowance several times over.
     for index in 2..MAX_RECORDED_PER_WALLET * 2 {
         let plan = plan(&index.to_string());
         let result = result(&plan);
@@ -265,8 +263,6 @@ fn a_clock_that_moved_backwards_does_not_refresh_a_simulation() {
             .is_ok()
     );
 
-    // The clock moved behind the moment it was recorded. Elapsed time is no
-    // longer knowable, and the safe reading of that is "too long", not "fresh".
     let mut store = SimulationStore::default();
     let recorded = store.record(
         "primary",

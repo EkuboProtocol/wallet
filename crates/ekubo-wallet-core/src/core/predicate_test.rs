@@ -41,13 +41,10 @@ fn bytes(data: Vec<u8>) -> DynSolValue {
     DynSolValue::Bytes(data)
 }
 
-// ---------------------------------------------------------------- literals
-
 #[test]
 fn addresses_must_be_hex_with_an_0x_prefix() {
     let ty = DynSolType::Address;
     assert!(parse_literal("0x1111111111111111111111111111111111111111", &ty).is_ok());
-    // Bare hex is refused rather than guessed at.
     assert!(parse_literal("1111111111111111111111111111111111111111", &ty).is_err());
     assert!(parse_literal("0x11", &ty).is_err(), "wrong width");
     assert!(parse_literal("0xzz11111111111111111111111111111111111111", &ty).is_err());
@@ -58,8 +55,6 @@ fn integers_are_decimal_without_a_prefix() {
     let ty = DynSolType::Uint(256);
     assert_eq!(parse_literal("0", &ty).unwrap(), "0");
     assert_eq!(parse_literal("1000", &ty).unwrap(), "1000");
-    // 0x-prefixed hex is the other legal spelling and canonicalizes to decimal,
-    // so the two forms of one number compare equal.
     assert_eq!(parse_literal("0x10", &ty).unwrap(), "16");
     assert!(parse_literal("0x", &ty).is_err());
     assert!(parse_literal("ten", &ty).is_err());
@@ -69,7 +64,6 @@ fn integers_are_decimal_without_a_prefix() {
 
 #[test]
 fn a_literal_is_canonicalized_before_comparison() {
-    // Mixed-case hex in the document still matches a decoded address.
     let mixed = Predicate::Eq("0xA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48".into());
     assert!(mixed.matches(&DynSolValue::Address(TOKEN), &context()));
 }
@@ -88,8 +82,6 @@ fn odd_length_hex_is_refused() {
     assert!(parse_literal("0x123", &DynSolType::Bytes).is_err());
 }
 
-// -------------------------------------------------------------- predicates
-
 #[test]
 fn the_only_thing_a_predicate_reads_beyond_the_call_is_the_wallet() {
     let ctx = context();
@@ -100,8 +92,6 @@ fn the_only_thing_a_predicate_reads_beyond_the_call_is_the_wallet() {
 
 #[test]
 fn self_composes_with_the_literals_around_it() {
-    // The reason `$self` is a literal and not a predicate of its own: "me or
-    // one named address" is an ordinary `in`, with no `any` wrapped around it.
     let ctx = context();
     let me_or_friend = predicate(serde_json::json!({
         "in": [SELF_LITERAL, format!("{FRIEND:#x}")]
@@ -113,7 +103,6 @@ fn self_composes_with_the_literals_around_it() {
 
 #[test]
 fn self_resolves_against_the_wallet_being_asked_not_the_one_it_was_written_for() {
-    // What portability means: the same document, two wallets, two answers.
     let is_self = predicate(serde_json::json!({ "eq": SELF_LITERAL }));
     let theirs = PolicyContext { wallet: FRIEND };
     assert!(is_self.matches(&DynSolValue::Address(FRIEND), &theirs));
@@ -163,12 +152,10 @@ fn the_retired_is_wallet_spelling_no_longer_parses() {
 
 #[test]
 fn a_variable_reads_as_what_it_means_in_the_permission_diff() {
-    // A reviewer approving a rule sees the authority, not the syntax.
     assert_eq!(
         predicate(serde_json::json!({ "eq": SELF_LITERAL })).describe(),
         "this wallet"
     );
-    // Ordering follows the literals, so it does not move when the wording does.
     assert_eq!(
         predicate(serde_json::json!({ "in": [SELF_LITERAL, format!("{FRIEND:#x}")] })).describe(),
         format!("one of this wallet, {FRIEND:#x}")
@@ -331,8 +318,6 @@ fn tuple_predicates_compose_for_nested_and_array_arguments() {
 #[test]
 fn a_predicate_applied_to_the_wrong_shape_is_a_non_match_not_a_panic() {
     let ctx = context();
-    // `each` over a scalar, an address literal over an integer, `$self` over a
-    // bool: all unanswerable, all false.
     assert!(
         !predicate(serde_json::json!({ "each": { "eq": SELF_LITERAL } }))
             .matches(&DynSolValue::Address(TOKEN), &ctx)
@@ -371,7 +356,6 @@ fn ordered_comparisons_are_signed_when_the_abi_type_is() {
         ))
     };
 
-    // The bounds a real position uses: negative, and ordered against zero.
     let in_range = selector(
         abi,
         &serde_json::json!({ "lower": { "gte": "-140" }, "upper": { "lte": "0" } }),
@@ -390,8 +374,6 @@ fn ordered_comparisons_are_signed_when_the_abi_type_is() {
     assert!(!below_zero.matches(&call(0, 0), &ctx));
     assert!(!below_zero.matches(&call(1, 0), &ctx));
 
-    // A literal outside the declared width is refused where it is written,
-    // rather than wrapping into a bound that means something else.
     assert!(check_literal("-8388608", &DynSolType::Int(24)).is_ok());
     assert!(check_literal("-8388609", &DynSolType::Int(24)).is_err());
     assert!(check_literal("-1", &DynSolType::Uint(256)).is_err());
@@ -413,8 +395,6 @@ fn coverage_orders_negative_bounds_the_way_matching_does() {
     assert!(!positive.is_narrower_than(&negative));
 }
 
-// ------------------------------------------------------------ selector/ABI
-
 #[test]
 fn a_selector_predicate_matches_a_well_formed_call() {
     let ctx = context();
@@ -434,7 +414,6 @@ fn a_selector_predicate_matches_a_well_formed_call() {
 
 #[test]
 fn the_selector_is_derived_from_the_signature() {
-    // keccak("approve(address,uint256)")[..4]
     let function = Function::parse("approve(address spender, uint256 amount)").unwrap();
     assert_eq!(hex::encode(function.selector()), "095ea7b3");
 }
@@ -597,8 +576,6 @@ fn length_constrains_arrays() {
     assert!(!rule.matches(&bytes(two), &ctx));
 }
 
-// ------------------------------------------------------- parse-time checks
-
 #[test]
 fn a_signature_must_name_every_parameter() {
     assert!(
@@ -671,8 +648,6 @@ fn the_canonical_signature_collapses_spelling_differences() {
     );
 }
 
-// ------------------------------------------------------------- subsumption
-
 #[test]
 fn subsumption_recognizes_the_obvious_cases() {
     let one = Predicate::Eq("0x2222222222222222222222222222222222222222".into());
@@ -695,7 +670,6 @@ fn subsumption_reverses_under_negation() {
     ]}));
     let not_narrow = Predicate::Not(Box::new(narrow.clone()));
     let not_wide = Predicate::Not(Box::new(wide.clone()));
-    // `not wide` admits fewer addresses than `not narrow`.
     assert!(not_wide.is_narrower_than(&not_narrow));
     assert!(!not_narrow.is_narrower_than(&not_wide));
 }
@@ -724,8 +698,6 @@ fn tuple_subsumption_accounts_for_unconstrained_positions() {
     assert!(!loose.is_narrower_than(&tight));
     assert!(!predicate(serde_json::json!({ "tuple": [null] })).is_narrower_than(&loose));
 }
-
-// ---------------------------------------------------------------- fuzzing
 
 /// The literals an address slot may compare against, including the variable —
 /// `$self` is one of these rather than a strategy of its own precisely because
@@ -1076,8 +1048,6 @@ proptest! {
     }
 }
 
-// ------------------------------------------------- unreadable encodings
-
 const APPROVE: &str = "approve(address spender, uint256 amount)";
 
 fn approve_body() -> Vec<u8> {
@@ -1136,7 +1106,6 @@ fn doubt_survives_negation_and_composition() {
     let all = predicate(serde_json::json!({ "all": [{ "selector": { "abi": APPROVE } }] }));
     assert_eq!(all.evaluate(&bytes(data.clone()), &ctx), Match::Unreadable);
 
-    // A definite answer still settles a composition that also holds doubt.
     let certain = predicate(serde_json::json!({ "any": [
         { "any_value": null },
         { "selector": { "abi": APPROVE } }
@@ -1146,11 +1115,6 @@ fn doubt_survives_negation_and_composition() {
 
 #[test]
 fn a_word_wider_than_its_type_is_unreadable_rather_than_canonical() {
-    // Run 6251, findings 189943 and 186981. The re-encode check was standing
-    // in for "canonically encoded" and could not: alloy decodes a narrow type
-    // by keeping the whole 32-byte word and noting the declared width beside
-    // it, then writes that same word back. Both halves of the comparison carry
-    // the same dirty bits, so they agree.
     let function = alloy::json_abi::Function::parse("act(uint8 mode, bytes4 tag)").unwrap();
     let body = |mode_word: [u8; 32], tag_word: [u8; 32]| {
         let mut data = function.selector().to_vec();
@@ -1163,8 +1127,6 @@ fn a_word_wider_than_its_type_is_unreadable_rather_than_canonical() {
     let mut clean_tag = [0_u8; 32];
     clean_tag[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
-    // A rule that denies mode 1, which is what a masking target reads out of
-    // either word below.
     let predicate = Predicate::Selector(Box::new(
         SelectorPredicate::new(
             "act(uint8 mode, bytes4 tag)",
@@ -1177,10 +1139,6 @@ fn a_word_wider_than_its_type_is_unreadable_rather_than_canonical() {
 
     assert_eq!(answer(&body(clean_mode, clean_tag)), Match::Yes);
 
-    // The same call with the byte above the declared width set. It decodes to
-    // 65281, so the rule naming 1 does not match it — and the deny that a
-    // reviewer wrote to stop mode 1 stops firing. The word is not a `uint8`,
-    // so the answer is doubt, which a deny still acts on.
     let mut dirty_mode = clean_mode;
     dirty_mode[30] = 0xff;
     assert_eq!(answer(&body(dirty_mode, clean_tag)), Match::Unreadable);
@@ -1212,7 +1170,6 @@ fn a_literal_outside_its_declared_width_is_refused_where_it_is_written() {
     assert!(build("128", "act(int8 delta)", "delta").is_err());
     assert!(build("-129", "act(int8 delta)", "delta").is_err());
 
-    // The full-width types keep taking their full range.
     assert!(
         build(
             "115792089237316195423570985008687907853269984665640564039457584007913129639935",
@@ -1229,9 +1186,6 @@ fn a_literal_outside_its_declared_width_is_refused_where_it_is_written() {
 /// wallet refuses. Every form is tried against both, and they must agree.
 #[test]
 fn a_typed_predicate_publishes_exactly_the_forms_it_parses() {
-    // One representative document per `Predicate` variant, so a variant added
-    // later without a decision about these slots shows up as a failure here
-    // rather than as a schema that quietly omits it.
     let forms = [
         ("any_value", serde_json::json!("any_value")),
         ("eq", serde_json::json!({"eq": "1"})),

@@ -237,8 +237,6 @@ fn inferred_outcome(
 
 fn candidate_action(signature: &str) -> Option<&'static str> {
     let name = signature.split_once('(')?.0.to_ascii_lowercase();
-    // Keep ambiguous generic names out. In particular deposit() may mean
-    // wrapping, staking or a vault deposit; "deposit" is the common action.
     let actions = [
         ("swap", "swap"),
         ("deposit", "deposit"),
@@ -256,8 +254,6 @@ fn candidate_action(signature: &str) -> Option<&'static str> {
         .iter()
         .find(|(prefix, _)| name.starts_with(prefix))?;
     let rest = &name[prefix.len()..];
-    // A compound function may contain another substantive action whose
-    // intent would be hidden by choosing its first verb.
     (!actions.iter().any(|(other, _)| rest.contains(other))).then_some(*action)
 }
 

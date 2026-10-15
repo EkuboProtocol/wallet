@@ -197,8 +197,6 @@ fn the_column_holds_every_representable_moment() {
                 row.time(0)
             })
             .expect("read");
-        // Truncated to the millisecond the column keeps, which is all a
-        // moment loses on the way in.
         assert_eq!(read, moment.trunc_subsecs(3));
     }
 }

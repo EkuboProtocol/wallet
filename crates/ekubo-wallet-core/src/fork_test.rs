@@ -82,9 +82,6 @@ fn a_new_fork_is_empty_and_pinned() {
     );
     let preface = session.preface();
     assert_eq!(preface.applied_plans(), 0);
-    // With nothing applied, the first simulated block is the one that
-    // directly follows the pinned parent, exactly like a one-shot
-    // simulation.
     assert_eq!(preface.simulated_block(), 101);
     assert!(!preface.requires_calibur());
 }
@@ -106,16 +103,12 @@ fn each_applied_plan_advances_the_simulated_block_by_one() {
 fn a_fork_is_bounded_by_retained_plan_bytes_as_well_as_plan_count() {
     let (mut store, session, now) = store_with_fork();
     let mut bulky = plan(1);
-    // Well under MAX_PLANS_PER_FORK, well over the byte budget: the count
-    // says nothing about how much calldata each plan carries, and a plan
-    // this size validates, simulates, and is therefore kept.
     bulky.ordered_steps[0].transaction.data = vec![0_u8; MAX_FORK_PLAN_BYTES].into();
     let error = store
         .append(session.fork_id, bulky, 0, now)
         .expect_err("an oversized plan must not be retained");
     assert!(error.to_string().contains("bytes of applied plans"));
 
-    // The ordinary case is untouched: a real plan is kilobytes.
     assert_eq!(
         store
             .append(session.fork_id, plan(1), 0, now)
@@ -143,8 +136,6 @@ fn capacity_is_refusable_before_a_parent_block_is_pinned() {
             )
             .unwrap();
     }
-    // Same answer `create` would give, reached without the RPC round trip
-    // that pinning a parent block costs.
     let error = store
         .ensure_capacity("wallet-a", wallet_a(), now)
         .expect_err("a wallet at its fork limit must be refused up front");
@@ -161,7 +152,6 @@ fn capacity_is_refusable_before_a_parent_block_is_pinned() {
             )
             .is_err()
     );
-    // Another wallet is unaffected: this is a per-wallet limit.
     store.ensure_capacity("wallet-b", wallet_b(), now).unwrap();
 }
 
@@ -292,8 +282,6 @@ fn replay_blocks_carry_one_exact_call_each() {
     for block in &blocks {
         assert_eq!(block.calls.len(), 1);
     }
-    // The single-call plan runs directly at its own target; the two-call
-    // plan runs through the wallet itself as a Calibur batch.
     assert_eq!(blocks[0].calls[0].to, Some(Address::repeat_byte(2).into()));
     assert_eq!(
         blocks[1].calls[0].to,

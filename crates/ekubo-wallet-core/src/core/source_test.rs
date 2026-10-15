@@ -110,7 +110,6 @@ fn a_named_field_the_request_does_not_carry_is_a_mismatch() {
         Match::Yes
     );
 
-    // An inline plan has no host, so a rule that names one refuses it.
     let served = matcher(serde_json::json!({"agent": {"plan_host": "any_value"}}));
     assert_eq!(
         served.evaluate(&RequestSource::agent(Some("codex"), None), &context()),
@@ -181,7 +180,6 @@ fn the_description_says_which_parts_are_claims() {
     let described = agent.describe();
     assert!(described.contains("self-identifying"), "{described}");
 
-    // An automation id is proved, so it is not hedged.
     let automation = matcher(serde_json::json!({"automation": {"id": {"eq": "7"}}}));
     let described = automation.describe();
     assert!(described.contains("installed automation"), "{described}");

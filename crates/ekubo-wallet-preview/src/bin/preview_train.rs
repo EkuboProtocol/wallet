@@ -206,10 +206,6 @@ fn fit<B: AutodiffBackend>(
 
     tally(&model.valid(), evaluate, held_out_batches, device).report();
 
-    // Saved from the inference view of the model, so the weights file carries
-    // no autodiff state and loads under the plain backend the wallet runs.
-    // Half precision, matching `weights::load`. See its doc comment: this is
-    // about what goes into git, not about what the model computes in.
     let recorder = BinFileRecorder::<HalfPrecisionSettings>::new();
     model
         .valid()

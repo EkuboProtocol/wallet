@@ -28,9 +28,6 @@ def check_initialize(initialized: dict, expected_version: str) -> None:
             f"initialize response reports version {server.get('version')!r}, "
             f"expected {expected_version!r}"
         )
-    # A harness keeps these answers for its whole session, so a package that
-    # forgets to claim resources here makes every wallet:// document
-    # unreachable no matter what the wallet itself serves.
     for capability in ("tools", "resources"):
         if capabilities.get(capability, {}).get("listChanged") is not True:
             fail(f"initialize response does not advertise {capability}.listChanged")

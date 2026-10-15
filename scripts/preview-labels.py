@@ -30,10 +30,6 @@ import re
 import sys
 from typing import Any
 
-# Ordered: the first pattern that matches an intent decides the class. Order is
-# what resolves the overlaps -- "Claim fees and extend" is a claim, "Approve
-# position operator" is an approval and not a position action, and "Withdraw
-# liquidity" is a liquidity removal rather than a plain withdrawal.
 CLASS_RULES: list[tuple[str, str]] = [
     # Removing an authority, before the rule that grants one: "Revoke
     # Delegation" is not a delegation and "Decrease allowance" is not an
@@ -56,9 +52,6 @@ CLASS_RULES: list[tuple[str, str]] = [
     (r"\bapprove safe hash", "governance"),
     (r"\bapprove|\bauthorize spending|\bpermit\b|\bincrease allowance|\bcheck allowance"
      r"|\bset (position|stake) operator", "approval"),
-    # Anything naming an NFT explicitly, before the class rules that would
-    # otherwise claim it: "Transfer Stake NFT" is an NFT movement, not a stake,
-    # and "Burn empty vote-escrow NFT" is not either.
     (r"\bnft\b|\bpoap", "nft"),
     # A Safe "Swap signer" replaces a multisig owner and trades nothing.
     (r"\bswap signer", "governance"),
@@ -112,9 +105,6 @@ CAUTION_CLASSES = {
     "nft",
 }
 
-# Phrases the deterministic interpretation attaches when a call grants
-# authority that outlives it. These decide Critical regardless of class,
-# because that is what they mean.
 CRITICAL_WARNINGS = (
     "unlimited",
     "setapprovalforall",
@@ -229,13 +219,8 @@ CLASS_VERBS: dict[str, str] = {
     "unrecognized": "call an unrecognized contract",
 }
 
-# The owner prefix a descriptor puts in front of its intent: "Ekubo Protocol —
-# Swap". Stripped from the verb phrase because it is lifted into a
-# `<protocol>` slot instead, so the summary names it verbatim through a copy
-# reference rather than through words the model could get wrong.
 OWNER_SEPARATOR = "\u2014"
 
-# A verb phrase longer than this stops being a verb phrase.
 MAX_VERB_WORDS = 6
 
 # How the tail of a long plan counts its unnamed calls. Spelled, never as
@@ -289,12 +274,6 @@ def risk_of(name: str, warnings: list[str], has_value: bool, own: bool, decoded:
     return "routine"
 
 
-# The standard ERC calls, whose meaning is fixed by the standard rather than by
-# a protocol, so the wording can be too. `setApprovalForAll` earns two entries
-# of its own: the class verb "approve" produced "approve letting 0x… spend
-# 0x…", which describes an allowance over one token, when what is actually
-# being granted is control of every token in a collection. Getting the wording
-# right matters most exactly where the transaction is most dangerous.
 STANDARD_SHAPES: list[tuple[str, str, list[str]]] = [
     (
         "setapprovalforall: grant",
@@ -359,9 +338,6 @@ def fill(template: str, slots: list[tuple[int, str]], verb: list[str]) -> list[s
     """
     pieces: list[str] = []
     for word in template.split():
-        # A template may punctuate a placeholder -- "{protocol1}:" -- and the
-        # punctuation is a piece of its own, because the renderer joins it to
-        # whatever precedes it rather than treating it as part of a word.
         trailing = ""
         if word.endswith(":") or word.endswith(","):
             word, trailing = word[:-1], word[-1]
@@ -454,9 +430,6 @@ def join_summaries(summaries: list[list[str]]) -> list[str]:
     if len(summaries) == 2:
         return summaries[0] + [","] + ["then"] + summaries[1]
     remaining = len(summaries) - 2
-    # Spelled, not written as digits. A digit here would either enter the
-    # vocabulary as a word the decoder can emit -- the one thing slotization
-    # exists to prevent -- or be stripped afterwards, leaving "and more calls".
     tail = ["and", COUNT_WORDS.get(remaining, "several"), "more"]
     tail.append("call" if remaining == 1 else "calls")
     return summaries[0] + [","] + ["then"] + summaries[1] + tail
@@ -464,10 +437,6 @@ def join_summaries(summaries: list[list[str]]) -> list[str]:
 
 def label(example: dict[str, Any], intents: dict[str, str | None]) -> dict[str, Any] | None:
     """Attach a class, a risk band, and a summary to one generated example."""
-    # A call the registry describes is classified from its human-authored
-    # intent. One it does not -- a standard token call, an opaque target -- is
-    # classified from the deterministic reading instead, which is what the
-    # model will have to do at inference for every protocol not vendored here.
     descriptions = example.get("call_descriptions", [])
     names = [
         classify(intents.get(key) or (descriptions[index] if index < len(descriptions) else None))

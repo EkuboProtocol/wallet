@@ -233,9 +233,6 @@ fn recursively_unwraps_calibur_and_decodes_declared_target_error() {
     assert_eq!(decoded.name, "TargetFailure");
     assert_eq!(decoded.args, Some(json!(["42"])));
     assert_eq!(decoded.step, Some(1));
-    // The name is the plan's reading of the revert, not one this wallet
-    // reached, and the sentence reaches the approval screen beside findings
-    // that are. It has to say so rather than read as a verdict.
     assert_eq!(
         failure.message,
         "reverted as TargetFailure, per the error ABI the plan supplied"

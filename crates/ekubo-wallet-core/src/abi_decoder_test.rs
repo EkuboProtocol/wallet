@@ -25,9 +25,6 @@ fn parameter(ty: &str) -> AbiParameterInput {
 
 #[test]
 fn a_parameter_descriptor_is_bounded_by_bytes_as_well_as_count() {
-    // Few enough entries to pass MAX_COLLECTION_ITEMS, large enough to
-    // exceed MAX_ABI_BYTES: the count says nothing about how much each
-    // entry carries, which is the gap the named-ABI path already closed.
     let bulky = AbiParameterInput {
         name: Some("n".repeat(4_096)),
         ty: "uint256".into(),
@@ -50,15 +47,11 @@ fn a_parameter_descriptor_is_bounded_by_bytes_as_well_as_count() {
 
 #[test]
 fn oversized_return_data_is_refused_without_being_scanned() {
-    // Not hexadecimal past the prefix, so the old order would have run the
-    // whole scan first and reported malformed. The length settles it, and
-    // the answer is the ceiling that was actually exceeded.
     let oversized = format!("0x{}", "z".repeat(MAX_RETURN_DATA_BYTES * 2 + 2));
     let failure = validate_return_data(&oversized).unwrap_err();
     assert_eq!(failure.0.code, "resource_limit");
     assert!(!preservable_raw(&oversized));
 
-    // A short non-hex value is still reported as malformed, not as a limit.
     assert_eq!(
         validate_return_data("0xzz").unwrap_err().0.code,
         "malformed_return_data"
@@ -224,8 +217,6 @@ fn an_out_of_domain_sqrt_ratio_fails_the_decode_rather_than_panicking() {
         assert_eq!(decoded.decode_error.unwrap().code, "codec_failure");
     }
 
-    // The same expression reached from an inline decode plan, where the value
-    // is whatever the contract — or the configured RPC — returned.
     let named = |name: &str, ty: &str| AbiParameterInput {
         name: Some(name.into()),
         ty: ty.into(),
@@ -375,8 +366,6 @@ mod shared_budget_tests {
             required: false,
         };
 
-        // Every decode charges the shared allowance, so the total is reached
-        // by enough calls even though no single one comes near it.
         let mut shared = DecodeBudget::for_request();
         for _ in 0..MAX_TOTAL_DECODES {
             let _ = decode_abi_result_within("0x", &plan, false, &mut shared);
@@ -391,8 +380,6 @@ mod shared_budget_tests {
             exhausted.decode_error
         );
 
-        // A fresh request starts with its own, which is what every call in a
-        // batch used to get for free.
         let mut fresh = DecodeBudget::for_request();
         let first = decode_abi_result_within("0x", &plan, false, &mut fresh);
         assert!(
@@ -426,10 +413,6 @@ mod shared_budget_tests {
                 .is_some_and(|error| error.message.contains("decode budget")),
             "the refusal is reported on the result"
         );
-        // And the read itself is still returned. Running out of decode
-        // allowance is not a reason to withhold what the endpoint answered:
-        // `usable` stays true for an optional decode, which is the decoder's
-        // existing semantics rather than anything this changed.
         assert!(
             result.return_data.is_some(),
             "the raw result survives a decode that could not run"
@@ -465,10 +448,6 @@ mod sqrt_ratio_float_codec {
         .expect("codec succeeds")
     }
 
-    // Observed on mainnet: Ekubo Core pool 0x2412d98b... (USDC/USDG) at tick
-    // -165, cross-checked against CoreDataFetcher.poolState over RPC. The
-    // mantissa here has bits 89..=93 set, which is what a 7-bit exponent split
-    // gets wrong: it used to return 22775868403039233396916548160160193078693462016.
     #[test]
     fn converts_a_mantissa_that_overlaps_the_old_exponent_field() {
         assert_eq!(
@@ -477,9 +456,6 @@ mod sqrt_ratio_float_codec {
         );
     }
 
-    // Ekubo Core pool 0x9efd723a... (ETH/USDC) at tick -19822811. Bits 89..=93
-    // are clear here, so this case agreed with the old split too and is kept as
-    // the control.
     #[test]
     fn converts_a_mantissa_clear_of_the_exponent_field() {
         assert_eq!(
@@ -488,7 +464,6 @@ mod sqrt_ratio_float_codec {
         );
     }
 
-    // The vector the SDK and evm-contracts pin for exponent 0.
     #[test]
     fn converts_the_zero_exponent_vector() {
         assert_eq!(

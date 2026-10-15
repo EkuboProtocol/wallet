@@ -95,10 +95,6 @@ impl PlatformTray {
             .with_menu_on_left_click(true)
             .with_tooltip("Ekubo Wallet")
             .with_icon(wallet_icon(dark_mode)?)
-            // AppKit owns the status-item foreground color. The icon remains
-            // one stable template for its entire lifetime so AppKit can react
-            // to the actual menu-bar backdrop (which is independent of the
-            // application's light/dark preference).
             .with_icon_as_template(cfg!(target_os = "macos"))
             .build()
             .context("the desktop has no usable tray host")?;
@@ -120,9 +116,6 @@ impl PlatformTray {
     pub fn set_dark_mode(&mut self, dark_mode: bool) {
         #[cfg(target_os = "macos")]
         {
-            // Replacing a tray-icon image can drop AppKit's template-image
-            // state and leave the raw dark pixels visible on a dark menu bar.
-            // The template already adapts itself, so theme updates are a no-op.
             let _ = dark_mode;
         }
         #[cfg(windows)]
@@ -262,8 +255,6 @@ fn command_for_id(id: &str) -> Option<TrayCommand> {
         CONNECT_ID => Some(TrayCommand::OpenRoute(Route::WalletConnect)),
         SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
         QUIT_ID => Some(TrayCommand::Quit),
-        // `AGENTS_ID` lands here with everything unrecognized: the
-        // agent-status line reports, it does not act.
         _ => None,
     }
 }

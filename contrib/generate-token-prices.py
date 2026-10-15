@@ -48,7 +48,6 @@ def three_significant_figures(value: float) -> float:
 
 
 def fetch(url: str) -> list[dict]:
-    # The API refuses the default urllib agent string outright.
     request = urllib.request.Request(
         url,
         headers={
@@ -100,18 +99,9 @@ def build(feed: list[dict]) -> dict:
             "usd_price": three_significant_figures(float(price)),
         }
 
-    # A chain's own currency is the balance every other row on that chain needs
-    # in order to move, and most chains' feed entry for it carries no price of
-    # its own. The same asset is priced somewhere — ETH on mainnet is the ETH
-    # an L2 charges gas in — so the symbol carries the value across, from the
-    # symbol in this wallet's own network registry rather than from anything a
-    # token list claims. The result is written out here rather than inferred at
-    # run time, so what ships is exactly what can be read in this file.
     priced_by_symbol: dict[str, float] = {}
     for token in sorted(
         tokens.values(),
-        # A native entry first, then the lowest chain ID, so the choice is
-        # deterministic and prefers the asset in its own right.
         key=lambda token: (token["address"] != NATIVE_ADDRESS, token["chain_id"]),
     ):
         priced_by_symbol.setdefault(token["symbol"], token["usd_price"])

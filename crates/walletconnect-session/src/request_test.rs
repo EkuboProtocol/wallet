@@ -40,9 +40,6 @@ fn a_missing_value_or_calldata_means_zero_and_empty() {
 
 #[test]
 fn the_fields_the_wallet_decides_itself_are_named_rather_than_dropped() {
-    // A dapp that pinned a nonce and a gas price asked for something specific
-    // and is not getting it. The reviewer is told, because a wallet that
-    // silently disagrees with the request it is showing is lying by omission.
     let request = parse_send_transaction(&json!([{
         "from": WALLET,
         "to": TARGET,
@@ -71,7 +68,6 @@ fn input_is_accepted_as_a_spelling_of_data() {
             .unwrap();
     assert_eq!(request.data.as_ref(), hex::decode("deadbeef").unwrap());
 
-    // The same value under both names is not a conflict.
     let agreed = parse_send_transaction(&json!([{
         "from": WALLET, "to": TARGET, "data": "0xdeadbeef", "input": "0xdeadbeef",
     }]))
@@ -90,8 +86,6 @@ fn data_and_input_disagreeing_is_refused_rather_than_resolved() {
 
 #[test]
 fn a_contract_deployment_is_refused_by_name() {
-    // `to` absent means creation. Dropping the field would silently turn this
-    // into a call to the zero address, which is a real way to burn funds.
     for transaction in [
         json!([{ "from": WALLET, "data": "0x60806040" }]),
         json!([{ "from": WALLET, "to": null, "data": "0x60806040" }]),
@@ -103,9 +97,6 @@ fn a_contract_deployment_is_refused_by_name() {
 
 #[test]
 fn a_decimal_quantity_is_refused_rather_than_guessed_at() {
-    // "100" is 256 to a hex reader and 100 to a decimal one. For a value in
-    // wei that is a 2.56x error in the amount leaving the account, so there is
-    // no safe way to accept it.
     let error = parse_send_transaction(&json!([{
         "from": WALLET, "to": TARGET, "value": "1000000000000000000",
     }]))
@@ -126,7 +117,6 @@ fn malformed_calldata_is_refused() {
             "{data} was accepted as calldata"
         );
     }
-    // The two spellings of "no calldata" both work.
     for data in ["", "0x"] {
         let request =
             parse_send_transaction(&json!([{ "from": WALLET, "to": TARGET, "data": data }]))
@@ -146,7 +136,6 @@ fn personal_sign_accepts_both_parameter_orders() {
     assert_eq!(address, expected);
     assert!(was_hex);
 
-    // Reversed, as several dapps send it.
     let (message, address, _) =
         parse_personal_sign(&json!([WALLET, hex_message]), wallet()).unwrap();
     assert_eq!(message, b"hello");
@@ -160,14 +149,11 @@ fn a_personal_sign_message_that_is_not_hex_is_taken_literally() {
     assert_eq!(message, b"Sign in to Example");
     assert!(!was_hex);
 
-    // A message that starts with 0x but is not valid hex is text that happens
-    // to start with those two characters, not malformed hex.
     let (message, _, was_hex) =
         parse_personal_sign(&json!(["0xZZ not hex", WALLET]), wallet()).unwrap();
     assert_eq!(message, b"0xZZ not hex");
     assert!(!was_hex);
 
-    // Odd digit count is likewise not hex.
     let (message, _, was_hex) = parse_personal_sign(&json!(["0xabc", WALLET]), wallet()).unwrap();
     assert_eq!(message, b"0xabc");
     assert!(!was_hex);
@@ -245,11 +231,8 @@ fn a_batch_of_calls_parses_in_the_order_it_was_given() {
     assert_eq!(request.chain_id, 1);
     assert!(request.atomic_required);
     assert_eq!(request.calls.len(), 2);
-    // Order is the whole point of a batch: an approval and a swap in the other
-    // order is a different transaction.
     assert_eq!(request.calls[0].to, TARGET.parse::<Address>().unwrap());
     assert_eq!(request.calls[0].value, U256::from(1));
-    // A call may carry neither data nor value; it is a bare native send.
     assert_eq!(request.calls[1].to, WALLET.parse::<Address>().unwrap());
     assert!(request.calls[1].data.is_empty());
     assert_eq!(request.calls[1].value, U256::ZERO);
@@ -297,7 +280,6 @@ fn a_batch_this_wallet_cannot_answer_is_refused_rather_than_trimmed() {
         );
     }
 
-    // A decimal chain id and an empty batch are both refusals, not guesses.
     assert!(
         parse_send_calls(&json!([{
             "version": "2.0.0",
@@ -309,7 +291,6 @@ fn a_batch_this_wallet_cannot_answer_is_refused_rather_than_trimmed() {
     );
     assert!(parse_send_calls(&batch(&json!([]))).is_err());
 
-    // A call with no target deploys a contract, which no plan step expresses.
     let error = parse_send_calls(&batch(&json!([{ "to": TARGET }, { "data": "0x60" }])))
         .expect_err("a deployment was accepted");
     assert!(format!("{error}").contains("call 2"), "{error}");
@@ -346,8 +327,6 @@ fn a_capabilities_query_reads_the_address_and_any_chain_filter() {
     assert_eq!(address, WALLET.parse::<Address>().unwrap());
     assert_eq!(chains, vec![1, 42_161]);
 
-    // No filter means every chain, which is what an absent second parameter
-    // asks for.
     let (_, chains) = parse_get_capabilities(&json!([WALLET])).unwrap();
     assert!(chains.is_empty());
 
@@ -379,7 +358,6 @@ fn an_address_shaped_message_does_not_become_the_signer() {
         hex::decode(message.trim_start_matches("0x")).unwrap()
     );
 
-    // The documented order still reads the documented way.
     let (bytes, signer, _) = parse_personal_sign(&json!([message, WALLET]), wallet()).unwrap();
     assert_eq!(signer, wallet());
     assert_eq!(
@@ -387,9 +365,6 @@ fn an_address_shaped_message_does_not_become_the_signer() {
         hex::decode(message.trim_start_matches("0x")).unwrap()
     );
 
-    // Neither one is this session's account, so the reading does not matter:
-    // whichever is chosen, the request is refused downstream. The second
-    // stands, as it always did.
     let stranger: Address = "0x3333333333333333333333333333333333333333"
         .parse()
         .unwrap();

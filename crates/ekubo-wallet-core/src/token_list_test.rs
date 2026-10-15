@@ -197,7 +197,6 @@ fn a_list_over_the_import_cap_still_imports_one_chain() {
         .collect();
     let body = format!(r#"{{"name": "Big", "tokens": [{}]}}"#, rows.join(","));
 
-    // Unfiltered, the list is over the cap and says so.
     let error = parse_token_list(body.as_bytes()).unwrap_err().to_string();
     assert!(error.contains("one import may carry"), "{error}");
 

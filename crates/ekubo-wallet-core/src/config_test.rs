@@ -23,7 +23,6 @@ fn a_network_without_a_currency_takes_the_one_this_build_ships_for_its_chain() {
         .expect("Ethereum ships a native currency");
     assert_eq!(shipped.symbol, "ETH");
 
-    // Configured wins, even when it disagrees with the registry.
     ethereum.native_currency = Some(NativeCurrency {
         name: "Renamed".to_owned(),
         symbol: "RENAMED".to_owned(),
@@ -35,7 +34,6 @@ fn a_network_without_a_currency_takes_the_one_this_build_ships_for_its_chain() {
     assert_eq!(resolved.symbol, "RENAMED");
     assert_eq!(resolved.decimals, 8);
 
-    // Absent falls back by chain id.
     ethereum.native_currency = None;
     let resolved = ethereum
         .resolved_native_currency()
@@ -43,8 +41,6 @@ fn a_network_without_a_currency_takes_the_one_this_build_ships_for_its_chain() {
     assert_eq!(resolved.symbol, shipped.symbol);
     assert_eq!(resolved.decimals, shipped.decimals);
 
-    // A chain the registry does not carry resolves to nothing rather than to
-    // a plausible default.
     let unknown = u64::MAX;
     assert!(crate::networks::known_network(unknown).is_none());
     ethereum.chain_id = unknown;
@@ -412,8 +408,6 @@ fn desktop_replacement_takes_over_the_name_or_the_chain_id() {
         ethereum.rpc_urls
     );
 
-    // Chain 1 under a new name takes chain 1 over rather than failing:
-    // the configuration holds one profile per chain ID either way.
     let mut renamed = ethereum;
     renamed.name = "custom".into();
     replace_configured_network(&mut networks, renamed).unwrap();
@@ -483,9 +477,6 @@ fn owner_configuration_admits_a_loopback_node() {
 
 #[test]
 fn an_rpc_url_may_not_carry_a_credential_the_wallet_would_repeat() {
-    // A host and an empty path, so nothing but the userinfo distinguishes it
-    // from an ordinary endpoint — and the wallet quotes endpoints back to the
-    // agent and onto the screen verbatim.
     for endpoint in [
         "https://apikey:secret@rpc.example.com/",
         "https://apikey@rpc.example.com/",
@@ -517,9 +508,6 @@ fn network_identifiers_cannot_inject_terminal_or_completion_controls() {
 
 #[test]
 fn network_display_fields_reject_invisible_and_bidirectional_characters() {
-    // `char::is_control` is false for every one of these, so the old
-    // predicate admitted them — into picker labels and, for the symbol,
-    // onto the line of the approval screen that names an amount.
     for injected in ["\u{202e}", "\u{200b}", "\u{feff}", "\u{2066}"] {
         let mut candidate = default_networks().remove(0);
         candidate.display_name = Some(format!("Ethereum{injected}"));
@@ -538,7 +526,6 @@ fn network_display_fields_reject_invisible_and_bidirectional_characters() {
         );
     }
 
-    // Ordinary non-ASCII display text is still fine.
     let mut candidate = default_networks().remove(0);
     candidate.display_name = Some("Éthereum メインネット".into());
     assert!(validate_network(&candidate).is_ok());
@@ -557,7 +544,6 @@ fn rpc_strategies_round_trip_through_the_spellings_people_type() {
             "parsing {text}"
         );
     }
-    // Display round-trips, so what `network list` prints can be typed back in.
     for strategy in [RpcStrategy::Ordered, RpcStrategy::Random] {
         assert_eq!(
             strategy.to_string().parse::<RpcStrategy>().unwrap(),
@@ -698,13 +684,10 @@ fn an_explorer_base_is_a_base_and_nothing_else() {
     assert!(base("https://etherscan.io").is_ok());
     assert!(base("https://etherscan.io/").is_ok());
 
-    // A query is where an `&` legitimately lives, and a base with one produces
-    // nonsense once `/tx/{hash}` is appended to it regardless.
     let error = format!("{:#}", base("https://etherscan.io/?a=1&calc").unwrap_err());
     assert!(error.contains("no query string or fragment"), "{error}");
     assert!(base("https://etherscan.io/#frag").is_err());
 
-    // And the scheme rule still stands.
     assert!(base("ftp://etherscan.io").is_err());
 }
 
@@ -777,8 +760,6 @@ mod record_network_tests {
 
 #[test]
 fn a_network_reads_by_its_display_name_never_its_internal_handle_or_an_alias() {
-    // `name` is what an agent types and `aliases` are what a person
-    // abbreviates to in conversation. Neither is what the network is called.
     let mut network = default_networks().remove(0);
     network.name = "robinhood".into();
     network.aliases = vec!["rh".into(), "robinhood-mainnet".into()];
@@ -786,8 +767,6 @@ fn a_network_reads_by_its_display_name_never_its_internal_handle_or_an_alias() {
 
     assert_eq!(network.display_label(), "Robinhood Chain");
 
-    // With nothing configured the internal handle is all there is, and that
-    // is still better than showing an alias.
     network.display_name = None;
     assert_eq!(network.display_label(), "robinhood");
 }

@@ -71,7 +71,6 @@ fn a_helper_clobbered_by_another_build_is_restored_in_place() {
     install_bridge_image(&parent, &installed, packaged).unwrap();
     assert!(installed_image_matches(&installed, packaged).unwrap());
 
-    // Another wallet build takes the path over while this one keeps running.
     fs::write(&installed, b"bridge 1.5.0+7af8600.dirty").unwrap();
     assert!(!installed_image_matches(&installed, packaged).unwrap());
 
@@ -94,7 +93,6 @@ fn reasserting_is_due_once_per_interval_but_never_skips_the_first() {
     assert!(!reassert_is_due(&mut last, start + REASSERT_INTERVAL / 2));
     assert!(!reassert_is_due(&mut last, start + just_inside));
     assert!(reassert_is_due(&mut last, start + REASSERT_INTERVAL));
-    // The window restarts from the check that ran, not from launch.
     assert!(!reassert_is_due(
         &mut last,
         start + REASSERT_INTERVAL + Duration::from_millis(1)
@@ -312,8 +310,6 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
         config_path: config.clone(),
     };
 
-    // Nothing there at all, a file with nothing in it, and a file holding no
-    // entries of ours. None of the three is an error to report.
     assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
     fs::write(&config, "  \n\t\n").unwrap();
     assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
@@ -332,9 +328,6 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
     fs::write(&config, &installed).unwrap();
     assert!(adapter.in_sync(&CompanionSelection::all()).unwrap());
 
-    // What the harness leaves behind the next time it saves: our exact
-    // entries, its own bytes. The trailing newline alone was the whole of the
-    // difference on the machine this was found on.
     let without_newline = installed.trim_end().to_owned();
     assert_ne!(without_newline, installed);
     fs::write(&config, &without_newline).unwrap();
@@ -346,7 +339,6 @@ fn a_harness_that_rewrote_its_own_config_still_reads_as_installed() {
     fs::write(&config, &reformatted).unwrap();
     assert!(adapter.in_sync(&CompanionSelection::all()).unwrap());
 
-    // A harness that dropped the entries is genuinely not installed.
     let removed = remove_json(&installed, "mcpServers").unwrap();
     fs::write(&config, &removed).unwrap();
     assert!(!adapter.in_sync(&CompanionSelection::all()).unwrap());
@@ -682,8 +674,6 @@ fn a_pre_split_config_is_retargeted_rather_than_duplicated() {
         parsed["mcpServers"]["ekubo"]["url"],
         "https://mcp.ekubo.org/mcp/ekubo"
     );
-    // The all-protocol endpoint is nowhere in the result: an agent given it
-    // alongside the per-protocol servers would carry every tool twice.
     assert!(!after.contains(r#""https://mcp.ekubo.org/mcp""#));
     assert!(validate_json_shape(&after, AgentKind::Cursor, &selection).is_ok());
 }
@@ -814,6 +804,5 @@ fn the_managed_diff_names_a_server_being_removed() {
     let diff = managed_config_diff(AgentKind::Cursor, &before, &after).unwrap();
     assert!(diff.contains("mcpServers.ekubo_merkl"));
     assert!(diff.contains("<not configured>"));
-    // Nothing else moved.
     assert!(!diff.contains("mcpServers.ekubo_morpho"));
 }

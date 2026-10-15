@@ -281,7 +281,7 @@ fn unlimited_threshold_covers_the_sentinels_actually_in_use() {
     for unlimited in [
         U256::MAX,
         U256::MAX / U256::from(2_u8),
-        (U256::from(1_u8) << 160) - U256::from(1_u8), // Permit2
+        (U256::from(1_u8) << 160) - U256::from(1_u8),
         U256::from(u128::MAX),
     ] {
         assert!(
@@ -292,7 +292,6 @@ fn unlimited_threshold_covers_the_sentinels_actually_in_use() {
     for finite in [
         U256::ZERO,
         U256::from(1_000_000_u64),
-        // 100 billion tokens at eighteen decimals: large but real.
         U256::from(10_u8).pow(U256::from(29_u8)),
     ] {
         assert!(
@@ -509,8 +508,6 @@ async fn clear_signed_steps_take_precedence_over_standard_decoding() {
     assert!(joined.contains("Amount"), "{joined}");
     assert!(joined.contains("Stake end"), "{joined}");
 
-    // The same calldata on a chain without that deployment falls back to
-    // the unrecognized-selector path rather than borrowing the reading.
     let (_, target, calldata) = crate::clear_signing::stake_fixture();
     let elsewhere = step(1, target, calldata);
     let fallback =
@@ -567,7 +564,6 @@ fn an_account_name_can_never_be_read_as_a_second_address() {
         "0x3333333333333333333333333333333333333333",
         "savings (0x3333333333333333333333333333333333333333)",
         "0X3333",
-        // Letters to a parser, an address to whoever is reading the screen.
         "Ox3333333333333333333333333333333333333333",
         "oXdeadbeef",
     ] {
@@ -580,8 +576,6 @@ fn an_account_name_can_never_be_read_as_a_second_address() {
         );
     }
 
-    // The hex run is what makes it a forgery. An ordinary name that happens to
-    // contain those two letters keeps its label.
     for ordinary in ["box", "oxide", "Oxen"] {
         let mut own = OwnAccounts::new();
         own.insert(mine, ordinary.to_owned());
@@ -634,8 +628,6 @@ async fn a_clear_signed_transfer_names_the_owners_own_account() {
 
     let mine_read = read(mine, &own).await;
     let rendered = mine_read.details.join("\n");
-    // The descriptor path is the one under test; if this stops matching, the
-    // rest of the test is asserting about the fallback instead.
     assert!(
         mine_read
             .description
@@ -685,9 +677,6 @@ fn signed_amounts_keep_sign_and_only_unknown_assets_use_base_units() {
 
 #[test]
 fn balance_deltas_beyond_fixed_width_integers_stay_exact() {
-    // A delta is the difference of two uint256 balances, so it can exceed
-    // any fixed-width type. Rendering it as zero, saturated, or wrapped
-    // would show a reviewer a number other than the one being approved.
     let huge = "-".to_string() + &"9".repeat(60);
     let delta = parse_signed(&huge).expect("arbitrary precision parses");
     let rendered = format_signed_amount(&delta, Some(18), Some("TKN"));
@@ -724,7 +713,6 @@ fn token_symbols_cannot_forge_review_structure() {
     );
     assert_eq!(display_symbol("   ").as_deref(), None);
     assert_eq!(display_symbol(&"A".repeat(64)).unwrap().len(), 32);
-    // The symbols real token lists carry survive intact.
     for symbol in ["USDC", "WETH", "USDC.e", "wstETH", "1INCH", "USD+", "sDAI"] {
         assert_eq!(display_symbol(symbol).as_deref(), Some(symbol), "{symbol}");
     }
@@ -744,8 +732,6 @@ fn a_stored_symbol_cannot_forge_the_address_suffix() {
             decimals: Some(6),
         },
     );
-    // A symbol that tries to carry an address is refused outright, so the
-    // token falls back to being named by its own address and nothing else.
     assert!(label.starts_with(&format!("{real:#x}")), "{label}");
     assert!(!label.contains("2222"), "{label}");
     assert_eq!(label.matches("0x").count(), 1, "{label}");
@@ -762,8 +748,6 @@ fn an_unlisted_token_is_named_by_address_alone() {
         format!("{} (unlisted token)", token.to_checksum(None))
     );
 
-    // And its amounts stay in base units rather than being scaled by a
-    // decimals value no confirmed list vouched for.
     let amount = format_token_amount(U256::from(1_000_000_u64), token, &TokenMetadata::default());
     assert!(amount.starts_with("1000000 base units of"), "{amount}");
 }
@@ -772,14 +756,6 @@ fn an_unlisted_token_is_named_by_address_alone() {
 fn a_real_outflow_survives_a_flood_of_forged_transfer_logs() {
     use crate::simulation::TokenBalanceChange;
 
-    // Any contract can emit a `Transfer` log naming this wallet, and every
-    // emitter enters the change list. While the list truncated in address
-    // order, deploying contracts whose addresses sort early pushed the
-    // transaction's real outflow past the cut and left the reviewer a screen
-    // of noise plus a "further token(s)" footnote.
-    //
-    // The genuine token is given the highest address there is, so address
-    // order alone would place it dead last.
     let real = Address::repeat_byte(0xff);
     let mut simulation = simulation_with_native_delta("0");
     let changes = &mut simulation.balance_changes.as_mut().unwrap().tokens;
@@ -819,7 +795,6 @@ fn a_real_outflow_survives_a_flood_of_forged_transfer_logs() {
         rendered.contains("-1000") || rendered.contains("-0.001"),
         "the measured outflow must be on screen: {rendered}"
     );
-    // And it leads, because nothing else here was measured at all.
     assert_eq!(
         lines[0].0,
         token_label(
@@ -858,10 +833,6 @@ fn continuation_line(lines: &[(String, String)]) -> Option<String> {
 
 #[test]
 fn gross_transfer_totals_stay_hidden_when_they_only_restate_the_net() {
-    // A token that moved one way has a gross flow identical to its net, so
-    // the continuation line said "+1 USDC" twice — once as the balance
-    // change and once as "+1 USDC in, +0 USDC out". A reader who meets that
-    // learns to skip the second line everywhere, including where it matters.
     let token = Address::repeat_byte(0xaa);
     let lines = balance_change_lines(
         TokenBalanceChange {
@@ -883,8 +854,6 @@ fn gross_transfer_totals_stay_hidden_when_they_only_restate_the_net() {
 
 #[test]
 fn gross_transfer_totals_appear_when_the_token_moved_both_ways() {
-    // Here the net genuinely hides something: 3 USDC arrived and 1 left, and
-    // "+2 USDC" alone does not say that.
     let token = Address::repeat_byte(0xaa);
     let lines = balance_change_lines(
         TokenBalanceChange {
@@ -1017,8 +986,6 @@ fn labels_render_addresses_in_eip55_checksum_case() {
         format!("USDC ({checksummed})")
     );
 
-    // A balance change arrives keyed by the lowercase form the simulation
-    // stores, and is still shown in checksum case.
     let mut simulation = simulation_with_native_delta("0");
     simulation.balance_changes.as_mut().unwrap().tokens.insert(
         format!("{address:#x}"),
@@ -1034,8 +1001,6 @@ fn labels_render_addresses_in_eip55_checksum_case() {
     let lines = render_balance_changes(&simulation, &network, &TokenMetadataMap::new());
     assert_eq!(lines[0].0, format!("{checksummed} (unlisted token)"));
 
-    // A string the simulation stored lowercase reads back in checksum case,
-    // and anything that is not an address is left exactly as it came.
     assert_eq!(
         checksummed_or_verbatim(&format!("{address:#x}")),
         checksummed
@@ -1066,9 +1031,6 @@ async fn a_headline_names_each_call_in_order() {
 
 #[tokio::test]
 async fn a_headline_carries_no_address() {
-    // The whole point of a headline is that it fits on one row, so it names a
-    // token by symbol and leaves every address to the review. A row that
-    // showed part of an address would be the surface address poisoning wants.
     let token = Address::repeat_byte(0x44);
     let stranger = Address::repeat_byte(0x66);
     let headline = plan_headline(
@@ -1137,8 +1099,6 @@ async fn an_unnamed_token_stays_unnamed_and_an_unlimited_allowance_says_so() {
 
 #[tokio::test]
 async fn a_plan_nothing_recognized_has_no_headline() {
-    // The caller titles such a row by its kind. A headline that said
-    // "unrecognized" three times would take the row and tell nobody anything.
     let headline = plan_headline(
         &[
             step(1, Address::repeat_byte(0x44), vec![0xde, 0xad, 0xbe, 0xef]),
@@ -1289,9 +1249,6 @@ fn a_headline_never_drops_the_count_of_what_it_did_not_name() {
         );
     }
 
-    // A single phrase already past the cap keeps the count rather than the
-    // tail of the phrase: how many calls there are outranks the last few
-    // words of what the first one does.
     let overlong = format!("grant operator control of every {} token", "W".repeat(70));
     let remainder_width = " and 1 more call".len();
     assert!(

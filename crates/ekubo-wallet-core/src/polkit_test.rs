@@ -142,8 +142,6 @@ composefs / overlay ro,relatime,seclabel 0 0
 
 #[tokio::test]
 async fn readiness_never_panics_without_a_bus() {
-    // CI runners and containers may have no system bus at all; the answer
-    // then is `Unreachable`, which the settings pane renders as a sentence.
     let state = readiness().await;
     assert!(!matches!(state, Readiness::Ready) || std::path::Path::new(ACTIONS_DIR).is_dir());
 }

@@ -99,8 +99,6 @@ fn privacy_policy_discloses_the_walletconnect_relay() {
     assert!(policy.contains("wss://relay.walletconnect.org"));
     assert!(policy.contains("end-to-end encrypted"));
     assert!(policy.contains("the size and timing of every message"));
-    // Section 2's "nothing else leaves this machine" claim has to account for
-    // it, or the disclosure contradicts the section that promises exhaustion.
     assert!(policy.contains(
         "the WalletConnect relay described in section 5, and the release and\nupdate activity \
 described in section 6, this software makes no network\nrequests."
@@ -124,14 +122,10 @@ fn privacy_policy_discloses_release_checks_and_updates() {
     );
     assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
     assert!(policy.contains("does not persist the release-listing\nresponse or version tag"));
-    // What triggers it, because "when you run a command" is the difference
-    // between this and the background telemetry section 1 promises is absent.
     assert!(policy.contains("Only after you explicitly confirm installation"));
     assert!(policy.contains("update public key"));
     assert!(policy.contains("compiled into the running application"));
     assert!(policy.contains("GitHub Releases page"));
-    // Section 4's exhaustive claim has to account for it too, not just
-    // section 2's.
     assert!(policy.contains(
         "Apart from the WalletConnect relay in section 5 and the release and\nupdate activity in \
 section 6,"
@@ -152,8 +146,6 @@ fn terms_disclaim_dapp_directed_signing_and_the_relay() {
     assert!(TERMS_OF_SERVICE.contains("CONNECTED OVER WALLETCONNECT"));
     assert!(TERMS_OF_SERVICE.contains("ANY RELAY\nOPERATOR"));
     assert!(TERMS_OF_SERVICE.contains("IMPERSONATED DAPP"));
-    // Section 1 says the developer runs no servers; the relay it now names is
-    // somebody else's, and saying so is what keeps that claim true.
     assert!(TERMS_OF_SERVICE.contains("wss://relay.walletconnect.org"));
     assert!(TERMS_OF_SERVICE.contains("under the control of the developer"));
 }
@@ -239,10 +231,6 @@ fn stale_digests_cannot_be_recorded_and_stale_acceptance_is_superseded() {
             .is_err()
     );
 
-    // Simulate acceptance of a previous revision by writing the row
-    // directly, as a build shipping older document text would have. It is a
-    // real digest of some other text rather than a placeholder string: the
-    // column holds 32 bytes, so there is no way to write anything else.
     let superseded = B256::repeat_byte(0xAA);
     store
         .database

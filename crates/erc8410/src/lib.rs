@@ -104,8 +104,6 @@ impl ExecutionStepKind {
             Self::Approval => Some("Grants a spending allowance the next call needs"),
             Self::AllowanceCleanup => Some("Takes that spending allowance back afterwards"),
             Self::SignatureDependentExecution => Some("Uses a signature you approved earlier"),
-            // "Does the work you asked for" and "Something else" are both
-            // true of every plan and useful about none of them.
             Self::Execution | Self::Other => None,
         }
     }
@@ -353,8 +351,6 @@ impl ExecutionPlan {
     /// binds.
     #[must_use]
     pub fn digest(&self) -> B256 {
-        // Struct field order preserves the wallet's original insertion-ordered
-        // JSON digest, regardless of serde_json's preserve_order feature.
         #[derive(Serialize)]
         struct Transaction<'a> {
             chain_id: &'a DecimalU256,

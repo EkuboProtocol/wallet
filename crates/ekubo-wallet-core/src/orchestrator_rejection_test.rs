@@ -67,8 +67,6 @@ fn a_rejection_already_recorded_is_a_success_not_an_error() {
     let rejected = record_rejection(&pending, request.request_id).unwrap();
     assert_eq!(rejected.status, PendingStatus::Rejected);
 
-    // The raw call fails now, which is exactly the shape of the post-commit
-    // read failure this has to survive.
     assert!(
         lock(&pending).unwrap().reject(request.request_id).is_err(),
         "the store itself refuses a row that is not awaiting approval"
@@ -88,8 +86,6 @@ fn a_rejection_that_did_not_land_says_the_request_can_still_be_signed() {
         .unwrap()
         .create("primary", "ethereum", &plan(), None, 1)
         .unwrap();
-    // Reject a request that is not this one, so the store errors while the
-    // real row stays `AwaitingApproval`.
     let missing = uuid::Uuid::new_v4();
     let error = format!("{:#}", record_rejection(&pending, missing).unwrap_err());
     assert!(error.contains("still awaiting approval"), "{error}");

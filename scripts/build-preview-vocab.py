@@ -87,9 +87,6 @@ def shaped(word: str) -> bool:
     """
     if not word or word.startswith("<") or WORD.fullmatch(word) is None:
         return False
-    # Belt and braces against a hex blob arriving as a word: the address
-    # scanner already lifts these, and an entry like `a0b86991` in the
-    # vocabulary would be a value the decoder could emit.
     return "0x" not in word and not is_long_hex(word) and not is_hex_fragment(word)
 
 

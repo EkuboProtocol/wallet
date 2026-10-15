@@ -139,8 +139,6 @@ impl<B: Backend> PreviewEngine<B> {
                     continue;
                 }
                 let width = crate::slots::width_for(slots.tokens.len());
-                // Quadratic attention work, not just number of rows, bounds
-                // latency. Full-plan realization still examines EVERY call.
                 let cost = width * width;
                 if work + cost > 262_144 {
                     continue;
@@ -233,10 +231,6 @@ impl<B: Backend> PreviewEngine<B> {
         &self,
         pending: &[(usize, Slotized)],
     ) -> Result<Vec<(usize, TransactionPreview)>, String> {
-        // Rounded up to one of a handful of widths rather than padded to the
-        // longest member: a shape the backend has already compiled a kernel
-        // for costs nothing, and a new one costs a compile and a fresh
-        // allocation. See `slots::WIDTHS`.
         let length = crate::slots::width_for(
             pending
                 .iter()
@@ -347,9 +341,6 @@ impl<B: Backend> PreviewEngine<B> {
         let mut prefixes = vec![vec![vocab::BOS]; size];
         let mut summaries = vec![Vec::new(); size];
         let mut finished = vec![false; size];
-        // One fewer than the width the corpus padded to, because the prefix
-        // starts at BOS. Decoding further would index positional embeddings
-        // no training example ever reached.
         for _ in 0..MAX_SUMMARY_TOKENS - 1 {
             if finished.iter().all(|done| *done) {
                 break;
@@ -373,8 +364,6 @@ impl<B: Backend> PreviewEngine<B> {
             for row in 0..size {
                 let picked = chosen.get(row).copied().unwrap_or(0);
                 let picked = usize::try_from(picked).unwrap_or(0);
-                // Past the vocabulary the model is pointing at an input
-                // position; what it named is the slot reference sitting there.
                 let token = if picked >= vocabulary {
                     slot_at(&pending[row].1, picked - vocabulary)
                 } else {
@@ -598,8 +587,6 @@ impl Prepared {
             return;
         }
         if document.nothing_decoded() {
-            // There is no action verb to infer. State the missing reading and
-            // preserve the known native value without asking the model to guess.
             if let [call] = document.calls.as_slice()
                 && !crate::slots::is_zero_value(&call.native_value)
             {

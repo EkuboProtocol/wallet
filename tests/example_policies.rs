@@ -144,8 +144,6 @@ fn set_approval_for_all(operator: Address, approved: bool) -> String {
     )
 }
 
-// ------------------------------------------------------------------ examples
-
 #[test]
 fn transfers_to_named_addresses_permits_only_named_recipients() {
     let name = "transfers-to-named-addresses.json";
@@ -178,7 +176,6 @@ fn transfers_to_named_addresses_permits_only_named_recipients() {
         false,
         "approve is a different function and matches no rule",
     );
-    // The label promises no amount ceiling, and there is none.
     check(
         name,
         &policy,
@@ -220,7 +217,6 @@ fn revoke_only_lets_an_agent_clean_up_but_never_grant() {
         false,
         "granting an operator",
     );
-    // The wildcard chain entry means this holds off mainnet too.
     check(
         name,
         &policy,
@@ -530,8 +526,6 @@ fn an_earlier_deny_rule_outranks_a_later_allow_that_also_matches() {
     );
 }
 
-// --------------------------------------------------------------- the defaults
-
 #[test]
 fn an_unmatched_call_requires_approval_and_says_why() {
     // The property every example above rests on: silence never signs
@@ -574,8 +568,6 @@ fn a_chain_the_example_does_not_configure_is_not_automatically_allowed() {
 
 #[test]
 fn every_example_with_restricted_rules_withholds_automatic_signing_for_unknown_calls() {
-    // A blanket sanity net: no restricted example may permit an arbitrary call
-    // to an unknown contract.
     for name in [
         "transfers-to-named-addresses.json",
         "revoke-approvals-only.json",
@@ -614,7 +606,6 @@ fn scoped_to_the_asker_decides_the_same_call_by_who_asked() {
         verdict(&RequestSource::agent(Some("codex"), None)),
         PolicyOutcome::Allowed
     );
-    // Another harness gets no rule at all, so a human decides.
     assert_eq!(
         verdict(&RequestSource::agent(Some("claude_code"), None)),
         PolicyOutcome::RequiresApproval
@@ -626,8 +617,6 @@ fn scoped_to_the_asker_decides_the_same_call_by_who_asked() {
         PolicyOutcome::RequiresApproval
     );
 
-    // The leading deny forecloses one target for every dapp, whatever domain
-    // it claims, and does not touch that target for anyone else.
     let dapp_call = plan("1", FRIEND, "0x", "0");
     assert_eq!(
         policy_outcome(&evaluate_policy(

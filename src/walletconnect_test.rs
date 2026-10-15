@@ -26,8 +26,6 @@ fn manager_keeps_multiple_sessions_only_in_memory() {
         manager.begin_uri(&uri).unwrap();
     }
     assert_eq!(manager.sessions().len(), 2);
-    // Nothing settled, so there is no dapp to say goodbye to and nothing for
-    // the application shutdown to wait on.
     assert!(manager.disconnect_all().is_empty());
     assert!(manager.sessions().is_empty());
 }
@@ -112,10 +110,6 @@ fn a_pairing_that_fails_before_settling_frees_its_slot() {
     let connected = paired(&mut manager, "44");
     manager.update(connected, SessionStatus::Connected, None, 0, None);
 
-    // Nothing draws an unsettled pairing, so an error left on one would be
-    // invisible — and the entry would hold a slot against the session cap
-    // that no button on screen could ever free. The connect panel reports
-    // that failure instead.
     manager.fail(unsettled, "relay refused the subscription".into());
     let sessions = manager.sessions();
     assert_eq!(sessions.len(), 1);
@@ -149,11 +143,6 @@ fn a_session_that_ends_cleanly_leaves_nothing_behind() {
 
 #[test]
 fn quitting_leaves_something_to_wait_on_for_every_settled_dapp() {
-    // The dapp is told the session is over by a publish to the relay, and the
-    // quit used to cancel the sessions and let the process exit out from under
-    // it — so the dapp went on showing a connection to a wallet that had
-    // closed. The shutdown waits on these, so there has to be one per dapp
-    // that was ever actually connected.
     let mut manager = WalletConnectManager::default();
     let settled = paired(&mut manager, "88");
     let never_settled = paired(&mut manager, "99");

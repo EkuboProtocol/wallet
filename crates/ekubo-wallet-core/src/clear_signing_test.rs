@@ -10,8 +10,6 @@ use super::*;
 #[test]
 fn every_vendored_descriptor_resolves_and_parses() {
     let registry = registry();
-    // The one known upstream defect: swell's burn format carries no
-    // intent, which the engine requires. Anything beyond that fails.
     let unexpected: Vec<_> = registry
         .failures
         .iter()
@@ -105,8 +103,6 @@ async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
         "a symbol that can be read as an address must not name a token: {forged:?}"
     );
 
-    // An ordinary symbol still resolves, and carries the address it belongs to
-    // rather than leaving it in the calldata the descriptor exists to replace.
     let honest = TokenMetadataMap::from([(
         attacker,
         crate::approval_summary::TokenMetadata {
@@ -230,8 +226,6 @@ fn every_signed_parameter_is_displayed_by_a_signed_formatter() {
         if !standalone {
             continue;
         }
-        // A file that does not resolve is already covered by
-        // `every_vendored_descriptor_resolves_and_parses`.
         let Ok((_, resolved)) = resolve_vendored(path, contents, &by_path) else {
             continue;
         };
@@ -301,7 +295,6 @@ fn signed_parameter_names(signature: &str) -> BTreeSet<&str> {
             continue;
         }
         let mut cursor = start + "int".len();
-        // Width digits and any array suffix sit between the type and the name.
         while cursor < bytes.len()
             && (bytes[cursor].is_ascii_digit() || bytes[cursor] == b'[' || bytes[cursor] == b']')
         {

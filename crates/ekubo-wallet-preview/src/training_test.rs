@@ -56,7 +56,6 @@ fn nothing_fed_to_the_decoder_is_outside_the_vocabulary() {
             "{token} is not a row of the embedding table"
         );
     }
-    // A copy is fed back as the slot's own token, exactly as inference does.
     assert_eq!(encoded.summary_inputs[2], vocab::slot_token(0).unwrap());
     assert_eq!(
         encoded.summary_inputs.len(),

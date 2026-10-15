@@ -158,9 +158,6 @@ const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releas
 
 fn app_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
-        // Keep the component's semantic Medium size so icons and text retain
-        // their intended metrics. Passing a pixel value to `with_size` scales
-        // icons and padding; it does not set a button height.
         .h(BUTTON_HEIGHT)
         .px_3()
         .rounded(px(12.0))
@@ -748,8 +745,6 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
     ];
     let mut rows = div()
         .debug_selector(|| "portfolio-loading-placeholder".to_owned())
-        // The list region: the placeholder rows sit at the top of it, exactly
-        // as an account holding four balances would.
         .w_full()
         .min_w_0()
         .flex_1()
@@ -760,8 +755,6 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
     for (index, (identity, metadata, balance)) in ROWS.into_iter().enumerate() {
         rows =
             rows.child(
-                // The balance row's own frame: `py_2`, and a divider under every
-                // row but the last.
                 div()
                     .debug_selector(|| "portfolio-placeholder-row".to_owned())
                     .w_full()
@@ -783,10 +776,6 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
                             .flex()
                             .flex_col()
                             .gap_0p5()
-                            // Each bar sits in a box the height of the line it
-                            // stands in for: the identity is one line of
-                            // base-size text, and the metadata under it is a row
-                            // whose height comes from the explorer link in it.
                             .child(
                                 div()
                                     .h(rems(1.5))
@@ -800,7 +789,6 @@ fn portfolio_loading_placeholder(cx: &App) -> gpui::Div {
                                 ),
                             ),
                     )
-                    // The amount is `text_lg` and sits hard right.
                     .child(Skeleton::new().h_6().w(balance).flex_none()),
             );
     }
@@ -815,11 +803,6 @@ fn account_switcher(
 ) -> TabBar {
     TabBar::new(id)
         .w_full()
-        // Segmented marks the active account with the page background plus a
-        // shadow, which is nearly the colour of the bar it sits in — in both
-        // themes it was hard to tell which account was selected. A pill fills
-        // it with the brand primary and its paired foreground, both of which
-        // the interface palette defines per mode.
         .pill()
         .large()
         .selected_index(selected_index)
@@ -842,8 +825,6 @@ fn html_escaped_plain_text(value: &str) -> SharedString {
     let mut html = String::with_capacity(value.len());
     for (index, line) in value.split('\n').enumerate() {
         if index > 0 {
-            // A newline the caller wrote is a line the reader should see.
-            // Markdown joined those lines into a paragraph.
             html.push_str("<br>");
         }
         push_html_escaped(&mut html, line);
@@ -1130,18 +1111,7 @@ fn render_network_card(
                                             if network.testnet { " · testnet" } else { "" },
                                         ),
                                     )),
-                            ), // No status badge. The rows are
-                               // already in a section headed
-                               // "Enabled" or "Disabled", and the
-                               // button on the row offers the
-                               // opposite verb, so the badge was
-                               // the third statement of a fact
-                               // nobody had asked twice about —
-                               // and it spent the accent colour
-                               // on every row of the longer
-                               // section, which is the surest way
-                               // to make an accent stop meaning
-                               // anything.
+                            ),
                     ),
                 )
                 .child(
@@ -1234,12 +1204,6 @@ fn render_network_card(
                                 let name = name.clone();
                                 move || format!("set-native-value-{name}")
                             })
-                            // A ghost Button, not a link: this
-                            // opens the price dialog, and link
-                            // styling on an in-app command hides
-                            // the affordance and hands assistive
-                            // technology the wrong role. The
-                            // ellipsis is the dialog.
                             .label(if recorded.is_some() {
                                 "Change value…"
                             } else {
@@ -1370,8 +1334,6 @@ struct NetworkEditorMetrics {
 /// short to ever show the whole form on a large display and it left a short
 /// form padded out to a size nothing had asked for.
 fn network_editor_metrics(viewport: gpui::Size<gpui::Pixels>) -> NetworkEditorMetrics {
-    // Preserve breathing room where possible without ever making the modal
-    // larger than the window that contains it.
     let horizontal_inset = viewport.width.min(px(32.0));
     let vertical_inset = (viewport.height / 8.0).min(px(24.0));
     NetworkEditorMetrics {
@@ -1448,11 +1410,6 @@ fn about_row(
         .items_center()
         .justify_between()
         .gap_4()
-        // Each row is a name, a fact about it, and one control, and the
-        // control sits a column away from the name. A rule between rows is
-        // what keeps the pairing obvious without asking the eye to track
-        // across a gap. The final rule separates the actionable rows from the
-        // informational copyright footer below them.
         .when(ruled, |row| {
             row.pb_2().border_b_1().border_color(cx.theme().border)
         })
@@ -1572,8 +1529,6 @@ fn format_usd(value: f64) -> String {
     if value == 0.0 {
         return "$0".to_owned();
     }
-    // Anything under a cent rounds to "$0.00", which reads as nothing at all
-    // rather than as a very small something.
     if value < 0.01 {
         return "<$0.01".to_owned();
     }
@@ -1627,9 +1582,6 @@ fn portfolio_balance_rows(
             .unwrap_or(&item.network.name)
             .to_owned();
         if portfolio.native_balance != "0" {
-            // A row that does not name its currency still gets the one
-            // this build ships for its chain, rather than a balance in
-            // wei under the heading "native units".
             let native = item.network.resolved_native_currency();
             let native = native.as_ref();
             rows.push(PortfolioBalanceRow {
@@ -1899,12 +1851,6 @@ fn render_portfolio_balance_row(
                         .flex_col()
                         .items_end()
                         .gap_0p5()
-                        // The balance and nothing else. A recorded value is a
-                        // price somebody typed once and no ticker maintains,
-                        // so printing a dollar figure beside a live balance
-                        // would put a stale number where an exact one belongs.
-                        // It decides the order of these rows and which of them
-                        // are dust, and says nothing on screen.
                         .child(
                             div()
                                 .min_w_0()
@@ -1915,11 +1861,6 @@ fn render_portfolio_balance_row(
                                 )))
                                 .overflow_x_scroll()
                                 .text_right()
-                                // Monospace digits at this size are dense
-                                // enough already: bolding them thickened every
-                                // stroke and closed up the counters, which is
-                                // the opposite of what a column of numbers
-                                // being compared needs.
                                 .font_family(MONO_FONT_FAMILY)
                                 .text_lg()
                                 .child(
@@ -2321,8 +2262,6 @@ fn countdown_label(
 ) -> String {
     let remaining = moment.signed_duration_since(now);
     let seconds = remaining.num_seconds();
-    // A fire time already in the past means the scheduler is between its sleep
-    // and its tick, not that anything is wrong.
     if seconds <= 0 {
         return "any moment now".to_owned();
     }
@@ -2674,12 +2613,6 @@ impl Route {
             Self::Activity => {
                 "Requests waiting on your decision, and everything this wallet has signed or sent."
             }
-            // Says "token balances", not "what each account holds". This
-            // screen reads balances and nothing else, so capital deposited
-            // into a protocol leaves it and the total drops — which reads as
-            // a loss rather than as a move if the line above claims to show
-            // everything. The first person to add liquidity through an agent
-            // and then open this page said their portfolio "went way down".
             Self::Overview => {
                 "The token balances each account holds, across every network you have enabled. Value deposited into a protocol — liquidity, lending, staking — is not counted here; ask your agent about those."
             }
@@ -2745,9 +2678,6 @@ impl Route {
             .copied()
             .unwrap_or_default();
         if self == Self::Settings {
-            // The platform's own preferences shortcut also opens Settings, and
-            // it stays with the route rather than with whichever slot it sits
-            // in.
             SharedString::from(format!("{key} / {SETTINGS_ALTERNATE_SHORTCUT}"))
         } else {
             SharedString::from(key)
@@ -3147,10 +3077,6 @@ impl DesktopSnapshot {
             .unwrap_or_default()
             .into_iter()
             .map(|(request_id, name)| {
-                // The name an agent chose for itself. Registration already
-                // holds it to a terminal-safe line, and this holds it again at
-                // the surface that draws it, where the bound on its width is
-                // also a bound on how much of the row it can take over.
                 (
                     request_id,
                     SharedString::from(ekubo_wallet_core::sanitize::stripped_capped(&name, 64)),
@@ -4020,8 +3946,6 @@ struct NotificationNavigation {
 
 impl NotificationNavigation {
     fn receive(&mut self, route: NotificationRoute) {
-        // Navigation is intent, not a work queue: the newest explicit click
-        // supersedes an older one that has not been shown yet.
         self.pending = Some(route);
     }
 
@@ -4251,9 +4175,6 @@ const ACTIVITY_DETAIL_LIST_OVERDRAW: gpui::Pixels = px(480.0);
 
 fn virtual_review_detail_list(row_count: usize) -> VariableListState {
     VariableListState::new(row_count, ListAlignment::Top, ACTIVITY_DETAIL_LIST_OVERDRAW)
-        // Review cards are not uniform, but this gives the unmeasured tail a
-        // useful scrollbar estimate without eagerly laying out thousands of
-        // calls. Each visible card replaces its hint with its exact height.
         .with_uniform_item_height(ACTIVITY_DETAIL_ITEM_HEIGHT_HINT)
 }
 
@@ -4460,10 +4381,6 @@ fn notification_context(
     }
     Some(NotificationContext::Wallet(WalletContext {
         account,
-        // Not `record.network_name`. That is the internal handle an agent
-        // types — "robinhood" — and aliases exist so a person can abbreviate
-        // in conversation, not so the wallet can abbreviate back at them. A
-        // banner says the name the network is actually called.
         network: chain_id
             .map(|chain_id| chain_label(Some(chain_id), &token_network_names(&networks))),
     }))
@@ -4683,8 +4600,6 @@ fn render_inbox_waiting_card(
                 }
             });
         });
-    // The gap the queue used to get from its column lives on the row now:
-    // a virtualized list stacks its items with no spacing of its own.
     div()
         .debug_selector(|| "inbox-waiting-card".to_owned())
         .pb_3()
@@ -4778,9 +4693,6 @@ fn render_policy_diff_row(index: usize, row: &PolicyDiffRow, cx: &App) -> AnyEle
                                 )),
                         ),
                 )
-                // A rewritten rule is two long, nearly identical sentences.
-                // Run together on one line they are unreadable; stacked and
-                // labelled, they can be compared.
                 .when_some(row.before.as_deref(), |card, before| {
                     card.child(state(
                         &format!("policy-diff-before-{index}"),
@@ -6400,12 +6312,6 @@ impl ListDelegate for TokenListDelegate {
         let price_token = token.clone();
         let price_wallet = self.wallet.clone();
         let value_action = app_button(("set-token-value", index.row))
-            // A button label names what pressing it does. This one used to
-            // read "Value $1.00", which names a fact -- and a fact belongs in
-            // the row's own metadata, where it lines up with the decimals and
-            // the source and can be compared down the column. The price moved
-            // there; the control says what it opens, in the words the network
-            // rows already use for the same dialog.
             .label(if token.approximate_usd_price.is_some() {
                 "Change value…"
             } else {
@@ -6550,15 +6456,6 @@ impl ListDelegate for TokenListDelegate {
                                                             |value| value.to_string()
                                                         ),
                                                         token.source,
-                                                        // The recorded price,
-                                                        // last on the row's
-                                                        // own line of facts.
-                                                        // Absent, rather than
-                                                        // written as nothing,
-                                                        // when nobody has
-                                                        // recorded one: the
-                                                        // control beside it
-                                                        // already says so.
                                                         token.approximate_usd_price.map_or_else(
                                                             String::new,
                                                             |price| format!(
@@ -7155,9 +7052,6 @@ impl WalletWindow {
                         let delegate = list.delegate_mut();
                         delegate.query = query;
                         delegate.apply_filters();
-                        // A search answers with a different list, and the
-                        // reader is at its first row whether or not they were
-                        // halfway down the last one.
                         scroll_token_list_to_top(list);
                         cx.notify();
                     });
@@ -7493,8 +7387,6 @@ impl WalletWindow {
         }
         self.owner_auth = OwnerAuthState::Probing;
         let data_dir = self.update_data_dir.clone();
-        // The whole next state is built off the main thread: the export is
-        // file I/O, and nothing here needs the view.
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let state = match polkit::readiness().await {
                 polkit::Readiness::Ready => OwnerAuthState::Ready,
@@ -7574,8 +7466,6 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                // Every outcome but success leaves the section where it was,
-                // button and command included, with at most a message.
                 let message: Option<SharedString> = match result {
                     Ok(Ok(Readiness::Ready)) => {
                         view.owner_auth = OwnerAuthState::Ready;
@@ -7596,7 +7486,6 @@ impl WalletWindow {
                         )
                         .into(),
                     ),
-                    // Closing the dialog is an answer, not a failure.
                     Ok(Err(SetupError::Dismissed)) => None,
                     Ok(Err(error)) => Some(error.to_string().into()),
                     Err(error) => Some(format!("{error:#}").into()),
@@ -7846,9 +7735,6 @@ impl WalletWindow {
         if self.guided_setup.latch(observation)
             && let Some(state) = self.guided_setup.state.as_ref()
         {
-            // Best effort. A checklist that redraws correctly but forgets by
-            // tomorrow is far better than one that refuses to advance because
-            // the settings store is momentarily unavailable.
             let _ = self.owner.set_guided_setup(state);
         }
     }
@@ -8053,9 +7939,6 @@ impl WalletWindow {
             let close_view = view.clone();
             let on_close_view = view.clone();
             dialog
-                // Pixels because `Dialog::w` takes them: the component sizes
-                // itself against the window rather than against the rem, and
-                // there is no relative form of this call to reach for.
                 .w(px(640.0))
                 .title("Add token")
                 .overlay_closable(!busy)
@@ -8634,9 +8517,6 @@ impl WalletWindow {
     /// The dapp still has to propose a session, and that proposal still opens
     /// the review where the owner picks an account and authenticates.
     fn connect_walletconnect_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        // The button renders disabled while a pairing is in flight, but a
-        // render-time property is not what decides this: refuse the press
-        // here, where the second click of a double click arrives.
         if self.walletconnect_connecting.is_some() {
             return;
         }
@@ -8791,11 +8671,6 @@ impl WalletWindow {
     }
 
     fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
-        // The connect button stays busy through the review rather than
-        // stopping when the proposal lands: a proposal under review is not a
-        // connection, and nothing else on the screen behind stands for it.
-        // Both endings clear it — approving settles the session into the list
-        // below, declining ends the pairing outright.
         self.active_review = Some(ActiveReview::new(
             prompt.unselected_document,
             None,
@@ -9129,8 +9004,6 @@ impl WalletWindow {
                 }
                 cx.notify();
             });
-            // Re-render every second so the countdown moves and the panel
-            // flips itself to "hidden" the moment the lease expires.
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let revealed = view.update(cx, |view, cx| {
@@ -9298,12 +9171,6 @@ impl WalletWindow {
                             proposal: Some(proposal),
                             validation: Some(Ok(review)),
                         });
-                        // A proposal arrives already checked, so what is
-                        // left is the reading: the agent's case first, then
-                        // the diff, then installing. Landing on the case also
-                        // makes the loading visible -- the draft in the editor
-                        // is now this document, and the screen that says so is
-                        // the screen that says where it came from.
                         self.policy_proposal_open = true;
                         self.policy_review_open = false;
                         self.policy_diff_drawn_for.set(0);
@@ -9802,11 +9669,6 @@ impl WalletWindow {
                 if !self.legal_gate {
                     self.activate_next_waiting_surface(cx);
                 }
-                // Acceptance is written straight to the legal store, which
-                // raises no domain event, so nothing else was ever going to
-                // refresh the snapshot. Settings reads its acceptance dates
-                // from that snapshot and went on saying "Review required"
-                // about a document the reader had just accepted.
                 self.reload_desktop_snapshot(cx);
             }
             Err(error) => {
@@ -9979,9 +9841,6 @@ impl WalletWindow {
         if self.legal_gate || matches!(self.portfolio, PortfolioState::Loading) {
             return;
         }
-        // Without a selected account there is nothing to read. Leaving the
-        // state `Idle` lets the render-time trigger try again once the
-        // background accounts snapshot arrives.
         let Some(wallet_id) = self
             .selected_portfolio_account()
             .map(|account| account.id.clone())
@@ -10006,10 +9865,6 @@ impl WalletWindow {
                 }
                 view.portfolio = match result {
                     Ok(snapshot) => {
-                        // Stamped where the read lands rather than where it
-                        // starts, so both the age on screen and the interval
-                        // that throttles the next read describe the balances
-                        // rather than the intent to fetch them.
                         view.portfolio_refreshed_at
                             .insert(refreshed_account, chrono::Utc::now());
                         PortfolioState::Ready(snapshot)
@@ -10110,8 +9965,6 @@ impl WalletWindow {
             return;
         }
         self.portfolio_account_index = index;
-        // Balances are read one account at a time, so the shown snapshot
-        // belongs to the account that was selected a moment ago.
         self.invalidate_portfolio();
         self.refresh_portfolio(cx);
         cx.notify();
@@ -10213,9 +10066,6 @@ impl WalletWindow {
         self.network_editor_original = None;
         self.network_editor_disabled = false;
         self.network_editor_testnet = false;
-        // Prefilled rather than blank: this one has a value in force whether
-        // or not anybody types in it, and an empty box invites the reading
-        // that there is no wait at all.
         replace_input_value(
             self.network_finality_confirmations_input.as_ref(),
             ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS.to_string(),
@@ -10248,9 +10098,6 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) {
         let focus = focus.clone();
-        // Opening on the next frame ensures the dialog observes the freshly
-        // populated edit state and avoids competing with the network card's
-        // click dispatch.
         cx.on_next_frame(window, move |wallet, window, cx| {
             if !wallet.network_editor_open {
                 return;
@@ -10335,20 +10182,7 @@ impl WalletWindow {
                         return content;
                     };
                     let wallet = entity.read(cx);
-                    // Without `min_h_0` the content container's automatic
-                    // minimum height is its content's, and that is a floor no
-                    // shrinking gets under: the form kept its full height and
-                    // ran under the footer instead of scrolling.
                     content.min_h_0().child(
-                        // Every box from here down is sized by the form and
-                        // may shrink, and none of them is given a height.
-                        // `flex_1` would set a flex basis of zero, which tells
-                        // the dialog its body is nothing and collapses it to
-                        // the minimum; a height of 100% measures zero against
-                        // a parent that has none, which does the same.
-                        // `flex_shrink` and `min_h_0` on each of them is what
-                        // turns the excess into scrolling once `max_height`
-                        // stops the dialog growing.
                         v_flex()
                             .relative()
                             .w_full()
@@ -10514,8 +10348,6 @@ impl WalletWindow {
             self.network_editor_testnet,
             self.network_editor_rpc_strategy,
         );
-        // An error under a collapsed disclosure is invisible, so a rejected
-        // save always reveals the field it is complaining about.
         self.network_editor_advanced_open |=
             errors.aliases.is_some() || errors.finality_confirmations.is_some();
         self.network_editor_errors = errors;
@@ -11236,11 +11068,6 @@ impl WalletWindow {
                 view.history_clearing = false;
                 match result {
                     Ok(_) => {
-                        // The emptied list is the entire report, so there is no
-                        // note to leave about it. What has to go is the view
-                        // state keyed by records that no longer exist: notes on
-                        // rows nobody can see, receipts fetched for them, and a
-                        // selection whose detail would open onto nothing.
                         view.activity_feedback.clear();
                         view.activity_inspections.clear();
                         view.activity_payloads_expanded.clear();
@@ -11924,9 +11751,6 @@ impl WalletWindow {
             return;
         }
         if route != self.route {
-            // The record detail belongs to the inbox. Leaving that screen with
-            // it still open would strand a modal about a row nobody can see
-            // over whichever page was asked for.
             self.selected_record = None;
             if self.route == Route::Policies {
                 // Historical revisions are temporary views. Re-entering the
@@ -11953,11 +11777,6 @@ impl WalletWindow {
         if route == Route::Overview {
             self.refresh_portfolio_if_stale(cx);
         }
-        // Opening the inbox always asks the same question — what needs me
-        // now — and pressing its rail button while the inbox is already open
-        // asks it again. Either way the answer is the waiting queue, so the
-        // tab returns to it rather than resuming wherever reading history
-        // left off.
         if route == Route::Activity {
             self.set_inbox_tab(InboxTab::Waiting, cx);
             self.reset_inbox_scroll();
@@ -12033,9 +11852,6 @@ impl WalletWindow {
                 self.open_notification_activity(request_id, subject, cx);
             }
             NotificationRoute::WalletConnect => {
-                // The proposal presents itself as a modal the moment it
-                // arrives, so there is nothing to open — this lands the window
-                // on the screen the connection will show up on once settled.
                 self.set_route(Route::WalletConnect);
             }
             NotificationRoute::PolicyProposal { wallet_id } => {
@@ -12222,10 +12038,6 @@ impl WalletWindow {
                 ))
             })
             .unwrap_or_default();
-        // The mark identifies the application rather than any one screen, so
-        // it sits above the rail instead of standing in for a tab's icon. That
-        // also frees `Inbox` to carry the icon it has always had, and lets the
-        // tab order change without moving the branding.
         let logo = if cx.theme().is_dark() {
             self.sidebar_logo_dark.clone()
         } else {
@@ -12260,10 +12072,6 @@ impl WalletWindow {
                     .child(img(logo).w(rems(2.25)).h(rems(2.25))),
             );
         for route in Route::ALL {
-            // The badge is the one thing on this rail that changes on its own,
-            // and it was drawn for the eye alone: the button's tooltip and its
-            // screen-reader name both said "Inbox" whether or not anything was
-            // waiting in it.
             let waiting = (route == Route::Activity && pending_reviews > 0)
                 .then(|| format!("{} waiting", pluralize(pending_reviews, "request")));
             let tooltip = match &waiting {
@@ -12696,9 +12504,6 @@ impl WalletWindow {
         meta: &str,
         cx: &App,
     ) -> gpui::Div {
-        // Title, current state, and the one sentence that explains the state.
-        // The request UUID is not here: it names the row to the wallet, not to
-        // the reader, and it used to be the second line of every detail pane.
         div()
             .w_full()
             .min_w_0()
@@ -13309,9 +13114,6 @@ impl WalletWindow {
             .flex()
             .items_center()
             .justify_center()
-            // Dim the inbox rather than replace it: this is a detail about
-            // something on the list behind it, and it stays visible as
-            // context.
             .bg(cx.theme().background.opacity(0.85))
             // The scrim takes the mouse, so nothing behind it reacts: no press
             // aimed at the modal reaches a row underneath, and — the reason
@@ -13531,10 +13333,6 @@ impl WalletWindow {
     }
 
     fn render_activity_history(&self, cx: &mut Context<Self>) -> gpui::Div {
-        // No panel around the rows. The section's `GroupBox` is already a
-        // bordered container, and wrapping a second one — same border, same
-        // `secondary` fill as the cards inside it — drew a box around a box
-        // around each row.
         let panel = div()
             .w_full()
             .min_w_0()
@@ -13612,9 +13410,6 @@ impl WalletWindow {
                 return div().into_any_element();
             };
             let request_id = record.request_id();
-            // The detail is a modal now. Expanding it in place pushed every
-            // later row off the screen, so reading one receipt cost you the
-            // list you were reading it from.
             render_activity_row(
                 record,
                 selected_record == Some(request_id),
@@ -13836,10 +13631,6 @@ impl WalletWindow {
                         "Ekubo runs one MCP server per protocol. Each is public, needs no credential, and can only prepare unsigned transactions for this wallet to simulate and for you to authorize. Everything here is on by default; turn one off to keep its tools out of your agent's context. Your choice is written to every agent already connected below.",
                     )),
             )
-            // The one number the switches are actually about. A reader can
-            // see what each row costs but not what they add up to, and the
-            // total is what decides whether narrowing the set is worth doing
-            // at all.
             .child(
                 div()
                     .debug_selector(|| "companion-server-total".to_owned())
@@ -13871,11 +13662,6 @@ impl WalletWindow {
                                     .items_baseline()
                                     .gap_2()
                                     .child(div().font_medium().child(server.title))
-                                    // Approximate on purpose: the count ships
-                                    // with the wallet and the catalog lives on
-                                    // the server, so it is an ordering cue for
-                                    // "51 against 6" rather than a promise
-                                    // about what the endpoint serves today.
                                     .child(
                                         div()
                                             .text_sm()
@@ -13927,10 +13713,6 @@ impl WalletWindow {
                                 ))
                             })
                             .child(
-                                // Same reason the testnet switch carries one:
-                                // the row's name lives in the left column, so
-                                // the switch has no rendered label to derive
-                                // an accessible name from.
                                 Switch::new(("companion-server", index))
                                     .checked(enabled)
                                     .disabled(busy)
@@ -14065,25 +13847,6 @@ impl WalletWindow {
                                         .child(
                                             app_button(action_selector.clone())
                                                 .debug_selector(move || action_selector.clone())
-                                                // A plain Button. One primary
-                                                // per detected agent put three
-                                                // of them down the same list,
-                                                // none of which is the page's
-                                                // default commit.
-                                                //
-                                                // One label in every state.
-                                                // The wallet writes its own
-                                                // entries and keeps them
-                                                // current on its own, so the
-                                                // button is a re-assert rather
-                                                // than a choice between two
-                                                // outcomes — and there is no
-                                                // opposite of it, because
-                                                // taking a working agent's
-                                                // connection away is not
-                                                // something a settings list
-                                                // should offer next to the
-                                                // thing that grants it.
                                                 .label("Sync")
                                                 .disabled(
                                                     self.legal_gate
@@ -14128,11 +13891,6 @@ impl WalletWindow {
             .w_full()
             .flex()
             .flex_col()
-            // A settings pane's groups need more air than the rows inside
-            // them, or the whole page reads as one dense block — the same
-            // thing the account form fixed for itself. The reference desktop
-            // settings spacing is 20-28px between groups against 16px within
-            // one; these were both 16.
             .gap_6();
         // First, because until it is done nothing below it that needs the
         // owner can be changed — and on a working machine it is one quiet
@@ -14245,10 +14003,6 @@ impl WalletWindow {
                             )),
                     )
                     .child(agents)
-                    // What the last write actually did. It sits under the
-                    // agent list rather than above it because that is where
-                    // the eye already is after pressing Sync, and it clears
-                    // itself the moment the next write starts.
                     .when_some(self.agent_sync_status.clone(), |group, status| {
                         group.child(
                             Alert::success(
@@ -14320,17 +14074,6 @@ impl WalletWindow {
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
         let busy = self.account_operation.is_some();
         let creating = self.account_entry_mode == AccountEntryMode::Create;
-        // Roomier than the account cards below it on purpose: this is the one
-        // card on the page that is a form, and at the list card's `p_4`/`gap_3`
-        // the tab bar, the explanation, the labelled field, and the primary
-        // button were all the same distance apart and read as one dense block.
-        //
-        // Filled with the app background rather than `secondary`, the way the
-        // inbox's tabbed panel is: a tab bar over a `secondary` fill reads as a
-        // card sitting on the page, and the list cards below — which really are
-        // cards — then had the same fill as the frame they sat under. Keeping
-        // the frame at page level leaves `secondary` to mean "an item in a
-        // list", which is the distinction the account rows depend on.
         let mut form = div()
             .p_5()
             .pb_6()
@@ -14370,9 +14113,6 @@ impl WalletWindow {
                     })),
             );
         if let Some(input) = &self.account_id_input {
-            // The error belongs to the field, so it lives in the field's own
-            // column. As a sibling of the form it sat the full row gap away
-            // and read as if it belonged to whatever came next.
             form = form.child(
                 div()
                     .flex()
@@ -14818,11 +14558,6 @@ impl WalletWindow {
         };
         let account_unavailable = account_error.is_some();
         let connecting = self.walletconnect_connecting;
-        // The same frame the account form and the inbox use: roomier than the
-        // cards below it, and filled with the page background rather than
-        // `secondary`. This is the one card on the page that is a form, and
-        // leaving `secondary` to mean "an item in a list" is what keeps the
-        // session cards under it reading as items rather than as more frame.
         let mut panel = div()
             .w_full()
             .min_w_0()
@@ -14925,9 +14660,6 @@ impl WalletWindow {
             );
         }
         if let Some(error) = account_error {
-            // The same alert every other route uses to say a thing could not
-            // be read. As a line of red text it was the one failure in the
-            // wallet that looked like a caption.
             panel = panel.child(selectable_error_alert("walletconnect-account-error", error));
         }
         let mut sessions = div().w_full().min_w_0().flex().flex_col().gap_3();
@@ -15108,13 +14840,6 @@ impl WalletWindow {
         let busy = self.network_editor_busy;
         let editing = self.network_editor_original.is_some();
         let advanced_open = self.network_editor_advanced_open;
-        // Twelve inputs stacked one prose paragraph at a time did not fit any
-        // ordinary window, and laying them out as wrapping flex rows let a long
-        // label decide its own column's width and shove the field beside it
-        // onto the next line. `Form` is a grid: every column gets the same
-        // share whatever its label says, so a row stays a row. Required fields
-        // carry the component's asterisk rather than an "(optional)" suffix on
-        // everything else — shorter, and it agrees with what saving enforces.
         let text_field = |label: &'static str,
                           input: &Entity<InputState>,
                           error: Option<String>,
@@ -15335,8 +15060,6 @@ impl WalletWindow {
                             ),
                     )
                     .child(
-                        // Named by tooltip for the same reason the testnet
-                        // switch in Settings is.
                         Switch::new("network-editor-testnet")
                             .checked(self.network_editor_testnet)
                             .tooltip("Test network")
@@ -15661,9 +15384,6 @@ impl WalletWindow {
                     view.show_activity_record(request_id, cx);
                 }
                 Err(error) => {
-                    // Reported here rather than on the tab it would have
-                    // opened: the reader is still looking at the run they
-                    // clicked, and that is where the answer belongs.
                     view.automation_error = Some(SharedString::from(format!(
                         "That transaction is no longer on this machine: {error:#}"
                     )));
@@ -15792,10 +15512,6 @@ impl WalletWindow {
             .child(
                 app_button(SharedString::from(format!("dry-run-automation-{id}")))
                     .debug_selector(|| "dry-run-automation".to_owned())
-                    // "What would it do right now" is the question this screen
-                    // exists to answer, and it is the one question a stopped
-                    // automation can still answer, so the control is offered
-                    // in every state.
                     .label("Dry run")
                     .loading(dry_running)
                     .disabled(dry_running)
@@ -15828,13 +15544,6 @@ impl WalletWindow {
                 actions.child(
                     app_button(SharedString::from(format!("stop-automation-{id}")))
                         .debug_selector(|| "stop-automation".to_owned())
-                        // Not danger. Stopping is the reversible half of this
-                        // pair -- Start puts the automation back on its
-                        // schedule, and nothing is lost in between. Painting
-                        // it red while Delete, the irreversible one, sat
-                        // beside it as a ghost inverted the hierarchy the
-                        // colour exists to carry. The destructive commitment
-                        // lives on the confirmation Delete opens.
                         .label("Stop")
                         .loading(busy)
                         .disabled(busy)
@@ -15908,9 +15617,6 @@ impl WalletWindow {
                                 &format!("Key: {}", automation.key),
                             )),
                     )
-                    // Which account it spends from and on which chain: the
-                    // same stack, because it is all one answer to "what is
-                    // this thing".
                     .child(
                         div()
                             .min_w_0()
@@ -16061,9 +15767,6 @@ impl WalletWindow {
                     .child(selectable_text(
                         format!("automation-schedule-{id}"),
                         &match &cadence {
-                            // Nothing to check the sentence against when there
-                            // is no sentence: the line above is already the
-                            // expression.
                             None => timing,
                             Some(_) => format!("· {timing}"),
                         },
@@ -16167,9 +15870,6 @@ impl WalletWindow {
                             )),
                     );
                 }
-                // Whether it would actually send is a different question from
-                // whether it runs, and it is the one that decides if this
-                // automation is doing anything at all.
                 if let Some(verdict) = result.verdict.as_ref() {
                     panel = panel.child(
                         div()
@@ -16307,9 +16007,6 @@ impl WalletWindow {
                                 &run.detail,
                             )),
                     )
-                    // Those records are hidden rather than deleted when
-                    // history is cleared, so this link keeps working however
-                    // long ago the run happened.
                     .when_some(request_id, |row, request_id| {
                         row.child(
                             app_button(SharedString::from(format!(
@@ -16444,10 +16141,6 @@ impl WalletWindow {
             }
         }
         content = match self.cached_networks() {
-            // Nothing to list, and the reason matters: with testnet mode off,
-            // a wallet whose networks are all test networks drew an empty page
-            // under an Add button and no account of where they had gone. Every
-            // other page in this wallet says what its own empty means.
             Ok(networks) if networks_for_display(networks, self.testnet_mode).is_empty() => content
                 .child(
                     div()
@@ -16500,27 +16193,16 @@ impl WalletWindow {
                 Self::resize_list(&self.network_list, &self.network_rows, rows.len());
                 self.route_overflow_indicator
                     .set_scroll_handle(self.network_list.clone());
-                // Cheap handles rather than the page's data: an `Arc` bump for
-                // the reading the cards are looked up in, and the two small
-                // per-network maps a card reads its own state out of.
                 let snapshot = self.desktop_snapshot.clone();
                 let busy = self.network_action_busy.clone();
                 let errors = self.network_action_errors.clone();
                 let testnet_mode = self.testnet_mode;
-                // A virtualized row is built with an `App` rather than this
-                // window's `Context`, so its buttons reach the window through
-                // a weak handle -- the same way the network editor's form
-                // already does.
                 let view = cx.entity().downgrade();
                 content.child(
                     div()
                         .id("network-list")
                         .debug_selector(|| "network-list".to_owned())
                         .flex_1()
-                        // A floor rather than `min_h_0`, for the same reason
-                        // the token inventory has one: this page is not always
-                        // given a definite height, and a virtualized list in an
-                        // auto-height column collapses to nothing.
                         .min_h(rems(16.25))
                         .w_full()
                         .flex()
@@ -16654,8 +16336,6 @@ impl WalletWindow {
                 ),
                 false,
             ),
-            // One account is read per refresh, so the snapshot holds exactly
-            // the selected account.
             PortfolioState::Ready(snapshot) => match snapshot.accounts.first() {
                 None => (
                     portfolio_balances_card(cx).child(portfolio_loading_placeholder(cx)),
@@ -16699,15 +16379,6 @@ impl WalletWindow {
                     .when(holdings, |hint| {
                         hint.child(selectable_label("Only non-zero balances are shown."))
                             .child(
-                                // A ghost Button rather than the link it used
-                                // to be. This switches tab, and in-app
-                                // navigation dressed as a link claims to leave
-                                // for a browser, takes the pointing-hand
-                                // cursor that says so, and reports the wrong
-                                // role to assistive technology. Named for
-                                // where it goes, the way the empty states'
-                                // "Go to Accounts" is: it does not add a
-                                // token, it opens the tab that can.
                                 app_button("portfolio-manage-tokens")
                                     .label("Go to Tokens")
                                     .ghost()
@@ -16764,9 +16435,6 @@ impl WalletWindow {
         let sortable = held
             .iter()
             .any(|row| row.approximate_usd_value.is_some_and(|value| value > 0.0));
-        // Dust is hidden rather than dropped, and the count of it is on screen
-        // whether or not it is showing: a tab that quietly omitted holdings
-        // would be a tab that could be made to lie by one wrong price.
         let hidden = held
             .iter()
             .filter(|row| sortable && row.is_low_value())
@@ -16776,8 +16444,6 @@ impl WalletWindow {
             .filter(|row| !sortable || self.show_low_value_balances || !row.is_low_value())
             .map(PortfolioListRow::Balance)
             .collect::<Vec<_>>();
-        // A network that could not be read is reported under the balances
-        // that could, rather than replacing them.
         rows.extend(account.networks.iter().filter_map(|item| {
             item.result
                 .as_ref()
@@ -16852,9 +16518,6 @@ impl WalletWindow {
                             .size_full(),
                         ),
                 )
-                // Inside the card the balances are in, rather than at the
-                // bottom of the window: the chevron has to say which list runs
-                // past its own edge, and the page holds three frames now.
                 .child(self.portfolio_overflow_indicator.element()),
         )
     }
@@ -16918,8 +16581,6 @@ impl WalletWindow {
     /// that failed is exactly when asking again is worth doing. `None` only
     /// where there is no account, and so no balances to refresh.
     fn portfolio_refreshed_note(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
-        // No account is no balances to refresh, and the page below is asking
-        // for one instead of showing them.
         self.selected_portfolio_account()?;
         let refreshed_at = self.focused_portfolio_refreshed_at();
         let loading = matches!(self.portfolio, PortfolioState::Loading);
@@ -16931,9 +16592,6 @@ impl WalletWindow {
         Some(
             h_flex()
                 .debug_selector(|| "portfolio-refreshed-at".to_owned())
-                // Right of the footer line, opposite the note about which
-                // balances are listed: two short facts about the same list,
-                // read together on one line instead of stacked under it.
                 .flex_none()
                 .items_center()
                 .gap_1()
@@ -17004,9 +16662,6 @@ impl WalletWindow {
                         .child(selectable_label(error)),
                 )
             });
-        // Two ways to get a token into this wallet, so they belong on one
-        // line. Stacked, they read as a menu of unrelated commands and push
-        // the list they act on further down the page.
         content = content.child(
             h_flex()
                 .flex_wrap()
@@ -17023,12 +16678,6 @@ impl WalletWindow {
                 )
                 .when_some(self.token_list_url_input.as_ref(), |row, _| {
                     row.child(
-                        // A disclosure, so one label and a chevron that turns
-                        // over. It used to swap the words as well, which read
-                        // as two different commands sharing a position -- and
-                        // it carried an ellipsis, which now says "this opens a
-                        // dialog" everywhere else in the wallet. It opens the
-                        // section directly below it.
                         app_button("toggle-owner-token-list-import")
                             .label("Import a published token list")
                             .toggled(self.token_list_import_open)
@@ -17098,9 +16747,6 @@ impl WalletWindow {
                                     })),
                             ),
                     )
-                    // The line says what the wait is for; the button beside it
-                    // is the indicator. Two spinners in one group box for one
-                    // operation is the same fact drawn twice.
                     .when(
                         self.token_import_state == TokenImportState::Fetching,
                         |group| {
@@ -17232,13 +16878,6 @@ impl WalletWindow {
                             .gap_2()
                             .child(
                                 app_button("accept-token-proposal-group")
-                                    // The label stays put while the work runs.
-                                    // It used to become "Working…", which
-                                    // replaced the one thing the button was
-                                    // for with a word that says nothing; the
-                                    // spinner is what reports progress, and it
-                                    // can do that without erasing the
-                                    // commitment the reader is making.
                                     .label(if viewed_to_end {
                                         "Accept exact list"
                                     } else {
@@ -17275,42 +16914,29 @@ impl WalletWindow {
             .appearance(false);
         if !search_input.read(cx).value().is_empty() {
             let clear_input = search_input.clone();
-            // Clearing the field has to clear the filter too. Setting the
-            // value from code does not raise the change event the search
-            // subscription listens for, so pressing this button emptied the
-            // box and left the list showing the last query's results.
             let clear_list = list.clone();
-            token_search = token_search.suffix(
-                // An icon with no word on it needs a name for the tooltip and
-                // a name for anything reading the interface aloud; this had
-                // neither, and a bare ✗ beside a full search box is a guess.
-                accessible_button(
-                    Button::new("clear-token-search")
-                        .icon(Icon::new(IconName::CircleX).size(rems(1.5)))
-                        .ghost()
-                        .h(rems(2.25))
-                        .w(rems(2.25))
-                        .p_0()
-                        // Not in the tab order on purpose: Tab leaves the
-                        // search box for the list. Clearing from the keyboard
-                        // is select-all and delete, in the field that already
-                        // has focus.
-                        .tab_stop(false)
-                        .tooltip("Clear search")
-                        .text_color(cx.theme().muted_foreground)
-                        .on_click(move |_, window, cx| {
-                            clear_input.update(cx, |input, cx| input.set_value("", window, cx));
-                            clear_list.update(cx, |list, cx| {
-                                let delegate = list.delegate_mut();
-                                delegate.query = String::new();
-                                delegate.apply_filters();
-                                scroll_token_list_to_top(list);
-                                cx.notify();
-                            });
-                        }),
-                    "Clear search",
-                ),
-            );
+            token_search = token_search.suffix(accessible_button(
+                Button::new("clear-token-search")
+                    .icon(Icon::new(IconName::CircleX).size(rems(1.5)))
+                    .ghost()
+                    .h(rems(2.25))
+                    .w(rems(2.25))
+                    .p_0()
+                    .tab_stop(false)
+                    .tooltip("Clear search")
+                    .text_color(cx.theme().muted_foreground)
+                    .on_click(move |_, window, cx| {
+                        clear_input.update(cx, |input, cx| input.set_value("", window, cx));
+                        clear_list.update(cx, |list, cx| {
+                            let delegate = list.delegate_mut();
+                            delegate.query = String::new();
+                            delegate.apply_filters();
+                            scroll_token_list_to_top(list);
+                            cx.notify();
+                        });
+                    }),
+                "Clear search",
+            ));
         }
 
         content
@@ -17449,8 +17075,6 @@ impl WalletWindow {
             app_button("check-latest-release")
                 .debug_selector(|| "check-latest-release".to_owned())
                 .self_start()
-                // Keep the action in place; the status line above swaps to a
-                // spinner and progress copy while this control is disabled.
                 .label("Check latest version")
                 .disabled(checking || downloading)
                 .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
@@ -17881,9 +17505,6 @@ impl WalletWindow {
         let selection_is_complete = active.selection_is_complete();
         let approve_enabled =
             active.state.approve_enabled() && !active.awaiting_refresh && selection_is_complete;
-        // Two different things hold approval back, and one instruction for
-        // both would send a reader who has already scrolled to the end back to
-        // scroll again.
         let approve_blocked_reason = if selection_is_complete {
             "Scroll to the end to enable approval"
         } else {
@@ -18252,13 +17873,6 @@ impl WalletWindow {
                                 buttons.child(
                                     div()
                                         .text_sm()
-                                        // Scrolling further is something the
-                                        // reader is already doing; choosing an
-                                        // account is a thing they have not
-                                        // started. Muted grey read as a note
-                                        // about the button rather than as the
-                                        // one instruction standing between
-                                        // them and it.
                                         .text_color(if selection_is_complete {
                                             cx.theme().muted_foreground
                                         } else {
@@ -18642,7 +18256,6 @@ impl WalletWindow {
             .collect::<Vec<_>>();
         match labels.as_slice() {
             [] => return None,
-            // A lone account needs naming, not choosing.
             [only] => {
                 return Some(
                     div()
@@ -18727,10 +18340,6 @@ impl WalletWindow {
                                     .debug_selector(|| "policy-editor-description".to_owned())
                                     .w_full()
                                     .min_w_0()
-                                    // The sentence is long enough to outrun a
-                                    // narrow window, and the header band does
-                                    // not scroll, so it has to fold onto a
-                                    // second line rather than run off the edge.
                                     .whitespace_normal()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
@@ -18833,8 +18442,6 @@ impl WalletWindow {
                             })),
                     ),
             )
-            // Ahead of the argument rather than after it: what an unrestricted
-            // allow grants is the fact a case for one has to answer to.
             .when(allow_anything_draft, |case| {
                 case.child(
                     div()
@@ -18853,8 +18460,6 @@ impl WalletWindow {
                         )),
                 )
             })
-            // The whole case, at the width of the frame, taking the height
-            // left over and scrolling in it.
             .child(
                 div()
                     .id("policy-proposal-rationale")
@@ -18885,8 +18490,6 @@ impl WalletWindow {
                         .child(selectable_label(error)),
                 )
             })
-            // What it changes, as a count. The changes themselves are the
-            // next screen, which is the whole of what that screen is for.
             .child(
                 h_flex()
                     .debug_selector(|| "policy-proposal-summary".to_owned())
@@ -18918,10 +18521,6 @@ impl WalletWindow {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    // Said once, plainly, on the screen where the proposal is
-                    // taken up: this document is the draft now, and the draft
-                    // is what installs. Everything after this point is the
-                    // ordinary editor flow.
                     .child(
                         div()
                             .min_w_0()
@@ -19062,13 +18661,6 @@ impl WalletWindow {
                                 )
                             })
                             .child(
-                                // Named for where it goes. "Back to editing"
-                                // read as returning to whatever the reader was
-                                // doing, which for a proposal is exactly wrong:
-                                // the editor holds the agent's document now.
-                                // The same words the proposal card uses for
-                                // the same destination. Two labels for one
-                                // command read as two commands.
                                 app_button("close-policy-review")
                                     .debug_selector(|| "close-policy-review".to_owned())
                                     .label("Edit the draft")
@@ -19260,10 +18852,6 @@ impl WalletWindow {
         let can_view_previous =
             previous_policy_revision(editor.history_selection, editor.history.len()).is_some();
 
-        // Reviewing a change and writing one want opposite shapes, so they are
-        // two states of this screen rather than two columns of it: the diff
-        // takes the whole frame, at prose width, with the install action under
-        // it.
         if self.policy_proposal_open
             && let Some(proposal) = editor.proposal.as_ref()
             && let Some(review) = validated
@@ -19310,9 +18898,6 @@ impl WalletWindow {
                     })),
             );
 
-        // What the checked draft changes, as a count rather than as the
-        // changes themselves: the rail is the wrong width to read a permission
-        // in, and reading one is what the review screen is for.
         if let Some(review) = validated
             && reviewed_exact_document
         {
@@ -19430,10 +19015,6 @@ impl WalletWindow {
 
         let sidebar = div()
             .debug_selector(|| "policy-full-screen-sidebar".to_owned())
-            // The rail holds buttons and short status copy, none of which reads
-            // better for being wider. Every pixel it gives up is a column of
-            // JSON, which is the thing on this page that runs out of room now
-            // that long lines no longer wrap.
             .w(rems(16.5))
             .h_full()
             .min_h_0()
@@ -19542,10 +19123,6 @@ impl WalletWindow {
                                         view.restore_current_policy(window, cx);
                                     })),
                             )
-                            // An installed revision is a starting point for the
-                            // draft in exactly the way the presets above are,
-                            // so it belongs with them rather than alone under
-                            // the group as a control of its own kind.
                             .child(
                                 app_button("previous-policy-revision")
                                     .debug_selector(|| "previous-policy-revision".to_owned())
@@ -19671,10 +19248,6 @@ impl WalletWindow {
             self.route,
             Route::Tokens | Route::Activity | Route::Overview | Route::Networks
         );
-        // The chevron belongs to whatever actually scrolls here. A route with
-        // its own list points it at that list while it draws; every other
-        // route is the page itself, so the default is restored first rather
-        // than left aimed at a list that is no longer on screen.
         self.route_overflow_indicator
             .set_scroll_handle(self.route_scroll_handle.clone());
         let route_panel = if self.desktop_snapshot.is_none() {
@@ -19715,9 +19288,6 @@ impl WalletWindow {
                                     .font_medium()
                                     .child(self.route.label()),
                             )
-                            // A page title names the screen; this line says
-                            // what the screen is for, so nobody has to open a
-                            // tab to find out whether it is the one they want.
                             .child(
                                 div()
                                     .text_sm()
@@ -19877,10 +19447,6 @@ impl WalletWindow {
                         .rounded(cx.theme().radius),
                 )
             });
-        // The palette used to float over a live page: the wheel scrolled
-        // whatever was behind it, and a press landed on whichever control was
-        // underneath. Every other surface that takes over this window
-        // occludes; this one is no different for as long as it is open.
         div().absolute().inset_0().occlude().child(palette)
     }
 
@@ -20004,17 +19570,6 @@ impl WalletWindow {
                     .debug_selector(|| "guided-setup-header".to_owned())
                     .w_full()
                     .items_center()
-                    // The title is the collapse control. It is the largest
-                    // thing on the card and the one part that stays when the
-                    // rest folds away, so it is what somebody reaches for to
-                    // get the corner back — and unlike dismissal it keeps the
-                    // count on screen, which is the whole reason to fold
-                    // rather than send away.
-                    //
-                    // The count reads as part of the heading rather than as
-                    // its own thing across the card: "Getting started, two of
-                    // five" is one sentence, and holding the two ends of a
-                    // 400px row apart made it two.
                     .child(
                         app_button("guided-setup-toggle")
                             .debug_selector(|| "guided-setup-toggle".to_owned())
@@ -20035,12 +19590,6 @@ impl WalletWindow {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(format!("{completed} of {total}")),
                             )
-                            // The button centres whatever it is given, and a
-                            // heading floating in the middle of the card is
-                            // not what a full-width press target is for. The
-                            // spacer takes the slack so the whole row is
-                            // pressable while the heading stays where a
-                            // heading goes.
                             .child(div().flex_1())
                             .tooltip(if collapsed {
                                 "Show the rest of the checklist."
@@ -20063,26 +19612,12 @@ impl WalletWindow {
                         .gap_1()
                         .children(rows),
                 )
-                // The way out sits under the list rather than beside the
-                // title, where an icon used to be: a close button on a card
-                // nobody has read yet is the most prominent thing on it, and
-                // reads as the point of the card. Down here it is what is left
-                // after the checklist, for somebody who has decided.
                 .child(
                     h_flex()
                         .w_full()
                         .justify_end()
                         .pt_1()
                         .child(accessible_button(
-                            // Quiet, but a Button: dismissing a panel is an
-                            // application command, and link styling would
-                            // promise a resource somewhere else.
-                            //
-                            // Quiet is not the same as muted. Painted in
-                            // `muted_foreground` it read as the caption at the
-                            // bottom of the card rather than as the way out of
-                            // it — a control at rest still owes an affordance.
-                            // The ghost variant's own foreground carries it.
                             app_button("guided-setup-dismiss")
                                 .debug_selector(|| "guided-setup-dismiss".to_owned())
                                 .ghost()
@@ -20099,13 +19634,7 @@ impl WalletWindow {
                         )),
                 )
             });
-        div()
-            .absolute()
-            .inset_0()
-            // The scrim itself takes no clicks: the page behind stays fully
-            // usable, which is the point of a card that asks somebody to go
-            // and use it.
-            .child(card)
+        div().absolute().inset_0().child(card)
     }
 }
 
@@ -20330,9 +19859,6 @@ const fn interface_interaction_palette(dark: bool) -> InterfaceInteractionPalett
         button_hover: if dark { 0x373737 } else { 0xe5e4e4 },
         button_active: if dark { 0x261b34 } else { 0xf3e7fe },
         button_foreground: if dark { 0xffffff } else { 0x101010 },
-        // Primary and destructive actions use white labels in both themes;
-        // dark mode uses deeper brand companions so every state retains AA
-        // contrast without the visually awkward near-black label treatment.
         primary: 0x7a36d2,
         primary_hover: if dark { 0x8b4ade } else { 0x6828b9 },
         primary_active: if dark { 0x6828b9 } else { 0x57209e },
@@ -20380,18 +19906,12 @@ fn apply_interface_palette(cx: &mut App) {
         )
     };
     let accent = color(0x9d5af2);
-    // Skeleton placeholders sit both on the page background and on `surface`
-    // cards, and the component animates them down to half opacity, so the
-    // default (which matches `surface`) would vanish inside a card.
     let skeleton = color(if dark { 0x3a3a3a } else { 0xdedde0 });
     let primary = color(interaction.primary);
     let primary_active = color(interaction.primary_active);
     let button_danger = color(interaction.danger);
     let button_success = color(interaction.success);
     let button_warning = color(interaction.warning);
-    // Semantic colors are also used as small text on the page background.
-    // The light-theme variants are darker accessibility companions to the
-    // exact brand fills used by buttons and badges.
     let semantic_primary = color(if dark { 0xb174ff } else { 0x7a36d2 });
     let danger = color(if dark { 0xeb1e74 } else { 0xc0165b });
     let success = color(if dark { 0x26e7ad } else { 0x08775a });
@@ -20459,9 +19979,6 @@ fn apply_interface_palette(cx: &mut App) {
     colors.progress_bar = accent;
     colors.ring = accent;
     colors.scrollbar = gpui::transparent_black();
-    // Scrolling is communicated by the non-obstructing bottom chevron rather
-    // than by tracks laid over content. This also hides the component
-    // library's internal dialog scrollbar, which does not expose its handle.
     colors.scrollbar_thumb = gpui::transparent_black();
     colors.scrollbar_thumb_hover = gpui::transparent_black();
     colors.secondary = surface;
@@ -20479,12 +19996,6 @@ fn apply_interface_palette(cx: &mut App) {
     colors.sidebar_primary_foreground = color(interaction.primary_foreground);
     colors.danger = danger;
     colors.danger_foreground = background;
-    // The count badge on the Inbox rail entry is the one thing that reads
-    // `red` directly, and the library's base red is mixed for a badge fill on
-    // the rail's near-black surface. Its darkened companion belongs here, with
-    // every other colour this product decides, rather than as a literal at the
-    // call site branching on `is_dark()` a second time on every frame. Light
-    // keeps the library value, which already carries the contrast.
     if dark {
         colors.red = color(0x9f_22_1d);
     }
@@ -20617,9 +20128,6 @@ fn join_tokio_runtime(slot: &Mutex<Option<tokio::runtime::Runtime>>, data_dir: &
         return;
     };
     if !shutdown_tokio_runtime(runtime, DESKTOP_TOKIO_SHUTDOWN_TIMEOUT) {
-        // Recorded rather than raised: the window is gone and an updated wallet
-        // may already be starting, so there is nobody left to tell. A run of
-        // these lines is what a still-crashing quit looks like.
         let _ = crate::release_check::record_update_diagnostic(
             data_dir,
             &format!(
@@ -20733,8 +20241,6 @@ fn close_window_key_binding() -> KeyBinding {
 
 fn close_active_window(_: &CloseWindow, cx: &mut App) {
     if let Some(window) = cx.active_window() {
-        // Global actions run while the active window is already being updated.
-        // Remove it on the next app turn to avoid a re-entrant window update.
         cx.defer(move |cx| {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         });
@@ -20772,18 +20278,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
 
-    // Built here rather than by `gpui_tokio::init` so that the runtime outlives
-    // the GPUI application and can be *joined* on the way out; see
-    // `shutdown_tokio_runtime` for what happens to a wallet that skips that.
-    // Two worker threads matches what `gpui_tokio::init` would have created.
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .context("could not start the Tokio runtime")?;
     let tokio_handle = tokio.handle().clone();
-    // In a slot because the quit handler and the tail of this function both
-    // have to be able to claim it; see `join_tokio_runtime`.
     let tokio_slot = Arc::new(Mutex::new(Some(tokio)));
     let shutdown_tokio_slot = Arc::clone(&tokio_slot);
     let shutdown_data_dir = data_dir.clone();

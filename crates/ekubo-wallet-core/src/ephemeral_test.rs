@@ -27,7 +27,6 @@ fn a_session_is_ordinary_unless_it_was_enabled() {
             .expect("an ordinary session answers rather than failing")
             .is_none()
     );
-    // Nothing was created merely by asking.
     assert!(!directory.path().join(KEY_FILE).exists());
 }
 

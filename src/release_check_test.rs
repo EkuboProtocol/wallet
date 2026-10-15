@@ -136,15 +136,12 @@ fn a_published_release_supersedes_an_older_one() {
     assert_eq!(is_newer("1.4.2", "v2.0.0"), Some(true));
     assert_eq!(is_newer("1.4.2", "v1.4.2"), Some(false));
     assert_eq!(is_newer("1.5.0", "v1.4.2"), Some(false));
-    // Shorter cores compare as if zero-padded, so `1.5` is not behind `1.5.0`.
     assert_eq!(is_newer("1.5", "v1.5.0"), Some(false));
     assert_eq!(is_newer("1.5", "v1.5.1"), Some(true));
 }
 
 #[test]
 fn a_release_supersedes_a_prerelease_of_itself() {
-    // The case that matters while `BUILD_VERSION` is an `-rc` build: the
-    // numeric cores are equal and the running build is still behind.
     assert_eq!(is_newer("1.0.0-rc.0+8133a00", "v1.0.0"), Some(true));
     assert_eq!(is_newer("1.0.0-rc.0+8133a00", "v1.0.0-rc.0"), Some(false));
     assert_eq!(is_newer("1.0.0", "v1.0.0-rc.1"), Some(false));
@@ -265,7 +262,6 @@ async fn being_offline_is_not_an_error() {
     assert!(!check.update_available);
     assert!(check.latest_version.is_none());
     assert!(check.notice().is_none());
-    // The agent is told explicitly not to read this as a reason to upgrade.
     assert!(check.instruction.contains("Do not retry"));
 }
 

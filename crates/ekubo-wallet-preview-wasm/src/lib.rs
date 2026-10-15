@@ -111,9 +111,6 @@ pub struct Previewer {
     engine: Backend,
 }
 
-// Boxed because the two engines differ by kilobytes and this enum is stored,
-// not passed: an unboxed variant would make every `Previewer` as large as the
-// biggest backend whichever one it holds.
 enum Backend {
     Cpu(Box<cpu::CpuEngine>),
     #[cfg(feature = "webgpu")]

@@ -403,10 +403,6 @@ fn connects_reconnects_and_preserves_bidirectional_protocol_messages() {
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
     );
-    // The wallet describes itself: its instructions are the ones the model
-    // reads, and the capabilities it declares are the ones the harness
-    // records — with the change notifications the bridge, not the wallet,
-    // is the one able to send.
     let initialized = receive(&mut stdout);
     assert_eq!(initialized["id"], 1);
     assert_eq!(initialized["result"]["serverInfo"]["name"], "fake-wallet");
@@ -582,8 +578,6 @@ fn a_wallet_frame_split_across_writes_survives_a_racing_harness_frame() {
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":"split","method":"tools/call","params":{"name":"wallet_test","arguments":{}}}),
     );
-    // Land inside the wallet's gap, so the bridge is holding half a frame when
-    // this arrives and abandons that read in order to forward it.
     thread::sleep(Duration::from_millis(150));
     send(
         &mut stdin,
@@ -719,8 +713,6 @@ fn spawn_fake_wallet(
             &mut writer,
             &json!({"jsonrpc":"2.0","id":initialize["id"],"result":result}),
         );
-        // An incompatible bridge stops here; a compatible one asks for both
-        // catalogs, so answering them is what tells the two apart.
         for _ in 0..2 {
             let Some(request) = read(&mut reader) else {
                 return;
@@ -765,8 +757,6 @@ fn a_different_build_speaking_the_same_protocol_is_served() {
     );
     let initialized = receive(&mut stdout);
     assert_eq!(initialized["id"], 1);
-    // The wallet's own handshake reached the harness, so the bridge served
-    // this wallet rather than answering offline on its behalf.
     assert_eq!(initialized["result"]["serverInfo"]["name"], "fake-wallet");
     assert_eq!(initialized["result"]["serverInfo"]["version"], "999.0.0");
     drop(stdin);

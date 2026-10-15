@@ -70,8 +70,6 @@ fn tokio_shutdown_waits_for_a_cancelled_task_to_drop_its_stores() {
     struct StoreGuard(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for StoreGuard {
         fn drop(&mut self) {
-            // Stands in for `rusqlite::Connection`'s drop, which is where
-            // SQLCipher frees the encryption context.
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
@@ -166,7 +164,6 @@ fn tokio_shutdown_reports_threads_it_could_not_join() {
         !shutdown_tokio_runtime(runtime, Duration::from_millis(200)),
         "a task that outlasts the deadline must be reported, not silently abandoned"
     );
-    // Let the stranded thread end so it does not outlive the test binary.
     release.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -643,8 +640,6 @@ fn unpriced_portfolio_rows_stay_commingled_by_chain_then_token_address() {
 
     sort_portfolio_balance_rows(&mut rows);
 
-    // Nothing is known about the size of these holdings, so the order that
-    // says nothing about it is the honest one.
     assert_eq!(
         rows.iter()
             .map(|row| (row.chain_id, row.asset_address.as_str()))
@@ -659,8 +654,6 @@ fn the_portfolio_leads_with_whatever_is_worth_most() {
         balance_row(1, "0xdust", false, Some(0.5)),
         balance_row(1, "0xunpriced", false, None),
         balance_row(1, "0xbig", false, Some(4_000.0)),
-        // A chain's own currency, worth less here than two of the tokens
-        // beside it, and placed by that rather than by being native.
         balance_row(1, "0x00", true, Some(30.0)),
         balance_row(1, "0xsmall", false, Some(12.0)),
     ];
@@ -680,19 +673,13 @@ fn the_portfolio_leads_with_whatever_is_worth_most() {
 fn dust_is_what_is_worth_under_a_dollar() {
     assert!(balance_row(1, "0xa", false, Some(0.99)).is_low_value());
     assert!(!balance_row(1, "0xa", false, Some(1.0)).is_low_value());
-    // A chain's own currency is dust on the same terms as anything else.
     assert!(balance_row(1, "0x00", true, Some(0.01)).is_low_value());
-    // A token nothing could put a value on is held back with the dust; a gas
-    // balance in the same position is not, because hiding it would hide the
-    // balance every other row on that chain needs in order to move.
     assert!(balance_row(1, "0xa", false, None).is_low_value());
     assert!(!balance_row(1, "0x00", true, None).is_low_value());
 }
 
 #[test]
 fn an_approximate_value_is_the_balance_scaled_by_the_price_of_one_whole_token() {
-    // 1500 USDC at a dollar, with the six decimals USDC actually has: the
-    // price is per whole token, so nothing here needs to know what six means.
     assert_eq!(
         approximate_usd_value("1500000000", Some(6), Some(1.0)),
         Some(1500.0)
@@ -708,8 +695,6 @@ fn an_approximate_value_is_the_balance_scaled_by_the_price_of_one_whole_token() 
 #[test]
 fn dollar_figures_read_as_money_rather_than_as_floats() {
     assert_eq!(format_usd(0.0), "$0");
-    // Rounded to the cent this is "$0.00", which reads as nothing at all
-    // rather than as a very small something.
     assert_eq!(format_usd(0.004), "<$0.01");
     assert_eq!(format_usd(12.345), "$12.35");
     assert_eq!(format_usd(1_234_567.0), "$1,234,567");
@@ -770,8 +755,6 @@ fn command_palette_reaches_every_desktop_route() {
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::Activity.label(), "Inbox");
     assert_eq!(Route::Overview.label(), "Portfolio");
-    // In `rem`, so the rail grows with the labels beside it. At the default
-    // 16px base these are the 80 and 52 device pixels they replaced.
     assert!(NAVIGATION_RAIL_WIDTH.to_pixels(px(16.0)) >= px(80.0));
     assert!(NAVIGATION_BUTTON_SIZE.to_pixels(px(16.0)) >= px(52.0));
     assert!(NAVIGATION_BUTTON_SIZE.to_pixels(px(32.0)) >= px(104.0));
@@ -883,8 +866,6 @@ fn shortcuts_follow_rail_position_so_reordering_tabs_cannot_desynchronize_them()
             route.label()
         );
     }
-    // The platform preferences shortcut belongs to Settings itself, not to
-    // whichever slot Settings happens to occupy.
     assert!(
         Route::Settings
             .shortcut()
@@ -1037,8 +1018,6 @@ fn policy_account_tab_follows_the_open_editor() {
     let labels = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
     assert_eq!(policy_selected_account_index(&labels, Some("beta")), 1);
     assert_eq!(policy_selected_account_index(&labels, Some("gamma")), 2);
-    // No editor open yet, and an editor left on a deleted account, both fall
-    // back to the first tab rather than to a tab that is not there.
     assert_eq!(policy_selected_account_index(&labels, None), 0);
     assert_eq!(policy_selected_account_index(&labels, Some("deleted")), 0);
     assert_eq!(policy_selected_account_index(&[], Some("alpha")), 0);
@@ -1139,9 +1118,6 @@ fn interaction_palette_uses_the_figma_brand_colors() {
 
 #[test]
 fn shared_controls_use_contextual_desktop_dimensions() {
-    // Control heights are relative, so they hold their proportion to the text
-    // inside them: the same 44 and 32 pixels at the default base, and twice
-    // that when somebody doubles it.
     assert_eq!(BUTTON_HEIGHT.to_pixels(px(16.0)), px(44.0));
     assert_eq!(COPY_BUTTON_HEIGHT.to_pixels(px(16.0)), px(32.0));
     assert_eq!(BUTTON_HEIGHT.to_pixels(px(32.0)), px(88.0));
@@ -1171,7 +1147,6 @@ fn selectable_plain_text_escapes_markup_without_changing_visible_content() {
         html_escaped_plain_text("<script>alert('x' & \"y\")</script>").as_ref(),
         "&lt;script&gt;alert(&#39;x&#39; &amp; &quot;y&quot;)&lt;/script&gt;"
     );
-    // A newline is a line break rather than a paragraph join.
     assert_eq!(
         html_escaped_plain_text("first\nsecond").as_ref(),
         "first<br>second"
@@ -1674,10 +1649,6 @@ fn every_lifecycle_state_reads_as_english_rather_than_its_variant_name() {
     ] {
         let label = status.label();
         let debug = format!("{status:?}");
-        // A few variants are already ordinary words ("Rejected"), so the
-        // test that matters is that none of them still reads as an
-        // identifier — no run-together capitals, and nothing left of
-        // `AwaitingApproval` shape.
         assert!(
             !label.chars().skip(1).any(char::is_uppercase),
             "{label} is CamelCase rather than a phrase"
@@ -1697,8 +1668,6 @@ fn every_lifecycle_state_reads_as_english_rather_than_its_variant_name() {
         );
     }
 
-    // The four outcomes a reader cares most about are the ones the wallet
-    // used to spell in lifecycle vocabulary.
     assert_eq!(PendingStatus::Confirmed.label(), "Succeeded");
     assert_eq!(PendingStatus::Reverted.label(), "Failed on chain");
     assert_eq!(PendingStatus::Broadcast.label(), "Waiting to be mined");
@@ -1770,7 +1739,6 @@ fn ages_read_as_elapsed_time_until_they_are_old_enough_to_need_a_date() {
     assert_eq!(relative_time_label(ago(5 * 3_600), now), "5 hours ago");
     assert_eq!(relative_time_label(ago(86_400), now), "1 day ago");
     assert_eq!(relative_time_label(ago(3 * 86_400), now), "3 days ago");
-    // Past a week, "63 days ago" is not something a person can place.
     let old = relative_time_label(ago(60 * 86_400), now);
     assert!(!old.contains("ago"), "{old} should be a calendar date");
     assert!(old.contains("2026"), "{old} should name its year");
@@ -2093,7 +2061,6 @@ fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
     ]);
     assert!(seeded.contains('\n'));
 
-    // The editor has to read back what it wrote, newlines and all.
     let draft = NetworkEditorDraft {
         name: "owner-chain".into(),
         display_name: "Owner Chain".into(),
@@ -2174,9 +2141,6 @@ fn a_signature_row_prefers_the_claim_its_review_showed() {
 
 #[test]
 fn a_source_cannot_draw_outside_its_line() {
-    // Both names are somebody else's text. The stores refuse control and
-    // bidirectional characters on the way in; the row refuses them again, and
-    // caps how much of itself a name can occupy.
     let long = "x".repeat(200);
     let label = activity_source_label(Some(&format!("WalletConnect: {long}")), None);
     assert_eq!(label, format!("via {} over WalletConnect", "x".repeat(64)));
@@ -2195,9 +2159,6 @@ fn a_permission_diff_is_read_by_the_direction_its_kernel_marked() {
         "No permission changes: the proposed policy is identical.".to_owned(),
     ]);
 
-    // The marker is the kernel's own judgement about which way authority
-    // moved — a `deny` that disappears is a widening — so the screen reads it
-    // rather than inferring a second, possibly opposite, answer.
     assert_eq!(rows[0].direction, PolicyDiffDirection::Widens);
     assert_eq!(rows[0].summary, "rule 1: starts allowing: to any address");
     assert_eq!(rows[0].before, None);
@@ -2318,13 +2279,10 @@ fn the_connect_button_spins_only_while_its_own_pairing_is_still_unsettled() {
     let pairing = uuid::Uuid::new_v4();
     let other = uuid::Uuid::new_v4();
 
-    // Still waiting on the dapp: the URI has been spent and a second press
-    // would spend it again, so the button stays busy.
     assert!(walletconnect_pairing_is_in_flight(
         &[walletconnect_summary(pairing, false)],
         pairing
     ));
-    // Settled — it is a connection now, and the list below draws it.
     assert!(!walletconnect_pairing_is_in_flight(
         &[walletconnect_summary(pairing, true)],
         pairing
@@ -2332,7 +2290,6 @@ fn the_connect_button_spins_only_while_its_own_pairing_is_still_unsettled() {
     // Failed before settling, so the manager dropped it entirely. A spinner
     // that outlived this would never stop.
     assert!(!walletconnect_pairing_is_in_flight(&[], pairing));
-    // Somebody else's unsettled pairing is not this button's business.
     assert!(!walletconnect_pairing_is_in_flight(
         &[walletconnect_summary(other, false)],
         pairing
@@ -2362,7 +2319,6 @@ fn a_dapp_connection_cannot_be_approved_before_an_account_is_chosen() {
         }
     )));
 
-    // Every other review answers its own question by existing.
     assert!(review_selection_is_complete(None));
 }
 
@@ -2468,12 +2424,10 @@ fn choosing_an_account_keeps_the_reading_already_done() {
     let chosen = choices[1].document.clone();
     review.adopt_answered_document(chosen);
 
-    // Answering the review's own question does not cost a second full read.
     assert!(review.state.approve_enabled());
     assert!(review.scroll_layout_ready);
     assert_eq!(review.scroll_stable_samples, 2);
     assert!(Arc::ptr_eq(&scroll_state, &review.end_rendered));
-    // A click rendered from the previous document is still stale.
     assert_ne!(review.state.generation(), generation);
     assert_eq!(
         review
@@ -2660,8 +2614,6 @@ fn a_signature_request_only_counts_once_it_has_been_decided() {
             &AgentDetectionState::Loading,
             &[],
         );
-        // Refusing one teaches exactly what approving one does: that the
-        // decision is yours and nothing happens without it.
         assert!(observation.signature, "{decided:?} should finish the task");
     }
 }
@@ -2748,15 +2700,11 @@ fn finishing_a_task_brings_a_dismissed_card_back_and_records_what_it_saw() {
     setup.dismiss();
     assert!(!setup.visible());
 
-    // The evidence for a task can be gone by the next launch — a session
-    // ends, a history is cleared — so a dismissed card has to keep watching.
     assert!(setup.latch(SetupObservation {
         dapp: true,
         ..SetupObservation::default()
     }));
     assert!(setup.is_complete(SetupTask::ConnectDapp));
-    // Somebody who sent the card away and then went and did one of the things
-    // on it is working the list, so the card comes back with the next step up.
     assert!(
         setup.visible(),
         "finishing a task reopens the card it was dismissed from"
@@ -2787,8 +2735,6 @@ fn a_dismissed_card_stays_away_while_nothing_new_is_finished() {
 
 #[test]
 fn finishing_the_last_task_retires_a_dismissed_card_rather_than_reopening_it() {
-    // Nothing is left to come back for, and a card that reappeared to say so
-    // would be asking for attention to tell somebody they are done.
     let mut setup = GuidedSetup::loaded(GuidedSetupState::default());
     setup.latch(SetupObservation {
         account: true,
@@ -2845,9 +2791,6 @@ fn a_finished_checklist_does_not_come_back() {
 
 #[test]
 fn nothing_is_drawn_or_recorded_until_the_stored_progress_is_read() {
-    // Defaulting an unreadable store would show an empty checklist to
-    // somebody who has finished it, at every launch rather than once, and
-    // storing the result would overwrite the progress it failed to read.
     let mut unread = GuidedSetup::unloaded();
     assert!(!unread.visible(), "an unread checklist draws nothing");
     assert!(!unread.latch(SetupObservation {
@@ -2863,8 +2806,6 @@ fn nothing_is_drawn_or_recorded_until_the_stored_progress_is_read() {
 
 #[test]
 fn the_guided_setup_card_fits_across_every_window_the_wallet_can_be_dragged_to() {
-    // 660x500 is the window minimum, so it is the smallest the card ever has
-    // to survive, and the card is pinned 20px off two edges.
     for (width, height) in [(660.0, 500.0), (960.0, 650.0), (1400.0, 900.0)] {
         let viewport = gpui::size(px(width), px(height));
 
@@ -2878,8 +2819,6 @@ fn the_guided_setup_card_fits_across_every_window_the_wallet_can_be_dragged_to()
 
 #[test]
 fn a_roomy_window_does_not_make_the_guided_setup_card_enormous() {
-    // The card is an aside, not the page: past the point where a task reads
-    // comfortably, more window is not more checklist.
     let huge = guided_setup_width(gpui::size(px(3840.0), px(2160.0)));
 
     assert_eq!(huge, px(400.0));
@@ -2904,9 +2843,6 @@ fn nothing_on_the_guided_setup_card_scrolls() {
     assert_eq!(card.matches("overflow_y_scroll()").count(), 0);
     assert_eq!(card.matches("overflow_x_scroll()").count(), 0);
     assert_eq!(card.matches("track_scroll(").count(), 0);
-    // A height cap with nothing scrolling behind it is silent clipping: the
-    // card takes the height its content comes to, and the content is what is
-    // kept short.
     assert_eq!(card.matches("max_h(").count(), 0);
 }
 
@@ -2959,8 +2895,6 @@ fn folding_the_card_keeps_it_while_dismissal_sends_it_away() {
 
 #[test]
 fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
-    // The stored name is what survives a rename of the variant, so two tasks
-    // sharing one would silently tick each other's box.
     let keys: std::collections::BTreeSet<&str> =
         SetupTask::ALL.iter().map(|task| task.key()).collect();
     assert_eq!(keys.len(), SetupTask::ALL.len());
@@ -2968,7 +2902,6 @@ fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
     for task in SetupTask::ALL {
         assert!(!task.title().is_empty());
         assert!(!task.detail().is_empty());
-        // Every row is a shortcut, so every task needs somewhere to send you.
         assert!(Route::ALL.contains(&task.route()));
     }
 }
@@ -2977,8 +2910,6 @@ fn every_setup_task_has_a_distinct_stored_name_and_a_screen_to_go_to() {
 fn a_pairing_link_is_recognised_by_its_scheme_and_nothing_else_is_touched() {
     let link = "wc:c9e6d3f0@2?symKey=abc";
     assert_eq!(clipboard_pairing_uri(link), Some(link));
-    // A link copied out of a browser arrives with whatever whitespace the
-    // page had around it.
     assert_eq!(clipboard_pairing_uri(&format!("  {link}\n")), Some(link));
 
     // Everything else stays an ordinary paste. The handler must not act on a
@@ -2988,12 +2919,8 @@ fn a_pairing_link_is_recognised_by_its_scheme_and_nothing_else_is_touched() {
     assert_eq!(clipboard_pairing_uri("https://ekubo.org"), None);
     assert_eq!(clipboard_pairing_uri("0xabc"), None);
     assert_eq!(clipboard_pairing_uri("{\"policy\": []}"), None);
-    // Not the scheme, just a word that starts the same way.
     assert_eq!(clipboard_pairing_uri("wconnect later"), None);
 
-    // Detection is not validation: a truncated link is still recognised, so
-    // the parser gets to say what is wrong with it instead of the paste being
-    // silently swallowed.
     assert_eq!(clipboard_pairing_uri("wc:"), Some("wc:"));
 }
 
@@ -3011,7 +2938,6 @@ fn the_clipboard_is_read_on_a_press_and_never_on_a_keystroke() {
     // A pairing link carries the session key, so it is not left lying in a
     // String.
     assert!(handler.contains("Zeroizing"));
-    // Pairing is not connecting: nothing here approves a session.
     assert!(!handler.contains("authorize_dapp_connection"));
     // The press happens on the WalletConnect page, so the handoff has no
     // business closing overlays or moving the owner between pages.
@@ -3027,13 +2953,10 @@ fn the_clipboard_is_read_on_a_press_and_never_on_a_keystroke() {
     assert!(!source.contains(r#"KeyBinding::new("cmd-v""#));
     assert!(!source.contains(r#"KeyBinding::new("ctrl-v""#));
 
-    // One affordance on the page, not a field beside a button.
     assert!(source.contains(r#"app_button("paste-walletconnect-uri")"#));
     assert!(!source.contains("walletconnect_uri_input"));
     assert!(!source.contains(r#"app_button("connect-walletconnect")"#));
 
-    // Cancel is the other answer to the pairing this button opened, so it
-    // stands beside it. Under it, the two read as consecutive steps.
     let row_source = source
         .split_once("// Cancel stands beside the press it undoes")
         .expect("the connect panel explains its row")
@@ -3049,8 +2972,6 @@ fn the_clipboard_is_read_on_a_press_and_never_on_a_keystroke() {
         .to_owned();
     let row_source = row_source.as_str();
     assert!(row_source.contains(r#"app_button("cancel-walletconnect")"#));
-    // One row holding both, paste first: `h_flex` opens it, and the cancel
-    // button is inside it rather than in a child of the column below.
     let paste_at = row_source
         .find(r#"app_button("paste-walletconnect-uri")"#)
         .expect("the row pastes a link");
@@ -3063,8 +2984,6 @@ fn the_clipboard_is_read_on_a_press_and_never_on_a_keystroke() {
         "cancel comes after the press it undoes"
     );
 
-    // Neither button pins itself to the start of a column any more: they are
-    // laid out by the row.
     assert!(!row_source[..cancel_at].contains(".self_start()"));
 }
 
@@ -3116,10 +3035,6 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
         .expect("the policy editor has an end marker")
         .0;
 
-    // The rail says a proposal is waiting and offers the two answers to it.
-    // It does not argue the case: an excerpt at 264 pixels is a paragraph of
-    // two-word lines that says less than the case screen does and still costs
-    // the height of one.
     assert!(!editor.contains("policy_rationale_excerpt("));
     assert!(!editor.contains("rationale_excerpt"));
     assert!(!editor.contains("Review changes has the rest of the agent's"));
@@ -3145,16 +3060,12 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
         .0;
     assert!(!reject.contains(".danger()"));
 
-    // One button, no box around it, and no paragraph explaining a button
-    // whose label already says what it does.
     assert!(editor.contains(r#".id("policy-full-screen-preview")"#));
     assert!(!editor.contains(r#".title("Review changes")"#));
     assert!(!editor.contains("Read what it changes before installing it."));
     assert!(!editor.contains("Validate the JSON and read its permission changes"));
     assert!(editor.contains("Validate & review changes"));
 
-    // The count of what changes stays: it is short, and it is not the
-    // changes themselves.
     assert!(editor.contains(r#""policy-change-summary""#));
 
     // A draft that arrived from an agent says so, because it looks exactly
@@ -3177,14 +3088,10 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
     assert!(case.contains(r#""policy-proposal-rationale""#));
     assert!(case.contains("overflow_y_scrollbar()"));
     assert!(!case.contains("max_h("));
-    // It reaches the diff, the draft, and the way out.
     assert!(case.contains(r#"app_button("review-policy-proposal-changes")"#));
     assert!(case.contains(r#"app_button("edit-policy-proposal-draft")"#));
     assert!(case.contains(r#"app_button("reject-policy-proposal-case")"#));
-    // And says what taking it up already did.
     assert!(case.contains("loaded in your editor as a draft"));
-    // Rejecting can fail -- the proposal may have been replaced while it was
-    // open -- and a failure leaves the reader here, so here has to say so.
     assert!(case.contains("self.policy_action_error"));
     assert!(case.contains(r#""policy-proposal-action-error""#));
 
@@ -3195,15 +3102,9 @@ fn the_agent_rationale_is_read_on_its_own_screen_and_not_in_the_rail_or_the_diff
         .split_once("fn render_policy_editor")
         .expect("the policy review has an end marker")
         .0;
-    // The diff screen carries no prose of its own: two unbounded things on one
-    // screen is what forced a bad bound on one of them.
     assert!(!review.contains("terminal_safe_multiline"));
     assert!(!review.contains(r#""policy-review-rationale""#));
     assert!(!review.contains("max_h(px(180.0))"));
-    // But the argument is one press away, and the way back is named for where
-    // it goes rather than for what the reader was doing -- in the same words
-    // the proposal card uses for the same destination, so one command does not
-    // read as two.
     assert!(review.contains(r#"app_button("open-policy-proposal-case")"#));
     assert!(review.contains(r#".label("Edit the draft")"#));
     assert!(case.contains(r#".label("Edit the draft")"#));
@@ -3252,10 +3153,6 @@ fn activity_transaction(chain_id: &str) -> OwnerActivityRecord {
 
 #[test]
 fn a_row_is_titled_by_what_the_plan_does_and_names_its_network_after_the_account() {
-    // The title used to be "Transaction on Ethereum Mainnet", which spent the
-    // most prominent line on the one fact every row on the screen shares. The
-    // network moves down beside the account, where the rest of the row's
-    // context already is, and the title says what the plan actually does.
     let networks = BTreeMap::from([(1_u64, SharedString::from("Ethereum Mainnet"))]);
     let record = activity_transaction("1");
     let now = chrono::Utc::now();
@@ -3271,8 +3168,6 @@ fn a_row_is_titled_by_what_the_plan_does_and_names_its_network_after_the_account
         decoded.subtitle
     );
 
-    // A plan nothing recognized keeps a title that is at least honest, and
-    // loses nothing: its network is in the subtitle either way.
     let undecoded = activity_row_summary(&record, &networks, None, None, now);
     assert_eq!(undecoded.title, "Transaction");
     assert_eq!(undecoded.subtitle, decoded.subtitle);
@@ -3280,9 +3175,6 @@ fn a_row_is_titled_by_what_the_plan_does_and_names_its_network_after_the_account
 
 #[test]
 fn a_record_on_no_network_is_not_given_one() {
-    // `chain_label` answers "no network" for a record that names no chain,
-    // which is a sentence worth printing in a review and not worth spending a
-    // subtitle segment on. An absent part is left out instead.
     assert_eq!(
         row_subtitle(&["primary", "", "2 hours ago"]),
         "primary · 2 hours ago"
@@ -3486,15 +3378,12 @@ fn the_report_separates_agents_by_what_their_file_can_hold() {
 fn an_unreadable_selection_neither_converges_nor_edits() {
     let source = include_str!("desktop.rs");
 
-    // The read keeps its error rather than collapsing it into the default.
     assert!(
         !source.contains("owner.companion_servers().unwrap_or_default()"),
         "a discarded read error is indistinguishable from an owner who chose every server"
     );
     assert!(source.contains("companion_servers_error"));
 
-    // Convergence is gated on having read the selection, not merely on
-    // holding one.
     assert!(
         source.contains("let converge = self.companion_servers_error.is_none();"),
         "convergence must not run on a defaulted selection"
@@ -3505,7 +3394,6 @@ fn an_unreadable_selection_neither_converges_nor_edits() {
     );
     assert!(source.contains("if converge && helper.is_ok()"));
 
-    // And the switches refuse to save over a selection nobody could read.
     assert!(
         source.contains("|| self.companion_servers_error.is_some()\n            || self.companion_servers.is_enabled(slug) == enabled"),
         "editing an unread selection would save a guess over the owner's choice"

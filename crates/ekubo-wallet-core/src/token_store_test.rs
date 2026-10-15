@@ -20,9 +20,6 @@ fn a_block_number_that_is_not_a_block_pins_nothing() {
         pin(U256::from(21_000_000_u64)).unwrap(),
         BlockId::number(21_000_000)
     );
-    // An endpoint chooses this number, and every later batch of the read
-    // is sent against it. Truncating it would silently pin the balances to
-    // a block nobody named.
     assert!(pin(U256::MAX).is_err());
 }
 
@@ -76,7 +73,6 @@ fn chain_and_address_conflicts_are_impossible() {
     // A second list cannot rename a token the owner already confirmed.
     assert_eq!(stored.symbol.as_deref(), Some("USDC"));
 
-    // The same address on another chain is a distinct entry.
     assert!(store.insert_if_absent(&usdc(8453, token), "list").unwrap());
     assert_eq!(store.count(None).unwrap(), 2);
     assert_eq!(store.count(Some(1)).unwrap(), 1);
@@ -175,7 +171,6 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
         .unwrap();
     assert_eq!(summary.pending, 1);
 
-    // Proposed, but the display path still refuses to name it.
     assert_eq!(store.count(None).unwrap(), 0);
     assert!(
         !store
@@ -184,7 +179,6 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
             .contains_key(&token)
     );
 
-    // Confirming it is what turns it into a name.
     let proposals = store.proposals().unwrap();
     assert_eq!(proposals.len(), 1);
     assert_eq!(
@@ -198,11 +192,6 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
         Some("USDC".into())
     );
 
-    // And once confirmed it is no longer a pending decision — which the
-    // review screen now reads too, rather than offering a choice whose
-    // answers were both wrong: rejecting deleted the suggestion and reported
-    // that nothing was named while the confirmed row carried on naming the
-    // token, and accepting preserved that row and reported zero.
     assert!(
         store.proposals().unwrap().is_empty(),
         "a token that already has a name is not a decision left to make"
@@ -267,15 +256,11 @@ fn search_finds_tokens_by_symbol_name_and_address() {
         .unwrap();
     store.add(&usdc(8453, usdc_address), "list").unwrap();
 
-    // Case-insensitive symbol substring.
     assert_eq!(store.search("usd", None, 10).unwrap().len(), 2);
-    // Name substring finds a token whose symbol does not match.
     let wrapped = store.search("wrapped", None, 10).unwrap();
     assert_eq!(wrapped.len(), 1);
     assert_eq!(wrapped[0].symbol.as_deref(), Some("WETH"));
-    // Chain filter narrows it.
     assert_eq!(store.search("usdc", Some(8453), 10).unwrap().len(), 1);
-    // Address matches exactly, in either case, on every chain it is on.
     assert_eq!(
         store
             .search(&usdc_address.to_checksum(None), None, 10)
@@ -431,8 +416,6 @@ fn a_removed_token_stops_naming_its_address() {
 
 #[test]
 fn removing_a_token_leaves_the_same_address_on_other_chains() {
-    // The same contract address is routinely deployed on several chains, and
-    // disagreeing with a name on one of them says nothing about the others.
     let (_directory, mut store) = store();
     let address = Address::repeat_byte(0x42);
     store.add(&usdc(1, address), "a list").unwrap();
@@ -445,10 +428,6 @@ fn removing_a_token_leaves_the_same_address_on_other_chains() {
 
 #[test]
 fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
-    // The cap was read once and then a whole batch was inserted, so one call
-    // could take the queue from just under the limit to a thousand over it.
-    // Capacity is charged per new row now, and the batch that would exceed it
-    // leaves the queue exactly as it was.
     let (_directory, mut store) = store();
     let listed: Vec<ListedToken> = (0..8_u32)
         .map(|index| {
@@ -466,7 +445,6 @@ fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
     assert_eq!(first.pending, 5);
     assert_eq!(store.count_proposals().unwrap(), 5);
 
-    // Re-proposing the same addresses replaces rather than grows.
     let repeat = store
         .propose(&listed[..5], &ProposalSource::Claimed("list-b"))
         .unwrap();
@@ -477,7 +455,6 @@ fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
         "replacing a suggestion adds no decision the owner did not already have"
     );
 
-    // And genuinely new addresses do grow it.
     store
         .propose(&listed[5..], &ProposalSource::Claimed("list-c"))
         .unwrap();
@@ -511,7 +488,6 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
         "a repeat of the identical suggestion must not invalidate a decision"
     );
 
-    // And the decision taken against what was shown still consumes the row.
     assert_eq!(
         store.discard_proposals(&[(1, address, reviewed)]).unwrap(),
         1
@@ -597,8 +573,6 @@ fn a_chains_own_currency_is_valued_per_chain_and_can_be_cleared() {
     store.set_native_price(8453, Some(1900.0)).unwrap();
     assert_eq!(store.native_prices().unwrap().get(&1), Some(&1900.0));
 
-    // Recording again replaces rather than duplicating: there is one answer
-    // per chain, and it is the latest one.
     store.set_native_price(1, Some(2000.0)).unwrap();
     assert_eq!(store.native_prices().unwrap().len(), 2);
     assert_eq!(store.native_prices().unwrap().get(&1), Some(&2000.0));
@@ -714,7 +688,6 @@ fn a_claimed_label_can_never_be_spelled_like_a_served_one() {
     };
     assert_eq!(served.label(), "tokens.uniswap.org — Uniswap Labs Default");
 
-    // The obvious impersonation, and the one that tries to undo the prefix.
     for attempt in [
         "tokens.uniswap.org — Uniswap Labs Default",
         "tokens.uniswap.org",
@@ -819,7 +792,6 @@ fn a_whole_review_is_confirmed_as_one_decision() {
     assert_eq!(store.count_proposals().unwrap(), 64);
 
     assert_eq!(store.insert_all_absent(&listed).unwrap(), 64);
-    // And the suggestions they shadow go with them, in the same transaction.
     assert_eq!(store.count_proposals().unwrap(), 0);
 
     // Re-confirming the same list adds nothing and still succeeds, so a

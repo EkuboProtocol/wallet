@@ -59,7 +59,6 @@ fn a_lease_stamped_in_the_future_is_not_a_lease() {
     );
     assert!(lease_expired(TimeDelta::days(-365)));
 
-    // The ordinary rule is unchanged.
     assert!(!lease_expired(TimeDelta::zero()));
     assert!(!lease_expired(TimeDelta::seconds(
         SUBMISSION_LEASE_SECONDS - 1

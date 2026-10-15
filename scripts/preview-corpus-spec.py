@@ -101,8 +101,6 @@ class Signature:
             written = self.identifier()
         written += self.array_suffixes()
         self.skip_space()
-        # Whatever follows the type is the parameter name, which has no effect
-        # on the selector or the encoding.
         if self.at < len(self.bytes) and (
             self.bytes[self.at].isalpha() or self.bytes[self.at] == "_"
         ):

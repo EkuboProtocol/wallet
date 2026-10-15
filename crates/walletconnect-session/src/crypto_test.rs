@@ -84,7 +84,6 @@ fn a_tampered_envelope_does_not_open() {
     let key = SymKey::from_hex(EXPECTED_SYM_KEY).unwrap();
     let sealed = seal(&key, PLAINTEXT).unwrap();
     let mut bytes = BASE64.decode(&sealed).unwrap();
-    // Flip a bit inside the ciphertext, past the type byte and the nonce.
     let last = bytes.len() - 20;
     bytes[last] ^= 0x01;
     let tampered = BASE64.encode(&bytes);
@@ -112,9 +111,6 @@ fn a_low_order_peer_key_is_refused() {
 
 #[test]
 fn a_truncated_envelope_is_refused_rather_than_indexed_into() {
-    // Everything shorter than a type byte, a nonce, and a tag. Each of these
-    // would be an out-of-bounds slice if the lengths were not checked first,
-    // and all of them are three characters of base64 to send.
     for bytes in [vec![], vec![0], vec![0, 1, 2], vec![1; 20], vec![1; 44]] {
         let envelope = BASE64.encode(&bytes);
         assert!(

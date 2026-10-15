@@ -148,8 +148,6 @@ fn supersede_agent_detection(wallet: &mut WalletWindow) {
 fn settle(cx: &mut gpui::TestAppContext, view: &Entity<WalletWindow>) {
     cx.run_until_parked();
     cx.update_entity(view, |wallet, _| {
-        // Whatever the background read made of this machine, the pages draw
-        // from here.
         wallet.desktop_snapshot = Some(Arc::new(quiet_snapshot()));
         wallet.desktop_snapshot_error = None;
         wallet.legal_gate = false;
@@ -444,8 +442,6 @@ fn the_command_palette_lays_out_over_a_page(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
-    // The scrim is a full-window occluding parent added this round, and the
-    // palette is absolutely positioned inside it.
     cx.update_entity(&view, |wallet, _| wallet.command_palette = true);
     draw(cx, window, &view);
     release(cx, &view);
@@ -456,8 +452,6 @@ fn a_record_detail_lays_out_with_its_fixed_footer(cx: &mut gpui::TestAppContext)
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
-    // A selection naming no record is dropped during render — the notification
-    // case fixed this round — so this also exercises that reconciliation.
     cx.update_entity(&view, |wallet, _| {
         wallet.set_route(Route::Activity);
         wallet.selected_record = Some(uuid::Uuid::new_v4());
@@ -501,7 +495,6 @@ fn a_transaction_cleared_from_history_still_opens_from_the_run_that_made_it(
         OwnerActivityRecord::Transaction(Box::new(cleared_transaction_fixture(request_id)));
     cx.update_entity(&view, |wallet, _| {
         let mut snapshot = quiet_snapshot();
-        // The list after a clear: the row is hidden, so nothing here has it.
         snapshot.activity = Ok(Arc::from(Vec::new()));
         wallet.desktop_snapshot = Some(Arc::new(snapshot));
         wallet.set_route(Route::Activity);
@@ -662,15 +655,9 @@ fn the_settings_pane_is_capped_to_a_readable_measure(cx: &mut gpui::TestAppConte
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
-    // The cap is the whole of the fix for a control sitting a hand's width
-    // from its label, so it is worth asserting rather than eyeballing.
     cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Settings));
     let measured = measure(cx, window, &view, &["settings-pane", "settings-prose"]);
     let pane = measured[0].expect("the settings pane must have been laid out");
-    // A row wants the full measure so its control can sit at the right edge.
-    // The sentence under the row does not: measured, this prose ran 634px,
-    // which at 14px is about ninety characters a line against a comfortable
-    // band nearer sixty-five to seventy-five.
     let prose = measured[1].expect("the settings prose must have been laid out");
     let prose_measure = resolved(cx, window, PROSE_MEASURE);
     let page_measure = resolved(cx, window, PAGE_CONTENT_MAX_WIDTH);
@@ -1075,8 +1062,6 @@ fn a_long_row_title_wraps_inside_the_card_rather_than_overflowing_it(
         list.right()
     );
 
-    // The waiting queue draws its own card rather than reusing the history
-    // row, so it has its own chance to get this wrong.
     let two_line = waiting_card_bounds(cx, window, &view, TWO_LINE_HEADLINE);
     let three_line = waiting_card_bounds(cx, window, &view, THREE_LINE_HEADLINE);
     assert!(
@@ -1115,8 +1100,6 @@ fn the_portfolio_footer_stays_on_screen_under_a_long_list(cx: &mut gpui::TestApp
             name: Some(format!("Token {index}")),
             decimals: Some(18),
             balance: "1000000000000000000".to_owned(),
-            // Priced, so the long list this test lays out is the list the tab
-            // shows by default rather than the one the dust filter hid.
             approximate_usd_price: Some(12.5),
         })
         .collect::<Vec<_>>();
@@ -1484,9 +1467,6 @@ fn portfolio_refresh_sits_with_the_refreshed_line_and_not_in_the_header(
             "portfolio-refreshed-at",
         ],
     );
-    // No balances have been read yet, so there is no age to print -- and this
-    // is exactly when asking again is worth doing, so the control is here
-    // whether or not the line beside it has anything to say.
     let refresh = overview[0].expect("the refresh control must draw");
     assert!(
         overview[1].is_none(),
@@ -1559,9 +1539,6 @@ fn draw_network_editor(
         wallet: view.clone(),
     });
     let mut visual = gpui::VisualTestContext::from_window(window, cx);
-    // The dialog sizes itself against `window.viewport_size()`, so the window
-    // has to actually be this size — drawing into a space of the size is a
-    // different claim, and not the one the dialog reads.
     visual.simulate_resize(viewport);
     visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
         gpui::AnyView::from(dialog_view.clone()).into_any_element()
@@ -1621,9 +1598,6 @@ fn the_network_editor_scrolls_and_keeps_its_footer_in_a_short_window(
         layout.content,
         layout.form.size.height
     );
-    // A pane still as tall as everything in it is not a viewport, and nothing
-    // scrolls: the form is simply cut off at the bottom of the dialog. This is
-    // the assertion that says the scroll is real.
     assert_eq!(
         layout.pane.size.height, layout.form.size.height,
         "the scroll pane must be the size of the space the form was given, \
@@ -1655,9 +1629,6 @@ fn the_network_editor_scrolls_and_keeps_its_footer_in_a_short_window(
 fn the_network_editor_takes_the_height_a_tall_window_offers(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
-    // Taller than the 640px the dialog was once pinned to, and taller than the
-    // form: nothing here should be scrolling, and nothing should be padded out
-    // to a size the content did not ask for.
     let viewport = gpui::size(px(1400.0), px(2160.0));
     let layout = draw_network_editor(cx, window, &view, viewport);
 
@@ -1696,10 +1667,6 @@ fn disabling_a_network_moves_the_card_out_of_enabled(cx: &mut gpui::TestAppConte
     settle(cx, &view);
     draw(cx, window, &view);
 
-    // The window asks for a snapshot as it attaches. Let that one finish
-    // first: a capture still in flight can read the store after the write and
-    // report the new state by luck, which would pass this test with the reload
-    // it is about missing entirely.
     settle_snapshot(cx, &view);
     let ethereum = cx.update_entity(&view, |wallet, _| {
         wallet
@@ -1715,8 +1682,6 @@ fn disabling_a_network_moves_the_card_out_of_enabled(cx: &mut gpui::TestAppConte
     cx.update_entity(&view, |wallet, cx| {
         wallet.set_network_disabled(ethereum.clone(), true, cx);
     });
-    // The write goes out over the tokio bridge this scheduler does not drive,
-    // so settling means waiting rather than draining a queue.
     for _ in 0..200 {
         cx.run_until_parked();
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1776,8 +1741,6 @@ fn an_action_button_is_the_width_of_its_label(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
-    // A flex column stretches its children, so this button was as wide as the
-    // page — a bar with "Add token…" floating in the middle of it.
     cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Tokens));
     let measured = measure(cx, window, &view, &["add-token-button"]);
     let button = measured[0].expect("the add-token button must have been laid out");
@@ -1874,9 +1837,6 @@ fn an_account_row_keeps_copy_visible_and_the_rest_in_a_menu(cx: &mut gpui::TestA
 
 #[gpui::test]
 fn an_agents_case_is_read_at_the_height_of_the_frame(cx: &mut gpui::TestAppContext) {
-    // The case used to be a 180-pixel box on the diff screen that could not
-    // scroll, so a long rationale was simply cut off with no way to reach the
-    // rest. On its own screen it takes the height the frame has left.
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
@@ -1923,7 +1883,6 @@ fn an_agents_case_is_read_at_the_height_of_the_frame(cx: &mut gpui::TestAppConte
                 wallet_address: alloy::primitives::Address::ZERO,
                 source_revision: 2,
                 policy: proposed,
-                // Longer than any fixed box would show.
                 rationale: "This proposal widens signing authority. ".repeat(60),
                 created_at: chrono::Utc::now(),
             }),
@@ -1952,15 +1911,11 @@ fn an_agents_case_is_read_at_the_height_of_the_frame(cx: &mut gpui::TestAppConte
     );
     let frame = bounds[3].expect("the editor frame must draw");
 
-    // Taller than the box it replaces, by a lot: it takes what the screen has
-    // rather than a number chosen in advance.
     assert!(
         rationale.size.height > px(180.0),
         "the rationale must not be bounded like the old box: {:?}",
         rationale.size.height
     );
-    // And it stays inside the frame, so the actions under it are reachable
-    // without the page growing past its own bottom edge.
     assert!(
         rationale.bottom() <= case.bottom() + px(1.0) && case.bottom() <= frame.bottom() + px(1.0),
         "the case must fit its frame: rationale {rationale:?}, case {case:?}, frame {frame:?}"
@@ -2091,7 +2046,6 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
         .expect("a shipped network")
         .clone();
 
-    // The history: one finished record.
     cx.update_entity(&view, |wallet, cx| {
         let mut snapshot = quiet_snapshot();
         snapshot.accounts = Ok(vec![account.clone()]);
@@ -2107,7 +2061,6 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
         "the history list must draw the record it holds"
     );
 
-    // The waiting queue: one request needing a decision.
     cx.update_entity(&view, |wallet, cx| {
         let mut snapshot = quiet_snapshot();
         snapshot.accounts = Ok(vec![account.clone()]);
@@ -2131,7 +2084,6 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
         "the waiting list must draw the request it holds"
     );
 
-    // The portfolio: one balance.
     cx.update_entity(&view, |wallet, _| {
         wallet.portfolio = PortfolioState::Ready(crate::authority::OwnerPortfolioSnapshot {
             accounts: vec![OwnerPortfolioAccount {
@@ -2159,7 +2111,6 @@ fn every_virtualized_list_draws_the_rows_it_was_given(cx: &mut gpui::TestAppCont
         "the portfolio must draw the balance it holds"
     );
 
-    // The permission diff.
     cx.update_entity(&view, |wallet, cx| {
         wallet.set_route(Route::Policies);
         let policy = WalletPolicy::require_approval_for_everything();
@@ -2239,7 +2190,6 @@ fn the_policy_editor_can_be_put_back_to_the_installed_policy(cx: &mut gpui::Test
         let _ = cx;
     });
 
-    // A draft nobody wants to keep, and the one control that undoes it.
     cx.update_window(window, |_, window, cx| {
         view.update(cx, |wallet, cx| {
             wallet
@@ -2333,7 +2283,6 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         "the first frame has to derive the rows"
     );
 
-    // What a scroll asks for: the same rows, again and again.
     for _ in 0..8 {
         draw(cx, window, &view);
     }
@@ -2359,7 +2308,6 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         "a reload in flight has published nothing, so the rows are unchanged"
     );
 
-    // Publishing one is the thing that changes them.
     cx.update_entity(&view, |wallet, _| {
         wallet.desktop_snapshot_loading = false;
         wallet.desktop_snapshot_revision = wallet.desktop_snapshot_revision.wrapping_add(1);
@@ -2371,8 +2319,6 @@ fn portfolio_rows_survive_the_frames_that_only_redraw_them(cx: &mut gpui::TestAp
         "a landed snapshot must derive the rows again"
     );
 
-    // The dust filter is one of the things they are derived from, so it has
-    // to reach through too.
     cx.update_entity(&view, |wallet, _| {
         wallet.show_low_value_balances = !wallet.show_low_value_balances;
     });
@@ -2425,8 +2371,6 @@ fn an_accounts_menu_opens_the_page_for_that_account(cx: &mut gpui::TestAppContex
         "the Portfolio must open on the account the row named"
     );
 
-    // An id the list no longer holds leaves the page where it is rather than
-    // opening whoever happens to be first.
     cx.update_entity(&view, |wallet, cx| {
         wallet.set_route(Route::Accounts);
         wallet.show_account_portfolio("removed", cx);
@@ -2548,8 +2492,6 @@ fn the_loading_placeholder_stands_where_the_balances_land(cx: &mut gpui::TestApp
         placeholder.size.width, list.size.width,
         "and be as wide as it"
     );
-    // A placeholder row is the real row's frame, so it stands the same height
-    // as one balance rather than the height of some other card's line.
     assert!(
         (placeholder_row.size.height - row.size.height).abs() < px(12.0),
         "a placeholder row must be about the height of the row it stands in \
@@ -2601,8 +2543,6 @@ fn the_portfolio_says_how_much_dust_it_is_holding_back(cx: &mut gpui::TestAppCon
             address: "0x0000000000000000000000000000000000000000".to_owned(),
             chain_id: network.chain_id.to_string(),
             network: network.name.clone(),
-            // Zero, so the native row does not stand in for the priced one
-            // this test is looking for.
             native_balance: "0".to_owned(),
             block_number: "1".to_owned(),
             tokens_checked: tokens.len() as u64,
@@ -3026,8 +2966,6 @@ fn the_policy_editor_scrolls_inside_its_frame_rather_than_moving_it(cx: &mut gpu
     };
     let (panel, control, description) = {
         let mut visual = gpui::VisualTestContext::from_window(window, cx);
-        // The window has to actually be this narrow. Drawing into a space of
-        // this size is a different claim, and the layout reads the window.
         visual.simulate_resize(viewport);
         let drawn = view.clone();
         visual.draw(gpui::point(px(0.0), px(0.0)), viewport, |_, _| {
@@ -3046,10 +2984,6 @@ fn the_policy_editor_scrolls_inside_its_frame_rather_than_moving_it(cx: &mut gpu
         (panel, control, description)
     };
 
-    // The header band does not scroll, so the description has to fold rather
-    // than run off the edge. One line of this text size measures about 22px,
-    // so a height past 40 is the sentence actually on two lines — a clipped
-    // single line would still report one line's height.
     assert!(
         description.size.height >= px(40.0),
         "the description must wrap onto a second line in a narrow window: \
@@ -3116,8 +3050,6 @@ fn opening_portfolio_reads(cx: &mut gpui::TestAppContext, view: &Entity<WalletWi
     });
     cx.update_entity(view, |wallet, _| {
         let read = wallet.portfolio_generation != before;
-        // Put the tab back the way it was found so one call does not decide
-        // what the next one measures.
         wallet.portfolio = PortfolioState::Ready(OwnerPortfolioSnapshot {
             accounts: Vec::new(),
         });
@@ -3198,7 +3130,6 @@ fn the_portfolio_refresh_interval_is_kept_per_account(cx: &mut gpui::TestAppCont
     settle(cx, &view);
     portfolio_at_rest(cx, &view);
 
-    // A reading that just landed for the account the tab is focused on.
     cx.update_entity(&view, |wallet, _| {
         wallet
             .portfolio_refreshed_at
@@ -3233,8 +3164,6 @@ fn the_portfolio_tab_reports_how_old_its_balances_are(cx: &mut gpui::TestAppCont
         wallet
             .portfolio_refreshed_at
             .insert("primary".to_owned(), read_at);
-        // The balances path rather than the placeholder: the line has to sit
-        // under a rendered list, which is where it was asked for.
         wallet.portfolio = PortfolioState::Ready(OwnerPortfolioSnapshot {
             accounts: vec![OwnerPortfolioAccount {
                 wallet: portfolio_account("primary"),
@@ -3291,9 +3220,6 @@ fn every_review_kind_lays_out_its_decision_row(cx: &mut gpui::TestAppContext) {
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
 
-    // Account removal is the one whose decision row differs — the danger moves
-    // to approve and Re-simulate is not drawn at all — so it is the one most
-    // worth laying out rather than reasoning about.
     for completion in [
         ActiveReviewCompletion::AccountRemoval {
             wallet: WalletMetadata {
@@ -3519,9 +3445,6 @@ fn screenshots() {
             let rem = px(f32::from(base));
             cx.update(|cx| {
                 Theme::change(mode, None, cx);
-                // `Theme::change` reloads the colours from the mode's config,
-                // so the product's palette goes back on top of it afterwards —
-                // the same order the running application uses.
                 apply_interface_palette(cx);
                 Theme::global_mut(cx).font_size = rem;
                 let _ = cx.update_window(window.into(), |_, window, _| window.set_rem_size(rem));
@@ -3532,8 +3455,6 @@ fn screenshots() {
             ]) {
                 cx.update(|cx| {
                     view.update(cx, |wallet, _| {
-                        // Re-applied each frame: the first render opens the legal gate,
-                        // and that overlay covers whichever page is behind it.
                         let mut snapshot = quiet_snapshot();
                         // The Policies page is only meaningfully reviewable with an
                         // account selected and its real editor open. The renderer will
@@ -3563,9 +3484,6 @@ fn screenshots() {
                             snapshot.automation_runs = BTreeMap::from([(running.id, runs)]);
                             snapshot.automations = Ok(vec![running, stopped]);
                         }
-                        // An Accounts tab with no account is a picture of the
-                        // form above the list, and the list is where the row
-                        // geometry and the row's own menu live.
                         if route == Route::Accounts {
                             snapshot.accounts = Ok(vec![WalletMetadata {
                                 instance_id: uuid::Uuid::nil(),
@@ -3765,8 +3683,6 @@ fn every_guided_setup_row_draws_and_the_dismiss_link_takes_the_card_away(
         assert!(row.is_some(), "{selector} did not draw");
     }
 
-    // Pressed rather than called: the way out is a word at the bottom of the
-    // card now, and a link nobody can hit is the same as no link at all.
     click(cx, window, &view, "guided-setup-dismiss");
     let after = measure(cx, window, &view, &["guided-setup"]);
 
@@ -3776,9 +3692,6 @@ fn every_guided_setup_row_draws_and_the_dismiss_link_takes_the_card_away(
 
 #[gpui::test]
 fn the_title_folds_the_checklist_away_and_opens_it_again(cx: &mut gpui::TestAppContext) {
-    // Somebody whose corner is covered should not have to give the checklist
-    // up for the run to get it back, so the title folds the card down to a
-    // line — count and all — and unfolds it.
     let (_directory, view, window) = wallet(cx);
     settle(cx, &view);
     let start = measure(
@@ -3791,10 +3704,6 @@ fn the_title_folds_the_checklist_away_and_opens_it_again(cx: &mut gpui::TestAppC
     let header = start[1].expect("the card header must draw");
     let toggle = start[2].expect("the fold control must draw");
 
-    // The whole header takes the press, not just the words in it. The button
-    // this is built from centres its own contents, so a full-width target and
-    // a heading that stays at the left edge are two separate things that have
-    // to hold at once.
     assert_eq!(
         toggle.size.width, header.size.width,
         "the fold control does not span the header: {toggle:?} in {header:?}"
@@ -3914,9 +3823,6 @@ fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestApp
         cx.update_entity(&view, |wallet, _| {
             wallet.guided_setup.latch(done);
         });
-        // The card sizes itself from the window rather than from the space it
-        // is handed, because the window is what its margins are measured off —
-        // so the window itself has to shrink for this to be the real case.
         cx.simulate_window_resize(window, smallest);
         let bounds = measure_at(
             cx,
@@ -3943,10 +3849,6 @@ fn the_guided_setup_card_stays_inside_the_smallest_window(cx: &mut gpui::TestApp
             card.origin.x >= px(0.0) && card.origin.x + card.size.width <= smallest.width,
             "the card does not fit across a 660x500 window at {done:?}: {card:?}"
         );
-        // The header carries the count and the fold, and the link is the way
-        // out. Both are inside the card, so both follow from the fit above —
-        // but they are what the fit is for, so they are asserted rather than
-        // assumed.
         assert!(
             header.origin.y >= px(0.0) && header.origin.y + header.size.height <= smallest.height,
             "the header left the window at {done:?}: {header:?}"
@@ -4054,9 +3956,6 @@ fn an_automations_key_sits_under_the_name_the_owner_gave_it(cx: &mut gpui::TestA
         key.origin.y > title.origin.y,
         "the key belongs under the name, not beside or above it: {title:?} {key:?}"
     );
-    // The cadence in words leads, with the expression it was installed as
-    // underneath: one is readable, the other is checkable, and neither
-    // replaces the other.
     let cadence = laid_out[2].expect("the schedule must read as a sentence");
     let expression = laid_out[3].expect("the expression must stay on screen");
     assert!(
@@ -4300,8 +4199,6 @@ fn the_handoff_button_reports_what_the_clipboard_actually_held(cx: &mut gpui::Te
     settle(cx, &view);
     cx.update_entity(&view, |wallet, _| wallet.set_route(Route::WalletConnect));
 
-    // Pressed with something else on the clipboard, the button says so rather
-    // than looking inert.
     cx.update(|cx| {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
             "ekubo.org is where the pool is".to_owned(),
@@ -4446,9 +4343,6 @@ fn opening_a_token_proposal_group_reads_back_only_that_source(cx: &mut gpui::Tes
         proposed_at: chrono::Utc::now(),
     };
 
-    // Large enough that a per-frame clone of the queue would be the dominant
-    // cost of drawing this page, and split so the read-back has something to
-    // exclude.
     let mut proposals = Vec::new();
     for index in 0..2_000 {
         proposals.push(proposal("https://example.invalid/big.json", index));
@@ -4652,7 +4546,6 @@ fn confirmed_rejection_removes_the_waiting_card_before_snapshot_refresh(
             .transactions
             .push(record.clone());
         wallet.desktop_snapshot = Some(Arc::new(snapshot));
-        // An older read is already in flight when the decision is confirmed.
         wallet.desktop_snapshot_loading = true;
         record.status = PendingStatus::Rejected;
         wallet.synchronize_transaction_activity(HEADLINE_ROW, Some(record), cx);

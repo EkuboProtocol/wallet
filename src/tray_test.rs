@@ -83,9 +83,6 @@ fn native_menu_ids_map_to_the_expected_commands() {
 
 #[test]
 fn no_two_menu_items_do_the_same_thing() {
-    // The agent-status line used to open Settings, which is what the
-    // `Settings` item is for, and `Check for updates` landed there too. A menu
-    // with two ways to reach one screen reads as though they differ.
     let items = [OPEN_ID, REVIEWS_ID, CONNECT_ID, SETTINGS_ID, QUIT_ID];
     let commands = items.map(command_for_id).to_vec();
     for (index, command) in commands.iter().enumerate() {
@@ -95,8 +92,6 @@ fn no_two_menu_items_do_the_same_thing() {
             "two menu items issue {command:?}"
         );
     }
-    // Issuing distinct commands is not enough: what a reader compares is where
-    // each one leaves them.
     let destinations = commands
         .iter()
         .flatten()
@@ -111,7 +106,6 @@ fn no_two_menu_items_do_the_same_thing() {
             "two menu items open {route:?}"
         );
     }
-    // The status line reports and nothing else.
     assert_eq!(command_for_id(AGENTS_ID), None);
 }
 

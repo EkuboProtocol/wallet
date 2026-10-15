@@ -24,8 +24,6 @@ fn definition(bytecode: Bytes) -> Result<AutomationDefinition> {
 fn six_field_expressions_parse_and_five_field_ones_do_not() {
     assert!(CronSchedule::parse("*/12 * * * * *").is_ok());
     let error = CronSchedule::parse("*/5 * * * *").expect_err("five fields must be refused");
-    // The whole reason to refuse it: read as six fields the minute column
-    // becomes seconds and the schedule fires sixty times too often.
     assert!(format!("{error:#}").contains("six"), "{error:#}");
 }
 
@@ -108,14 +106,9 @@ fn weekdays_are_named_from_this_dialect_not_the_familiar_one() {
 #[test]
 fn a_shape_without_an_exact_sentence_is_left_to_the_expression() {
     for expression in [
-        // Restricted to one month.
         "0 0 9 * 3 *",
-        // Both day columns restricted, which cron unions rather than
-        // intersects — no short phrase states that correctly.
         "0 0 9 1 * MON",
-        // An hour set that neither steps from midnight nor lists briefly.
         "0 0 9-17 * * *",
-        // A minute set that is neither one value nor a step.
         "0 3,7,42 * * * *",
     ] {
         assert_eq!(
@@ -174,8 +167,6 @@ fn oversized_bytecode_is_refused() {
 
 #[test]
 fn a_delegation_designator_is_not_runtime_code() {
-    // 0xef0100 || address is exactly what `eth_getCode` returns for a
-    // 7702-delegated account, which is the thing someone pastes by mistake.
     let mut designator = vec![0xEF, 0x01, 0x00];
     designator.extend_from_slice(wallet().as_slice());
     let error =
@@ -219,8 +210,6 @@ fn the_poll_installs_the_blob_at_the_wallets_own_address() {
     let call = block.calls.first().expect("one call");
     assert_eq!(call.from, Some(wallet()));
     assert_eq!(call.to, Some(wallet().into()));
-    // `msg.sender == address(this) == the wallet`, which is what a Calibur
-    // self-batch looks like and what makes a probe agree with execution.
     assert_eq!(call.from, Some(wallet()));
 }
 
@@ -264,9 +253,7 @@ fn calls_become_consecutive_one_indexed_steps() {
     assert_eq!(plan.ordered_steps[1].step, 2);
     assert_eq!(plan.ordered_steps[1].transaction.value.as_str(), "7");
     assert_eq!(plan.ordered_steps[0].transaction.from, wallet());
-    // The wallet's own preparation supplies gas for anything nobody reviews.
     assert!(plan.ordered_steps[0].transaction.gas.is_none());
-    // And it is an ordinary plan, so the ordinary validator accepts it.
     plan.validate().expect("synthesized plans validate");
 }
 
@@ -322,8 +309,6 @@ fn standard_reverts_decode_and_others_stay_hex() {
         Some("Panic(0x11)".to_owned())
     );
 
-    // A custom error the wallet has no ABI for stays bytes rather than
-    // becoming an invented decoding.
     assert_eq!(
         decode_standard_revert(&Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05])),
         None

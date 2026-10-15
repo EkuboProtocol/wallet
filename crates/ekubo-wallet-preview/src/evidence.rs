@@ -33,7 +33,6 @@ pub fn project(call: &CallSummary) -> CallSummary {
                 .push(format!("Known token {address}: {label}"));
         }
     }
-    // A decoded reading takes precedence over public selector guesses.
     for candidate in evidence
         .abi
         .iter()

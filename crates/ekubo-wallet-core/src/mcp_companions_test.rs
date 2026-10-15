@@ -159,8 +159,6 @@ fn tool_counts_cover_the_catalog() {
     for server in COMPANION_SERVERS {
         assert!(server.tool_count > 0, "{} serves no tools", server.title);
     }
-    // Ekubo's own protocol carries most of the catalog, which is the fact
-    // that makes the other six worth switching off individually.
     assert!(companion_by_slug("ekubo").unwrap().tool_count > summed / 2);
 }
 

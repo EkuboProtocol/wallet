@@ -160,8 +160,6 @@ fn slow_startup_keeps_the_same_handshake_and_announces_real_tools() {
     let home = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(home.path().join("mcp.sock")).unwrap();
     let wallet = thread::spawn(move || {
-        // This exceeds the two-second startup deadline. Cancelling that
-        // handshake used to discard its response and restart it forever.
         let (stream, _) = listener.accept().unwrap();
         let (mut reader, mut writer) = initialize(stream, Duration::from_secs(3), false);
         assert_eq!(read(&mut reader)["method"], "notifications/initialized");
@@ -207,8 +205,8 @@ fn transient_handshake_failure_recovers_within_startup_and_reports_the_cause() {
     let wallet = thread::spawn(move || {
         let (first, _) = listener.accept().unwrap();
         let mut first = BufReader::new(first);
-        read(&mut first); // hello
-        read(&mut first); // initialize
+        read(&mut first);
+        read(&mut first);
         drop(first);
         let (second, _) = listener.accept().unwrap();
         let (mut reader, _) = initialize(second, Duration::ZERO, false);
