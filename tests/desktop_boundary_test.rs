@@ -194,25 +194,57 @@ fn gpui_revisions_and_desktop_database_identity_are_pinned() {
         .parse::<toml_edit::DocumentMut>()
         .unwrap();
     let packages = lock["package"].as_array_of_tables().unwrap();
-    for (name, metadata_key) in [
-        ("gpui", "zed"),
-        ("gpui_platform", "zed"),
-        ("gpui_tokio", "zed"),
-        ("gpui_macos", "zed"),
-        ("gpui-component", "gpui-component"),
-    ] {
+    for metadata_key in ["zed", "gpui-component"] {
         let revision = manifest["package"]["metadata"]["gpui-revisions"][metadata_key]
             .as_str()
             .unwrap();
         assert_eq!(revision.len(), 40);
         assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        let package = packages
+    }
+    // Every gpui-pre snapshot may change GPUI's API, so each crate is pinned
+    // to an exact crates.io version and appears exactly once in the lock.
+    let dependency_tables = [
+        &manifest["dependencies"],
+        &manifest["dev-dependencies"],
+        &manifest["target"]["cfg(target_os = \"macos\")"]["dependencies"],
+    ];
+    for (key, package_name) in [
+        ("gpui", "gpui-pre"),
+        ("gpui_platform", "gpui-pre-platform"),
+        ("gpui_macos", "gpui-pre-macos"),
+        ("gpui-component", "gpui-component"),
+        ("gpui-kit-assets", "gpui-kit-assets"),
+    ] {
+        let mut requirements = dependency_tables
             .iter()
-            .find(|package| package["name"].as_str() == Some(name))
-            .unwrap();
-        let source = package["source"].as_str().unwrap();
-        assert!(source.starts_with("git+https://"));
-        assert_eq!(source.rsplit_once('#').unwrap().1, revision, "{name}");
+            .filter_map(|table| table.get(key))
+            .map(|dependency| {
+                assert_eq!(
+                    dependency.get("package").and_then(|value| value.as_str()),
+                    (package_name != key).then_some(package_name),
+                    "{key}"
+                );
+                dependency
+                    .as_str()
+                    .or_else(|| dependency["version"].as_str())
+                    .unwrap()
+            })
+            .peekable();
+        assert!(requirements.peek().is_some(), "{key}");
+        let mut locked = packages
+            .iter()
+            .filter(|package| package["name"].as_str() == Some(package_name));
+        let package = locked.next().unwrap();
+        assert!(locked.next().is_none(), "{package_name} is locked twice");
+        assert_eq!(
+            package["source"].as_str(),
+            Some("registry+https://github.com/rust-lang/crates.io-index"),
+            "{package_name}"
+        );
+        let version = package["version"].as_str().unwrap();
+        for requirement in requirements {
+            assert_eq!(requirement, format!("={version}"), "{key}");
+        }
     }
     let store =
         fs::read_to_string(root().join("crates/ekubo-wallet-core/src/policy_store.rs")).unwrap();

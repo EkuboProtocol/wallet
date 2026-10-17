@@ -311,6 +311,12 @@ helper's hash or code signature as
 authorization: any process already running as the same user can connect to the
 local MCP IPC listener directly.
 
+GPUI comes from the `gpui-pre-*` crates.io snapshots of Zed, which the
+gpui-component maintainers publish rather than Zed. Exact version pins and the
+lockfile confine a compromised publisher to an explicit bump. Every bump must
+compare the published sources against the Zed revision recorded in
+`package.metadata.gpui-revisions` before it lands.
+
 ## Local platform and lifecycle
 
 The platform credential-store consequences are described in
@@ -325,6 +331,13 @@ preference is security-sensitive, and changing it requires owner
 authentication. Explicit Quit disconnects WalletConnect, stops local MCP IPC,
 and installs only an already verified, exactly authorized update. Hiding or
 closing windows does not mutate protected state.
+
+On macOS the window root forwards accessibility hit tests into the GPUI
+content view, so the whole interface, including a pending security review, is
+readable and operable through the accessibility API. Any process the user has
+granted accessibility access in System Settings can therefore read review
+details and press its controls. That grant is outside the wallet's control, and
+such a process is treated like any other same-user process with input control.
 
 SQLCipher authenticates pages at rest but does not provide freshness. A
 same-user process able to replace the database may roll it back to an earlier

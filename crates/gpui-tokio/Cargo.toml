@@ -1,0 +1,18 @@
+[package]
+name = "gpui_tokio"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.1"
+publish = false
+description = "Zed's gpui_tokio bridge, vendored because gpui-pre does not publish it"
+repository = "https://github.com/EkuboProtocol/wallet"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0.100"
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui_util = { package = "gpui-pre-util", version = "=0.3.7" }
+tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

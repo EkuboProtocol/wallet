@@ -30,9 +30,9 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 ```
 
-GPUI is pinned to Zed revision
-`52b2927a1bac46be5d50ad341ac00b665e13764b`; `gpui-component` is pinned to
-`26cc9366abb27ccedce386ac99a615a8fa7018da`. The application consumes only the
+GPUI is pinned to the crates.io `gpui-pre` 0.3.7 snapshot of Zed revision
+`1a28cff4b409169bac058bca40dfbfeb7621d19b`; `gpui-component` is pinned to
+0.7.0, which is built against that snapshot. The application consumes only the
 Apache-2.0 GPUI infrastructure, not Zed's GPL workspace/UI crates.
 
 See [architecture](docs/architecture.md), the system-wide

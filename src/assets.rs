@@ -6,11 +6,11 @@ pub const TRASH_ICON: &str = "icons/wallet-trash.svg";
 pub const REFRESH_ICON: &str = "icons/wallet-refresh.svg";
 
 /// Application assets layered over gpui-component's bundled icon set.
-pub struct WalletAssets(gpui_component_assets::Assets);
+pub struct WalletAssets(gpui_kit_assets::Assets);
 
 impl Default for WalletAssets {
     fn default() -> Self {
-        Self(gpui_component_assets::Assets)
+        Self(gpui_kit_assets::Assets)
     }
 }
 

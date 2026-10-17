@@ -14,11 +14,12 @@ Read it — this file is an index and a set of local amendments, not a
 replacement. **Must** in that document is a correctness constraint, **should**
 is the default that needs a stated reason to override, **may** is optional.
 
-The wallet composes `gpui-component` at the revision pinned in `Cargo.toml`
-(`package.metadata.gpui-revisions`). The guide is newer than that pin, so a
-rule may describe an API this build does not have. When they disagree, the
-vendored library wins: check `~/.cargo/git/checkouts` or the `gpui-component`
-skill for the real signature rather than inferring one from the prose.
+The wallet composes `gpui-component` at the exact version pinned in
+`Cargo.toml` (commit recorded in `package.metadata.gpui-revisions`). The guide
+may be newer than that pin, so a rule may describe an API this build does not
+have. When they disagree, the vendored library wins: check
+`~/.cargo/registry/src` or the `gpui-component` skill for the real signature
+rather than inferring one from the prose.
 
 ## What the wallet already is
 
