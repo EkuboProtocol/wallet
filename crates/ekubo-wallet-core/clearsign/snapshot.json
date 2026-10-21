@@ -5,8 +5,8 @@
   },
   "ekubo": {
     "repository": "https://github.com/EkuboProtocol/clear-signing-erc7730-registry",
-    "revision": "f25bc1a0cdd7d931271565463cea5228476795cd",
-    "branch": "fix-ekubo-signed-formats"
+    "revision": "a9feda378de6cc3ed4714aab899152a4964533b3",
+    "branch": "eku-1018/ekubo-descriptors"
   },
   "paths": [
     "ercs/*.json",

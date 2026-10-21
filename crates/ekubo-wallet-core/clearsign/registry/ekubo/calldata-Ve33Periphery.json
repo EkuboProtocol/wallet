@@ -17,12 +17,12 @@
   "display": {
     "formats": {
       "scheduleEmissions(uint64 startTime, uint64 endTime, uint160 rewardRate)": {
-        "intent": "Schedule Ve33 emissions",
-        "interpolatedIntent": "Schedule STONX emissions",
+        "intent": "Fund Ve33 emissions",
+        "interpolatedIntent": "Fund STONX emissions",
         "fields": [
-          { "path": "startTime", "label": "Start time", "format": "date", "params": { "encoding": "timestamp" }, "visible": "always" },
-          { "path": "endTime", "label": "End time", "format": "date", "params": { "encoding": "timestamp" }, "visible": "always" },
-          { "path": "rewardRate", "label": "Reward rate (Q32)", "format": "raw", "visible": "always" }
+          { "path": "startTime", "label": "Payment period start", "format": "date", "params": { "encoding": "timestamp" }, "visible": "always" },
+          { "path": "endTime", "label": "Payment period end", "format": "date", "params": { "encoding": "timestamp" }, "visible": "always" },
+          { "path": "rewardRate", "label": "Payment rate (STONX per second × 2^32)", "format": "raw", "visible": "always" }
         ]
       },
       "multicall(bytes[] data)": {

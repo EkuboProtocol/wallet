@@ -8,6 +8,7 @@
         { "chainId": 1, "address": "0xfF6cF0Ca6d7a30a60539AcD4bB20B3df84EA0644" },
         { "chainId": 4326, "address": "0x3325428adB409c239E88ca472F50b0efe00E98B4" },
         { "chainId": 4663, "address": "0x3325428adB409c239E88ca472F50b0efe00E98B4" },
+        { "chainId": 8453, "address": "0x3325428adB409c239E88ca472F50b0efe00E98B4" },
         { "chainId": 42161, "address": "0x3325428adB409c239E88ca472F50b0efe00E98B4" },
         { "chainId": 42161, "address": "0xfF6cF0Ca6d7a30a60539AcD4bB20B3df84EA0644" },
         { "chainId": 46630, "address": "0xfF6cF0Ca6d7a30a60539AcD4bB20B3df84EA0644" },
@@ -195,7 +196,7 @@
         "interpolatedIntent": "Refresh DCA order {id}"
       },
       "burn(uint256 id)": {
-        "intent": "Burn order NFT",
+        "intent": "Burn order NFT (does not withdraw proceeds)",
         "fields": [{ "path": "id", "label": "Order ID", "format": "raw", "visible": "always" }],
         "interpolatedIntent": "Burn order NFT {id}"
       },
