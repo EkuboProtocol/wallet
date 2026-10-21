@@ -61,6 +61,7 @@ fn typed_data_request(payload: serde_json::Value) -> PendingTypedData {
         rejected_at: None,
         signature: None,
         requester: Some("app.example (app.example)".into()),
+        valid_until: None,
     }
 }
 
@@ -199,6 +200,38 @@ fn an_unlimited_allowance_is_named_and_warned_about() {
             .any(|warning| warning.contains("effectively unlimited")),
         "no unlimited-allowance warning among {:?}",
         document.request.warnings
+    );
+}
+
+#[test]
+fn a_signing_cutoff_is_shown_in_human_time_when_the_request_carries_one() {
+    let mut request = typed_data_request(erc2612_permit("1500000", "1767225600"));
+    request.valid_until = Some("2000000000".into());
+    let document = build(&request, &TokenMetadataMap::new());
+    let fact = document
+        .request
+        .facts
+        .iter()
+        .find(|fact| fact.label == "Signing cutoff")
+        .expect("a review with a cutoff names it");
+    assert_eq!(
+        fact.value.as_str(),
+        "2000000000 (2033-05-18 03:33:20 UTC); the wallet will not sign at or after this time"
+    );
+}
+
+#[test]
+fn no_cutoff_row_shows_no_cutoff_fact() {
+    let request = typed_data_request(erc2612_permit("1500000", "1767225600"));
+    let document = build(&request, &TokenMetadataMap::new());
+    assert!(
+        !document
+            .request
+            .sections
+            .iter()
+            .flat_map(|section| section.facts.iter())
+            .any(|fact| fact.label == "Signing cutoff"),
+        "a row queued without a cutoff must not show one"
     );
 }
 

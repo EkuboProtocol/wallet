@@ -753,6 +753,7 @@ fn an_agents_own_typed_data_request_withdraws_and_a_dapps_does_not() {
             digest,
             None,
             &RequestSource::agent(Some("claude_code"), None),
+            None,
         )
         .unwrap();
 
@@ -773,6 +774,7 @@ fn an_agents_own_typed_data_request_withdraws_and_a_dapps_does_not() {
             digest,
             None,
             &RequestSource::agent(Some("claude_code"), None),
+            None,
         )
         .unwrap();
     assert_ne!(fresh.request_id, queued.request_id);
@@ -787,6 +789,7 @@ fn an_agents_own_typed_data_request_withdraws_and_a_dapps_does_not() {
             digest,
             Some("Example (app.example.org)"),
             &RequestSource::walletconnect(Some("https://app.example.org")),
+            None,
         )
         .unwrap();
     assert!(store.withdraw(dapp.request_id).is_err());

@@ -108,6 +108,12 @@ pub struct PendingTypedData {
     /// the name the reviewer reads belongs to whoever queued the bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// Exclusive wallet signing and release cutoff, Unix seconds, from an
+    /// ERC-8410 typed-data signature request. `None` for rows queued without
+    /// one. The wallet refuses to sign at or after the cutoff and refuses
+    /// to release an expired signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
 }
 
 /// Parse and canonicalize an EIP-712 payload, returning the parsed typed data
@@ -648,6 +654,7 @@ impl TypedDataStore {
             digest,
             requester,
             &RequestSource::Unknown,
+            None,
         )
     }
 
@@ -660,6 +667,39 @@ impl TypedDataStore {
         requester: Option<&str>,
         request_source: &RequestSource,
     ) -> Result<PendingTypedData> {
+        self.create_for_wallet_with_expiry(
+            wallet,
+            chain_id,
+            typed_data,
+            digest,
+            requester,
+            request_source,
+            None,
+        )
+    }
+
+    /// Queue one typed-data payload as [`create_for_wallet`], additionally
+    /// recording the request's exclusive signing and release cutoff. Already
+    /// expired cutoffs are refused rather than queued.
+    pub fn create_for_wallet_with_expiry(
+        &mut self,
+        wallet: &WalletMetadata,
+        chain_id: u64,
+        typed_data: &serde_json::Value,
+        digest: B256,
+        requester: Option<&str>,
+        request_source: &RequestSource,
+        valid_until: Option<u64>,
+    ) -> Result<PendingTypedData> {
+        if let Some(cutoff) = valid_until {
+            ensure!(
+                !crate::typed_data_request::valid_until_expired(
+                    Some(cutoff),
+                    chrono::Utc::now().timestamp()
+                ),
+                "typed-data signature request is already past its signing cutoff"
+            );
+        }
         self.database
             .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
             .context("wallet has no active policy")?;
@@ -672,6 +712,7 @@ impl TypedDataStore {
             digest,
             requester,
             request_source,
+            valid_until,
         )
     }
 
@@ -685,8 +726,13 @@ impl TypedDataStore {
         digest: B256,
         requester: Option<&str>,
         request_source: &RequestSource,
+        valid_until: Option<u64>,
     ) -> Result<PendingTypedData> {
         let stored_chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
+        let stored_valid_until = valid_until
+            .map(i64::try_from)
+            .transpose()
+            .context("signing cutoff out of range")?;
         let requester = requester.unwrap_or_default();
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
@@ -699,8 +745,8 @@ impl TypedDataStore {
                 transaction.execute(
                     "INSERT INTO pending_typed_data(
                         request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest,
-                        requester, request_source, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'awaiting_approval', ?10, ?10)",
+                        requester, request_source, valid_until, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11)",
                     params![
                         request_id,
                         wallet_instance_id.to_string(),
@@ -711,6 +757,7 @@ impl TypedDataStore {
                         Blob(digest),
                         requester,
                         serde_json::to_string(request_source)?,
+                        stored_valid_until,
                         Millis(now),
                     ],
                 )?;
@@ -820,7 +867,7 @@ impl TypedDataStore {
             .connection
             .query_row(
                 "SELECT wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
-                        created_at, updated_at, decided_at, signature, requester
+                        created_at, updated_at, decided_at, signature, requester, valid_until
                  FROM pending_typed_data WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -837,6 +884,7 @@ impl TypedDataStore {
                         row.time_opt(9)?,
                         row.blob_opt::<[u8; 65]>(10)?,
                         row.get::<_, String>(11)?,
+                        row.get::<_, Option<i64>>(12)?,
                     ))
                 },
             )
@@ -854,6 +902,7 @@ impl TypedDataStore {
             decided_at,
             signature,
             requester,
+            valid_until,
         ) = row;
         let wallet_instance_id = Uuid::parse_str(&wallet_instance_id)
             .context("stored typed-data wallet instance is invalid")?;
@@ -873,6 +922,9 @@ impl TypedDataStore {
         let status = TypedDataStatus::parse(&status)?;
         let (approved_at, rejected_at) =
             split_decision(decided_at, status == TypedDataStatus::Rejected);
+        let valid_until = valid_until
+            .map(|cutoff| u64::try_from(cutoff).context("stored typed-data cutoff is invalid"))
+            .transpose()?;
         Ok(PendingTypedData {
             request_id,
             wallet_instance_id,
@@ -888,6 +940,7 @@ impl TypedDataStore {
             rejected_at,
             signature: signature.map(encode_signature),
             requester: (!requester.is_empty()).then_some(requester),
+            valid_until: valid_until.map(|cutoff| cutoff.to_string()),
         })
     }
 }

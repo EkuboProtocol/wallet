@@ -56,4 +56,5 @@ pub mod token_list;
 pub mod token_prices;
 pub mod token_store;
 pub mod typed_data;
+pub mod typed_data_request;
 pub mod update_trust;

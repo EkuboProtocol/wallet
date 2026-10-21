@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The encrypted database schema understood by this build.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -1754,6 +1754,18 @@ const MIGRATIONS: &[Migration] = &[
         ],
         seed: None,
     },
+    // ERC-8410 typed-data signature requests carry an exclusive signing and
+    // release cutoff the wallet must enforce at signing time and again
+    // before release. Rows that predate the column were queued without one,
+    // which is exactly what a null says; legacy inline and dapp requests
+    // still queue that way.
+    Migration {
+        to_version: 14,
+        statements: &[
+            "ALTER TABLE pending_typed_data ADD COLUMN valid_until INTEGER CHECK (valid_until IS NULL OR valid_until > 0)",
+        ],
+        seed: None,
+    },
 ];
 
 /// The harness-kind vocabulary as the six attribution columns were first
@@ -2236,6 +2248,13 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- on, which is why withdrawal reads it rather than checking
                  -- whether the display text happens to be empty.
                  request_source TEXT,
+                 -- Exclusive wallet signing and release cutoff, Unix
+                 -- seconds, from an ERC-8410 typed-data signature request.
+                 -- Null for every row queued without one. The wallet refuses
+                 -- to sign at or after the cutoff and refuses to release an
+                 -- expired signature; protocol expiry still belongs to the
+                 -- signed message and its verifier.
+                 valid_until INTEGER CHECK (valid_until IS NULL OR valid_until > 0),
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER

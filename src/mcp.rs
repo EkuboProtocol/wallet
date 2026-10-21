@@ -21,6 +21,7 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     plan_fetch::{
         ArtifactReference, ArtifactSource, FetchPolicy, resolve_execution_plan_reference,
+        resolve_typed_data_signature_request_reference,
     },
     policy_store::PolicyStore,
     release_check::{self, ReleaseCheck},
@@ -32,6 +33,7 @@ use crate::{
         PendingTypedData, PermitApproval, TypedDataStatus, TypedDataStore,
         interpret_permit_approvals, parse_typed_data,
     },
+    typed_data_request::{ValidatedSignatureRequest, valid_until_expired},
 };
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
@@ -1156,8 +1158,21 @@ struct SignTypedDataInput {
     wallet_id: String,
     /// Complete EIP-712 payload: `types`, `primaryType`, `domain`, `message`.
     /// The domain must include a `chainId` matching a configured network.
+    /// Pass exactly one of `typed_data` and `reference`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
-    typed_data: serde_json::Value,
+    typed_data: Option<serde_json::Value>,
+    /// A producer's ERC-8410 `typed_data_signature_request` `artifact_reference`
+    /// envelope, passed as a JSON object through VERBATIM as reference. The
+    /// wallet fetches the bytes itself over vetted public HTTPS, a bounded
+    /// local `file:` read, or a bounded `data:application/json` URI, verifies
+    /// the envelope's integrity digest and byte count, validates the request,
+    /// and queues its EIP-712 payload exactly as if passed inline. The
+    /// request's `signer` must be this wallet's address and its `valid_until`
+    /// cutoff is enforced at signing and at release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "ekubo_wallet_core::plan_fetch::artifact_reference_object_schema")]
+    reference: Option<ArtifactReference>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1191,6 +1206,16 @@ struct TypedDataOutput {
     /// Review information: it never shortens the approval path.
     #[serde(skip_serializing_if = "Option::is_none")]
     permit_approvals: Option<Vec<PermitApproval>>,
+    /// ERC-8410 wallet request digest binding signer, message, cutoff, and
+    /// destination. Present when the request carried enough to recompute it;
+    /// authorization binds to this, not to the signing digest alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_digest: Option<String>,
+    /// Exclusive wallet signing and release cutoff, Unix seconds, from an
+    /// ERC-8410 typed-data signature request. Absent for rows queued without
+    /// one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_until: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instruction: Option<String>,
 }
@@ -1507,7 +1532,7 @@ impl WalletMcpServer {
     // in-process, short-lived, and invisible at approval time.
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over vetted public HTTPS or decodes a bounded data:application/json URI and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over vetted public HTTPS, a bounded local file: read, or a bounded data:application/json URI and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1760,7 +1785,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_batch_eth_call",
-        description = "Execute 1-4096 read-only eth_call requests against one exact resolved block. Count is only one bound: calldata, response size, timeout, RPC gas, and decoder-work limits still apply. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches, decompresses when HTTP content encoding is used, and integrity-verifies the bounded HTTPS or data:application/json call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
+        description = "Execute 1-4096 read-only eth_call requests against one exact resolved block. Count is only one bound: calldata, response size, timeout, RPC gas, and decoder-work limits still apply. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches, decompresses when HTTP content encoding is used, and integrity-verifies the bounded HTTPS, local file:, or data:application/json call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_batch_eth_call(
@@ -2235,7 +2260,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or re-submit the exact signed bytes for a separately approved request_id that remains signed after its approval-time submission attempt. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. Set must_review true when the user asked to look at this particular transaction before it is sent: it queues the plan for their review even where their policy would have signed it automatically, and it can only add that review — it never approves, widens the policy, or makes a denied plan sendable. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Freshly simulate, prepare the exact transaction envelope, evaluate the current policy, then locally sign, persist, and broadcast an execution plan resolved from a producer's bounded HTTPS, local file:, or data:application/json artifact_reference envelope passed through VERBATIM as reference; consume a prior simulation_id as a short-lived handle to that exact plan while repeating the same fresh pipeline; or re-submit the exact signed bytes for a separately approved request_id that remains signed after its approval-time submission attempt. Provide exactly one of reference, simulation_id, or request_id. A simulation_id is not approval, policy authority, or a reusable prepared envelope. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan with an unmatched call or review effect queues for approval, and a plan with any deny result fails without queuing whatever you set. Set must_review true when the user asked to look at this particular transaction before it is sent: it queues the plan for their review even where their policy would have signed it automatically, and it can only add that review — it never approves, widens the policy, or makes a denied plan sendable. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -3410,15 +3435,15 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_sign_typed_data",
-        description = "Queue an exact EIP-712 typed-data payload for explicit human approval through the native wallet application, which is the only way it can be signed: no policy is consulted, and there is no automatic path for any payload, including recognized permits. The domain must pin a configured chainId. Recognized permits (ERC-2612 Permit and canonical Permit2) are decoded into the token approvals they grant and shown to the user and returned to you, as review information only. Wait on the queued request with wallet_wait_for_typed_data.",
+        description = "Queue an exact EIP-712 typed-data payload for explicit human approval through the native wallet application, which is the only way it can be signed: no policy is consulted, and there is no automatic path for any payload, including recognized permits. Pass exactly one of typed_data and reference. The domain must pin a configured chainId. A reference is a producer's ERC-8410 typed_data_signature_request artifact_reference envelope passed through VERBATIM; the wallet fetches it over vetted public HTTPS, a bounded local file: read, or a bounded data:application/json URI, verifies its integrity digest and byte count, and queues the payload it names. The request's signer must be this wallet's address and its valid_until cutoff is enforced at signing and at release. Recognized permits (ERC-2612 Permit and canonical Permit2) are decoded into the token approvals they grant and shown to the user and returned to you, as review information only. Wait on the queued request with wallet_wait_for_typed_data.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false,
-            open_world_hint = false
+            open_world_hint = true
         )
     )]
-    fn wallet_sign_typed_data(
+    async fn wallet_sign_typed_data(
         &self,
         Parameters(input): Parameters<SignTypedDataInput>,
     ) -> Result<Json<TypedDataOutput>, ErrorData> {
@@ -3430,8 +3455,47 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         self.require_provisioned_wallet(&wallet.id)
             .map_err(|error| tool_error(&error))?;
-        let (typed, chain_id, digest) =
-            parse_typed_data(&input.typed_data).map_err(|error| tool_error(&error))?;
+        if input.typed_data.is_some() == input.reference.is_some() {
+            return Err(tool_error(&"pass exactly one of typed_data and reference"));
+        }
+        // Resolve the payload to the exact EIP-712 value, its signing hash,
+        // the provenance of its bytes, and the request's release cutoff.
+        let (typed_data_json, typed, chain_id, digest, source, valid_until) =
+            match (input.typed_data, input.reference) {
+                (Some(inline), None) => {
+                    let (typed, chain_id, digest) =
+                        parse_typed_data(&inline).map_err(|error| tool_error(&error))?;
+                    (inline, typed, chain_id, digest, None, None)
+                }
+                (None, Some(reference)) => {
+                    let (request, source): (ValidatedSignatureRequest, _) =
+                        resolve_typed_data_signature_request_reference(
+                            &reference,
+                            FetchPolicy::production(),
+                        )
+                        .await
+                        .map_err(|error| tool_error(&error))?;
+                    if request.signer != wallet.address {
+                        return Err(tool_error(&format!(
+                            "signature request signer {:#x} is not this wallet's address {:#x}",
+                            request.signer, wallet.address,
+                        )));
+                    }
+                    (
+                        request.typed_data_json,
+                        request.typed,
+                        request.chain_id,
+                        request.signing_digest,
+                        Some(source),
+                        request.valid_until,
+                    )
+                }
+                _ => {
+                    return Err(tool_error(&anyhow::anyhow!(
+                        "pass exactly one of typed_data and reference"
+                    )));
+                }
+            };
         self.config
             .network_by_chain_id(&chain_id.to_string())
             .map_err(|error| tool_error(&error))?;
@@ -3447,13 +3511,14 @@ impl WalletMcpServer {
             .typed_data
             .lock()
             .map_err(|_| ErrorData::internal_error("typed-data database lock was poisoned", None))?
-            .create_for_wallet(
+            .create_for_wallet_with_expiry(
                 &wallet,
                 chain_id,
-                &input.typed_data,
+                &typed_data_json,
                 digest,
                 None,
-                &self.request_source(None),
+                &self.request_source(source.as_ref()),
+                valid_until,
             )
             .map_err(|error| tool_error(&error))?;
         self.with_attribution(|desktop, client_id| {
@@ -3488,6 +3553,15 @@ impl WalletMcpServer {
             |record| record.status == TypedDataStatus::AwaitingApproval,
         )
         .await?;
+        // The cutoff is checked again after the approval wait: a signature
+        // produced before expiry must still not be released at or after it.
+        if record.status == TypedDataStatus::Signed && cutoff_expired(record.valid_until.as_deref())
+        {
+            return Err(tool_error(&anyhow::anyhow!(
+                "this typed-data request passed its signing cutoff before release, so the \
+                 signature will not be released; queue a fresh request"
+            )));
+        }
         let mut output = typed_data_output(record);
         if timed_out {
             output.instruction = Some(format!(
@@ -3713,7 +3787,9 @@ impl WalletMcpServer {
                 .map(|(harness, _)| harness.as_policy_claim()),
             match plan {
                 Some(ArtifactSource::Https { host }) => Some(host.as_str()),
-                Some(ArtifactSource::InlineDataUri) | None => None,
+                // A local file path and an inline data URI are caller-chosen
+                // text, not publisher provenance, and stay absent.
+                Some(ArtifactSource::InlineDataUri | ArtifactSource::LocalFile) | None => None,
             },
         )
     }
@@ -4517,6 +4593,7 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
             "This typed-data request was withdrawn before the user decided it, so nothing was signed and their review is gone. Queue a fresh one only if the user still wants the signature.".into(),
         ),
     };
+    let request_digest = request_digest_for_record(&record);
     TypedDataOutput {
         request_id: record.request_id,
         wallet_id: record.wallet_id,
@@ -4527,8 +4604,46 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
         rejected_at: record.rejected_at,
         signature: record.signature,
         permit_approvals: None,
+        request_digest,
+        valid_until: record.valid_until,
         instruction,
     }
+}
+
+/// Recompute the ERC-8410 request digest for a queued row from its stored
+/// signer, signing digest, and cutoff. `None` when the row predates digests
+/// it cannot name — which, given the read path re-validates the payload, is
+/// only ever a genuinely ancient shape, never a corrupt one.
+/// Whether a queued typed-data row's release cutoff has passed. Unparseable
+/// cutoffs fail closed: a row that cannot name its cutoff cannot release.
+fn cutoff_expired(valid_until: Option<&str>) -> bool {
+    let Some(text) = valid_until else {
+        return false;
+    };
+    let Ok(cutoff) = text.parse::<u64>() else {
+        return true;
+    };
+    valid_until_expired(Some(cutoff), Utc::now().timestamp())
+}
+
+fn request_digest_for_record(record: &PendingTypedData) -> Option<String> {
+    let signer = record.wallet_address;
+    let signing_digest = record.digest.parse().ok()?;
+    let valid_until = record
+        .valid_until
+        .as_deref()
+        .map(str::parse::<u64>)
+        .transpose()
+        .ok()?;
+    Some(format!(
+        "{:#x}",
+        ekubo_wallet_core::typed_data_request::request_digest(
+            &signer,
+            &signing_digest,
+            valid_until,
+            None,
+        )
+    ))
 }
 
 fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<MessageOutput> {
