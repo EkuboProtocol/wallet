@@ -74,8 +74,8 @@ windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials_
 backhand = { version = "0.25.2", default-features = false, features = ["gzip", "xz", "zstd"] }
 keyring-core = "1.0.0"
 zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }
-zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
-zbus_polkit = "5.1.0"
+zbus = { version = "6.1.0", default-features = false, features = ["tokio"] }
+zbus_polkit = "6.0.0"
 
 [lints]
 workspace = true
