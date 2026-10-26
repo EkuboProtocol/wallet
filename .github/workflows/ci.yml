@@ -136,7 +136,7 @@ jobs:
       # The Windows job spends most of its time compiling vendored SQLCipher
       # and OpenSSL; caching cuts that to minutes on unchanged dependencies.
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # GitHub cache entries are immutable. The previous generation saved
           # canceled jobs and could permanently capture a partial target tree,
@@ -195,7 +195,7 @@ jobs:
       # run. The cache key carries the job name, so these lint artifacts stay
       # separate from the test job's rather than displacing them.
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v2-rust
           cache-on-failure: false
