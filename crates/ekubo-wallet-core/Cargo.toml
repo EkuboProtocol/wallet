@@ -27,7 +27,7 @@ base64 = "0.23.0"
 chrono = { version = "0.4.42", features = ["serde"] }
 clear-signing = "=0.1.0"
 directories = "6.0.0"
-ekubo_sdk = { version = "3.2.0", features = ["evm"] }
+ekubo_sdk = { version = "4.0.0", features = ["evm"] }
 flate2 = "1.1.9"
 fs2 = "0.4.3"
 hex = "0.4.3"
@@ -37,7 +37,7 @@ num-bigint = "0.5.1"
 percent-encoding = "2.3.2"
 rand = "0.10.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "brotli", "deflate", "gzip", "rustls", "zstd"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
@@ -75,7 +75,7 @@ backhand = { version = "0.25.2", default-features = false, features = ["gzip", "
 keyring-core = "1.0.0"
 zbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }
 zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
-zbus_polkit = "5.1.0"
+zbus_polkit = "6.0.0"
 
 [lints]
 workspace = true
